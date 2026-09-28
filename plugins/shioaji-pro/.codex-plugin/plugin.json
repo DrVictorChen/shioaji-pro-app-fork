@@ -1,7 +1,7 @@
 {
   "name": "shioaji-pro",
   "version": "0.1.0",
-  "description": "Official Shioaji Pro skill for native market analysis, App content authoring, workspace control, and guarded trading through semantic MCP tools.",
+  "description": "Official Shioaji Pro skill for safe, capability-scoped market analysis, App content authoring, workspace control, and guarded trading through semantic MCP tools.",
   "author": {
     "name": "Sinotrade",
     "url": "https://github.com/Sinotrade"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Shioaji Pro",
-    "shortDescription": "Native analysis, content, and App control",
-    "longDescription": "Analyze markets, create native indicators and backtest strategies, manage workspaces and tasks, and use guarded trading through versioned semantic MCP tools.",
+    "shortDescription": "Safe native analysis, content, and App control",
+    "longDescription": "Safely analyze markets, create native indicators and backtest strategies, manage workspaces and tasks, and use guarded trading through versioned semantic MCP tools with capability-scoped permissions.",
     "developerName": "Sinotrade",
     "category": "Finance",
     "capabilities": [

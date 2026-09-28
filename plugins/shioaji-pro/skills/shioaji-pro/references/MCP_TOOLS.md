@@ -62,9 +62,11 @@ past success or conversation text.
 - Reusable skills: `use_skill`, `read_skill_reference`, `save_skill`.
 - Background tasks: `create_task`, `list_tasks`, `set_task_enabled`,
   `delete_task`, `get_task_runs`, `notify_user`.
-- Trading: `preview_order`, `place_order`, `cancel_order`, `reconcile_order`.
-  Every mutation requires a caller-generated stable `idempotency_key` and the
-  same key must never be reused for a different payload.
+- Trading: `trade.preview`: `preview_order`; `trade.execute`:
+  `place_order`, `cancel_order`, `reconcile_order`.
+
+Every mutation requires a caller-generated stable `idempotency_key` and the
+same key must never be reused for a different payload.
 
 Availability still depends on the connected server's advertised schema and the
 session's granted capabilities. Do not invent audit, approval-token, raw HTTP,
