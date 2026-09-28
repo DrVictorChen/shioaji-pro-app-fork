@@ -11,6 +11,7 @@ import {
     EXPECTED_SERVER_VERSION,
     LEGACY_PORT,
     getApiBase,
+    getDevServerPort,
     getApiPort,
     getApiScheme,
     getServerPid,
@@ -27,12 +28,17 @@ import {
     setStoredSpawnKeyHash,
     shouldForceRespawn,
 } from './spawn-keys';
-import { cacheAgentHarnessEnabled } from './agent-harness-state';
+import {
+    cacheAgentHarnessEnabled,
+    resolveAgentHarnessSetting,
+} from './agent-harness-state';
 import {
     harnessOwnershipCompatible,
     recoverHarnessOwnership,
 } from './sidecar-ownership';
 import { notify } from './trade';
+import { cacheDesktopConfigured } from './desktop-setup-state';
+import { isChildWindow } from './window-role';
 
 export { isTauri } from './runtime';
 export {
@@ -115,7 +121,7 @@ async function spawnServer(
     env: Record<string, string>,
     port: number,
     scheme: ApiScheme = 'http',
-    agentHarnessEnabled = false,
+    agentHarnessEnabled = true,
 ): Promise<SidecarResult> {
     const fullEnv = { NO_COLOR: '1', ...env };
     const { invoke } = await import('@tauri-apps/api/core');
@@ -267,6 +273,7 @@ async function spawnServerViaChannels(
 // Ports a shioaji server could be answering on: whatever the app last used,
 // the app default, and the CLI default (a user-run `shioaji server` daemon).
 function candidatePorts(): number[] {
+    if (getDevServerPort()) return [getDevServerPort()!];
     return [...new Set([getApiPort(), DEFAULT_PORT, LEGACY_PORT])];
 }
 
@@ -425,6 +432,7 @@ export async function serverStatus(): Promise<ServerStatus | null> {
                     : undefined,
         };
     }
+    if (getDevServerPort()) return { running: false };
     try {
         const res = await sidecar(['server', 'status', '--format', 'json']);
         const jsonStart = res.output.indexOf('{');
@@ -647,7 +655,7 @@ export async function serverStart(opts: {
     // reload landing in that window used to see "not running", then the
     // pre-spawn reclaim killed the warming child by remembered pid — the
     // restart loop. Wait for the remembered spawn to surface instead.
-    if (!st?.running && getServerPid() && getSpawnPort()) {
+    if (!st?.running && getServerPid() && getSpawnPort() && (!getDevServerPort() || getSpawnPort() === getDevServerPort())) {
         const spawnPort = getSpawnPort()!;
         const deadline = Date.now() + 20_000;
         while (Date.now() < deadline) {
@@ -668,7 +676,7 @@ export async function serverStart(opts: {
             await new Promise((r) => setTimeout(r, 1500));
         }
     }
-    if (!st?.running) {
+    if (!st?.running && !getDevServerPort()) {
         // an orphan of ours can sit on a fallback port with its record lost
         // (cleared web storage) — sweep the find_free_port windows (current
         // default + the pre-21322 legacy one) before piling yet another
@@ -804,14 +812,15 @@ export async function serverStart(opts: {
     }
 
     // preferred port occupied by something else → first free port after it
-    let port = DEFAULT_PORT;
+    const preferredPort = getDevServerPort() ?? DEFAULT_PORT;
+    let port = preferredPort;
     try {
         const { invoke } = await import('@tauri-apps/api/core');
         // nothing usable is answering, so any listener still bound on our
         // ports is a zombie orphan (SIGKILLed app → dead pipe → HTTP dead) —
         // reclaim our own before picking a port; foreign listeners refuse
         // the ownership check and find_free_port dodges them below
-        for (const p of new Set([getApiPort(), DEFAULT_PORT])) {
+        for (const p of new Set(getDevServerPort() ? [preferredPort] : [getApiPort(), DEFAULT_PORT])) {
             await invoke('kill_shioaji', {
                 port: p,
                 pid: getServerPid(),
@@ -819,8 +828,11 @@ export async function serverStart(opts: {
         }
         setServerPid(null);
         const free = await invoke<number>('find_free_port', {
-            preferred: DEFAULT_PORT,
+            preferred: preferredPort,
         });
+        if (getDevServerPort() && free !== preferredPort) {
+            return { ok: false, output: '隔離測試連接埠已被占用；不切換至其他伺服器', port: preferredPort, attached: false, portChanged: false };
+        }
         if (free > 0) port = free;
     } catch {
         // command unavailable — try the default and let the server error
@@ -900,18 +912,38 @@ export async function serverStart(opts: {
     };
 }
 
-// Stop the running server. Our own spawn is killed by pid/path proof; an
-// EXTERNAL server (the user's own CLI) is only stopped when the call carries
-// explicit user intent (`allowExternal` — the 停止/重啟 buttons), via the
-// CLI's own `server stop`. Automatic flows (boot restart on mode mismatch)
-// must never take the user's server down behind their back.
+// Explicit user server changes also end idle provider processes. A completed
+// conversation can still own a running native runtime and trading authority.
+// Native stop drains pending effects, revokes grants and emits runtime_stopped.
+export async function stopAgentsForServerChange(): Promise<void> {
+    if (!isTauri) return;
+    const { invoke } = await import('@tauri-apps/api/core');
+    type Runtime = { runtimeId: string; status: string };
+    const runtimes = await invoke<Runtime[]>('agent_runtime_list');
+    for (const runtime of runtimes) {
+        if (runtime.status === 'running') {
+            await invoke<boolean>('agent_runtime_stop', { runtimeId: runtime.runtimeId });
+        }
+    }
+    const remaining = await invoke<Runtime[]>('agent_runtime_list');
+    if (remaining.some(runtime => runtime.status === 'running')) {
+        throw new Error('Agent 尚未停止，伺服器未變更。請停止正在執行的 Agent 後再試。');
+    }
+}
+
+// Stop only an App-owned server through the native ownership/lifecycle guard.
+// Never retry a native refusal through the CLI: that bypasses the lifecycle
+// lock and could stop an external server after a new Agent has started.
 export async function serverStop(opts?: {
-    allowExternal?: boolean;
+    stopAgents?: boolean; // explicit UI action only; automatic recovery must not stop agents
 }): Promise<SidecarResult> {
     if (!isTauri) return { ok: false, output: '' };
+    if (opts?.stopAgents) {
+        try { await stopAgentsForServerChange(); }
+        catch (e) { return { ok: false, output: `無法停止 Agent：${String(e)}` }; }
+    }
     const st = await serverStatus();
     let killNote = '';
-    let killErr = '';
     const pid = getServerPid();
     // resolve the victim by port (survives lost pid records from older app
     // versions); the remembered pid is only a fallback for a server that is
@@ -928,17 +960,9 @@ export async function serverStop(opts?: {
             setSpawnPort(null);
             if (killed) killNote = `已終止伺服器（:${port}）`;
         } catch (e) {
-            // ownership refused (external shioaji / foreign service) — keep
-            // the explanation; the pid record stays in case it referred to a
-            // not-yet-listening child
-            killErr = String(e);
+            // Preserve ownership records and the native explanation on refusal.
+            return { ok: false, output: String(e) };
         }
-    }
-    // the CLI can stop servers it registered itself (its daemon file tracks
-    // the last `server start`, including external foreground ones on ≥1.5.5)
-    // — explicit user intent only
-    if (opts?.allowExternal) {
-        await sidecar(['server', 'stop']);
     }
     if (st?.running && st.port) {
         const deadline = Date.now() + 5000;
@@ -955,8 +979,7 @@ export async function serverStop(opts?: {
             ok: false,
             output: [
                 killNote,
-                killErr,
-                `:${st.port} 上的伺服器仍在運行${opts?.allowExternal ? '，請手動停止（終端機 Ctrl+C）' : ''}`,
+                `:${st.port} 上的伺服器仍在運行`,
             ]
                 .filter(Boolean)
                 .join('\n'),
@@ -986,13 +1009,37 @@ const EMPTY_SETTINGS: DesktopSettings = {
     caPath: '',
     caPasswd: '',
     httpsEnabled: false,
-    agentHarnessEnabled: false,
+    agentHarnessEnabled: true,
 };
+
+// settings.json holds the API key, secret key and CA password: only the main
+// window may touch it. Child windows (popouts, tray) have no store permission
+// at all and learn only the non-secret "setup done" flag (desktop-setup-state).
+function assertMainWindowSettingsAccess(): void {
+    if (isChildWindow()) {
+        throw new Error('本機設定只能在主視窗讀取或修改');
+    }
+}
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
     if (!isTauri) return { ...EMPTY_SETTINGS };
+    assertMainWindowSettingsAccess();
     const { LazyStore } = await import('@tauri-apps/plugin-store');
     const store = new LazyStore('settings.json');
+    const safeDefaultMigrated =
+        (await store.get<boolean>('agentHarnessSafeDefaultV1')) ?? false;
+    const storedAgentHarnessEnabled = await store.get<boolean>(
+        'agentHarnessEnabled',
+    );
+    const agentHarnessEnabled = resolveAgentHarnessSetting(
+        storedAgentHarnessEnabled,
+        safeDefaultMigrated,
+    );
+    if (!safeDefaultMigrated) {
+        await store.set('agentHarnessEnabled', agentHarnessEnabled);
+        await store.set('agentHarnessSafeDefaultV1', true);
+        await store.save();
+    }
     const settings = {
         apiKey: (await store.get<string>('apiKey')) ?? '',
         secretKey: (await store.get<string>('secretKey')) ?? '',
@@ -1001,15 +1048,16 @@ export async function loadDesktopSettings(): Promise<DesktopSettings> {
         caPath: (await store.get<string>('caPath')) ?? '',
         caPasswd: (await store.get<string>('caPasswd')) ?? '',
         httpsEnabled: (await store.get<boolean>('httpsEnabled')) ?? false,
-        agentHarnessEnabled:
-            (await store.get<boolean>('agentHarnessEnabled')) ?? false,
+        agentHarnessEnabled,
     };
     cacheAgentHarnessEnabled(settings.agentHarnessEnabled);
+    cacheDesktopConfigured(Boolean(settings.apiKey && settings.secretKey));
     return settings;
 }
 
 export async function saveDesktopSettings(s: DesktopSettings) {
     if (!isTauri) return;
+    assertMainWindowSettingsAccess();
     const { LazyStore } = await import('@tauri-apps/plugin-store');
     const store = new LazyStore('settings.json');
     await store.set('apiKey', s.apiKey);
@@ -1022,6 +1070,7 @@ export async function saveDesktopSettings(s: DesktopSettings) {
     await store.set('agentHarnessEnabled', s.agentHarnessEnabled);
     cacheAgentHarnessEnabled(s.agentHarnessEnabled);
     await store.save();
+    cacheDesktopConfigured(Boolean(s.apiKey && s.secretKey));
 }
 
 export interface SetAgentHarnessResult {
@@ -1237,21 +1286,12 @@ export async function openFlashTiles(
 
 // ---- app version (for support: shown in the server panel & debug) ----
 
-let cachedVersion: string | null = null;
-
 export async function appVersion(): Promise<string> {
-    if (cachedVersion) return cachedVersion;
-    if (isTauri) {
-        try {
-            const { getVersion } = await import('@tauri-apps/api/app');
-            cachedVersion = await getVersion();
-            return cachedVersion;
-        } catch {
-            // fall through
-        }
-    }
-    cachedVersion = 'dev';
-    return cachedVersion;
+    // Only the public release tag defines a published App version. Native
+    // getVersion() also returns the schema placeholder in local/debug builds.
+    return typeof __SHIOAJI_BUILD_VERSION__ === 'string'
+        ? __SHIOAJI_BUILD_VERSION__
+        : 'dev · unknown';
 }
 
 // ---- auto-update ----
@@ -1452,17 +1492,22 @@ export async function restartAndInstallUpdate() {
     }
 }
 
-export async function openLatestRelease() {
+// 以系統預設瀏覽器開啟外部網址（WebView 內不導航）。
+export async function openExternalUrl(url: string, failTitle = '無法開啟連結') {
     try {
         const { open } = await import('@tauri-apps/plugin-shell');
-        await open(APP_RELEASE_URL);
+        await open(url);
     } catch (e) {
         notify({
             kind: 'err',
-            title: '無法開啟下載頁',
+            title: failTitle,
             body: e instanceof Error ? e.message : String(e),
         });
     }
+}
+
+export async function openLatestRelease() {
+    await openExternalUrl(APP_RELEASE_URL, '無法開啟下載頁');
 }
 
 // ---- tray events ----

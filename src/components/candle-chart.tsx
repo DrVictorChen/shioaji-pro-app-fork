@@ -1,3 +1,5 @@
+import { RefreshButton } from './refresh-button';
+import { fetchChartHistory, nextChartHistoryRevision } from '../lib/chart-history';
 // src/components/candle-chart.tsx — K-bar candlestick + volume chart
 // (lightweight-charts v5), live-updated from the SSE tick stream.
 
@@ -32,12 +34,8 @@ import {
     Star,
     X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useQuote } from '../hooks/use-stream';
-import {
-    IndicatorDialog,
-    IndicatorSettingsModal,
-} from './indicator-dialog';
 import {
     colorWithOpacity,
     DEF_BY_TYPE,
@@ -51,35 +49,42 @@ import {
     saveInstances,
     type IndicatorInstance,
 } from '../lib/indicator-defs';
+import { IndicatorInstanceContext } from '../lib/indicator-instance-context';
+import {
+    IndicatorDialog,
+    IndicatorSettingsModal,
+} from './indicator-dialog';
 // side-effect import順序：custom-indicators 在 module 載入時就把已存的
 // 自訂指標註冊進 DEF_BY_TYPE，loadInstances() 的型別過濾才不會把它們丟掉
 import { subscribeCustoms } from '../lib/custom-indicators';
 import type { IndicatorPoint } from '../lib/indicators';
-import { cancelOrder, fetchKbars, updateOrderPrice } from '../lib/shioaji';
-import { setPickedPrice } from '../lib/price-sync';
+import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
+import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
+import { getChartColors, useThemeSettings } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
+import { isCancelUnconfirmed } from '../lib/cancel-verification';
+import { cancellationSummary } from '../lib/trade-mutations';
 import {
     addTrigger,
     removeTrigger,
     useTriggers,
 } from '../lib/trigger-engine';
+import { currentProtectionEnv } from '../lib/protection-env';
 import type { ContractBase } from '../lib/types/contract';
 import type { Candle } from '../lib/types/market';
-import { ACTIVE_ORDER_STATUSES, type Trade } from '../lib/types/order';
+import type { Trade } from '../lib/types/order';
+import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 import { fmtPrice } from '../lib/utils/format';
-import { roundToTick } from '../lib/utils/ticksize';
-import { getChartColors, useThemeSettings } from '../lib/theme-store';
 import {
     aggregate,
     dateStrOffset,
     kbarsToCandles,
-    nowWallClockUtc,
-    wallClockToUtc,
+    wallClockToUtc
 } from '../lib/utils/kbars';
-import { findKbarGap } from '../lib/intraday-session';
-import * as panel from './panel.css';
+import { roundToTick } from '../lib/utils/ticksize';
 import * as styles from './candle-chart.css';
 import { Orb } from './orb';
+import * as panel from './panel.css';
 
 // NOTE: the kbars API only serves 1-minute bars, so 1D aggregates a huge
 // payload (a year of TXF ≈ 280k bars / 18MB) — keep the range tight enough
@@ -107,10 +112,12 @@ const TRADE_MODES: { key: TradeMode; label: string }[] = [
 const MAX_HISTORY_DAYS = 1095; // ~3 years
 
 export function CandleChart({
+    panelId,
     contract,
     trades = [],
     onOrdersChanged,
 }: {
+    panelId?: string;
     contract: ContractBase;
     trades?: Trade[];
     onOrdersChanged?: () => void;
@@ -130,9 +137,6 @@ export function CandleChart({
     // 覆蓋率自癒（issue #18 二報）：live 斷層觸發的那次補抓常常太早
     // （上游還沒發布），live bar 一堆積洞就變「內部洞」再也偵測不到 —
     // 載入後直接驗覆蓋率，有缺口就退避排程重抓直到上游補齊（封頂）
-    const healAttemptsRef = useRef(0);
-    const healTimerRef = useRef(0);
-    const healKeyRef = useRef('');
     // ticks must NOT touch the series until history for the current
     // (symbol, timeframe) is in place — updating a freshly-switched series
     // with a bucket older than its last point makes lightweight-charts
@@ -154,13 +158,27 @@ export function CandleChart({
             setMode('observe');
         }
     }, [isCombo, mode]);
-    const [instances, setInstances] =
+    const [legacyInstances, setInstances] =
         useState<IndicatorInstance[]>(loadInstances);
+    const service = useContext(IndicatorInstanceContext);
+    const panelService = panelId ? service : null;
+    const panelState = useSyncExternalStore(
+        panelService?.subscribe ?? (() => () => {}),
+        () => panelService && panelId ? panelService.snapshot(panelId) : null,
+    );
+    useEffect(() => panelService && panelId ? panelService.registerPanel(panelId) : undefined, [panelService, panelId]);
+    const savedInstances = panelState?.instances ?? legacyInstances;
+    const [settingsDraft, setSettingsDraft] = useState<IndicatorInstance | null>(null);
+    const settingsRevisionRef = useRef('');
+    const settingsNewRef = useRef(false);
+    const instances = settingsDraft
+        ? savedInstances.some(i => i.id === settingsDraft.id)
+            ? savedInstances.map(i => i.id === settingsDraft.id ? settingsDraft : i)
+            : [...savedInstances, settingsDraft]
+        : savedInstances;
     const [pickerOpen, setPickerOpen] = useState(false);
     const [settingsFor, setSettingsFor] = useState<string | null>(null);
     const [legendMenuFor, setLegendMenuFor] = useState<string | null>(null);
-    // instances snapshot taken when settings opens — 取消 restores it
-    const settingsSnapshotRef = useRef<string>('');
     // legend live values: instId -> per-output {label,text,color}
     const [legendValues, setLegendValues] = useState<
         Record<string, { label: string; text: string; color: string }[]>
@@ -203,7 +221,7 @@ export function CandleChart({
                     (t.contract.code === contract.code ||
                         (contract.target_code &&
                             t.contract.code === contract.target_code)) &&
-                    ACTIVE_ORDER_STATUSES.has(t.status.status),
+                    remainingWorkingOrderQuantity(t) > 0,
             ),
         [trades, contract],
     );
@@ -374,7 +392,7 @@ export function CandleChart({
                     action: below ? 'Sell' : 'Buy',
                     quantity: qty,
                     kind: 'stop',
-                });
+                }, c);
             } else {
                 addTrigger({
                     code: c.code,
@@ -383,7 +401,7 @@ export function CandleChart({
                     action: below ? 'Buy' : 'Sell',
                     quantity: qty,
                     kind: 'take',
-                });
+                }, c);
             }
         });
 
@@ -402,7 +420,8 @@ export function CandleChart({
             const raw = candles.coordinateToPrice(param.point.y);
             if (raw === null) return;
             const c = contractRef.current;
-            setPickedPrice(c.code, roundToTick(c, Number(raw)));
+            // 游標移動帶價受設定控制（#58，預設關閉）；點擊帶價不受影響
+            setHoverPickedPrice(c.code, roundToTick(c, Number(raw)));
         });
 
         // TradingView-style infinite history: panning near the left edge
@@ -523,7 +542,7 @@ export function CandleChart({
             if (dryPages >= 3 || oldestDay >= MAX_HISTORY_DAYS) return;
             fetching = true;
             const from = Math.min(oldestDay + tf.days, MAX_HISTORY_DAYS);
-            fetchKbars(
+            fetchChartHistory(
                 contract,
                 dateStrOffset(from),
                 dateStrOffset(oldestDay + 1),
@@ -566,7 +585,8 @@ export function CandleChart({
                 });
         };
 
-        fetchKbars(contract, dateStrOffset(tf.days), dateStrOffset(0), {
+        fetchChartHistory(contract, dateStrOffset(tf.days), dateStrOffset(0), {
+            revision: historySeq,
             timeoutMs: 30_000, // 大週期初載可達數十天，不能用 10s
         })
             .then((k) => {
@@ -584,33 +604,6 @@ export function CandleChart({
                 lastBarRef.current = bars[bars.length - 1] ?? null;
                 loadedKeyRef.current = loadKey;
                 loadMoreRef.current = loadMore;
-                // 覆蓋率自癒：換商品/週期歸零重驗；缺口存在就 3 分鐘
-                // （第 6 次起 10 分鐘）後重抓，上限 15 次（≈2h，涵蓋
-                // 上游最晚發布時點）；補齊即停
-                const healKey = `${contract.code}|${tf.minutes}`;
-                if (healKeyRef.current !== healKey) {
-                    healKeyRef.current = healKey;
-                    healAttemptsRef.current = 0;
-                }
-                // 1D 不跑覆蓋率自癒 — 240 天的重抓一次 ~2.7MB，稀疏
-                // 商品誤判時代價太高；分鐘級週期才是洞真正可見的地方
-                const gap =
-                    tf.minutes >= 1440
-                        ? null
-                        : findKbarGap(
-                              raw.map((b) => b.time),
-                              contract.security_type,
-                              nowWallClockUtc(),
-                          );
-                if (gap && healAttemptsRef.current < 15) {
-                    const n = healAttemptsRef.current++;
-                    healTimerRef.current = window.setTimeout(
-                        () => setHistorySeq((v) => v + 1),
-                        n < 5 ? 180_000 : 600_000,
-                    );
-                } else if (!gap) {
-                    healAttemptsRef.current = 0;
-                }
                 chartRef.current?.timeScale().scrollToRealTime();
                 // a manual price-axis drag disables autoScale and pins the
                 // range; without re-enabling it the prior symbol's price band
@@ -622,23 +615,15 @@ export function CandleChart({
             })
             .catch(() => {
                 if (cancelled) return;
-                // clearSeries 已讓 live bars 可以從現在開始堆；歷史
-                // 15s 後自動重試（server 掛掉期間圖不再死等人工切換）
+                // 保留即時作畫；歷史查詢失敗後由使用者手動更新。
                 clearSeries();
                 setEmpty(true);
-                healTimerRef.current = window.setTimeout(
-                    () => setHistorySeq((v) => v + 1),
-                    15_000,
-                );
             })
             .finally(() => {
                 if (!cancelled) setLoading(false);
             });
         return () => {
             cancelled = true;
-            // 換商品/週期時未觸發的 heal 重抓一併取消 — 殘留的 timer
-            // 會替新商品多打一次無意義的 historySeq 重載
-            window.clearTimeout(healTimerRef.current);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contract, tf, historySeq]);
@@ -682,7 +667,7 @@ export function CandleChart({
             Date.now() - gapReloadAtRef.current > 120_000
         ) {
             gapReloadAtRef.current = Date.now();
-            setHistorySeq((v) => v + 1);
+            setHistorySeq(nextChartHistoryRevision());
         }
         if (!bar || bucket > bar.time) {
             bar = {
@@ -733,14 +718,14 @@ export function CandleChart({
         () =>
             subscribeCustoms(() => {
                 setCustomVer((v) => v + 1);
-                setInstances((cur) => {
+                if (!panelService) setInstances((cur) => {
                     const kept = cur.filter((i) => DEF_BY_TYPE.has(i.type));
                     if (kept.length === cur.length) return cur;
                     saveInstances(kept);
                     return kept;
                 });
             }),
-        [],
+        [panelService],
     );
 
     // indicator instances → chart series: overlays on the main pane,
@@ -1009,28 +994,37 @@ export function CandleChart({
     }, [dataVersion, instancesKey, themeKey, tf.minutes, customVer]);
 
     const commitInstances = (list: IndicatorInstance[]) => {
+        if (panelService && panelId && panelState) {
+            try { panelService.replace(panelId, list, panelState.revision); }
+            catch (e) { notify({ kind: 'err', title: '指標設定未儲存', body: e instanceof Error ? e.message : String(e) }); }
+            return;
+        }
         setInstances(list);
         saveInstances(list);
     };
     // 點選指標 → 先開設定（圖上即時預覽），確定才算加入、取消整個撤掉
     const addIndicator = (type: string) => {
-        settingsSnapshotRef.current = JSON.stringify(instances); // 不含新實例
         const inst = newInstance(type);
-        commitInstances([...instances, inst]);
+        settingsRevisionRef.current = panelState?.revision ?? '';
+        settingsNewRef.current = true;
+        setSettingsDraft(inst);
         setPickerOpen(false);
         setSettingsFor(inst.id);
     };
     const removeIndicator = (id: string) => {
-        if (settingsFor === id) setSettingsFor(null);
-        commitInstances(instances.filter((i) => i.id !== id));
+        if (settingsFor === id) { setSettingsFor(null); setSettingsDraft(null); }
+        commitInstances(savedInstances.filter((i) => i.id !== id));
     };
     const patchInstance = (id: string, patch: Partial<IndicatorInstance>) => {
+        if (settingsDraft?.id === id) { setSettingsDraft({ ...settingsDraft, ...patch }); return; }
         commitInstances(
             instances.map((i) => (i.id === id ? { ...i, ...patch } : i)),
         );
     };
     const openSettings = (id: string) => {
-        settingsSnapshotRef.current = JSON.stringify(instances);
+        settingsRevisionRef.current = panelState?.revision ?? '';
+        settingsNewRef.current = false;
+        setSettingsDraft(structuredClone(savedInstances.find(i => i.id === id)!));
         setLegendMenuFor(null);
         setSettingsFor(id);
     };
@@ -1059,15 +1053,21 @@ export function CandleChart({
         saveFavorites(favs);
     };
     const cancelSettings = () => {
-        try {
-            const snap = JSON.parse(
-                settingsSnapshotRef.current,
-            ) as IndicatorInstance[];
-            commitInstances(snap);
-        } catch {
-            // snapshot unreadable — keep current state
-        }
+        setSettingsDraft(null);
         setSettingsFor(null);
+    };
+    const commitSettings = () => {
+        if (!settingsDraft) return;
+        const list = settingsNewRef.current ? [...savedInstances, settingsDraft]
+            : savedInstances.map(i => i.id === settingsDraft.id ? settingsDraft : i);
+        try {
+            if (panelService && panelId) panelService.replace(panelId, list, settingsRevisionRef.current);
+            else commitInstances(list);
+            cancelSettings();
+        } catch (e) {
+            notify({ kind: 'err', title: '指標設定已變更，請重新開啟設定', body: e instanceof Error ? e.message : String(e) });
+            cancelSettings();
+        }
     };
     const settingsInst = instances.find((i) => i.id === settingsFor) ?? null;
 
@@ -1085,7 +1085,7 @@ export function CandleChart({
         workingOrders.map((t) => [
             t.order.id,
             t.status.modified_price || t.order.price,
-            t.order.quantity - t.status.deal_quantity,
+            remainingWorkingOrderQuantity(t),
         ]),
     );
     useEffect(() => {
@@ -1094,7 +1094,7 @@ export function CandleChart({
         const lines = new Map<string, IPriceLine>();
         for (const t of workingOrdersRef.current) {
             const price = t.status.modified_price || t.order.price;
-            const remaining = t.order.quantity - t.status.deal_quantity;
+            const remaining = remainingWorkingOrderQuantity(t);
             lines.set(
                 t.order.id,
                 series.createPriceLine({
@@ -1478,7 +1478,9 @@ export function CandleChart({
         );
     });
     return (
-        <div className={styles.wrap}>
+        <div className={styles.wrap}
+            onPointerDownCapture={() => { if (panelService && panelId) panelService.focus(panelId); }}
+            onFocusCapture={() => { if (panelService && panelId) panelService.focus(panelId); }}>
             <div className={styles.toolbar}>
                 {TIMEFRAMES.map((t, i) => (
                     <button
@@ -1551,6 +1553,10 @@ export function CandleChart({
                         instances={instances}
                         onAdd={addIndicator}
                         onClose={() => setPickerOpen(false)}
+                        onSaveDefaults={panelService ? () => {
+                            saveInstances(savedInstances);
+                            notify({ kind: 'info', title: '已儲存指標預設', body: '新圖與回測圖表使用此設定；其他現有面板維持原設定。' });
+                        } : undefined}
                     />
                 )}
                 {settingsInst && (
@@ -1564,10 +1570,11 @@ export function CandleChart({
                             patchInstance(settingsInst.id, patch)
                         }
                         onRemove={() => removeIndicator(settingsInst.id)}
-                        onCommit={() => setSettingsFor(null)}
+                        onCommit={commitSettings}
                         onCancel={cancelSettings}
                     />
                 )}
+                <RefreshButton label="更新歷史" loading={loading} onClick={() => setHistorySeq(nextChartHistoryRevision())} />
             </div>
             <div ref={hostRef} className={styles.chartHost}>
                 {loading && (
@@ -1602,8 +1609,7 @@ export function CandleChart({
                         {workingOrders.map((t) => {
                             const price =
                                 t.status.modified_price || t.order.price;
-                            const remaining =
-                                t.order.quantity - t.status.deal_quantity;
+                            const remaining = remainingWorkingOrderQuantity(t);
                             return (
                                 <div
                                     key={t.order.id}
@@ -1626,18 +1632,21 @@ export function CandleChart({
                                         title='刪單'
                                         onClick={() =>
                                             cancelOrder(t.order.id)
-                                                .then(() => {
+                                                .then((trade) => {
+                                                    // Cancelled, filled first, or a working-looking
+                                                    // broker status whose cancel covers everything.
+                                                    const summary = cancellationSummary([{ status: 'fulfilled', value: trade }]);
                                                     notify({
-                                                        kind: 'ok',
-                                                        title: '🗑 刪單已送出',
-                                                        body: `${t.contract.code} @${fmtPrice(price)}`,
+                                                        kind: summary.kind,
+                                                        title: '刪單結果',
+                                                        body: `${t.contract.code} @${fmtPrice(price)}：${summary.body}`,
                                                     });
                                                     onOrdersChangedRef.current?.();
                                                 })
                                                 .catch((e) =>
                                                     notify({
                                                         kind: 'err',
-                                                        title: '刪單失敗',
+                                                        title: isCancelUnconfirmed(e) ? '刪單未確認' : '刪單失敗',
                                                         body:
                                                             e instanceof Error
                                                                 ? e.message
@@ -1665,6 +1674,16 @@ export function CandleChart({
                                     {fmtPrice(t.price)}
                                     {t.kind !== 'alert' &&
                                         ` ${t.action === 'Buy' ? '買' : '賣'}${t.quantity}`}
+                                    {t.suspended && (
+                                        <span title={t.suspended}> 未啟用</span>
+                                    )}
+                                    {!t.suspended &&
+                                        t.kind !== 'alert' &&
+                                        t.env !== currentProtectionEnv() && (
+                                            <span title='建立於其他伺服器或模擬／正式模式，目前不執行'>
+                                                {' '}未在此環境
+                                            </span>
+                                        )}
                                 </span>
                                 <button
                                     className={styles.triggerRemove}

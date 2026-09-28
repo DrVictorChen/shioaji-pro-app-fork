@@ -28,6 +28,7 @@ const STATUS_LABEL = {
     live: 'LIVE',
     connecting: 'SYNC',
     down: 'LOST',
+    stale: 'STALE',
 } as const;
 
 function Menu({
@@ -251,8 +252,7 @@ export function HudHeader({
                 <span className={styles.logoMain}>Shioaji Pro</span>
                 <span className={styles.logoSub}>
                     交易終端
-                    {appVer &&
-                        ` · ${appVer === 'dev' ? 'Dev' : `App v${appVer}`}`}
+                    {appVer && ` · App ${appVer}`}
                 </span>
             </div>
 

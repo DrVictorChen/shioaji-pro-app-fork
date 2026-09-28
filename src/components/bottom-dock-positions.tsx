@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTradingLive } from '../hooks/use-stream';
 import { ensureContract } from '../lib/contracts-cache';
 import { maskMoney, usePrivacyMode, usePrivacyMoney } from '../lib/privacy';
+import { useServerInfo, yesterdayQuantityNotice } from '../lib/server-info-store';
 import {
     notify,
     placeQuickOrder,
@@ -83,6 +84,7 @@ export function PositionsPane({
     const { ref: measureRef, width } = useMeasuredWidth();
     const size = sizeClassOf(width);
     const live = useTradingLive();
+    const yesterdayNotice = yesterdayQuantityNotice(useServerInfo());
     const priv = usePrivacyMode();
     const privMoney = usePrivacyMoney();
     const [armed, setArmed] = useState(false);
@@ -179,21 +181,29 @@ export function PositionsPane({
         setSelected(allSelected ? new Set() : new Set(rows.map(posKey)));
     };
 
-    // NOTE（已知限制）：平倉單經 placeQuickOrder/placeStockExitByShares 走
-    // accountFor()，也就是「目前選中的證/期帳戶」。同類型多帳戶時，非選中
-    // 帳戶的倉位會被路由到選中帳戶下單。現況一證一期沒有實害；若未來支援
-    // 同類型多帳戶，需把 p.account 傳進下單層。
+    // 捕捉列本身的帳戶；不得以目前選取帳戶補猜持倉歸屬。
     const closeOne = async (p: AccountedPosition, mode2: 'close' | 'reverse') => {
-        const contract = await ensureContract(p.code);
-        const exit = p.direction === 'Buy' ? 'Sell' : 'Buy';
-        const qty = mode2 === 'close' ? p.quantity : p.quantity * 2;
-        if (isStockPosition(p)) {
-            // shares → Common lots + IntradayOdd remainder
-            await placeStockExitByShares(contract, exit, qty);
-        } else {
-            await placeQuickOrder(contract, exit, null, qty);
+        const account = p.account;
+        if (!account?.signed || !account.broker_id || !account.account_id || !['S', 'F'].includes(account.account_type)) {
+            throw new Error('持倉帳戶歸屬不明，未送出委託');
         }
-        return { exit, qty };
+        if ((isStockPosition(p) ? 'S' : 'F') !== account.account_type) throw new Error('持倉單位與帳戶市場不符，未送出委託');
+        if (!Number.isInteger(p.quantity) || p.quantity <= 0 || !['Buy', 'Sell'].includes(p.direction)) {
+            throw new Error('持倉數量或方向不明，未送出委託');
+        }
+        if (isStockPosition(p) && (mode2 === 'reverse' || !('cond' in p) || p.cond !== 'Cash')) {
+            throw new Error('股票反手或信用持倉請分開確認交易條件，未送出委託');
+        }
+        const contract = await ensureContract(p.code);
+        if ((contract.security_type === 'STK' ? 'S' : 'F') !== account.account_type) throw new Error('商品與持倉帳戶市場不符，未送出委託');
+        const exit = p.direction === 'Buy' ? 'Sell' : 'Buy';
+        if (isStockPosition(p)) {
+            await placeStockExitByShares(contract, exit, p.quantity, account);
+        } else {
+            await placeQuickOrder(contract, exit, null, mode2 === 'reverse' ? p.quantity * 2 : p.quantity,
+                { account, ocType: mode2 === 'reverse' ? 'Auto' : 'Cover' });
+        }
+        return { exit, qty: mode2 === 'reverse' ? p.quantity * 2 : p.quantity };
     };
 
     // 平/反 are one-click market orders on the whole position — locked by
@@ -214,8 +224,8 @@ export function PositionsPane({
         } catch (e) {
             notify({
                 kind: 'err',
-                title: mode2 === 'close' ? '平倉失敗' : '反手失敗',
-                body: e instanceof Error ? e.message : String(e),
+                title: mode2 === 'close' ? '平倉未完整確認' : '反手未完整確認',
+                body: `可能已有部分委託送出或結果未知，請手動核對，勿直接重送。${e instanceof Error ? e.message : String(e)}`,
             });
         } finally {
             setBusyCode(null);
@@ -245,8 +255,8 @@ export function PositionsPane({
         const fail = targets.length - ok;
         notify({
             kind: fail > 0 ? 'err' : 'ok',
-            title: '批次平倉完成',
-            body: `成功 ${ok} 筆 / 失敗 ${fail} 筆${firstErr ? `｜${firstErr}` : ''}`,
+            title: '批次平倉請核對委託',
+            body: `已送出 ${ok} 筆 / 未完整確認 ${fail} 筆；可能部分送出，勿直接重送${firstErr ? `｜${firstErr}` : ''}`,
         });
         onChanged();
     };
@@ -347,9 +357,9 @@ export function PositionsPane({
                                 )}
                             </td>
                             {sz === 'wide' && (
-                                <td className={`${styles.td} ${styles.qtyCell}`}>
+                                <td className={`${styles.td} ${styles.qtyCell}`} title={isStockPosition(p) ? yesterdayNotice : undefined}>
                                     {isStockPosition(p)
-                                        ? maskMoney(
+                                        ? yesterdayNotice ? '待確認' : maskMoney(
                                               fmtStockLots(p.yd_quantity),
                                               privMoney,
                                           )
@@ -432,7 +442,7 @@ export function PositionsPane({
                                                 ? '行情未連線，暫停下單'
                                                 : !armed
                                                   ? '已鎖定 — 點表頭鎖頭解鎖平/反'
-                                                  : '市價反向兩倍（翻倉）'
+                                                  : '同帳戶市價反向兩倍（翻倉）'
                                         }
                                         onClick={(e) => {
                                             e.stopPropagation();

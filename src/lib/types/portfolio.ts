@@ -45,6 +45,15 @@ export interface AccountBalance {
     errmsg: string;
 }
 
+// 每帳戶保留各自最後成功快照；失敗不把其他帳戶的資料套過來。
+export interface AccountFunds {
+    account: Account;
+    balance?: AccountBalance;
+    margin?: Margin;
+    updatedAt?: number;
+    error?: string;
+}
+
 export interface Margin {
     yesterday_balance: number;
     today_balance: number;

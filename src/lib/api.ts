@@ -50,6 +50,21 @@ async function doFetch(url: string, init?: RequestInit): Promise<Response> {
     return fetch(url, init);
 }
 
+async function doFetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs?: number,
+): Promise<Response> {
+    if (!timeoutMs) return doFetch(url, init);
+    const controller = new AbortController();
+    const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await doFetch(url, { ...init, signal: controller.signal });
+    } finally {
+        globalThis.clearTimeout(timer);
+    }
+}
+
 // shioaji errors come back as JSON: {"code":400,"message":"...","details":...}
 // surface that message instead of a bare "400 Bad Request" — the message is
 // what tells you it's CA / unsigned account / bad params (issue #1 support)
@@ -75,8 +90,8 @@ async function throwApiError(res: Response): Promise<never> {
     );
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-    const res = await doFetch(base() + path);
+export async function apiGet<T>(path: string, opts?: { signal?: AbortSignal; headers?: HeadersInit }): Promise<T> {
+    const res = await doFetch(base() + path, opts);
     if (!res.ok) await throwApiError(res);
     return res.json() as Promise<T>;
 }
@@ -84,7 +99,7 @@ export async function apiGet<T>(path: string): Promise<T> {
 export async function apiPost<T>(
     path: string,
     body: unknown,
-    opts?: { timeoutMs?: number; agentInitiated?: boolean },
+    opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
 ): Promise<T> {
     const harnessEnabled = isAgentHarnessEnabled();
     if (
@@ -114,6 +129,7 @@ export async function apiPost<T>(
                     url: base() + path,
                     body: bodyText,
                     agentInitiated: opts?.agentInitiated === true,
+                    ...(opts?.agentCallId ? { agentCallId: opts.agentCallId, agentAuto: opts.agentAuto === true } : {}),
                 },
             );
         } catch (error) {
@@ -134,16 +150,17 @@ export async function apiPost<T>(
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }
-    const res = await doFetch(base() + path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+    const res = await doFetchWithTimeout(
+        base() + path,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        },
         // opt-in only — order paths must never abort an in-flight request
         // (an aborted POST tells us nothing about whether it was executed)
-        signal: opts?.timeoutMs
-            ? AbortSignal.timeout(opts.timeoutMs)
-            : undefined,
-    });
+        opts?.timeoutMs,
+    );
     if (!res.ok) await throwApiError(res);
     return res.json() as Promise<T>;
 }

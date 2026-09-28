@@ -75,3 +75,12 @@ export const btn = style({
         cursor: 'not-allowed',
     },
 });
+
+export const refreshToolbar = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: vars.space.sm,
+    padding: `0 ${vars.space.sm}`,
+    flexShrink: 0,
+    minWidth: 0,
+});

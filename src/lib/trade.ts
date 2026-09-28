@@ -1,3 +1,6 @@
+import { remainingWorkingOrderQuantity } from './working-order-quantity';
+import { getApiBase } from './runtime';
+import { cancellationSummary } from './trade-mutations';
 // src/lib/trade.ts — one-shot order helper + in-app notification channel
 
 import { getAccountState } from './account-store';
@@ -5,7 +8,7 @@ import { trackActivity } from './activity';
 import { requestOrderConfirm } from './order-confirm';
 import { checkOrderAllowed, getRiskSettings } from './risk';
 import {
-    cancelOrder,
+    cancelOrders,
     fetchTrades,
     placeFuturesOrder,
     placeStockOrder,
@@ -14,9 +17,9 @@ import { getStreamStatus } from './stream';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
-    ACTIVE_ORDER_STATUSES,
     type Action,
     type StockOrderLot,
+    type FuturesOCType,
     type Trade,
 } from './types/order';
 
@@ -145,13 +148,24 @@ export async function placeQuickOrder(
         bypassRisk?: boolean;
         orderLot?: StockOrderLot;
         account?: Account;
+        ocType?: FuturesOCType;
         // 'auto' = 系統觸發（停損/停利等），永不彈手動確認
         source?: 'manual' | 'auto' | 'agent';
+        agentCallId?: string;
+        agentAuto?: boolean;
     },
 ): Promise<Trade> {
+    const startedBase = getApiBase();
+    const capturedAccount = opts?.account ?? (isFuturesContract(contract) ? getAccountState().selectedFutures : getAccountState().selectedStock) ?? undefined;
     assertTradingLive();
     if (contract.security_type === 'IND') {
         throw mutationNotStartedError('指數商品僅提供行情，不可下單');
+    }
+    const expectedAccountType = isFuturesContract(contract) ? 'F' : 'S';
+    if (!capturedAccount || !capturedAccount.signed || capturedAccount.account_type !== expectedAccountType
+        || !getAccountState().accounts.some(a => a.signed && a.account_type === expectedAccountType
+            && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) {
+        throw mutationNotStartedError('缺少有效且符合商品市場的下單帳戶，請重新選擇帳戶');
     }
     if (!opts?.bypassRisk) {
         const blocked = checkOrderAllowed(quantity);
@@ -166,6 +180,10 @@ export async function placeQuickOrder(
             opts?.orderLot,
         );
     }
+    assertTradingLive();
+    if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
+    if (capturedAccount && !getAccountState().accounts.some(a => a.signed && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
+    if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity); if (blocked) throw mutationNotStartedError(blocked); }
     trackActivity(
         '下單',
         `${contract.code} ${action === 'Buy' ? '買' : '賣'} ${quantity} @${price ?? '市價'}`,
@@ -179,7 +197,11 @@ export async function placeQuickOrder(
         market,
         opts?.orderLot,
         opts?.source === 'agent',
-        opts?.account,
+        capturedAccount,
+        opts?.agentCallId
+            ? { agentCallId: opts.agentCallId, agentAuto: opts.agentAuto }
+            : undefined,
+        opts?.ocType,
     );
 }
 
@@ -192,6 +214,8 @@ async function sendOrder(
     orderLot?: StockOrderLot,
     agentInitiated = false,
     account?: Account,
+    agentContext?: { agentCallId?: string; agentAuto?: boolean },
+    ocType: FuturesOCType = 'Auto',
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -203,8 +227,8 @@ async function sendOrder(
               quantity,
               price_type: market ? 'MKT' : 'LMT',
               order_type: market ? 'IOC' : 'ROD',
-              octype: 'Auto',
-          }, account, { agentInitiated })
+              octype: ocType,
+          }, account, { agentInitiated, ...agentContext })
         : await placeStockOrder(contract, {
               action,
               price: price ?? 0,
@@ -212,7 +236,7 @@ async function sendOrder(
               price_type: market ? 'MKT' : 'LMT',
               order_type: market ? 'IOC' : 'ROD',
               order_lot: orderLot ?? 'Common',
-          }, account, { agentInitiated });
+          }, account, { agentInitiated, ...agentContext });
     return trade;
 }
 
@@ -224,10 +248,18 @@ export async function placeStockExitByShares(
     contract: ContractBase & { limit_up?: number; limit_down?: number },
     action: Action,
     shares: number,
+    account?: Account,
 ): Promise<Trade[]> {
+    const capturedAccount = account ?? getAccountState().selectedStock ?? undefined;
+    const base = getApiBase();
     assertTradingLive();
+    if (!capturedAccount || capturedAccount.account_type !== 'S') throw mutationNotStartedError('缺少股票平倉帳戶');
+    if (contract.security_type !== 'STK') throw mutationNotStartedError('股票股數平倉僅支援股票');
+    if (!Number.isSafeInteger(shares) || shares <= 0) throw mutationNotStartedError('平倉股數必須是正整數');
     const lots = Math.floor(shares / 1000);
     const odd = shares % 1000;
+    const limitPrice = action === 'Sell' ? contract.limit_down : contract.limit_up;
+    if (odd && (!Number.isFinite(limitPrice) || !limitPrice || limitPrice <= 0)) throw mutationNotStartedError('零股需要有效漲跌停價，尚未送出任何分單');
     // 拆單前先做一次合併的手動確認（整張市價＋零股限價兩腳只問一次，
     // 內層 placeQuickOrder 一律 source:'auto' 免得連問兩次）
     await confirmManualOrder(
@@ -240,17 +272,19 @@ export async function placeStockExitByShares(
             ? `拆為 ${lots} 張市價＋${odd} 股盤中零股限價`
             : undefined,
     );
+    assertTradingLive();
+    if (getApiBase() !== base) throw mutationNotStartedError('確認期間伺服器已切換');
     const out: Trade[] = [];
     if (lots > 0) {
         out.push(
             await placeQuickOrder(contract, action, null, lots, {
                 source: 'auto',
+                account: capturedAccount,
             }),
         );
     }
     if (odd > 0) {
-        const limitPrice =
-            action === 'Sell' ? contract.limit_down : contract.limit_up;
+        if (getApiBase() !== base) throw new Error('伺服器已切換；先前分單可能已送出，剩餘分單未送出');
         if (!limitPrice) {
             throw new Error('零股需要漲跌停價作為限價，無法取得');
         }
@@ -258,6 +292,7 @@ export async function placeStockExitByShares(
             await placeQuickOrder(contract, action, limitPrice, odd, {
                 orderLot: 'IntradayOdd',
                 source: 'auto',
+                account: capturedAccount,
             }),
         );
     }
@@ -273,13 +308,16 @@ export async function cancelAllOrders(): Promise<number> {
     const tradable = getAccountState().accounts.filter(
         (a) => a.signed && (a.account_type === 'S' || a.account_type === 'F'),
     );
+    // Rare, safety-critical: always the authoritative update_status read
+    // (refresh:true), never the sidecar cache (ADR 0003).
     const fetches =
         tradable.length > 0
             ? tradable.map((a) =>
-                  fetchTrades(a.account_type as 'S' | 'F', a),
+                  fetchTrades(a.account_type as 'S' | 'F', a, { refresh: true }),
               )
-            : [fetchTrades('S'), fetchTrades('F')];
+            : [fetchTrades('S', undefined, { refresh: true }), fetchTrades('F', undefined, { refresh: true })];
     const rs = await Promise.allSettled(fetches);
+    const failedAccounts = rs.filter(r => r.status === 'rejected').length;
     const merged = rs.flatMap((r) =>
         r.status === 'fulfilled' ? r.value : [],
     );
@@ -293,16 +331,15 @@ export async function cancelAllOrders(): Promise<number> {
         all.push(t);
     }
     const working = all.filter((t) =>
-        ACTIVE_ORDER_STATUSES.has(t.status.status),
+        remainingWorkingOrderQuantity(t) > 0,
     );
-    const results = await Promise.allSettled(
-        working.map((t) => cancelOrder(t.order.id)),
-    );
-    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    const results = await cancelOrders(working.map((t) => t.order.id));
+    const summary = cancellationSummary(results);
+    const ok = results.filter(r => r.status === 'fulfilled' && r.value.status.status === 'Cancelled').length;
     notify({
-        kind: ok === working.length ? 'ok' : 'err',
+        kind: failedAccounts ? 'err' : summary.kind,
         title: '🚨 全部刪單',
-        body: `已送出 ${ok}/${working.length} 筆刪單`,
+        body: `${summary.body}${failedAccounts ? ` ${failedAccounts} 個帳戶委託查詢失敗，該範圍未執行刪單。` : ''}`,
     });
     return ok;
 }

@@ -1,7 +1,7 @@
 # AI Agent 指標與策略研究閉環
 
 > 2026-09-03 定稿。產品決策已確認;portfolio-first 核心決策見
-> [ADR 0002](../adr/0002-portfolio-first-strategy-runtime.md)。
+> [ADR 0005](../adr/0005-portfolio-first-strategy-runtime.md)。
 
 ## 目標
 
@@ -261,6 +261,13 @@ Agent 回覆必須列出 artifact/run、商品、週期、資料期間、revisio
 - 完成單商品 compatibility tests,以及可執行的最小雙商品 pair/spread vertical slice:synthetic bars 必須通過時間軸與 availability 對齊、sequential runtime、intent normalization、最小共享資金 planner 與成交模擬,並斷言兩個商品的 fills、positions、portfolio result 及 per-asset attribution;只有多 symbol 型別測試不算完成。
 - 抽出 IndicatorInstanceService,讓 Agent 可建立後直接掛載、讀回及調整。
 - 不交付多商品 UI,但 code 和 interface 不得以唯一 bars/position 為核心假設。
+
+Phase 1 實作決定(2026-09-28,維護者確認):
+
+- 既有 Signal DSL 在同商品同一根 K 棒同時出現互相衝突的訊號(例如多單與空單同時進場)時,adapter 沿用舊引擎的優先順序,讓單商品結果與舊引擎一致;但每一次衝突都必須寫入可查詢的診斷紀錄(時間、商品、衝突訊號、採用的訊號),並在結果中可見。直接以 intent 撰寫的策略,同商品同週期的衝突 intent 仍然驗證失敗。
+- 風控或資金不足造成的拒絕(跳空、停牌、手續費使槓桿超限)不中止整個執行,改寫入結構化的 rejection 紀錄後繼續;只有輸入資料或策略本身不合法才中止。
+- 部位數量與最小交易單位(lot)是不同參數;非零請求取整後為 0 lot 時驗證失敗,不得改變原本的目標部位。
+- Phase 1 的預設 gross/net leverage 上限為 1x,Phase 3 再擴充。
 
 ### Phase 2: backtest research loop
 

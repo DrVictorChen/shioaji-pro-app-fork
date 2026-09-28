@@ -4,9 +4,12 @@
 // 預收券款/圈存（查詢類 only — reserve 申請屬下單動作，刻意不做）。
 // 寬版兩欄（左=資金＋交割＋額度、右=損益＋預收）、窄版單欄堆疊。
 
+import { accountMatches } from '../lib/flash-account';
+import { maskAccountId, usePrivacyMode } from '../lib/privacy';
+import { useAccounts } from '../lib/account-store';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { usePoll } from '../hooks/use-poll';
+import { useQuery } from '../hooks/use-query';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
 import {
     fetchEarmarkingDetail,
@@ -18,7 +21,6 @@ import {
     fetchStockReserveSummary,
     fetchTradingLimits,
     resolveContract,
-    type AccountSelector,
     type EarmarkStocksDetail,
     type ProfitLoss,
     type ReserveStocksDetail,
@@ -28,21 +30,22 @@ import {
 } from '../lib/shioaji';
 import type {
     Account,
+    AccountFunds,
     AccountBalance,
     AccountedPosition,
     Margin,
 } from '../lib/types/portfolio';
 import { fmtMoney, fmtSigned } from '../lib/utils/format';
 import { vars } from '../theme.css';
-import * as panel from './panel.css';
-import * as styles from './bottom-dock.css';
 import {
     isStockPosition,
     sizeClassOf,
     useMeasuredWidth,
     type MarketFilter,
 } from './bottom-dock-shared';
+import * as styles from './bottom-dock.css';
 import { Orb } from './orb';
+import * as panel from './panel.css';
 
 // ---- helpers ----
 
@@ -65,7 +68,7 @@ function bizDateLabel(offset: number): string {
     ).padStart(2, '0')} (${WEEKDAYS[d.getDay()]})`;
 }
 
-// server 回的 date（YYYY-MM-DD）→ MM/DD (週X)；不可解析就原样顯示
+// server 回的 date（YYYY-MM-DD）→ MM/DD (週X)；不可解析就原樣顯示
 function settleDateLabel(raw: string): string {
     const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
     if (!m) return raw;
@@ -106,6 +109,7 @@ function Row({
 // ---- 資金狀態 ----
 
 function FundsSection({
+    incomplete = false,
     balance,
     margin,
     positions,
@@ -121,6 +125,7 @@ function FundsSection({
     showFut: boolean;
     sim: boolean;
     privMoney: boolean;
+    incomplete?: boolean;
 }) {
     const money = (n: number) => maskMoney(fmtMoney(Math.round(n)), privMoney);
     const signed = (n: number) => maskMoney(fmtSigned(n, 0), privMoney);
@@ -162,7 +167,7 @@ function FundsSection({
     const totalAssets =
         (showStock ? stockValue + cash : 0) + (showFut ? futEquity : 0);
     const showTotal =
-        totalAssets > 0 &&
+        !incomplete && totalAssets > 0 &&
         ((showStock && stockValue > 0) || cash > 0 || futEquity > 0);
 
     const hasAny = showStock || showFut;
@@ -312,7 +317,7 @@ function SettleSection({
 
 // ---- 今日已實現損益 ----
 
-type AccountedPnl = ProfitLoss & { market: 'S' | 'F' };
+type AccountedPnl = ProfitLoss & { market: 'S' | 'F'; accountKey: string };
 
 interface PnlData {
     rows: AccountedPnl[];
@@ -387,7 +392,7 @@ function PnlSection({
                     {open &&
                         pnl.rows.map((r) => (
                             <div
-                                key={`${r.market}-${r.id}-${'dseq' in r ? r.dseq : r.date}`}
+                                key={`${r.accountKey}-${r.market}-${r.id}-${'dseq' in r ? r.dseq : r.date}`}
                                 className={styles.pnlDetailRow}
                             >
                                 <span>{r.code}</span>
@@ -468,9 +473,9 @@ function LimitsSection({
 // ---- 預收券款/圈存 ----
 
 interface ReserveData {
-    summary: ReserveStocksSummary | null;
-    detail: ReserveStocksDetail | null;
-    earmark: EarmarkStocksDetail | null;
+    summary: Pick<ReserveStocksSummary, 'stocks'> | null;
+    detail: Pick<ReserveStocksDetail, 'stocks'> | null;
+    earmark: Pick<EarmarkStocksDetail, 'stocks'> | null;
 }
 
 function ReserveSection({
@@ -517,9 +522,9 @@ function ReserveSection({
                             <span className={styles.rsvHead}>
                                 可預收股票（可預收/已預收）
                             </span>
-                            {sumRows.map((s) => (
+                            {sumRows.map((s, i) => (
                                 <div
-                                    key={s.contract.code}
+                                    key={`${s.contract.code}-${i}`}
                                     className={styles.rsvRow}
                                 >
                                     <span>{s.contract.code}</span>
@@ -601,19 +606,60 @@ function ReserveSection({
 
 // ---- pane 本體 ----
 
-export function AccountPane({
-    positions,
-    balance,
-    margin,
-    market,
-    scopeAccount,
-}: {
+export interface AccountRefreshControls {
+    refresh: () => Promise<void>;
+    loading: boolean;
+    error: string | null;
+}
+
+interface AccountPaneProps {
     positions: AccountedPosition[];
     balance?: AccountBalance;
     margin?: Margin;
+    funds?: AccountFunds[];
     market: MarketFilter;
     scopeAccount: Account | null;
-}) {
+    mode?: 'merged' | 'grouped';
+    onRefreshControls?: (controls: AccountRefreshControls | null) => void;
+}
+export function AccountPane(props: AccountPaneProps) {
+    const { accounts } = useAccounts();
+    const privacy = usePrivacyMode();
+    const visible = accounts.filter(a => a.signed && (a.account_type === 'S' || a.account_type === 'F')
+        && (props.market === 'all' || a.account_type === props.market)
+        && (!props.scopeAccount || accountMatches(a, props.scopeAccount)));
+    const key = visible.map(a => `${a.account_type}:${a.broker_id}:${a.account_id}`).sort().join('|');
+    const [controls, setControls] = useState<Record<string, AccountRefreshControls>>({});
+    const callbacks = useMemo(() => Object.fromEntries(visible.map(a => {
+        const id = `${a.account_type}:${a.broker_id}:${a.account_id}`;
+        return [id, (control: AccountRefreshControls | null) => setControls(previous => {
+            const next = { ...previous };
+            if (control) next[id] = control; else delete next[id];
+            return next;
+        })];
+    })), [key]);
+    const grouped = props.mode === 'grouped' && !props.scopeAccount;
+    useEffect(() => {
+        if (!grouped) return;
+        const current = Object.entries(controls).filter(([id]) => id in callbacks).map(([, c]) => c);
+        props.onRefreshControls?.({ refresh: async () => { await Promise.all(current.map(c => c.refresh())); },
+            loading: current.some(c => c.loading), error: current.map(c => c.error).filter(Boolean).join('；') || null });
+        return () => props.onRefreshControls?.(null);
+    }, [grouped, controls, callbacks, props.onRefreshControls]);
+    if (!visible.length) return <div role="status">無符合範圍的帳戶</div>;
+    if (!grouped) return <AccountPaneContent {...props} />;
+    return <>{visible.map(account => {
+        const id = `${account.account_type}:${account.broker_id}:${account.account_id}`;
+        return <section key={id}>
+            <h3>{account.account_type === 'F' ? '期貨' : '證券'} {account.broker_id}-{maskAccountId(account.account_id, privacy)}</h3>
+            <AccountPaneContent {...props} scopeAccount={account}
+                positions={props.positions.filter(p => accountMatches(p.account, account))}
+                onRefreshControls={callbacks[id]} />
+        </section>;
+    })}{!visible.length && <div role="status">無符合範圍的帳戶</div>}</>;
+}
+
+function AccountPaneContent({ positions, balance, margin, funds, market, scopeAccount, onRefreshControls }: AccountPaneProps) {
     const privMoney = usePrivacyMoney();
     const { ref, width } = useMeasuredWidth();
     const wide = sizeClassOf(width) === 'wide';
@@ -642,14 +688,30 @@ export function AccountPane({
     const showFut =
         market !== 'S' && (!scopeAccount || scopeAccount.account_type === 'F');
 
-    const stockSel: AccountSelector | undefined =
-        scopeAccount?.account_type === 'S'
-            ? {
-                  broker_id: scopeAccount.broker_id,
-                  account_id: scopeAccount.account_id,
-              }
-            : undefined;
-    const selKey = `${scopeAccount?.broker_id ?? ''}-${scopeAccount?.account_id ?? ''}`;
+    const { accounts } = useAccounts();
+    const queryAccounts = accounts.filter(a => a.signed && (a.account_type === 'S' || a.account_type === 'F')
+        && (!scopeAccount || (a.account_type === scopeAccount.account_type && a.broker_id === scopeAccount.broker_id && a.account_id === scopeAccount.account_id))
+        && (a.account_type === 'S' ? showStock : showFut));
+    const stockAccounts = queryAccounts.filter(a => a.account_type === 'S');
+    const selKey = queryAccounts.map(a => `${a.account_type}:${a.broker_id}:${a.account_id}`).sort().join('|');
+
+    const selectedFunds = funds?.filter(row => queryAccounts.some(a => accountMatches(a, row.account)));
+    const fundsIncomplete = !!funds && (selectedFunds!.length !== queryAccounts.length
+        || selectedFunds!.some(row => row.error || (row.account.account_type === 'S' ? !row.balance || !!row.balance.errmsg?.trim() : !row.margin)));
+    if (funds) {
+        const stockFunds = selectedFunds!.filter(row => row.account.account_type === 'S');
+        const futureFunds = selectedFunds!.filter(row => row.account.account_type === 'F');
+        balance = stockFunds.length === stockAccounts.length && stockFunds.length > 0 && stockFunds.every(row => row.balance && !row.balance.errmsg?.trim() && !row.error)
+            ? { acc_balance: stockFunds.reduce((sum, row) => sum + row.balance!.acc_balance, 0), date: stockFunds[0]!.balance!.date, errmsg: '' } : undefined;
+        const expectedFutures = queryAccounts.filter(a => a.account_type === 'F').length;
+        if (futureFunds.length === expectedFutures && expectedFutures > 0 && futureFunds.every(row => row.margin && !row.error)) {
+            margin = { ...futureFunds[0]!.margin! };
+            for (const field of Object.keys(margin) as (keyof Margin)[]) {
+                margin[field] = futureFunds.reduce((sum, row) => sum + row.margin![field], 0);
+            }
+            if (futureFunds.length > 1) { margin.risk_indicator = 0; margin.plus_margin_indicator = 0; }
+        } else margin = undefined;
+    }
 
     // 只篩掉不在範圍內市場的持倉（股票市值估算用）
     const scopedPositions = useMemo(
@@ -661,17 +723,24 @@ export function AccountPane({
     );
 
     // 交割行事曆（證券）
-    const { data: settlements, refresh: refreshSettle } = usePoll<
+    const { data: settlements, refresh: refreshSettle, loading: loadingSettle, error: errorSettle } = useQuery<
         Settlement[]
     >(
         useCallback(
             () =>
-                showStock
-                    ? fetchSettlements().catch(() => [])
-                    : Promise.resolve([]),
-            [showStock],
+                Promise.all(stockAccounts.map(a => fetchSettlements(a))).then(results => {
+                    const sums = new Map<string, Settlement>();
+                    for (const row of results.flat()) {
+                        const key = `${row.T}`;
+                        const previous = sums.get(key);
+                        if (previous && previous.date !== row.date) throw new Error('帳戶交割日期不一致，合計待確認');
+                        sums.set(key, { ...row, amount: (previous?.amount ?? 0) + row.amount });
+                    }
+                    return [...sums.values()];
+                }),
+            [showStock, selKey],
         ),
-        60000,
+        `settlements:${selKey}:${showStock}`,
     );
 
     // 今日已實現損益：profit_loss 給列表/筆數；profitloss_sum 給權威總額。
@@ -679,27 +748,17 @@ export function AccountPane({
     // fallback 逐市場判斷：證/期各自「sum 有料就用 sum、沒料就加總列表」，
     // 避免一個市場 sum 有效、另一個只有列表時總額漏掉後者的筆數
     const pnlFetcher = useCallback(async (): Promise<PnlData> => {
-        const markets: ('S' | 'F')[] = [];
-        if (showStock) markets.push('S');
-        if (showFut) markets.push('F');
         const rows: AccountedPnl[] = [];
         let total = 0;
         await Promise.all(
-            markets.map(async (m) => {
-                const sel =
-                    scopeAccount && scopeAccount.account_type === m
-                        ? {
-                              broker_id: scopeAccount.broker_id,
-                              account_id: scopeAccount.account_id,
-                          }
-                        : undefined;
+            queryAccounts.map(async (account) => {
+                const m = account.account_type as 'S' | 'F';
+                const sel = account;
                 const [list, sum] = await Promise.all([
-                    fetchProfitLoss(m, sel).catch(
-                        () => [] as ProfitLoss[],
-                    ),
-                    fetchProfitLossSummary(m, sel).catch(() => null),
+                    fetchProfitLoss(m, sel),
+                    fetchProfitLossSummary(m, sel),
                 ]);
-                for (const r of list) rows.push({ ...r, market: m });
+                for (const r of list) rows.push({ ...r, market: m, accountKey: `${account.broker_id}:${account.account_id}` });
                 const haveSum =
                     sum &&
                     (sum.total.pnl !== 0 || sum.profitloss_sum.length > 0);
@@ -712,54 +771,67 @@ export function AccountPane({
         return { rows, total };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [showStock, showFut, selKey]);
-    const { data: pnl, refresh: refreshPnl } = usePoll<PnlData>(
+    const { data: pnl, refresh: refreshPnl, loading: loadingPnl, error: errorPnl } = useQuery<PnlData>(
         pnlFetcher,
-        30000,
+        `realized-pnl:${selKey}:${showStock}:${showFut}`,
     );
 
     // 交易額度（證券）
-    const { data: limits, refresh: refreshLimits } = usePoll<TradingLimits | null>(
+    const { data: limits, refresh: refreshLimits, loading: loadingLimits, error: errorLimits } = useQuery<TradingLimits | null>(
         useCallback(
             () =>
-                showStock
-                    ? fetchTradingLimits(stockSel).catch(() => null)
-                    : Promise.resolve(null),
+                Promise.all(stockAccounts.map(a => fetchTradingLimits(a))).then(results => {
+                    if (!results.length) return null;
+                    const total: TradingLimits = { ...results[0]! };
+                    for (const key of Object.keys(total) as (keyof TradingLimits)[]) total[key] = results.reduce((sum, row) => sum + row[key], 0);
+                    return total;
+                }),
             // eslint-disable-next-line react-hooks/exhaustive-deps
             [showStock, selKey],
         ),
-        60000,
+        `trading-limits:${selKey}:${showStock}`,
     );
 
     // 預收券款/圈存（證券、查詢類）— 個別 catch，任一失敗不拖垮整區
-    const { data: reserve, refresh: refreshReserve } = usePoll<ReserveData>(
+    const { data: reserve, refresh: refreshReserve, loading: loadingReserve, error: errorReserve } = useQuery<ReserveData>(
         useCallback(async () => {
             if (!showStock) {
                 return { summary: null, detail: null, earmark: null };
             }
-            const [summary, detail, earmark] = await Promise.all([
-                fetchStockReserveSummary(stockSel).catch(() => null),
-                fetchStockReserveDetail(stockSel).catch(() => null),
-                fetchEarmarkingDetail(stockSel).catch(() => null),
-            ]);
-            return { summary, detail, earmark };
+            const batches = await Promise.all(stockAccounts.map(async account => {
+                const [summary, detail, earmark] = await Promise.all([
+                    fetchStockReserveSummary(account), fetchStockReserveDetail(account), fetchEarmarkingDetail(account),
+                ]);
+                return { summary, detail, earmark };
+            }));
+            const first = batches[0];
+            if (!first) return { summary: null, detail: null, earmark: null };
+            return {
+                summary: { stocks: batches.flatMap(b => b.summary.stocks) },
+                detail: { stocks: batches.flatMap(b => b.detail.stocks) },
+                earmark: { stocks: batches.flatMap(b => b.earmark.stocks) },
+            };
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [showStock, selKey]),
-        60000,
+        `reserves:${selKey}:${showStock}`,
     );
 
-    // usePoll 換 fetcher 不會立即重跑（interval 綁定 stable run）—
-    // 帳戶範圍/市場篩選切換時主動 refresh，不等下一個 tick
+    const refreshReports = useCallback(async () => {
+        await Promise.all([refreshSettle(), refreshPnl(), refreshLimits(), refreshReserve()]);
+    }, [refreshSettle, refreshPnl, refreshLimits, refreshReserve]);
+    const reportsLoading = loadingSettle || loadingPnl || loadingLimits || loadingReserve;
+    const reportsError = [errorSettle, errorPnl, errorLimits, errorReserve].filter(Boolean).join('；') || null;
     useEffect(() => {
-        refreshSettle();
-        refreshPnl();
-        refreshLimits();
-        refreshReserve();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selKey, showStock, showFut]);
+        onRefreshControls?.({ refresh: refreshReports, loading: reportsLoading, error: reportsError });
+        return () => onRefreshControls?.(null);
+    }, [onRefreshControls, refreshReports, reportsLoading, reportsError]);
 
     const left = (
         <div className={styles.acctCol}>
+            {fundsIncomplete && <div role="status">部分帳戶資金尚未取得或查詢失敗；合計待確認</div>}
+            {!scopeAccount && queryAccounts.filter(a => a.account_type === 'F').length > 1 && <div role="status">多帳戶風險比例不合計，請切換分帳戶檢視</div>}
             <FundsSection
+                incomplete={fundsIncomplete}
                 balance={balance}
                 margin={margin}
                 positions={scopedPositions}
@@ -799,6 +871,7 @@ export function AccountPane({
 
     return (
         <div ref={ref}>
+            {reportsError && <span role="status">{reportsError}</span>}
             <div
                 className={`${styles.acctWrap} ${wide ? styles.acctWrapWide : ''}`}
             >

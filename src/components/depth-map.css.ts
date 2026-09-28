@@ -6,13 +6,14 @@ import { vars } from '../theme.css';
 export const wrap = style({
     display: 'flex',
     flexDirection: 'column',
+    flex: 1,
     minHeight: 0,
-    height: '100%',
 });
 
 export const canvas = style({
     flex: 1,
     minHeight: 0,
+    height: 0,
     width: '100%',
 });
 

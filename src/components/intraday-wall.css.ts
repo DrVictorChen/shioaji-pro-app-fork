@@ -279,3 +279,10 @@ export const centerMsg = style({
     fontSize: '0.7rem',
     gap: '6px',
 });
+
+export const refreshAction = style({
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    zIndex: 2,
+});

@@ -1,54 +1,82 @@
-## v0.1.45 - 原生 AI Agent 工作區、技能與交易安全邊界
+## v0.1.49 - 內建 Shioaji 1.7.6、刪單確認、保護單回報化與 AI Agent 全面檢修
 
-### Codex、Claude Code、Pi Agent 原生接入
+### Shioaji 1.7.6
 
-Shioaji Pro 的 AI Agent 不再只是包一層聊天 API。桌面版現在可直接使用 Codex、Claude Code 與 Pi Agent 的原生 runtime，保留各自的登入、模型、推理與工具能力，並由 App 統一提供交易工作區與安全邊界。
+- 內建 sidecar 升級為 Shioaji 1.7.6。模擬環境現在也需要逐帳戶訂閱委託／成交回報，App 啟動時會對所有已簽署帳戶訂閱，模擬與正式行為一致。
+- 期貨新單的委託識別已由上游修正（[Shioaji #235](https://github.com/Sinotrade/Shioaji/issues/235)），移除 v0.1.48 期貨改價、減量、刪單前的暫時同步查詢；帳戶、商品、方向與伺服器一致性等本機檢查全數保留。伺服器重啟後尚未重新建立委託基準時，改刪單前會先對該帳戶做一次權威查詢並重新比對委託，不符即拒送。
+- 模擬持倉昨餘數量單位差異（[Shioaji #233](https://github.com/Sinotrade/Shioaji/issues/233)）在 1.7.6 仍可重現，模擬環境持續標示「待確認」。
 
-- Provider-neutral App Tools：行情、帳戶、版面、技能與交易語意使用同一份版本化契約。
-- Agent 對話支援 session 保存、resume／fork、工具執行紀錄、技能選單與背景任務。
-- 官方 Shioaji Pro skill／plugin 可安裝到 Codex 與 Claude Code；Pi 使用對應的 native policy。
-- Codex 訂閱模型改由 native app-server 的 `model/list` 動態載入，不再受 App 內建清單限制；GPT-5.6 系列與之後新增的帳號可用模型會自動出現（#20）。
+### 主動回報與待對帳（#85、#86、#75）
 
-![AI Agent 原生 runtime 與交易權限設定](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.45/docs/images/release-0.1.45-agent-settings.png)
+- 使用 1.7.6 回報的 `event_id` 去除重複送達，並依串流追蹤序號；跳號時短暫等待晚到回報，仍缺少才標示待對帳。成交同時以事件 ID 與成交序號去重，不重複計入持倉。
+- 待對帳依原因分開顯示（串流中斷、序號跳號、待關聯回報、投影失敗、未訂閱等），成功的更新只解除它實際處理的原因。
+- 僅在重新連線、持續跳號或手動更新委託時讀取伺服器委託快取健康狀態，平時只讀快取、不耗帳務查詢額度；不新增任何定時查詢。
+- 新增串流心跳監看：超過兩個心跳週期沒有任何資料時狀態改為 STALE 並重新連線，同時標示可能漏收回報；電腦休眠喚醒只給一次寬限，不會永遠停在假的 LIVE。
+- 伺服器在 App 之外重啟時會被偵測並重新建立基準；以快取重建委託時只新增或更新，不會刪除本機仍在的委託。重連時行情重新訂閱改為分批，並移除面板重掛時多餘的退訂／重訂。
+- 改價、減量在對應回報確認後，只解除該筆委託的「改刪待確認」；小視窗內的改單也會同步到主視窗。
 
-### 交易核准是人看得懂的介面
+### 刪單確認（#120、#116）
 
-手動下單確認與 Agent 下單核准已拆成兩套互不混用的控制：
+- 刪單送出後，以伺服器快取確認同一筆委託已取消且取消量涵蓋剩餘量，才顯示「已確認取消」；委託從快取消失不視為已取消。若券商狀態仍為 Submitted 但取消量已涵蓋全部，視為已取消並註明券商原始狀態。刪單前已全部成交者顯示「無可取消」。
+- 仍無法確認時，每個帳戶每輪最多一次權威查詢；仍未確認則標示結果未知，不自動重送。批次刪單、閃電全刪、鋪單全撤與全部刪單共用同一次查詢，避免撞帳務限流。全部刪單一律使用權威查詢列出有效委託。
+- 鋪單跟隨遇到未確認的刪單時停止跟隨該筆並提示人工對帳，不再自動重複刪單。
+- AI Agent 的 `cancel_order` 只在確認取消後回報成功；未確認時記錄為結果未知並保存，重啟後仍禁止重送。
 
-- 手動操作使用原有的可視化委託確認，可在風控設定中控制。
-- Agent 提案以方向、商品、價格、數量、帳戶與環境為第一層資訊；完整 payload 與 digest 收在技術細節。
-- 核准視窗由 Tauri native 建立，主 WebView 與模型不能自行偽造「已確認」。關窗、逾時或環境不明一律拒絕。
-- 模糊的網路／券商結果不會自動重送；App 保留待核對紀錄，讓使用者確認券商端結果後再決定是否可用同一 idempotency key 重試。
+![刪單核可卡片](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.49/docs/images/release-0.1.49-approval-cancel.png)
 
-### Phase 1 安全界線
+### 停損停利保護單（#102）
 
-- Agent 交易目前只在已驗證的**模擬環境**提供；受限的模擬自動模式仍通過數量、價格、頻率與帳戶風控。
-- 正式環境 Agent mutation 維持 fail-closed；人類在交易終端內原有的正式下單不受影響。
-- 正式環境逐筆 Agent 核准將在 Shioaji server 支援 one-shot／native IPC secret bootstrap 後開放；正式環境不會提供免確認的全自動權限。
+- 移除每 4 秒的委託輪詢，改以帳戶隔離的委託／成交回報追蹤進場與部分成交；保護量隨成交累積，同一成交只計一次。
+- 保護單固定建立時的伺服器、模擬／正式環境、帳戶與商品；僅主視窗執行，小視窗送出指令需確認回覆。停損與停利同一報價只觸發一方，已觸發的群組重新載入後也不會重送。
+- 股票出場以已確認現股數量為上限，期貨出場一律 Cover；結果未知的出場保留並顯示，不自動重送。IOC 出場以最多兩次快取讀取結算，部分成交的剩餘量標示待確認。
+- 斷線、STALE、跳號、快取非正常、環境切換後尚未重新確認時，保護狀態顯示「未確認」；只有在連線正常且快取正常時手動對帳才會解除。出場後進場單仍有剩餘時會提示，可手動刪除剩餘進場單，不會自動刪除。
 
-這個界線避免同一使用者下執行的 provider process 取得 sidecar reusable signing secret 後繞過逐筆核准。它是刻意的安全限制，不是 UI 少接一個按鈕。
+![保護單未確認時提示對帳](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.49/docs/images/release-0.1.49-bracket-unconfirmed.png)
 
-### 稽核、冪等與程序隔離
+### AI Agent 全面檢修
 
-- capability secret 隨 sidecar generation 輪替；server restart、runtime stop／exit 會撤銷權限。
-- mutation 在外部副作用前持久化 intent，並按環境、帳戶、工具與 idempotency key 隔離。
-- keyed audit chain 使用分段輪替與 checkpoint；啟動或人工驗證會做完整檢查，日常 append 維持固定成本。
-- Codex／Claude／Pi process tree 在 macOS／Linux 以 process group、Windows 以 Job Object 管理；停止 runtime 會清理 descendants、pending calls 與短期憑證。
-- Linux、Windows exact-head composite CI 已涵蓋 frontend、Rust、plugin、Pi policy、Windows TCP owner 與 Job Object E2E。
+- **交易權限**：修正 App 會在正式環境默默改為「僅分析」、導致選了逐筆確認仍無下單工具的問題（#124）。設定頁與對話框的交易權限合併為同一個控制（僅分析／逐筆確認／Auto），任何自動降級都會提示。
+- **Pi 下單工具**：補上 Pi 漏接的下單、刪單、查核與試算工具，與 Claude Code、Codex 使用相同的逐筆確認、Auto 授權與結果未知處理；命令列交易核可維持不變。
+- **核可**：刪單、改價、減量改用專屬核可卡片，顯示商品、原委託、剩餘數量與價格；拒絕、關閉、逾時、報價變動、Agent 已停止等原因分開說明。核可等待期間各模型服務不再提前逾時；按下停止或 Esc 時，該回合所有待核可卡片立即失效，不會在停止後送出。停止一個 Agent 只撤銷它自己的核可與 Auto 授權。
+- **工作階段管理**：設定頁新增「執行中的 Agent 工作階段」，可查看並停止各對話的背景 runtime；閒置的其他模型服務不再阻擋連線測試，被阻擋時以中文說明並提供停止。切換模型服務時自動收起其他服務的閒置 runtime。
+- **連線與設定**：錯誤改為中文說明與下一步，原始訊息收在「技術資訊」；不再在有錯誤時顯示「已完成準備」；模型清單載入失敗不再以預設清單替代。Claude API／OpenAI API 新增不耗額度的 API Key 檢查，不適用的權限選項會停用並說明。
+- **執行權限**：「工作區自主」不再自動允許寫入工作區以外的路徑；讀取 `~/.ssh`、`.env`、環境變數一律逐次確認。各模式的說明改依實際行為顯示，效果相同的模式會標示。
+- **對話**：回應中鎖定模型切換；runtime 結束後下一則訊息自動接續；重載後停止不再中斷下一則訊息；Claude 工具列會正常完成；Codex 重載後文字不再重複或斷段；中文粗體正確顯示；刪除需確認。
+- **任務與技能**：到價任務會實際訂閱行情；忙碌時觸發改為排隊，單次提醒不再遺失；任務可停止並有執行時限；每日任務以台北時間排程並補跑；紀錄保留結論；你修改過的內建技能不會被覆蓋。
+- **安全**：Codex 的 App 工具授權不再出現在程序命令列；Agent 事件只傳給主視窗；小視窗與系統匣不再讀取含 API 金鑰的設定檔；核可卡片遮蔽秘密內容。常駐指示輸入框可正常輸入並自動儲存（#80）。
 
-### 開發與發佈治理
+![AI Agent 設定：執行中的工作階段與權限說明](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.49/docs/images/release-0.1.49-agent-settings.png)
 
-- public／private repo 使用不可變 SHA pin；private 先 merge，public repin 並重跑跨平台 composite 後才能 merge 或打 tag。
-- Release build 會再次驗證 `DESKTOP_MODULES_REF` 等於 private `main`，不一致直接停止。
+### AI Agent 介面更新
 
-### 相容性
+- **輸入框**：改為單一輸入區，工具列收在框內：「＋」選單（附加圖片、指令、商品代碼、工作資料夾、技能）、權限、Context 用量、模型與推理強度，以及圓形送出／停止鈕。回應中送出的訊息以排隊標籤顯示，可用 Alt+↑ 收回編輯。
+- **推理強度**：改為滑桿，只列出目前模型實際支援的等級（含最高／極限），切換到不支援的模型會自動調整並提示；支援的模型可開啟 Fast。
+- **Context 用量**：點開圓環可查看 Context 使用量、本次對話的 token 分項與費用，以及方案用量限制與重置時間；只顯示模型服務實際回報的數字，並可一鍵壓縮對話。
+- **對話內容**：工具列改以「查詢報價 TXFR1」「下單 TXFJ6 買 × 1 @44,050」等易讀摘要呈現，展開才看完整參數與結果；思考列顯示「思考了 N 秒」；程式碼區塊支援語法上色、語言標籤與一鍵複製；回覆可一鍵複製；等待核可時明確顯示「等待你確認…」。
+- **新對話**：提供常用提問與技能建議，點選只會填入輸入框，不會直接送出。
 
-- 內建 Shioaji Server `v1.7.4`；既有手動交易、行情與版面功能不受 Agent Harness 權限影響。
-- 深色、純黑與淺色主題完整支援。
+![AI Agent 輸入框與推理強度](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.49/docs/images/release-0.1.49-agent-composer.png)
+
+![AI Agent 對話：工具摘要、思考時間與程式碼上色](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.49/docs/images/release-0.1.49-agent-chat.png)
+
+### 介面
+
+- 面板標題顯示商品名稱，窄面板保留商品代碼（#125）。
+- 無法下單的帳戶改標示為「未簽署或未測試」，並附永豐 API 管理頁與對應商品的 API 約定書連結，說明需完成約定書簽署與模擬測試；伺服器就緒檢查的帳號也會依隱私模式遮蔽。
+- **行為變更**：圖表游標移動預設不再帶入下單價格，需點擊圖表或五檔才會帶價；可在「設定 › 風控 › 圖表帶價」開啟（#58）。
+
+![圖表帶價設定](https://raw.githubusercontent.com/Sinotrade/shioaji-pro-app/v0.1.49/docs/images/release-0.1.49-chart-price-pref.png)
+
+### 驗證範圍與持續追蹤
+
+- macOS arm64 以 Shioaji 1.7.6 模擬 sidecar 完成交易整合 QA（啟動訂閱、閒置零帳務輪詢、下單／改價／減量／刪單、全部刪單、閃電逐價刪單、成交更新持倉、保護單觸發與出場、伺服器重啟偵測），以及 AI Agent 原生 QA（Claude Code、Codex、Pi 的設定、對話、逐筆確認核可與停止、任務、技能、小視窗）。
+- 以下尚未驗證，不因本版發布結案：正式環境刪單確認與減量後刪單的取消量語意、正式保護單、IOC 部分成交實際回報、原生多視窗異常與保護單主視窗交接（#88）、Windows／Linux 原生、App 與 SDK 長時間共存（#57、#75）。上游 [Shioaji #232](https://github.com/Sinotrade/Shioaji/issues/232)、[#233](https://github.com/Sinotrade/Shioaji/issues/233)、[#234](https://github.com/Sinotrade/Shioaji/issues/234) 仍在追蹤。跨平台原生總表見 #113。
+- 內建 Shioaji 為 1.7.6；本版 private runtime pin 為 `5ea08af009856e090d2442e83a0ee5659de7c54b`（private main 的 AI Agent 整合合併）。
+- 模擬環境結果只作回歸證據，不代表正式成交或乾淨機器驗收。詳見 [1.7.6 交易 QA 紀錄](https://github.com/Sinotrade/shioaji-pro-app/blob/v0.1.49/docs/qa/shioaji-1.7.6.md)、[刪單確認 QA 紀錄](https://github.com/Sinotrade/shioaji-pro-app/blob/v0.1.49/docs/qa/cancel-confirmation-2026-09-23.md) 與 [AI Agent 原生 QA 紀錄](https://github.com/Sinotrade/shioaji-pro-app/blob/v0.1.49/docs/qa/agent-native-v0.1.49.md)。
 
 ---
 
-⚠ Agent 分析與工具輸出僅供參考；模擬自動仍可能產生非預期委託，請先設定風控上限並核對成交結果。正式環境目前不開放 Agent 下單；人類手動正式下單仍會動用真實資金。組合單為真實下單（模擬環境不支援組合單），送出前請確認每腳方向；到價監控會自動送單，請盯緊成交回報。回測結果基於歷史資料與簡化成本假設，不代表未來績效；自動下單請自行評估風險，盈虧自負。
+⚠ Agent 分析與工具輸出僅供參考；正式 Auto 會動用真實資金，請先設定風控上限並核對成交結果。模擬自動也可能產生非預期委託。組合單為真實下單（模擬環境不支援組合單），送出前請確認每腳方向；到價監控會自動送單，請盯緊成交回報。回測結果基於歷史資料與簡化成本假設，不代表未來績效；自動下單請自行評估風險，盈虧自負。
 
 Shioaji Pro 桌面版 - 內建 shioaji server（sidecar）、伺服器管理介面、系統匣、自動更新。
 

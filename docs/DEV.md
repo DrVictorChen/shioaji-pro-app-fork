@@ -84,6 +84,18 @@ test coverage 門檻、quality metrics 等。落地時更新本節。
 - 私有 repo 的 PR 會透過 `repository_dispatch` 觸發本 repo 的
   `desktop-ci.yml` 做合成驗證（詳見私有 repo 的 DEV.md）。
 
+### Desktop Agent CI 觸發與驗收
+
+- `desktop-agent-ci.yml` 在指向 main 的 PR 開啟／更新時跑 Linux/Windows
+  合成測試；push 只監聽 main，避免開發分支同一個 commit 同時觸發 push
+  與 PR 兩輪，互相取消後在 PR 留下紅叉。
+- 尚未開 PR 的分支若要合成驗證，使用 `workflow_dispatch` 手動選擇分支。
+- concurrency 依 workflow、事件與 PR 編號／ref 分組。新 commit 可取消
+  同 PR 的舊 run，但手動執行、main push 與其他 PR 不互相取消。
+- 回報 CI 完成前，核對最新 PR head 的完整 check rollup；若仍有 failed、
+  cancelled 或 pending，不得只挑成功的 run 宣告全綠。取消原因與重跑結果
+  須寫回 PR，等待所有檢查完成後再交付。
+
 ### 公私 paired PR 的 merge 順序
 
 同一功能同時修改 public/private 時，兩個 PR 必須先以
@@ -100,3 +112,52 @@ test coverage 門檻、quality metrics 等。落地時更新本節。
 
 不得先 merge public、不得讓 release workflow 的 private-main HEAD 與
 `DESKTOP_MODULES_REF` 指向不同實作，也不得在 paired PR 僅落地一側時打 tag。
+
+## Dev／候選版的版本識別
+
+- App 畫面與複製診斷統一使用 build identity。`vite dev`、未帶 release tag
+  的 `vite build`、本機 debug bundle 都顯示 `dev · <public short SHA>`；
+  build／dev server 啟動時有未提交內容則加 `+dirty`，無 Git metadata 顯示
+  `dev · unknown`。commit 後重新啟動 Vite 才會更新這份 build-time identity。
+- Tauri／Cargo／package.json 的占位版本不能當成候選版版本對外顯示；
+  不得為了畫面好看而手動 bump 成預計發布的版本。候選版說明可寫預計版本，
+  但它仍是未發布的 dev build。
+- 正式 release build 只從 GitHub tag context（`GITHUB_REF_TYPE=tag`、
+  `GITHUB_REF_NAME=vX.Y.Z`）顯示 `vX.Y.Z`，與 native bundle 的 tag 注入一致。
+- 交付 dev App 給人驗收前，確認伺服器面板、Debug、頁首與複製診斷均顯示
+  相同 build identity，並分開核對 sidecar 的 `SHIOAJI_VERSION`。不得把舊
+  Tauri 占位值（例如 0.1.43）誤認為當前 App build。
+- 自訂 Vite port 時也要驗證原生 WebView SSE 的 Origin；sidecar 預設接受
+  `5173` 的 dev origin。其他 port 使用 Vite 同來源 `/api` proxy，設定
+  `VITE_STREAM_BASE` 為 dev origin，`VITE_API_TARGET` 為本次 sidecar origin；
+  健康檢查與歷史資料正常不能代替 SSE 的 LIVE／heartbeat 驗證。
+
+## 每次開發交付：備妥可試用的 dev App
+
+- 同機已有正式 sidecar 時，隔離 dev App 設定 `VITE_DEV_SERVER_PORT=21323`。
+  此設定只在 development 生效，將原生服務管理、REST 與直接 SSE 鎖定到指定埠；
+  不可因 `21323` 停機或占用而探測、接手或啟動到 `21322`、`8080` 或其他 fallback 埠。
+  舊 localStorage 的正式服務埠／PID 不能成為隔離 dev 的操作目標。
+- `VITE_API_BASE` 通常不另設；若設定，必須與隔離服務的 scheme、`127.0.0.1`
+  及 `21323` 完全一致，矛盾設定會拒絕連線。自訂 Vite port 時，SSE 使用
+  `VITE_STREAM_BASE` 指向目前 Vite 的同來源 origin，並將 `VITE_API_TARGET`
+  設為 `http://127.0.0.1:21323`（HTTPS 服務則使用相符 scheme），讓 `/api` proxy
+  指向同一隔離 sidecar。不可把 SSE override 指向正式 `21322`；同源 proxy 的
+  target 亦須人工核對，不能只看到 REST 正常便宣稱隔離或 SSE LIVE 通過。
+- 隔離啟動前後分別確認 dev 與正式 App／sidecar 的 PID、port、模式和新 heartbeat；
+  僅清理由本次任務建立的程序。原生管理與 SSE 的實測證據、mock 探測測試分開記錄。
+
+- 每次完成功能或修正，都要把 dev App 更新到本次工作分支，實際開啟並
+  驗證可操作後再交付；只有 PR、CI 或隔離 browser fixture 不算完成 dev 交付。
+- 純前端變更沿用相容的原生 dev shell，切換其 Vite 到本次 worktree；
+  private/native 有變更時須用精確 pin 重建相容的 dev App。主 checkout
+  保持乾淨，不為了試用 merge 或發布。
+- 更新前辨識 dev App、Vite、sidecar 的實際 PID／port／模式。保留使用者
+  的正式 App、交易伺服器與其他工作；不使用真實下單作驗證。若必要操作
+  會影響活躍策略或 Agent，先說明具體影響，依既有授權判斷是否需確認。
+- 更新後核對畫面 build identity、sidecar 版本、SSE LIVE／新 heartbeat、
+  主要變更面板及錯誤狀態；回報實際驗證範圍，不把模擬／CI 當成原生
+  登入、真實回報或乾淨機器 QA。
+- 交付時提供 App 名稱、build identity 與啟動方式，保留供使用者實測的
+  dev App／Vite 及其 worktree。關閉額外的隔離 QA 程序；使用者結束實測
+  或已切換替代版本後，再清理已合併且乾淨、沒有程序依賴的 worktree。

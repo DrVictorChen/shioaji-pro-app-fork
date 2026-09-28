@@ -50,22 +50,33 @@ identical to the TypeScript constants consumed by the application.
 
 The desktop host provides one authenticated loopback MCP endpoint. Every native
 runtime receives a distinct short-lived bearer through its native MCP header
-configuration, not an inherited child-process environment variable. Depending
-on the provider's native protocol, that configuration can reside in an
-owner-only temporary file or process argv and may therefore be observable to a
-same-user process. Tokens are never returned to the WebView and are revoked when
-the runtime stops. Tool
+configuration, never through process argv (readable by every local user and
+captured by command-line telemetry) or an inherited child-process environment
+variable. The configuration is an owner-only file in a per-App-instance
+directory that is deleted when the runtime stops or exits and swept at the next
+start after a crash; it remains readable by the same OS user and by the
+provider's own descendants. The endpoint accepts a bearer only from a
+connection owned by that runtime's process tree. Tokens are never returned to
+the WebView: runtime events, pending requests and RPC results are redacted
+before delivery, and runtime events reach only the main window. Tokens are
+revoked when the runtime stops. Tool
 calls use typed JSON arguments and semantic names; coordinate
 automation, raw key capture, and virtual Bash commands are outside this
 contract.
 
 ## Trading lifecycle
 
-Every mutation uses a client operation ID and exact request digest. Phase 1
-native Agent runtimes are simulation-only; startup against a production server
-fails before the provider process is spawned. The independent production
-exact-payload confirmation contract remains staged but does not grant production
-authority until the sidecar supports one-shot secret bootstrap. An interrupted
+Every mutation uses a client operation ID and exact request digest. Production
+native runtimes require an App-owned sidecar reporting `bootstrap=one_shot_ipc`.
+The host retains the exact serialized body. Confirm mode uses the independent
+`agent-approval` window for each production mutation. Explicit Auto selection
+requests a native session grant on its first production mutation; that window
+authorizes the displayed mutation and subsequent risk-checked place/cancel calls
+for the same runtime, generation and account. The grant never crosses into the
+provider or WebView. Production proposals expire after 15 seconds. Native
+snapshot timestamp and price checks reject stale or changed quotes before
+dispatch; cancellation rechecks broker status and remaining quantity.
+Missing or legacy bootstrap fails closed. An interrupted
 or timed-out mutation enters `unknown_outcome`; it may only be reconciled by its
 operation ID and must never be submitted again automatically.
 
@@ -78,8 +89,35 @@ is stable; a later broker-state observation uses a new attempt key and may move
 the original mutation to a terminal reconciled state. Payload-shaped matches
 remain unresolved and require manual verification.
 
-Controlled auto is available only in simulation and only for the current App
-session. Risk rules still apply and may reject or require confirmation.
+Production per-order confirmation has a deliberate limitation: the last price
+and best bid/ask captured for the proposal must equal the values re-read after
+approval, and the whole round trip — including opening the approval window —
+must finish within the 15-second proposal lifetime. On an actively ticking
+product a human approval often misses that window. The order is then not sent,
+the user sees 「報價已變動，請重新確認」 (or its 15-second variant), and the
+Agent must re-propose at the new quote. The rule is not relaxed to a tolerance
+band, because the user would otherwise authorize a price they never saw. Every
+refusal names its cause — user denied, window closed, expired, quote changed,
+runtime stopped or authority revoked, or risk check — and states that the
+order was not sent.
+
+The approval window renders `cancel_order`, `update_price`, and `update_qty`
+as operations on an existing order (刪單／改價／減量) with the product, the
+original order, and the remaining unfilled quantity. The native summary
+carries an explicit `operation` and `remaining_quantity`; when a legacy summary
+omits them the window derives both from the request operation and the order
+status. It never renders the original order's side as a new buy or sell. The
+outer request operation is authoritative: if the summary declares a different
+`operation`, the window shows only the operation label. The window can already
+render `update_price` and `update_qty`, but production does not accept them
+yet: native proposal validation admits only `place_order` and `cancel_order`
+and rejects every other Agent mutation before an approval is shown.
+
+Controlled auto is available in simulation and in production after the user
+grants the native scope above. It is never restored from persisted settings.
+Account/environment changes, renderer reload and runtime stop revoke authority.
+Risk rules still apply and may reject or require confirmation. Raw CLI trading
+remains unavailable in production; semantic App Tools are the execution path.
 
 ## Restart policy
 
@@ -96,3 +134,23 @@ without storing credentials or raw account secrets. Keyed entry hashes plus a
 MACed head checkpoint detect record edits, complete-tail removal, and whole-log
 deletion. Approval/receipt lifecycle fields remain a follow-up before this log
 can be treated as a complete compliance journal.
+
+## Phase skill parity gate
+
+Every later Agent Harness or Agent Strategy phase must ship its skill surface
+with its semantic tools. A phase is not complete until all of the following are
+true:
+
+1. The App's built-in Agent prompt routes the new capability and states its
+   material limits.
+2. The provider-neutral `shioaji-pro` plugin teaches the same workflow through
+   one shared `SKILL.md` and references tree installed natively by Codex and
+   Claude Code.
+3. Tool schemas remain the source of truth for names and arguments; skill text
+   adds workflow, safety, interpretation, and progressive-disclosure guidance
+   without inventing authority.
+4. Contract tests cover tool discoverability, reference packaging, capability
+   denial, and the bounded behavior needed to keep large results out of Agent
+   context.
+5. QA exercises the capability through at least one native provider, and both
+   provider manifests are validated before merge.

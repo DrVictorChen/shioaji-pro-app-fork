@@ -1,20 +1,31 @@
+import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // src/components/bottom-dock.tsx — positions / orders / account tabs.
 // 標題列常駐：帳戶範圍選單、合併｜分帳戶切換、市場篩選 chips、摘要列；
 // 持倉/委託表本體在 bottom-dock-positions.tsx / bottom-dock-orders.tsx、
 // 帳務/交割 tab 在 bottom-dock-account.tsx
 
 import { useEffect, useState } from 'react';
+import { RefreshButton } from './refresh-button';
 import {
     ensureAccounts,
     selectAccount,
     useAccounts,
 } from '../lib/account-store';
+import { UNSIGNED_LABEL, UNSIGNED_TITLE } from '../lib/account-signing';
 import {
     maskAccountId,
     maskMoney,
     usePrivacyMode,
     usePrivacyMoney,
 } from '../lib/privacy';
+import { RECONCILE_REASON_LABELS, refreshTradingState, useTradingState, type ReconcileReason } from '../lib/trading-state';
+
+// 待對帳 names its distinct causes (#85); the tooltip keeps the full messages.
+function reconcileLabel(reasons: readonly ReconcileReason[] | undefined) {
+    const labels = (reasons ?? []).map(r => RECONCILE_REASON_LABELS[r]).filter(Boolean);
+    if (!labels.length) return '待對帳';
+    return `待對帳：${labels.slice(0, 2).join('、')}${labels.length > 2 ? ` 等 ${labels.length} 項` : ''}`;
+}
 import type { Trade } from '../lib/types/order';
 import type {
     AccountBalance,
@@ -23,13 +34,10 @@ import type {
 } from '../lib/types/portfolio';
 import { fmtMoney, fmtSigned } from '../lib/utils/format';
 import { vars } from '../theme.css';
-import * as panel from './panel.css';
-import * as styles from './bottom-dock.css';
-import { AccountPane } from './bottom-dock-account';
+import { AccountPane, type AccountRefreshControls } from './bottom-dock-account';
 import { OrdersPane } from './bottom-dock-orders';
 import { PositionsPane } from './bottom-dock-positions';
 import {
-    ACTIVE_STATUSES,
     accountToRef,
     isStockPosition,
     positionAccountRef,
@@ -41,6 +49,8 @@ import {
     type MarketFilter,
     type ViewMode,
 } from './bottom-dock-shared';
+import * as styles from './bottom-dock.css';
+import * as panel from './panel.css';
 
 type TabKey = 'positions' | 'orders' | 'account';
 
@@ -59,7 +69,20 @@ export function BottomDock({
     onTradesChanged: () => void;
     onSelectCode: (code: string) => void;
 }) {
+    const portfolio = useTradingState();
     const [tab, setTab] = useState<TabKey>('positions');
+    const [accountRefresh, setAccountRefresh] = useState<AccountRefreshControls | null>(null);
+    const queryStatus = portfolio.queries[tab];
+    // 操作通知已呈現改刪單結果；不在委託表重複常駐通用提示。
+    const queryError = tab === 'orders'
+        && queryStatus.error === '刪單／改單結果待確認；請手動更新委託，不要自動重送'
+        ? null : queryStatus.error;
+    const refreshing = portfolio.loading || (tab === 'account' && !!accountRefresh?.loading);
+    const tabLabel = { positions: '持倉', orders: '委託', account: '帳務' }[tab];
+    const refreshTab = () => {
+        void refreshTradingState(tab);
+        if (tab === 'account') void accountRefresh?.refresh();
+    };
     const { accounts, selectedStock, selectedFutures } = useAccounts();
     useEffect(ensureAccounts, []);
     const priv = usePrivacyMode();
@@ -106,7 +129,7 @@ export function BottomDock({
         return true;
     });
     const activeOrders = scopedTrades.filter((t) =>
-        ACTIVE_STATUSES.has(t.status.status),
+        remainingWorkingOrderQuantity(t) > 0,
     ).length;
 
     const tabs: { key: TabKey; label: string }[] = [
@@ -176,6 +199,10 @@ export function BottomDock({
                         {t.label}
                     </button>
                 ))}
+                <span style={{ fontSize: 11, whiteSpace: 'nowrap' }} title={queryStatus.error ?? (tab === 'positions' ? '持倉依成交與行情在本機估算' : tab === 'orders' ? '委託依主動回報更新' : '帳務為上次查詢快照')}>
+                    {queryStatus.needsReconcile || (tab === 'account' && accountRefresh?.error) ? reconcileLabel(queryStatus.reasons) : tab === 'positions' ? '即時估算' : tab === 'orders' ? '即時回報' : '帳務快照'}
+                    {queryStatus.updatedAt ? ` · 查詢 ${new Date(queryStatus.updatedAt).toLocaleTimeString()}` : ' · 尚未查詢'}
+                </span>
                 <span className={styles.tabSpacer} />
                 <select
                     className={styles.accountSelect}
@@ -212,11 +239,11 @@ export function BottomDock({
                                 key={key}
                                 value={key}
                                 disabled
-                                title='未簽署 API 約定書（無法下單）'
+                                title={UNSIGNED_TITLE}
                             >
                                 {a.account_type === 'S' ? '[證]' : '[期]'}{' '}
                                 {a.broker_id}-
-                                {maskAccountId(a.account_id, priv)} · 未簽署
+                                {maskAccountId(a.account_id, priv)} · {UNSIGNED_LABEL}
                             </option>
                         );
                     })}
@@ -252,6 +279,7 @@ export function BottomDock({
                         </button>
                     ))}
                 </span>
+                <RefreshButton label={`更新${tabLabel}`} loading={refreshing} onClick={refreshTab} />
             </div>
             <div className={styles.summaryRow}>
                 <span className={styles.sumItem}>
@@ -302,6 +330,7 @@ export function BottomDock({
                     </span>
                 )}
             </div>
+            {queryError && <div role="status" style={{ padding: '4px 10px', fontSize: 12 }}>{queryError}</div>}
             {tab === 'positions' && (
                 <PositionsPane
                     positions={positions}
@@ -331,6 +360,8 @@ export function BottomDock({
             {tab === 'account' && (
                 <div className={panel.panelBody}>
                     <AccountPane
+                        mode={mode}
+                        funds={portfolio.funds}
                         // 股票市值估算要跟摘要列一樣尊重帳戶範圍 — 多帳戶時
                         // 選單一帳戶不能把別的帳戶持倉算進來
                         positions={
@@ -347,6 +378,7 @@ export function BottomDock({
                         margin={margin}
                         market={market}
                         scopeAccount={scopeAccount}
+                        onRefreshControls={setAccountRefresh}
                     />
                 </div>
             )}

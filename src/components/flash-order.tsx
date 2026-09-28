@@ -1,3 +1,4 @@
+import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // src/components/flash-order.tsx — 閃電下單 price ladder (DOM trader).
 // Fixed-window ladder anchored in tick space: the viewport always renders
 // exactly the rows that fit, the wheel shifts the anchor by ticks, and
@@ -6,6 +7,9 @@
 // price). Click bid/ask columns to fire LMT orders, click your own order
 // chips to cancel, market buy/sell + flatten + cancel-all in the action bar.
 
+import { accountFor, selectAccount, useAccounts } from '../lib/account-store';
+import { maskAccountId, usePrivacyMode } from '../lib/privacy';
+import { accountMatches, scopedFlashRows } from '../lib/flash-account';
 import { Zap } from 'lucide-react';
 import {
     memo,
@@ -16,16 +20,19 @@ import {
     useRef,
     useState,
 } from 'react';
-import { useQuote, useTradingLive } from '../hooks/use-stream';
+import { useTradingLive } from '../hooks/use-stream';
+import { useDisplayBook } from '../hooks/use-display-book';
+import type { Snapshot } from '../lib/types/market';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
-import { cancelOrder } from '../lib/shioaji';
-import { getAliasFor, onOrderEvent } from '../lib/stream';
-import { notify, placeQuickOrder } from '../lib/trade';
+import { cancellationSummary } from '../lib/trade-mutations';
+import { cancelOrders } from '../lib/shioaji';
+import { getAliasFor } from '../lib/stream';
+import { useTickBandsVersion } from '../lib/tick-bands';
+import { notify, placeQuickOrder, placeStockExitByShares } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
 import { ACTIVE_ORDER_STATUSES, type Action, type Trade } from '../lib/types/order';
-import type { Position } from '../lib/types/portfolio';
+import type { AccountedPosition } from '../lib/types/portfolio';
 import { fmtInt, fmtPrice, fmtSigned } from '../lib/utils/format';
-import { useTickBandsVersion } from '../lib/tick-bands';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import * as styles from './flash-order.css';
 
@@ -170,17 +177,30 @@ const FlashRow = memo(function FlashRow({
 
 export function FlashOrder({
     contract,
-    trades = [],
-    positions = [],
+    snapshot,
+    trades: allTrades = [],
+    positions: allPositions = [],
     onOrdersChanged,
 }: {
     contract: ContractInfo;
+    snapshot?: Snapshot;
     trades?: Trade[];
-    positions?: Position[];
+    positions?: AccountedPosition[];
     onOrdersChanged?: () => void;
 }) {
-    const quote = useQuote(contract.code);
+    const { quote, snapshot: initialSnapshot, book: display } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
+    const accountState = useAccounts();
+    const privacy = usePrivacyMode();
+    const market = contract.security_type === 'STK' ? 'S' : 'F';
+    const account = market === 'S' ? accountState.selectedStock : accountState.selectedFutures;
+    const eligible = accountState.accounts.filter(a => a.signed && a.account_type === market);
+    const activeAccount = eligible.find(a => accountMatches(a, account));
+    const accountKey = activeAccount ? `${activeAccount.account_type}:${activeAccount.broker_id}:${activeAccount.account_id}` : '';
+    const trades = scopedFlashRows(allTrades, activeAccount);
+    const positions = scopedFlashRows(allPositions, activeAccount);
+    const accountRef = useRef(activeAccount);
+    accountRef.current = activeAccount;
     const privMoney = usePrivacyMoney();
     const [qty, setQty] = useState(1);
     const [armed, setArmed] = useState(false);
@@ -191,7 +211,7 @@ export function FlashOrder({
 
     const last = quote?.tick
         ? Number(quote.tick.close)
-        : contract.reference || null;
+        : initialSnapshot?.close || contract.reference || null;
     const lastVol = quote?.tick ? quote.tick.volume : 0;
     const limitUp = contract.limit_up || 0;
     const limitDown = contract.limit_down || 0;
@@ -200,7 +220,8 @@ export function FlashOrder({
     const contractRef = useRef(contract);
     contractRef.current = contract;
     const armedRef = useRef(armed);
-    armedRef.current = armed;
+    const armedAccountKey = useRef(accountKey);
+    armedRef.current = armed && armedAccountKey.current === accountKey;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const lastRef = useRef(last);
@@ -219,7 +240,7 @@ export function FlashOrder({
         setAnchor(null);
         setFollow(true);
         setArmed(false);
-    }, [contract.code]);
+    }, [contract.code, accountKey]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
     // click can't fire into a dead connection (issue #2)
@@ -355,19 +376,16 @@ export function FlashOrder({
     // 5-level book lookup + totals
     const book = useMemo(() => {
         const map = new Map<string, { bid?: number; ask?: number }>();
-        const ba = quote?.bidask;
-        if (ba) {
-            ba.bid_price.forEach((p, i) => {
-                const key = keyOf(Number(p));
-                map.set(key, { ...map.get(key), bid: ba.bid_volume[i] });
-            });
-            ba.ask_price.forEach((p, i) => {
-                const key = keyOf(Number(p));
-                map.set(key, { ...map.get(key), ask: ba.ask_volume[i] });
-            });
+        for (const { price, vol } of display?.bids ?? []) {
+            const key = keyOf(price);
+            map.set(key, { ...map.get(key), bid: vol });
+        }
+        for (const { price, vol } of display?.asks ?? []) {
+            const key = keyOf(price);
+            map.set(key, { ...map.get(key), ask: vol });
         }
         return map;
-    }, [quote?.bidask]);
+    }, [display]);
 
     const { maxVol, sumBid, sumAsk } = useMemo(() => {
         let m = 1;
@@ -385,15 +403,14 @@ export function FlashOrder({
     const myOrders = useMemo(() => {
         const m = new Map<string, { buy: number; sell: number }>();
         for (const t of trades) {
-            if (!ACTIVE_ORDER_STATUSES.has(t.status.status)) continue;
+            if (remainingWorkingOrderQuantity(t) <= 0) continue;
             const tc = t.contract.code;
             if (tc !== contract.code && getAliasFor(tc) !== contract.code) {
                 continue;
             }
-            const remaining =
-                (t.status.order_quantity || t.order.quantity) -
-                t.status.deal_quantity -
-                t.status.cancel_quantity;
+            // HTTP status.order_quantity can be 0 (1.7.6) — use the shared
+            // original-quantity rule.
+            const remaining = remainingWorkingOrderQuantity(t);
             if (remaining <= 0) continue;
             const price = t.status.modified_price || t.order.price;
             const key = keyOf(price);
@@ -445,30 +462,18 @@ export function FlashOrder({
         }
         if (net === 0) return null;
         const avg = qtySum > 0 ? cost / qtySum : 0;
-        return { net, avg, avgKey: keyOf(roundToTick(contract, avg)), pnl };
+        const safeExit = matches.every(p => Number.isInteger(p.quantity) && p.quantity > 0)
+            && new Set(matches.map(p => p.direction)).size === 1
+            && (market !== 'S' || matches.every(p => 'cond' in p && p.cond === 'Cash'));
+        return { net, avg, avgKey: keyOf(roundToTick(contract, avg)), pnl, safeExit };
     }, [positions, contract]);
 
-    // refresh working orders promptly after any order event (debounced —
-    // a burst of events triggers one refresh). The delay is jittered per
-    // instance so eight 閃電全開 windows don't all refetch in the same
-    // instant when a fill lands.
-    useEffect(() => {
-        const delay = 400 + Math.floor(Math.random() * 900);
-        let timer: ReturnType<typeof setTimeout> | null = null;
-        const off = onOrderEvent(() => {
-            if (timer) clearTimeout(timer);
-            timer = setTimeout(() => onOrdersChangedRef.current?.(), delay);
-        });
-        return () => {
-            off();
-            if (timer) clearTimeout(timer);
-        };
-    }, []);
 
     // ---- order actions (all gated by the arm toggle) ----
 
     const send = useCallback(async (action: Action, price: number | null) => {
-        if (!armedRef.current) return;
+        const capturedAccount = accountRef.current;
+        if (!armedRef.current || !capturedAccount || !accountMatches(capturedAccount, accountFor(capturedAccount.account_type as 'S' | 'F'))) return;
         const q = Math.max(1, qtyRef.current);
         const key = `${action}:${price === null ? 'MKT' : keyOf(price)}`;
         if (inflightRef.current.has(key)) return; // double-click guard
@@ -480,6 +485,7 @@ export function FlashOrder({
                 action,
                 price,
                 q,
+                { account: capturedAccount },
             );
             notify({
                 kind: 'ok',
@@ -507,10 +513,13 @@ export function FlashOrder({
     );
 
     const cancelAt = useCallback(async (action: Action, price: number) => {
+        const capturedAccount = accountRef.current;
+        if (!capturedAccount) return;
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
-                ACTIVE_ORDER_STATUSES.has(t.status.status) &&
+                accountMatches((t as Trade & { account?: import('../lib/types/portfolio').Account }).account ?? t.order.account, capturedAccount) &&
+                remainingWorkingOrderQuantity(t) > 0 &&
                 (t.contract.code === code ||
                     getAliasFor(t.contract.code) === code) &&
                 t.order.action === action &&
@@ -518,14 +527,12 @@ export function FlashOrder({
                     keyOf(price),
         );
         if (targets.length === 0) return;
-        const results = await Promise.allSettled(
-            targets.map((t) => cancelOrder(t.order.id)),
-        );
-        const ok = results.filter((r) => r.status === 'fulfilled').length;
+        const results = await cancelOrders(targets.map((t) => t.order.id));
+        const summary = cancellationSummary(results);
         notify({
-            kind: ok === targets.length ? 'ok' : 'err',
+            kind: summary.kind,
             title: '⚡ 刪單',
-            body: `${code} @ ${fmtPrice(price)} 已送出 ${ok}/${targets.length} 筆刪單`,
+            body: `${code} @ ${fmtPrice(price)}：${summary.body}`,
         });
         onOrdersChangedRef.current?.();
     }, []);
@@ -536,10 +543,13 @@ export function FlashOrder({
     );
 
     const cancelSymbol = useCallback(async () => {
+        const capturedAccount = accountRef.current;
+        if (!capturedAccount) return;
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
-                ACTIVE_ORDER_STATUSES.has(t.status.status) &&
+                accountMatches((t as Trade & { account?: import('../lib/types/portfolio').Account }).account ?? t.order.account, capturedAccount) &&
+                remainingWorkingOrderQuantity(t) > 0 &&
                 (t.contract.code === code ||
                     getAliasFor(t.contract.code) === code),
         );
@@ -547,22 +557,37 @@ export function FlashOrder({
             notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
-        const results = await Promise.allSettled(
-            targets.map((t) => cancelOrder(t.order.id)),
-        );
-        const ok = results.filter((r) => r.status === 'fulfilled').length;
+        const results = await cancelOrders(targets.map((t) => t.order.id));
+        const summary = cancellationSummary(results);
         notify({
-            kind: ok === targets.length ? 'ok' : 'err',
+            kind: summary.kind,
             title: '⚡ 全刪',
-            body: `${code} 已送出 ${ok}/${targets.length} 筆刪單`,
+            body: `${code}：${summary.body}`,
         });
         onOrdersChangedRef.current?.();
     }, []);
 
-    const flatten = useCallback(() => {
-        if (!pos || !armedRef.current) return;
-        void send(pos.net > 0 ? 'Sell' : 'Buy', null);
-    }, [pos, send]);
+    const flatten = useCallback(async () => {
+        const account = accountRef.current;
+        if (!pos?.safeExit || !armedRef.current || !account
+            || !accountMatches(account, accountFor(account.account_type as 'S' | 'F'))) return;
+        const key = `flatten:${account.account_type}:${account.broker_id}:${account.account_id}`;
+        if (inflightRef.current.has(key)) return;
+        inflightRef.current.add(key);
+        const contract = contractRef.current;
+        const action = pos.net > 0 ? 'Sell' : 'Buy';
+        try {
+            if (account.account_type === 'S') {
+                await placeStockExitByShares(contract, action, Math.abs(pos.net), account);
+            } else {
+                await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover' });
+            }
+            notify({ kind: 'info', title: '⚡ 平倉已送出', body: '請以委託與成交回報確認結果' });
+            onOrdersChangedRef.current?.();
+        } catch (error) {
+            notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+        } finally { inflightRef.current.delete(key); }
+    }, [pos]);
 
     // ---- render ----
 
@@ -584,6 +609,17 @@ export function FlashOrder({
     return (
         <div className={styles.wrap}>
             <div className={styles.controls}>
+                <select aria-label="閃電下單帳戶" value={accountKey} onChange={e => {
+                    armedRef.current = false;
+                    setArmed(false);
+                    const next = eligible.find(a => `${a.account_type}:${a.broker_id}:${a.account_id}` === e.target.value);
+                    if (next) selectAccount(next);
+                }}>
+                    {!activeAccount && <option value="">無可用帳戶</option>}
+                    {eligible.map(a => <option key={`${a.broker_id}:${a.account_id}`} value={`${a.account_type}:${a.broker_id}:${a.account_id}`}>
+                        {a.broker_id}-{maskAccountId(a.account_id, privacy)}
+                    </option>)}
+                </select>
                 <span className={styles.qtyLabel}>量</span>
                 <button
                     className={styles.stepBtn}
@@ -608,8 +644,8 @@ export function FlashOrder({
                 </button>
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
-                    disabled={!live}
-                    onClick={() => setArmed((a) => !a)}
+                    disabled={!live || !activeAccount}
+                    onClick={() => { armedAccountKey.current = accountKey; setArmed((a) => !a); }}
                 >
                     {!live ? (
                         '⚠ 未連線'
@@ -656,8 +692,9 @@ export function FlashOrder({
                 {pos && (
                     <button
                         className={`${styles.flatBtn} ${armed ? '' : styles.disabledCell}`}
-                        title={`市價平倉 ${Math.abs(pos.net)}`}
-                        onClick={flatten}
+                        title={pos.safeExit ? `市價平倉 ${Math.abs(pos.net)}` : '持倉方向或交易條件不明，請使用持倉面板確認'}
+                        disabled={!pos.safeExit || !armed || !activeAccount}
+                        onClick={() => void flatten()}
                     >
                         平倉
                     </button>
@@ -753,6 +790,7 @@ export function FlashOrder({
                 )}
             </div>
             <div className={styles.totalsRow}>
+                {display?.source === 'snapshot' && <span title={display.time}>快照一檔</span>}
                 <span className={styles.totalBid}>Σ買 {fmtInt(sumBid)}</span>
                 <span className={styles.totalAsk}>Σ賣 {fmtInt(sumAsk)}</span>
             </div>

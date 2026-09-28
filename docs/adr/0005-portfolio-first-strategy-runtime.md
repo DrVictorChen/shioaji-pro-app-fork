@@ -1,4 +1,4 @@
-# ADR 0002: portfolio-first 策略執行核心
+# ADR 0005: portfolio-first 策略執行核心
 
 日期:2026-09-03
 狀態:已採納
