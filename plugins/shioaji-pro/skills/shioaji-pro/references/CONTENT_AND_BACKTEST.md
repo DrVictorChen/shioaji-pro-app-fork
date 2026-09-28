@@ -2,29 +2,32 @@
 
 Read this reference when the user asks to create or inspect a Shioaji Pro
 custom indicator, mount or change a chart indicator, create a strategy, or
-inspect a backtest result. These operations use semantic
-App Tools; they do not grant trading authority.
+inspect a backtest result. These operations use semantic App Tools; they do not
+grant trading authority. For source code, supported `ta.*` functions, signal
+semantics, execution timing, and validation examples, also read
+[CONTENT_AUTHORING.md](CONTENT_AUTHORING.md).
 
 ## Indicators and Strategies
 
 - An unqualified request to create an indicator or strategy in a connected
   Shioaji Pro session means native App content, not Pine Script or a workspace
-  file.
+  file. A source snippet is not a saved App item.
 - Use `list_custom_indicators` before editing an existing indicator and
   `save_custom_indicator` to create or update it. Overwriting an existing
   shared definition requires the App's content confirmation because it affects
   every chart using that definition. A concurrent definition change invalidates
   the proposed overwrite; read again and prepare a new proposal.
 - Use `list_strategies` before editing an existing strategy and `save_strategy`
-  to create or update it.
-- When converting an indicator into a strategy, preserve its parameters and
-  signal meaning, then make entry and exit conditions explicit.
+  to create or update it. When converting an indicator into a strategy,
+  preserve its parameters and signal meaning, then make entry and exit
+  conditions explicit.
 - Supply a new opaque caller-generated `idempotency_key` for each mutation
   intent. Preserve it with its exact arguments for a transport retry. A changed
   payload, including corrected source or parameters, requires a new key.
-- A validation failure is actionable feedback. Correct the source and submit
-  the same user intent again. Completion requires a successful receipt and a
-  fresh list read showing the saved content.
+- A validation failure is actionable feedback. Correct the source with the
+  runtime defined in [CONTENT_AUTHORING.md](CONTENT_AUTHORING.md), then submit
+  the corrected intent with a new key. Completion requires a successful receipt
+  and a fresh list read showing the saved content.
 
 ## Chart Indicator Workflow
 
