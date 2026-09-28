@@ -1,34 +1,20 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 const pluginRoot = new URL("../", import.meta.url);
-const repoRoot = fileURLToPath(new URL("../../", pluginRoot));
-const siblingDesktopRoot = join(
-  dirname(dirname(repoRoot)),
-  "shioaji-pro-desktop.wt",
-  basename(repoRoot)
-);
 
 async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, pluginRoot), "utf8"));
 }
 
 async function readOptional(path) {
-  const siblingPath = path.replace(/^\.\.\/\.\.\//, "");
-  for (const candidate of [
-    new URL(path, pluginRoot),
-    join(siblingDesktopRoot, siblingPath)
-  ]) {
-    try {
-      return await readFile(candidate, "utf8");
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
+  try {
+    return await readFile(new URL(path, pluginRoot), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
   }
-  return null;
 }
 
 function toolDefinitionNames(source) {
@@ -49,6 +35,31 @@ function capabilityNames(source, setName) {
   assert.ok(match, `${setName} must remain a literal capability set`);
   return [...match[1].matchAll(/['\"]([a-z][a-z0-9_]*)['\"]/g)]
     .map((entry) => entry[1]);
+}
+
+function documentedNames(source, label) {
+  const section = source.split("## v1 semantic names\n")[1];
+  assert.ok(section, "MCP_TOOLS.md must list v1 semantic names");
+  const lines = section.split("\n");
+  const start = lines.findIndex((line) => line.startsWith(`- ${label}:`));
+  assert.notEqual(start, -1, `${label} tool family must be documented`);
+  const entry = [];
+  for (const line of lines.slice(start)) {
+    if (entry.length && (!line.trim() || line.startsWith("- "))) break;
+    entry.push(line);
+  }
+  const names = [...entry.join("\n").matchAll(/`([a-z][a-z0-9_]*)`/g)]
+    .map((match) => match[1]);
+  assert.ok(names.length, `${label} must list tool names`);
+  return new Set(names);
+}
+
+function assertSameNames(actual, documented, label) {
+  assert.deepEqual(
+    [...actual].sort(),
+    [...documented].sort(),
+    `${label} tools must match MCP_TOOLS.md`
+  );
 }
 
 test("Codex and Claude expose the same provider-neutral skill package", async () => {
@@ -145,24 +156,47 @@ test("documented market, account, task, indicator, and backtest names match tool
   const capabilitySource = await readOptional(
     "../../modules/agent/lib/app-tool-contract.ts"
   );
-  if (toolSource === null || capabilitySource === null) {
+  if (toolSource === null && capabilitySource === null) {
     t.skip("desktop overlay sources are unavailable in this checkout");
     return;
   }
+  assert.notEqual(toolSource, null, "tools.ts must exist with the overlay");
+  assert.notEqual(
+    capabilitySource, null,
+    "app-tool-contract.ts must exist with the overlay"
+  );
 
   const documented = await readFile(
     new URL("skills/shioaji-pro/references/MCP_TOOLS.md", pluginRoot),
     "utf8"
   );
   const actual = toolDefinitionNames(toolSource);
-  const capabilityTools = ["MARKET_READ", "ACCOUNT_READ", "TASK_MANAGE"]
-    .flatMap((setName) => capabilityNames(capabilitySource, setName));
-  const scopedTools = [...actual].filter((name) =>
-    name.includes("indicator") || name.includes("backtest")
-  );
-
-  for (const name of new Set([...capabilityTools, ...scopedTools])) {
-    assert.ok(actual.has(name), `${name} must exist in tools.ts`);
-    assert.match(documented, new RegExp(`\\b${name}\\b`));
+  for (const [setName, label] of [
+    ["MARKET_READ", "Market"],
+    ["ACCOUNT_READ", "Account"],
+    ["TASK_MANAGE", "Background tasks"]
+  ]) {
+    const inCapability = new Set(capabilityNames(capabilitySource, setName));
+    const inReference = documentedNames(documented, label);
+    assertSameNames(inCapability, inReference, label);
+    for (const name of inReference) {
+      assert.ok(actual.has(name), `${name} must exist in tools.ts`);
+    }
   }
+  const contentNames = new Set(
+    ["Native content", "Chart indicators", "Backtest reads"]
+      .flatMap((label) => [...documentedNames(documented, label)])
+  );
+  const uiNames = new Set(capabilityNames(capabilitySource, "UI_CONTROL"));
+  for (const name of contentNames) {
+    assert.ok(actual.has(name), `${name} must exist in tools.ts`);
+    assert.ok(uiNames.has(name), `${name} must retain UI_CONTROL capability`);
+  }
+  assertSameNames(
+    new Set([...uiNames].filter((name) =>
+      /indicator|strateg|backtest/.test(name)
+    )),
+    contentNames,
+    "Native content, chart indicator, and backtest"
+  );
 });
