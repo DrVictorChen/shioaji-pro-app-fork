@@ -106,7 +106,7 @@ State that limitation when it affects the answer. A `multi` result is a Batch
 Run of independent single-symbol tests, not a Portfolio Run; do not infer
 cross-symbol capital allocation, portfolio exposure, or portfolio-level risk.
 
-## Persistent Single-Product Research
+## Persistent Portfolio Research
 
 The Phase 2 tools use an immutable revision and a persistent run ID. Read
 `list_strategy_revisions` or `get_strategy_revision` before changing a shared
@@ -137,7 +137,29 @@ chunks of at most 50 and request `get_backtest_equity` with at most 500 points.
 `compare_backtest_runs` accepts 2–10 run IDs and returns compact metrics.
 `open_backtest_run` opens a deep link; select a trade row to zoom the chart to
 its entry/exit interval.
+`get_backtest_portfolio` reads portfolio metrics, per-asset and tag attribution,
+and paged fills, rejections, and diagnostics. Request at most 20 rows per page.
 
 These tools require `ui.control`, not `trade.preview` or `trade.execute`.
 Starting, reading, cancelling, comparing, and opening research requires no
 trading approval. Tool schemas define exact arguments and idempotency keys.
+
+Use `start_portfolio_backtest` with `universe_kind: static`, one to eight
+explicit codes, and `calendar: union | intersection`. One code follows the
+same portfolio engine. Missing data is a partial failure: name the unavailable
+asset and gap from the manifest; do not count it as a zero-return trade.
+Dynamic selectors are unavailable until survivorship-bias rules exist.
+
+For optimization, pass a complete parameter value space, Grid or Random
+search (Random needs a seed and count), nonoverlapping train/test dates,
+resource limits, minimum trades, and a cost ratio limit to
+`start_optimization_job`. Poll `get_optimization_job`; use
+`cancel_optimization_job` if requested. Read `list_optimization_candidates`
+by pages of at most 20, then `get_optimization_candidate` for selected
+train/test metrics and child run IDs. Ranking uses train results. Report train
+and held-out test separately, describe their gap and sensitivity, and warn
+about overfitting before recommending another experiment. Use child run IDs
+with `get_backtest_summary`, bounded trade/equity readers, and
+`open_backtest_run` for inspection. `export_backtest_run` produces CSV trades,
+JSON manifest, PNG equity, or Markdown research report; the App owns the save
+destination. No research tool sends an order.

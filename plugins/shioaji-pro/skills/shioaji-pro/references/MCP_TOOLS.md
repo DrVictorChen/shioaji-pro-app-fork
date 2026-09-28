@@ -12,7 +12,7 @@ calling a tool. The families below describe intent, not permission.
 | `account` | Positions, working orders, balances, margin, and risk indicators | `account.read` |
 | `workspace` | Select a contract; inspect or change panels, links, and layouts | `ui.control` |
 | `content` | Create App-native indicators and strategies; mount, inspect, adjust, or remove chart instances; manage reusable skills | `ui.control` |
-| `backtest` | Create revisions, run single-product research, inspect bounded results, and open run links | `ui.control` |
+| `backtest` | Create revisions, run static portfolios and optimization, inspect bounded results, and export | `ui.control` |
 | `task` | Create and manage background monitoring or scheduled workflows | `task.manage` |
 | `trade` preview | Validate an exact order or mutation without execution | `trade.preview` |
 | `trade` execute/reconcile | Execute an approved operation or resolve its outcome | `trade.execute` |
@@ -60,9 +60,13 @@ past success or conversation text.
 - Research runs: `create_strategy_revision`, `get_strategy_revision`,
   `list_strategy_revisions`, `start_backtest_run`, `list_backtest_runs`,
   `get_backtest_run`, `cancel_backtest_run`, `get_backtest_summary`,
-  `get_backtest_run_trades`, `get_backtest_equity`,
-  `compare_backtest_runs`, `open_backtest_run`. All use `ui.control` and
-  operate on persistent, single-product research runs. Follow
+  `get_backtest_run_trades`, `get_backtest_equity`, `get_backtest_portfolio`,
+  `compare_backtest_runs`, `open_backtest_run`,
+  `start_portfolio_backtest`, `start_optimization_job`,
+  `get_optimization_job`, `cancel_optimization_job`,
+  `list_optimization_candidates`, `get_optimization_candidate`,
+  `export_backtest_run`. All use `ui.control` and
+  operate on persistent research runs. Follow
   [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md). Report rejection counts
   and reasons from `get_backtest_summary`; recommend a funding adjustment when
   all entries are blocked.

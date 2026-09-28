@@ -4,7 +4,8 @@ description: |
   Use when observing or controlling the Shioaji Pro desktop app through its
   native semantic MCP tools. Covers market and account context, workspaces,
   panels, native indicators and strategies, chart indicator mounting and
-  adjustment, bounded backtest analysis, reusable skills, background tasks,
+  adjustment, static portfolio research, Grid/Random optimization, bounded
+  backtest analysis and export, reusable skills, background tasks,
   guarded trade preview and execution, user-authorized controlled auto, restart
   recovery, and privacy. Use the separate
   Shioaji API skill for direct Python, CLI, HTTP, or SSE integration.
@@ -62,6 +63,13 @@ operations; never substitute shell commands, UI coordinates, or raw keystrokes.
   start a run, inspect status by `run_id`, read the summary and bounded trade
   and equity pages, then create a child revision and compare runs. Open the
   result link for chart inspection. These tools never submit broker orders.
+- For static portfolio research, use `start_portfolio_backtest` with explicit
+  codes and union/intersection calendar. One code is a universe of size one.
+  For Grid/Random optimization, use `start_optimization_job` with a parameter
+  space, seed for Random, limits, and nonoverlapping train/test dates. Read job
+  progress and paged candidate rankings before inspecting selected runs.
+  Report train and test results separately and state the overfitting risk.
+  [CONTENT_AND_BACKTEST.md](references/CONTENT_AND_BACKTEST.md) gives the workflow.
 - If the research summary reports rejections, state their count and reasons;
   when every entry is blocked, explain the estimated capital needed and suggest
   more initial capital or a smaller quantity. Keep the default 1× leverage.

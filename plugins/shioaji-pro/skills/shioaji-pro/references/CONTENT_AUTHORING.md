@@ -129,10 +129,14 @@ longExit('2330', exitSignal, { size: position.percent(0.5) })
 ```
 
 Simultaneous vector signals retain legacy priority and produce a conflict
-diagnostic. Direct conflicting intents fail validation. Stateful `onBar` and
-`currentPosition`, and target portfolio calls such as `targetWeight`, are
-reserved interfaces; Signal DSL cannot read simulated position state. These
-research calls never grant broker order authority.
+diagnostic. Direct conflicting intents fail validation. Choose
+`authoring_style: stateful` for `onBar`, `currentPosition`, `enterLong`,
+`enterShort`, `reducePosition`, and `closePosition`. Choose
+`authoring_style: target-portfolio` for `targetWeight` or `targetQuantity`;
+weights and quantities are distinct and `targetPosition` is unsupported.
+Signal DSL cannot read simulated position state. All assets must be named in
+the static universe; `asset(symbol)` reads named bars and availability.
+These research calls never grant broker order authority.
 
 A value greater than zero or `true` means the signal is confirmed at that bar's
 close. At least one entry is required. A long entry needs `longExit` or a reverse
