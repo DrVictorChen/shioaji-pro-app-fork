@@ -95,6 +95,45 @@ Strategy source emits aligned signal series through:
 - `longEntry(series)` and `longExit(series)`.
 - `shortEntry(series)` and `shortExit(series)`.
 
+Signal DSL also accepts `longEntry(symbol, series, options)` and the same
+form for the other three collectors. An omitted symbol selects the run's
+primary asset. `asset(symbol)` exposes that asset's own `time`, OHLCV, and
+`availability` arrays; a named symbol must belong to the resolved universe.
+The current multi-symbol panel is a Batch Run of independent single-symbol
+runs, so a cross-symbol source needs a portfolio-capable caller.
+
+`options.size` accepts `position.quantity(n)` for an integer number of panel
+units (stock lots/張 or futures contracts/口), or `position.weight(fraction)` for an entry's share of
+portfolio equity. Exits accept `position.quantity(n)` for a partial reduction
+or `position.percent(fraction)` for a fraction of the actual open position.
+The execution lot size is separate: quantities and reduction deltas round down
+to whole lots, and a nonzero request smaller than one lot fails validation.
+An omitted entry size uses the run's configured quantity or one lot.
+
+`pyramiding: n` on an entry permits at most `n` additional same-side entries
+of that entry size. The default is zero. `tag` is a nonempty string carried to
+fills; entry tags own the resulting position PnL in tag attribution, including
+untagged or end-of-run exits. `order` defaults to `{ type: 'market' }`, filled
+at the next available open. `{ type: 'limit', price: 100 }` may fill at a
+better open or at the limit if the next available bar crosses it; it expires
+after that bar and an unfilled limit is recorded as a rejection. Slippage must
+still respect the limit. Missing bars defer pending orders without fabricating
+prices.
+
+```js
+longEntry('2330', breakout, {
+  size: position.weight(0.4), pyramiding: 1,
+  order: { type: 'limit', price: 100 }, tag: 'breakout',
+})
+longExit('2330', exitSignal, { size: position.percent(0.5) })
+```
+
+Simultaneous vector signals retain legacy priority and produce a conflict
+diagnostic. Direct conflicting intents fail validation. Stateful `onBar` and
+`currentPosition`, and target portfolio calls such as `targetWeight`, are
+reserved interfaces; Signal DSL cannot read simulated position state. These
+research calls never grant broker order authority.
+
 A value greater than zero or `true` means the signal is confirmed at that bar's
 close. At least one entry is required. A long entry needs `longExit` or a reverse
 `shortEntry`; a short entry needs `shortExit` or a reverse `longEntry`.
