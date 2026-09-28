@@ -22,10 +22,14 @@ function toolDefinitionNames(source) {
   const end = source.indexOf("\n];", start);
   assert.notEqual(start, -1, "tools.ts must export TOOL_DEFS");
   assert.notEqual(end, -1, "tools.ts must terminate TOOL_DEFS");
-  return new Set(
-    [...source.slice(start, end).matchAll(/\bname:\s*['\"]([a-z][a-z0-9_]*)['\"]/g)]
-      .map((match) => match[1])
-  );
+  const names = [...source.slice(start, end).matchAll(/\bname:\s*['\"]([a-z][a-z0-9_]*)['\"]/g)]
+    .map((match) => match[1]);
+  const unique = new Set();
+  for (const name of names) {
+    assert.ok(!unique.has(name), `duplicate tool name: ${name}`);
+    unique.add(name);
+  }
+  return unique;
 }
 
 function capabilityNames(source, setName) {
@@ -61,6 +65,17 @@ function assertSameNames(actual, documented, label) {
     `${label} tools must match MCP_TOOLS.md`
   );
 }
+
+test("tool definition name extraction rejects duplicate registrations", () => {
+  const source = [
+    "export const TOOL_DEFS = [",
+    "  { name: 'get_quote', schema: {} },",
+    "  { name: 'get_quote', schema: {} },",
+    "];"
+  ].join("\n");
+
+  assert.throws(() => toolDefinitionNames(source), /duplicate.*get_quote/i);
+});
 
 test("Codex and Claude expose the same provider-neutral skill package", async () => {
   const codex = await readJson(".codex-plugin/plugin.json");
