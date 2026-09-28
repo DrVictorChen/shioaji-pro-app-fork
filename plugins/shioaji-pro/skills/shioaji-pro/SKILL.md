@@ -58,6 +58,13 @@ operations; never substitute shell commands, UI coordinates, or raw keystrokes.
   Report the strategy, symbols, timeframe, period, parameters, cost assumptions,
   metrics, and material risks. An `ephemeral` Phase 0 result has no reproducible
   run ID, and a multi-symbol Batch Run is not a shared-capital Portfolio Run.
+- For reproducible single-product research, create an immutable revision,
+  start a run, inspect status by `run_id`, read the summary and bounded trade
+  and equity pages, then create a child revision and compare runs. Open the
+  result link for chart inspection. These tools never submit broker orders.
+- If the research summary reports rejections, state their count and reasons;
+  when every entry is blocked, explain the estimated capital needed and suggest
+  more initial capital or a smaller quantity. Keep the default 1× leverage.
 - Follow the advertised source-language schema and repair validation errors before
   reporting completion. A code snippet or workspace file is not a saved App item.
 - These writes affect local App content, not brokerage orders. They still require
