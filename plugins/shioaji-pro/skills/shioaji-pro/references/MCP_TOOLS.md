@@ -63,7 +63,9 @@ past success or conversation text.
   `get_backtest_run_trades`, `get_backtest_equity`,
   `compare_backtest_runs`, `open_backtest_run`. All use `ui.control` and
   operate on persistent, single-product research runs. Follow
-  [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md).
+  [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md). Report rejection counts
+  and reasons from `get_backtest_summary`; recommend a funding adjustment when
+  all entries are blocked.
 - Reusable skills: `use_skill`, `read_skill_reference`, `save_skill`.
 - Background tasks: `create_task`, `list_tasks`, `set_task_enabled`,
   `delete_task`, `get_task_runs`, `notify_user`.

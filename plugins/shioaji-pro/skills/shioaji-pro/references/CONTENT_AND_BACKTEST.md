@@ -122,7 +122,11 @@ it has no broker order path. Use `get_backtest_run` for progress or
 cannot replace it. `list_backtest_runs` can recover IDs after the panel closes.
 
 After completion, read `get_backtest_summary` for the manifest and versioned
-metrics. For the #35 execution question, the manifest records interval, date
+metrics. Its bounded `rejections` summary gives counts, reasons, and an
+estimated capital need when all entries are blocked. If any rejections occur,
+explain them in the reply and suggest adjusting initial capital when funding
+blocks entries; do not report only "zero trades". Keep the 1× leverage default.
+For the #35 execution question, the manifest records interval, date
 range, pinned data snapshot ID, fees, tax, tick, lot, multiplier, sizing, and versions;
 `get_backtest_run_trades` shows entry and exit times/prices. The manifest's
 `signalExecution` records all-bar evaluation, close confirmation, next
