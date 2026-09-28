@@ -106,6 +106,34 @@ State that limitation when it affects the answer. A `multi` result is a Batch
 Run of independent single-symbol tests, not a Portfolio Run; do not infer
 cross-symbol capital allocation, portfolio exposure, or portfolio-level risk.
 
-The current semantic tools read the latest App result. They do not start,
-configure, persist, or reproduce a backtest. Ask the user to run it in the App
-when no result exists, and report unavailable capabilities plainly.
+## Persistent Single-Product Research
+
+The Phase 2 tools use an immutable revision and a persistent run ID. Read
+`list_strategy_revisions` or `get_strategy_revision` before changing a shared
+strategy. `create_strategy_revision` creates a child of the current head;
+updating an existing artifact requires content confirmation. The source and
+parameters are pinned, and an older run remains unchanged after a new revision.
+
+Call `start_backtest_run` with `revision_id`, `code`, interval `minutes`,
+`days`, optional parameter values, quantity in lots/contracts, capital,
+discount, futures fee, and slippage ticks. It reads K-bars and simulates fills;
+it has no broker order path. Use `get_backtest_run` for progress or
+`cancel_backtest_run` to stop. A cancelled run is terminal; late worker output
+cannot replace it. `list_backtest_runs` can recover IDs after the panel closes.
+
+After completion, read `get_backtest_summary` for the manifest and versioned
+metrics. For the #35 execution question, the manifest records interval, date
+range, pinned data snapshot ID, fees, tax, tick, lot, multiplier, sizing, and versions;
+`get_backtest_run_trades` shows entry and exit times/prices. The manifest's
+`signalExecution` records all-bar evaluation, close confirmation, next
+available open fills, and no engine daily-entry cap. Inspect the pinned source
+with `get_strategy_revision` to determine authored OR/AND conditions and
+filters; metrics alone cannot prove those rules. Page trades in
+chunks of at most 50 and request `get_backtest_equity` with at most 500 points.
+`compare_backtest_runs` accepts 2–10 run IDs and returns compact metrics.
+`open_backtest_run` opens a deep link; select a trade row to zoom the chart to
+its entry/exit interval.
+
+These tools require `ui.control`, not `trade.preview` or `trade.execute`.
+Starting, reading, cancelling, comparing, and opening research requires no
+trading approval. Tool schemas define exact arguments and idempotency keys.

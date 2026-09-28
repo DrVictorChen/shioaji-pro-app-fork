@@ -12,7 +12,7 @@ calling a tool. The families below describe intent, not permission.
 | `account` | Positions, working orders, balances, margin, and risk indicators | `account.read` |
 | `workspace` | Select a contract; inspect or change panels, links, and layouts | `ui.control` |
 | `content` | Create App-native indicators and strategies; mount, inspect, adjust, or remove chart instances; manage reusable skills | `ui.control` |
-| `backtest` | Read the latest backtest summary, symbol metrics, or selected trades | `ui.control` |
+| `backtest` | Create revisions, run single-product research, inspect bounded results, and open run links | `ui.control` |
 | `task` | Create and manage background monitoring or scheduled workflows | `task.manage` |
 | `trade` preview | Validate an exact order or mutation without execution | `trade.preview` |
 | `trade` execute/reconcile | Execute an approved operation or resolve its outcome | `trade.execute` |
@@ -55,9 +55,14 @@ past success or conversation text.
   [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md) for panel focus, opaque
   revisions, bounded reads, exact argument roles, and content confirmations.
 - Backtest reads: `get_backtest_result`, `list_backtest_symbol_results`,
-  `get_backtest_trades`. The first reads the current App session's latest
-  ephemeral summary; use the list/trades tools only for bounded, paged
-  drill-down. These tools do not create or recover a persistent run. Follow
+  `get_backtest_trades`. These legacy tools read an ephemeral Batch Run with
+  bounded, paged drill-down.
+- Research runs: `create_strategy_revision`, `get_strategy_revision`,
+  `list_strategy_revisions`, `start_backtest_run`, `list_backtest_runs`,
+  `get_backtest_run`, `cancel_backtest_run`, `get_backtest_summary`,
+  `get_backtest_run_trades`, `get_backtest_equity`,
+  `compare_backtest_runs`, `open_backtest_run`. All use `ui.control` and
+  operate on persistent, single-product research runs. Follow
   [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md).
 - Reusable skills: `use_skill`, `read_skill_reference`, `save_skill`.
 - Background tasks: `create_task`, `list_tasks`, `set_task_enabled`,

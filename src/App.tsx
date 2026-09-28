@@ -911,6 +911,29 @@ function MainApp() {
         });
     }, []);
 
+    // Persistent research links are owned by the backtest panel. The App
+    // only ensures that the panel exists and is visible on load or navigation.
+    const addBacktestRef = useRef(addBlock);
+    addBacktestRef.current = addBlock;
+    const locateBacktestRef = useRef(locateBlock);
+    locateBacktestRef.current = locateBlock;
+    useEffect(() => {
+        const openLinkedRun = () => {
+            const runId = new URLSearchParams(window.location.search).get('backtest_run');
+            if (!runId) return;
+            const existing = workspaceRef.current.blocks.find((block) => block.type === 'backtest');
+            if (existing) locateBacktestRef.current(existing.id);
+            else addBacktestRef.current('backtest');
+        };
+        window.addEventListener('shioaji:open-backtest-run', openLinkedRun);
+        window.addEventListener('popstate', openLinkedRun);
+        openLinkedRun();
+        return () => {
+            window.removeEventListener('shioaji:open-backtest-run', openLinkedRun);
+            window.removeEventListener('popstate', openLinkedRun);
+        };
+    }, []);
+
     const removeBlock = useCallback(
         (id: string) => {
             const gone = workspace.blocks.find((b) => b.id === id);
