@@ -56,6 +56,7 @@ import { useHotkeys } from './hooks/use-hotkeys';
 import { useWatchlist } from './hooks/use-watchlist';
 import { trackActivity } from './lib/activity';
 import { registerAgentAppCommandHost } from './lib/agent-app-command';
+import { requestedBacktestPanelId, selectBacktestPanelId } from './lib/backtest-link-routing';
 import {
     isAgentHarnessEnabled,
     subscribeAgentHarnessEnabled,
@@ -337,7 +338,7 @@ function BlockBody({
             return (
                 <FeatureGate feature='backtest'>
                     {BtPanel ? (
-                        <BtPanel contract={contract} onPick={onSelectCode} />
+                        <BtPanel contract={contract} onPick={onSelectCode} panelId={block.id} />
                     ) : null}
                 </FeatureGate>
             );
@@ -887,6 +888,7 @@ function MainApp() {
                 blocks: [...workspace.blocks, { id, type, pin: null }],
                 layout: [...workspace.layout, item],
             });
+            return id;
         },
         [workspace, updateWorkspace],
     );
@@ -917,13 +919,33 @@ function MainApp() {
     addBacktestRef.current = addBlock;
     const locateBacktestRef = useRef(locateBlock);
     locateBacktestRef.current = locateBlock;
+    const initialBacktestLinkRef = useRef({
+        runId: new URLSearchParams(window.location.search).get('backtest_run'),
+        panelId: new URLSearchParams(window.location.search).get('backtest_panel'),
+    });
     useEffect(() => {
-        const openLinkedRun = () => {
+        const openLinkedRun = (event?: Event) => {
             const runId = new URLSearchParams(window.location.search).get('backtest_run');
             if (!runId) return;
-            const existing = workspaceRef.current.blocks.find((block) => block.type === 'backtest');
-            if (existing) locateBacktestRef.current(existing.id);
-            else addBacktestRef.current('backtest');
+            const requested = requestedBacktestPanelId(
+                (event as CustomEvent<{ panelId?: string }> | undefined)?.detail?.panelId,
+                new URLSearchParams(window.location.search).get('backtest_panel'),
+                initialBacktestLinkRef.current.runId === runId
+                    ? initialBacktestLinkRef.current.panelId : null,
+            );
+            const blocks = workspaceRef.current.blocks;
+            const existingId = selectBacktestPanelId(blocks, requested);
+            const panelId = existingId ?? addBacktestRef.current('backtest');
+            if (!panelId) return;
+            if (existingId) locateBacktestRef.current(panelId);
+            // Keep the target in the URL until a newly added panel mounts. The
+            // selected panel removes this routing parameter after opening.
+            const url = new URL(window.location.href);
+            url.searchParams.set('backtest_panel', panelId);
+            history.replaceState(history.state, '', url);
+            window.dispatchEvent(new CustomEvent('shioaji:target-backtest-run', {
+                detail: { runId, panelId },
+            }));
         };
         window.addEventListener('shioaji:open-backtest-run', openLinkedRun);
         window.addEventListener('popstate', openLinkedRun);
