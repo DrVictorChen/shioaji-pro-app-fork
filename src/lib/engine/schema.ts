@@ -204,6 +204,13 @@ export interface NormalizedIntent {
 
 export interface PlannedOrder extends NormalizedIntent {
     decisionTime: number;
+    /**
+     * Present only on the risk-reducing projection of a rejected order
+     * (DECIDED-1): the order now closes to zero; this is the target and
+     * closeFirst flag that were rejected. A projection of a closeFirst order is
+     * its closing leg and executes at the market open.
+     */
+    projectedFrom?: { targetQuantity: number; closeFirst: boolean };
 }
 
 export interface PortfolioFill {
@@ -284,6 +291,12 @@ export interface PortfolioRejection {
     reason: { code: RiskReason; message: string };
     /** Null means valuation prevented normalization; raw intents remain above. */
     plannedBatch: PlannedOrder[] | null;
+    /**
+     * DECIDED-1: the risk-reducing part of a rejected batch that still proceeds
+     * (exits, reductions, the closing leg of a blocked reversal). Empty for
+     * deferred records. Records persisted before v2 have no such field.
+     */
+    retained: PlannedOrder[];
 }
 
 export interface PortfolioMetrics {
