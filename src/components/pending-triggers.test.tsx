@@ -15,6 +15,8 @@ const m = vi.hoisted(() => ({
     request: vi.fn(),
     dismiss: vi.fn(),
     focus: vi.fn(),
+    priv: false,
+    contracts: {} as Record<string, { name: string; delivery_month?: string }>,
 }));
 
 vi.mock('../lib/trigger-engine', () => ({
@@ -23,13 +25,19 @@ vi.mock('../lib/trigger-engine', () => ({
     useSendingTriggers: () => m.sending,
     resolvePendingTrigger: m.resolve,
     requestPendingPrices: m.request,
-    describePending: (t: TriggerOrder, price: number | undefined) => `${t.code} 目前 ${price ?? '未知'}`,
     isPendingUnpast: (t: TriggerOrder, price: number) => t.condition === 'below' ? price > t.price : price < t.price,
     RESTORE_REASON_TEXT: { restart: 'R-restart', disconnect: 'R-disconnect', env: 'R-env' },
 }));
 vi.mock('../lib/window-role', () => ({ focusMainWindow: m.focus }));
 vi.mock('../lib/bracket', () => ({ dismissBracket: m.dismiss }));
-vi.mock('../lib/privacy', () => ({ usePrivacyMode: () => false }));
+vi.mock('../lib/privacy', () => ({
+    usePrivacyMode: () => m.priv,
+    maskAccountId: (id: string, priv: boolean) => priv ? `••${id.slice(-2)}` : id,
+}));
+vi.mock('../lib/contracts-cache', () => ({
+    useContract: (code: string) => m.contracts[code],
+    ensureContract: async () => undefined,
+}));
 vi.mock('../lib/server-info-store', () => ({ useServerInfo: () => null }));
 vi.mock('../lib/protection-env', () => ({
     currentProtectionEnv: () => m.env,
@@ -67,6 +75,8 @@ beforeEach(() => {
     m.prices = { TXFR1: 47900 };
     m.sending = [];
     m.env = SIM;
+    m.priv = false;
+    m.contracts = { TXFR1: { name: '臺股期貨', delivery_month: '202610' } };
     for (const f of [m.resolve, m.request, m.dismiss, m.focus]) { f.mockReset(); f.mockResolvedValue(true); }
 });
 
@@ -80,10 +90,10 @@ it('send needs two clicks; the armed label follows the latest price', async () =
     await click(button(r, '送出'));
     expect(m.resolve).not.toHaveBeenCalled();
     expect(m.request).toHaveBeenCalledTimes(1); // executor publishes the latest price now
-    expect(text(button(r, '再按一次'))).toContain('目前 47900');
+    expect(text(button(r, '再按一次'))).toContain('目前 47,900');
     m.prices = { TXFR1: 47850 };
     act(() => { r.update(createElement(PendingTriggers)); });
-    expect(text(button(r, '再按一次'))).toContain('目前 47850'); // still armed
+    expect(text(button(r, '再按一次'))).toContain('目前 47,850'); // still armed
     await click(button(r, '再按一次'));
     expect(m.resolve).toHaveBeenCalledWith('tg-1', 'send', { allowUnpast: false });
 });
@@ -112,7 +122,7 @@ it('another environment: labelled, no current price, send disabled; old detectio
     const r = render();
     const all = text(r.root);
     expect(all).toContain('正式環境');
-    expect(all).toContain('目前 未知');
+    expect(all).toContain('目前價格未知');
     expect(all).toContain('2026-01-02');
     expect(button(r, '送出').props.disabled).toBe(true);
 });
@@ -172,7 +182,7 @@ it('price back on the non-trigger side: 目前已未穿價 and one extra confirm
     await click(button(r, '送出'));
     await click(button(r, '再按一次'));
     expect(m.resolve).not.toHaveBeenCalled();
-    expect(text(button(r, '目前已未穿價：再按一次'))).toContain('目前 48100');
+    expect(text(button(r, '目前已未穿價：再按一次'))).toContain('目前 48,100');
     await click(button(r, '目前已未穿價：再按一次'));
     expect(m.resolve).toHaveBeenCalledWith('tg-1', 'send', { allowUnpast: true });
 });
@@ -191,4 +201,26 @@ it('collapsible in the main window; popouts show only a badge that focuses the m
     expect(text(p.root)).toContain('觸價單待確認 1 筆');
     await click(buttons(p)[0]!);
     expect(m.focus).toHaveBeenCalled();
+});
+
+it('reads as plain language: product name, action, condition and distance; account masked in privacy mode', () => {
+    m.priv = true;
+    m.triggers = [stop({ condition: 'above', price: 48151, action: 'Buy', account: { account_type: 'F', broker_id: 'b', account_id: '9151121' } })];
+    m.prices = { TXFR1: 48169 };
+    const all = text(render().root);
+    expect(all).toContain('臺股期貨 202610');
+    expect(all).toContain('TXFR1');
+    expect(all).toContain('停損');
+    expect(all).toContain('買進 1 口');
+    expect(all).toContain('漲到 48,151 以上');
+    expect(all).toContain('48,169');
+    expect(all).toContain('已超過 18 點');
+    expect(all).toContain('期貨帳戶 ••21');
+    expect(all).not.toContain('9151121');
+});
+
+it('falls back to the code while the contract is not loaded', () => {
+    m.contracts = {};
+    const r = render();
+    expect(r.root.findAll(n => n.type === 'span' && text(n) === 'TXFR1')).toHaveLength(1);
 });

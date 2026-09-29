@@ -8,13 +8,13 @@ export const panel = style({
     left: '50%',
     bottom: vars.space.lg,
     transform: 'translateX(-50%)',
-    width: 'min(560px, calc(100vw - 32px))',
-    maxHeight: '50vh',
+    width: 'min(600px, calc(100vw - 32px))',
+    maxHeight: '60vh',
     overflowY: 'auto',
     display: 'flex',
     flexDirection: 'column',
-    gap: vars.space.xs,
-    padding: '8px 10px',
+    gap: vars.space.sm,
+    padding: '10px 12px',
     background: vars.color.panelRaised,
     border: `1px solid ${vars.color.danger}`,
     borderRadius: vars.radius.md,
@@ -49,50 +49,114 @@ export const badge = style({
 });
 
 export const title = style({
-    fontSize: '0.78rem',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '0.86rem',
     fontWeight: 700,
     color: vars.color.danger,
 });
 
+export const dot = style({
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    background: vars.color.danger,
+    boxShadow: `0 0 0 3px color-mix(in srgb, ${vars.color.danger} 25%, transparent)`,
+});
+
 export const hint = style({
     fontSize: '0.7rem',
+    lineHeight: 1.5,
     color: vars.color.mutedForeground,
 });
 
 export const row = style({
     display: 'flex',
     flexDirection: 'column',
-    gap: '3px',
-    padding: '5px 7px',
+    gap: '6px',
+    padding: '10px 12px',
     background: vars.color.inset,
     border: `1px solid ${vars.color.border}`,
     borderRadius: vars.radius.sm,
-    fontSize: '0.72rem',
+    fontSize: '0.76rem',
     fontVariantNumeric: 'tabular-nums',
     color: vars.color.foreground,
     overflowWrap: 'break-word',
 });
 
-export const line = style({ fontFamily: vars.font.mono });
+export const rowHead = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: vars.space.sm,
+    flexWrap: 'wrap',
+});
 
-export const message = style({ color: vars.color.amber });
+const tag = style({
+    fontSize: '0.68rem',
+    fontWeight: 700,
+    padding: '1px 6px',
+    borderRadius: vars.radius.sm,
+});
+export const kindStop = style([tag, { color: vars.color.amber, background: `color-mix(in srgb, ${vars.color.amber} 14%, transparent)` }]);
+export const kindTake = style([tag, { color: vars.color.accent, background: vars.color.accentDim }]);
+
+// 台股慣例：買進紅、賣出綠 — follows the user's up/down colour convention
+export const buy = style({ fontWeight: 700, color: vars.color.up });
+export const sell = style({ fontWeight: 700, color: vars.color.down });
+export const orderType = style({ color: vars.color.mutedForeground });
+export const detected = style({ marginLeft: 'auto', fontSize: '0.68rem', color: vars.color.mutedForeground });
+
+export const product = style({
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: vars.space.sm,
+    flexWrap: 'wrap',
+});
+export const productName = style({ fontSize: '0.95rem', fontWeight: 700 });
+export const code = style({ fontFamily: vars.font.mono, fontSize: '0.7rem', color: vars.color.mutedForeground });
+
+export const facts = style({
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+    gap: '1px',
+    background: vars.color.border,
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    overflow: 'hidden',
+});
+export const fact = style({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    padding: '6px 8px',
+    background: vars.color.panelRaised,
+});
+export const factLabel = style({ fontSize: '0.66rem', color: vars.color.mutedForeground });
+export const factValue = style({ fontSize: '0.84rem', fontWeight: 600 });
+export const factPast = style([factValue, { color: vars.color.danger }]);
+export const factUnpast = style([factValue, { color: vars.color.amber }]);
+export const factMuted = style([factValue, { color: vars.color.mutedForeground }]);
+
+export const message = style({ fontSize: '0.72rem', lineHeight: 1.5, color: vars.color.amber });
 
 export const actions = style({
     display: 'flex',
-    gap: vars.space.xs,
+    gap: vars.space.sm,
     flexWrap: 'wrap',
+    marginTop: '2px',
 });
 
 export const button = style({
     fontFamily: vars.font.display,
-    fontSize: '0.66rem',
+    fontSize: '0.74rem',
     fontWeight: 600,
     cursor: 'pointer',
     background: 'transparent',
     border: `1px solid ${vars.color.border}`,
     borderRadius: vars.radius.sm,
     color: vars.color.foreground,
-    padding: '2px 8px',
+    padding: '4px 10px',
     ':hover': { borderColor: vars.color.borderBright },
     ':disabled': { opacity: 0.5, cursor: 'default' },
 });
@@ -100,4 +164,6 @@ export const button = style({
 export const primary = style([button, {
     borderColor: vars.color.danger,
     color: vars.color.danger,
+    background: `color-mix(in srgb, ${vars.color.danger} 12%, transparent)`,
+    ':hover': { borderColor: vars.color.danger, background: `color-mix(in srgb, ${vars.color.danger} 22%, transparent)` },
 }]);

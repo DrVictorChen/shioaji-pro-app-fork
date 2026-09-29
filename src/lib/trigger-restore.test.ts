@@ -34,7 +34,7 @@ vi.mock('./stream', () => ({
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accounts,
     selectedFutures: m.accounts.find(a => a.account_type === 'F') ?? null, selectedStock: null }) }));
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
-vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure }));
+vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
 vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
 vi.mock('./trading-state', () => ({ getTradingState: () => ({ positions: [],
     queries: { positions: { updatedAt: null, needsReconcile: false, error: null } } }) }));
@@ -361,7 +361,7 @@ describe('restore confirmation (#144)', () => {
         await restoredStop();
         await tick(47900);
         expect(only().pending?.reason).toBe('restart');
-        expect(m.notify.mock.calls.at(-1)![0].body).toContain(engine.RESTORE_REASON_TEXT.restart);
+        expect(m.notify.mock.calls.at(-1)![0].body).toContain('沒有自動送單'); // the reason itself is shown in the panel
 
         await boot();
         await addStop();
@@ -369,7 +369,7 @@ describe('restore confirmation (#144)', () => {
         await outage(61_000);
         await tick(47900);
         expect(only().pending?.reason).toBe('disconnect');
-        expect(m.notify.mock.calls.at(-1)![0].body).toContain(engine.RESTORE_REASON_TEXT.disconnect);
+        expect(m.notify.mock.calls.at(-1)![0].body).toContain('沒有自動送單'); // the reason itself is shown in the panel
 
         await boot();
         await addStop();

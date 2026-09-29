@@ -50,7 +50,7 @@ vi.mock('./stream', () => ({
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accounts, selectedFutures: m.accounts.find(a => a.account_type === 'F') ?? null,
     selectedStock: m.accounts.find(a => a.account_type === 'S') ?? null }) }));
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
-vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure }));
+vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
 vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
 vi.mock('./trading-state', () => ({ tradeCacheContinuous: () => m.continuous, checkTradeCacheHealth: m.healthCheck, getTradingState: () => ({ positions: m.positions.rows,
     queries: { positions: { updatedAt: m.positions.updatedAt, needsReconcile: m.positions.needsReconcile, error: null } } }) }));

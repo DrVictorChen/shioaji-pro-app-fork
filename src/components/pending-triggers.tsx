@@ -6,11 +6,18 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { dismissBracket } from '../lib/bracket';
-import { usePrivacyMode } from '../lib/privacy';
+import { ensureContract, useContract } from '../lib/contracts-cache';
+import {
+    actionLabel,
+    conditionLabel,
+    contractLabel,
+    distanceLabel,
+    kindLabel,
+} from '../lib/pending-trigger-view';
+import { maskAccountId, usePrivacyMode } from '../lib/privacy';
 import { currentProtectionEnv, protectionEnvLabel } from '../lib/protection-env';
 import { useServerInfo } from '../lib/server-info-store';
 import {
-    describePending,
     isPendingUnpast,
     RESTORE_REASON_TEXT,
     requestPendingPrices,
@@ -21,6 +28,7 @@ import {
     type PendingChoice,
     type TriggerOrder,
 } from '../lib/trigger-engine';
+import { fmtPrice } from '../lib/utils/format';
 import { focusMainWindow } from '../lib/window-role';
 import * as styles from './pending-triggers.css';
 
@@ -85,20 +93,58 @@ function Row({ trigger, price, envNow, sending }: {
     };
     const resolve = (choice: PendingChoice, allowUnpast = false) =>
         void run(() => resolvePendingTrigger(trigger.id, choice, { allowUnpast }));
-    const side = `市價${trigger.action === 'Buy' ? '買' : '賣'} ${trigger.quantity}`;
+    const contract = useContract(trigger.code);
+    useEffect(() => { void ensureContract(trigger.code).catch(() => undefined); }, [trigger.code]);
+    const name = contractLabel(trigger.code, contract);
+    const act = actionLabel(trigger);
+    const distance = shown === undefined ? null : distanceLabel(trigger, shown);
+    const acct = trigger.account
+        ? `${trigger.account.account_type === 'F' ? '期貨' : '證券'}帳戶 ${maskAccountId(trigger.account.account_id, priv)}`
+        : null;
     return (
         <div className={styles.row}>
-            <span className={styles.line}>{describePending(trigger, shown, priv)}</span>
-            <span className={styles.hint}>
-                {trigger.env ? `${protectionEnvLabel(trigger.env)}環境` : '環境未知'}
-                {here ? '' : envNow ? '（非目前環境，目前價不顯示；切回該環境才能送出）' : '（伺服器模式未確認）'}
-                {trigger.pending && ` · 偵測時價格 ${trigger.pending.price} · 偵測時間 ${detectedAt(trigger.pending.at)}`}
-            </span>
+            <div className={styles.rowHead}>
+                <span className={trigger.kind === 'take' ? styles.kindTake : styles.kindStop}>{kindLabel(trigger)}</span>
+                <span className={trigger.action === 'Buy' ? styles.buy : styles.sell}>{act}</span>
+                <span className={styles.orderType}>市價單</span>
+                {trigger.pending && <span className={styles.detected}>偵測於 {detectedAt(trigger.pending.at)}</span>}
+            </div>
+            <div className={styles.product}>
+                <span className={styles.productName}>{name}</span>
+                {name !== trigger.code && <span className={styles.code}>{trigger.code}</span>}
+            </div>
+            <div className={styles.facts}>
+                <div className={styles.fact}>
+                    <span className={styles.factLabel}>觸發條件</span>
+                    <span className={styles.factValue}>{conditionLabel(trigger)}</span>
+                </div>
+                <div className={styles.fact}>
+                    <span className={styles.factLabel}>目前價格</span>
+                    <span className={styles.factValue}>{shown === undefined ? '未知' : fmtPrice(shown)}</span>
+                </div>
+                <div className={styles.fact}>
+                    <span className={styles.factLabel}>狀態</span>
+                    <span className={distance === null ? styles.factMuted : distance.past ? styles.factPast : styles.factUnpast}>
+                        {distance === null ? '等待行情' : distance.text}
+                    </span>
+                </div>
+            </div>
             {trigger.pending && (
-                <span className={styles.hint}>原因：{RESTORE_REASON_TEXT[trigger.pending.reason ?? 'restart']}，未自動送單</span>
+                <span className={styles.hint}>
+                    原因：{RESTORE_REASON_TEXT[trigger.pending.reason ?? 'restart']}，系統沒有自動送單
+                    {`（偵測時價格 ${fmtPrice(trigger.pending.price)}）`}
+                </span>
+            )}
+            <span className={styles.hint}>
+                {[acct, trigger.env ? `${protectionEnvLabel(trigger.env)}環境` : '環境未知'].filter(Boolean).join(' · ')}
+            </span>
+            {!here && (
+                <span className={styles.message}>
+                    {envNow ? '這筆不屬於目前的伺服器環境，切回該環境才能送出' : '伺服器模式尚未確認，暫時不能送出'}
+                </span>
             )}
             {unpast && (
-                <span className={styles.message}>目前已未穿價（價格已回到觸價另一側）；送出仍會立即以市價成交，需再多確認一次</span>
+                <span className={styles.message}>目前已未穿價：價格已經回到觸發價另一側。現在送出仍會立刻以市價成交，需要多確認一次。</span>
             )}
             {sending && <span className={styles.message}>送出處理中…（若開啟下單確認，請在主視窗確認）</span>}
             {message && <span className={styles.message}>{message}</span>}
@@ -106,7 +152,7 @@ function Row({ trigger, price, envNow, sending }: {
                 <button
                     className={styles.primary}
                     disabled={busy || sending || shown === undefined}
-                    title='重新檢查行情連線、環境與帳戶後，以原設定送出市價單'
+                    title='重新檢查行情連線、環境與帳戶後，以原設定立即送出市價單'
                     onClick={() => {
                         if (confirm !== 'send' && confirm !== 'send-unpast') {
                             setConfirm('send');
@@ -119,16 +165,16 @@ function Row({ trigger, price, envNow, sending }: {
                     }}
                 >
                     {sending ? '送出處理中'
-                        : confirm === 'send-unpast' ? `目前已未穿價：再按一次仍${side}（目前 ${shown}）`
-                            : confirm === 'send' ? `再按一次：${side}（目前 ${shown}）` : '送出'}
+                        : confirm === 'send-unpast' ? `目前已未穿價：再按一次仍市價${act}（目前 ${fmtPrice(shown)}）`
+                            : confirm === 'send' ? `再按一次確認：市價${act}（目前 ${fmtPrice(shown)}）` : '立即送出市價單'}
                 </button>
                 <button
                     className={styles.button}
                     disabled={busy}
-                    title='保留觸價單；價格先回到觸價另一側、再次穿價才會觸發'
+                    title='先不送單；價格回到觸發價另一側、再次穿過時才會觸發'
                     onClick={() => resolve('keep')}
                 >
-                    保留
+                    保留，等再次穿價
                 </button>
                 <button
                     className={styles.button}
@@ -143,8 +189,8 @@ function Row({ trigger, price, envNow, sending }: {
                     }}
                 >
                     {confirm === 'cancel'
-                        ? trigger.bracketId ? '再按一次：移除括號單保護' : '再按一次：取消'
-                        : trigger.bracketId ? '移除括號單' : '取消'}
+                        ? trigger.bracketId ? '再按一次：移除括號單保護' : '再按一次：取消這筆'
+                        : trigger.bracketId ? '移除括號單' : '取消這筆'}
                 </button>
             </div>
         </div>
@@ -171,7 +217,7 @@ export function PendingTriggers({ compact = false }: { compact?: boolean }) {
     return (
         <div className={open ? styles.panel : styles.panelCollapsed} role='alert'>
             <div className={styles.header}>
-                <span className={styles.title}>觸價單待確認（{pending.length}）</span>
+                <span className={styles.title}><span className={styles.dot} />觸價單待確認 · {pending.length} 筆</span>
                 <button className={styles.button} onClick={() => setOpen(o => !o)} aria-expanded={open}>
                     {open ? '收合' : '展開'}
                 </button>
@@ -179,7 +225,7 @@ export function PendingTriggers({ compact = false }: { compact?: boolean }) {
             {open && (
                 <>
                     <div className={styles.hint}>
-                        恢復盯價時價格已穿過觸價，系統未自動送單（原因見各筆）。請逐筆選擇送出、保留或取消；OCO 同組一筆送出後其餘自動取消。
+                        App 恢復盯價時，價格已經穿過這些單的觸發價。為了避免意外成交，系統先不送單，請逐筆決定。同一組停損停利（OCO）送出其中一筆後，其餘會自動取消。
                     </div>
                     {pending.map(t => <Row key={t.id} trigger={t} price={prices[t.code]} envNow={envNow} sending={sending.includes(t.id)} />)}
                 </>

@@ -43,7 +43,8 @@ import {
 } from './bracket-core';
 import { onTrackedReport, recentReportsFor } from './bracket-reports';
 import { getPrivacyMode, maskAccountId } from './privacy';
-import { ensureContract } from './contracts-cache';
+import { ensureContract, getCachedContract } from './contracts-cache';
+import { actionLabel, conditionLabel, contractLabel, kindLabel as pendingKindLabel } from './pending-trigger-view';
 import { claimExecutor, createCommandBus, isExecutor, isMainWindow } from './main-window-commands';
 import type { OrderEventReport } from './order-report';
 import {
@@ -60,6 +61,7 @@ import { fetchTrades } from './shioaji';
 import { getStreamStatus, onAnyTick, onStreamEvent, subscribeStatusStore } from './stream';
 import { notify, placeQuickOrder } from './trade';
 import { getTradingState } from './trading-state';
+import { fmtPrice } from './utils/format';
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
 import type { Action, FuturesOCType, Trade } from './types/order';
@@ -961,6 +963,10 @@ export function describePending(t: TriggerOrder, price: number | undefined, priv
         + ` 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} · ${now}`;
 }
 
+function pendingName(t: TriggerOrder): string {
+    return contractLabel(t.code, getCachedContract(t.code));
+}
+
 function holdPending(held: { t: TriggerOrder; reason: RestoreReason }[], price: number) {
     const at = Date.now();
     const why = new Map(held.map(h => [h.t.id, h.reason]));
@@ -968,7 +974,8 @@ function holdPending(held: { t: TriggerOrder; reason: RestoreReason }[], price: 
     commit();
     for (const { t, reason } of held) {
         notify({ kind: 'err', title: '觸價單待確認（未自動送出）',
-            body: `${describePending(t, price, getPrivacyMode())} — ${RESTORE_REASON_TEXT[reason]}；請選擇送出、取消或保留` });
+            body: `${pendingName(t)}　${pendingKindLabel(t)}・市價${actionLabel(t)}。`
+                + `價格已${conditionLabel(t)}（偵測時 ${fmtPrice(price)}），沒有自動送單，請到畫面下方的待確認面板處理。` });
     }
 }
 
@@ -987,7 +994,7 @@ function resolvePending(id: string, choice: PendingChoice, allowUnpast = false):
     if (choice === 'keep') {
         triggers = triggers.map(x => x.id === id ? { ...x, pending: undefined, awaitingRecross: true } : x);
         commit();
-        notify({ kind: 'info', title: '觸價單保留', body: `${t.code} 價格回到觸價另一側後，再次穿價才會觸發` });
+        notify({ kind: 'info', title: '觸價單保留', body: `${pendingName(t)} ${pendingKindLabel(t)}：價格回到觸發價另一側、再次穿過時才會觸發` });
         return true;
     }
     if (choice === 'cancel') {
@@ -995,7 +1002,7 @@ function resolvePending(id: string, choice: PendingChoice, allowUnpast = false):
         if (t.bracketId) throw new Error('括號單保護請在下單面板的括號單狀態中移除追蹤');
         triggers = triggers.filter(x => x.id !== id);
         commit();
-        notify({ kind: 'info', title: '觸價單已取消', body: `${t.code} 待確認觸價單已刪除，未送單` });
+        notify({ kind: 'info', title: '觸價單已取消', body: `${pendingName(t)} ${pendingKindLabel(t)} 已刪除，沒有送單` });
         return true;
     }
     if (choice !== 'send') throw new Error('未知選項');
