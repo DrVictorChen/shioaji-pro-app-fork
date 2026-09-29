@@ -31,6 +31,9 @@ export interface FuturePosition {
     price: number;
     last_price: number;
     pnl: number;
+    /** App projection only (never from the broker): open lots oldest first
+     * when live fills left more than one, so a close consumes them FIFO. */
+    lots?: { price: number; quantity: number }[];
 }
 
 export type Position = StockPosition | FuturePosition;

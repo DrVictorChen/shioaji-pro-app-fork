@@ -86,6 +86,29 @@ export function usePrivacyMoney(): boolean {
     }, getPrivacyMoney);
 }
 
+// Cross-window sync (#85 B-2): popouts share localStorage but not module
+// state, so a toggle in one window must reach already-open popouts. The
+// `storage` event fires only in the other windows. `key === null` is a
+// storage clear.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('storage', (e: StorageEvent) => {
+        if (e.key === KEY || e.key === null) {
+            const next = e.key === null ? false : e.newValue === '1';
+            if (next !== on) {
+                on = next;
+                listeners.forEach((l) => l());
+            }
+        }
+        if (e.key === MONEY_KEY || e.key === null) {
+            const next = e.key === null ? false : e.newValue === '1';
+            if (next !== moneyOn) {
+                moneyOn = next;
+                moneyListeners.forEach((l) => l());
+            }
+        }
+    });
+}
+
 export function maskMoney(text: string, priv: boolean): string {
     return priv ? '•••••' : text;
 }

@@ -19,12 +19,29 @@ describe('position projection', () => {
         expect(markPosition(base, 112, 0)).toBe(base);
     });
     it('adds shares at weighted cost and retains existing mark-to-market', () => {
-        const p = applyPositionFill([base], fill, 1)![0]!;
+        const p = applyPositionFill([base], fill, 1, 120)![0]!;
         expect(p.quantity).toBe(1100);
         expect(p.price).toBeCloseTo(101.8181818);
         expect(p.pnl).toBe(19900);
         expect(p.last_price).toBe(120);
         expect('yd_quantity' in p && p.yd_quantity).toBe(1000);
+    });
+    // #85 B-4: a fill is not a quote. The newest known tick stays the mark.
+    it('keeps the latest known market price instead of rewinding to the fill price', () => {
+        // Row already marked by a tick at 110; a Buy fills at 120 → the new
+        // shares are marked at 110 (−1000), last_price stays 110.
+        expect(applyPositionFill([base], fill, 1)![0]).toMatchObject({ quantity: 1100, last_price: 110, pnl: 8900 });
+        // A newer tick passed in wins over the row's older mark.
+        expect(applyPositionFill([base], fill, 1, 115)![0]).toMatchObject({ last_price: 115, pnl: 14900 - 500 });
+        const f: Account = { ...account, account_type: 'F' };
+        const buy: PositionFill = { ...fill, account: f, code: 'TXFJ6', quantity: 1, price: 48520, openClose: 'New' };
+        // New row: tick known → marked at it; none known → fill price.
+        expect(applyPositionFill([], buy, 200, 48530)![0]).toMatchObject({ last_price: 48530, pnl: 2000 });
+        expect(applyPositionFill([], buy, 200)![0]).toMatchObject({ last_price: 48520, pnl: 0 });
+        // Another row of the same contract already carries the newer mark.
+        const other: AccountedPosition = { id: 5, code: 'TXFJ6', direction: 'Sell', quantity: 1, price: 48500,
+            last_price: 48510, pnl: -2000, account: { ...f, account_id: 'b' } };
+        expect(applyPositionFill([other], buy, 200)![1]).toMatchObject({ last_price: 48510, pnl: -2000 });
     });
     it('reduces or removes only the matching account holding', () => {
         const other = { ...base, account: { ...account, account_id: 'b' } };
@@ -44,7 +61,7 @@ describe('position projection', () => {
         expect(applyPositionFill([p], { ...f, openClose: 'New' }, 200)).toHaveLength(2);
         expect(applyPositionFill([p, { ...p, direction: 'Sell' }], f, 200)).toBeNull();
     });
-    it.each(['Buy', 'Sell'] as const)('keeps weighted futures cost and proportional unrealized PnL through %s New and Cover', direction => {
+    it.each(['Buy', 'Sell'] as const)('closes futures lots FIFO through %s New and Cover (#85)', direction => {
         const owner: Account = { ...account, account_type: 'F' };
         const sign = direction === 'Buy' ? 1 : -1;
         const holding: AccountedPosition = { id: 10, code: 'TXFI6', account: owner,
@@ -52,32 +69,75 @@ describe('position projection', () => {
         const other: AccountedPosition = { ...holding, id: 11, account: { ...owner, account_id: 'other' } };
         const addition: PositionFill = { ...fill, account: owner, code: holding.code,
             action: direction, quantity: 2, price: 120, condition: '', openClose: 'New' };
-        const added = applyPositionFill([holding, other], addition, 200)!;
-        // Four contracts at average cost 110; at 120 the total unrealized PnL is ±8000.
-        expect(added[0]).toMatchObject({ quantity: 4, price: 110, last_price: 120, pnl: sign * 8000 });
+        const added = applyPositionFill([holding, other], addition, 200, 120)!;
+        // Four contracts, two lots (2 @100, 2 @120); at 120 the P&L is ±8000.
+        expect(added[0]).toMatchObject({ quantity: 4, price: 110, last_price: 120, pnl: sign * 8000,
+            lots: [{ price: 100, quantity: 2 }, { price: 120, quantity: 2 }] });
         expect(added[1]).toBe(other);
         const marked = markPosition(added[0]!, 125, 200);
         expect(marked.pnl).toBe(sign * 12000);
         const cover: PositionFill = { ...addition, key: 'cover-1', tradeId: 'cover',
             action: direction === 'Buy' ? 'Sell' : 'Buy', quantity: 1, price: 125, openClose: 'Cover' };
-        const partial = applyPositionFill([marked, other], cover, 200)!;
-        expect(partial[0]).toMatchObject({ direction, quantity: 3, price: 110, last_price: 125, pnl: sign * 9000 });
+        const partial = applyPositionFill([marked, other], cover, 200, 125)!;
+        // The oldest lot (@100) closes: 1 @100 + 2 @120 remain, cost 340/3.
+        expect(partial[0]).toMatchObject({ direction, quantity: 3, last_price: 125, pnl: sign * 7000,
+            lots: [{ price: 100, quantity: 1 }, { price: 120, quantity: 2 }] });
+        expect(partial[0]!.price).toBeCloseTo(340 / 3);
         expect(partial[1]).toBe(other);
         const moved = markPosition(partial[0]!, 123, 200);
-        expect(moved.pnl).toBe(sign * 7800);
-        const closed = applyPositionFill([moved, other], { ...cover, key: 'cover-rest', quantity: 3, price: 123 }, 200)!;
+        expect(moved.pnl).toBe(sign * 5800);
+        const second = applyPositionFill([moved, other], { ...cover, key: 'cover-2', price: 123 }, 200, 123)!;
+        expect(second[0]).toMatchObject({ quantity: 2, price: 120, pnl: sign * 1200 });
+        expect(second[0]).not.toHaveProperty('lots');
+        const closed = applyPositionFill([second[0]!, other], { ...cover, key: 'cover-rest', quantity: 2, price: 123 }, 200)!;
         expect(closed).toEqual([other]);
         expect(closed[0]).toBe(other);
+    });
+    it('matches the broker on the live-QA reproduction: long 48520 + 48525, close 1', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        const buy: PositionFill = { ...fill, account: owner, code: 'TXFJ6', quantity: 1, price: 48520, openClose: 'New' };
+        let rows = applyPositionFill([], buy, 200)!;
+        rows = applyPositionFill(rows, { ...buy, key: 'b2', price: 48525 }, 200, 48525)!;
+        rows = applyPositionFill(rows, { ...buy, key: 's1', action: 'Sell', price: 48523, openClose: 'Cover' }, 200, 48523)!;
+        // Broker position_unit: 1 @48525, −400 (was 1 @48522.5, +100 weighted).
+        expect(rows).toEqual([expect.objectContaining({ direction: 'Buy', quantity: 1, price: 48525, last_price: 48523, pnl: -400 })]);
+    });
+    it('reverses an Auto futures fill: closes every lot, remainder opens at the fill price', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        const long: AccountedPosition = { id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2, price: 48522.5, last_price: 48530,
+            pnl: 3000, account: owner, lots: [{ price: 48520, quantity: 1 }, { price: 48525, quantity: 1 }] };
+        const sell: PositionFill = { ...fill, account: owner, code: 'TXFJ6', action: 'Sell', quantity: 3, price: 48530, openClose: 'Auto' };
+        expect(applyPositionFill([long], sell, 200, 48530)).toEqual([expect.objectContaining({
+            direction: 'Sell', quantity: 1, price: 48530, last_price: 48530, pnl: 0 })]);
+        // Partial Auto close keeps the newest lot, like Cover.
+        expect(applyPositionFill([long], { ...sell, quantity: 1 }, 200, 48530)).toEqual([expect.objectContaining({
+            direction: 'Buy', quantity: 1, price: 48525, pnl: 1000 })]);
+    });
+    it('closes options FIFO with the option multiplier', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        const buy: PositionFill = { ...fill, account: owner, code: 'TXO23000J6', quantity: 1, price: 100, openClose: 'New' };
+        let rows = applyPositionFill([], buy, 50)!;
+        rows = applyPositionFill(rows, { ...buy, key: 'b2', price: 80 }, 50, 80)!;
+        rows = applyPositionFill(rows, { ...buy, key: 's1', action: 'Sell', price: 90, openClose: 'Cover' }, 50, 90)!;
+        expect(rows).toEqual([expect.objectContaining({ quantity: 1, price: 80, last_price: 90, pnl: 500 })]);
+    });
+    it('keeps broker P&L adjustments of a snapshot futures row proportionally on a FIFO close', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        // Snapshot row: no lot detail; P&L carries +100 the lots do not explain.
+        const row: AccountedPosition = { id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2, price: 100, last_price: 110, pnl: 4100, account: owner };
+        const cover: PositionFill = { ...fill, account: owner, code: 'TXFJ6', action: 'Sell', quantity: 1, price: 110, openClose: 'Cover' };
+        expect(applyPositionFill([row], cover, 200)![0]).toMatchObject({ quantity: 1, price: 100, pnl: 2050 });
     });
     it('retains stock average cost and remaining unrealized PnL after partial and full sale', () => {
         // Synthetic unit data: excludes fees and realized PnL, which are not computed here.
         const first = applyPositionFill([], { ...fill, quantity: 1000, price: 412.5 }, 1)![0]!;
-        const added = applyPositionFill([first], { ...fill, key: 'buy-2', quantity: 1000, price: 411 }, 1)![0]!;
+        const added = applyPositionFill([first], { ...fill, key: 'buy-2', quantity: 1000, price: 411 }, 1, 411)![0]!;
         expect(added).toMatchObject({ quantity: 2000, price: 411.75, last_price: 411, pnl: -1500 });
         const marked = markPosition(added, 409.5, 1);
         expect(marked.pnl).toBe(-4500);
         const other = { ...marked, account: { ...account, account_id: 'other' } };
         const sell: PositionFill = { ...fill, key: 'sell-1', action: 'Sell', quantity: 1000, price: 409.5 };
+        // Stocks keep the broker's weighted average cost (平均成本) on a partial sale.
         const partial = applyPositionFill([marked, other], sell, 1)!;
         expect(partial[0]).toMatchObject({ quantity: 1000, price: 411.75, last_price: 409.5, pnl: -2250 });
         expect(partial[1]).toBe(other);

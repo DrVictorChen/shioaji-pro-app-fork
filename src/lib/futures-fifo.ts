@@ -133,6 +133,26 @@ export function collectFills(trades: Trade[], code: string, since = -Infinity): 
     return ambiguous ? null : fills;
 }
 
+/**
+ * Closes `quantity` against `lots` oldest-first (FIFO), the broker's netting
+ * rule for futures and options. Shared by the Flash panel's replay and the
+ * live position projection so both keep the same open lots. Pure.
+ */
+export function consumeFifo<L extends { quantity: number }>(lots: readonly L[], quantity: number): { open: L[]; closed: L[] } {
+    const open = lots.slice();
+    const closed: L[] = [];
+    let left = quantity;
+    while (left > 0 && open.length > 0) {
+        const oldest = open[0]!;
+        const take = Math.min(oldest.quantity, left);
+        left -= take;
+        closed.push({ ...oldest, quantity: take });
+        if (take === oldest.quantity) open.shift();
+        else open[0] = { ...oldest, quantity: oldest.quantity - take };
+    }
+    return { open, closed };
+}
+
 /** Row prices may be rounded to cents by the broker. */
 const PRICE_EPS = 0.01;
 
@@ -210,14 +230,11 @@ export function fifoPosition(rows: Row[], fills: FifoFill[], multiplier: number,
     }
 
     for (const f of fills) {
-        let left = f.quantity;
-        while (left > 0 && lots.length > 0 && lots[0]!.action !== f.action) {
-            const oldest = lots[0]!;
-            const closed = Math.min(oldest.quantity, left);
-            left -= closed;
-            if (closed === oldest.quantity) lots.shift();
-            else lots[0] = { ...oldest, quantity: oldest.quantity - closed };
-        }
+        const oppositeEnd = lots.findIndex(l => l.action === f.action);
+        const opposite = oppositeEnd < 0 ? lots.splice(0) : lots.splice(0, oppositeEnd);
+        const { open, closed } = consumeFifo(opposite, f.quantity);
+        const left = f.quantity - closed.reduce((s, l) => s + l.quantity, 0);
+        lots.unshift(...open);
         if (left > 0) lots.push({ action: f.action, price: f.price, quantity: left });
     }
 

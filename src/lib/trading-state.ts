@@ -226,6 +226,8 @@ const accountKey = (a: { broker_id: string; account_id: string; account_type: st
 const reportKey = (report: OrderEventReport) => report.eventId ? `event:${report.eventId}` : JSON.stringify(report.raw);
 
 const positionQuotes = new Map<string, { release?: () => void }>();
+// Latest non-simulated tick per code, so a fill never rewinds a newer quote (#85 B-4).
+const lastTicks = new Map<string, number>();
 function prepareQuotes() {
     const codes = new Set(state.positions.map(p => p.code));
     for (const [code, entry] of positionQuotes) if (!codes.has(code)) { entry.release?.(); positionQuotes.delete(code); }
@@ -645,7 +647,7 @@ function applyDeal(report: OrderEventReport) {
     }
     const multiplier = fill?.account.account_type === 'S' ? 1 : c?.multiplier ?? c?.contract_size ?? 0;
     const next = fill && cutoff && fill.ts > cutoff
-        ? applyPositionFill(state.positions, fill, multiplier) : null;
+        ? applyPositionFill(state.positions, fill, multiplier, lastTicks.get(fill.code)) : null;
     if (next && fill && seenFills.size < 10000) {
         seenFills.add(fill.key);
         if (eventKey) seenFills.add(eventKey);
@@ -855,6 +857,8 @@ function start() {
     const stopTicks = onAnyTick(tick => {
         const price = Number(tick.close);
         if (!Number.isFinite(price) || price <= 0 || tick.simtrade) return;
+        if (lastTicks.size >= 2000 && !lastTicks.has(tick.code)) lastTicks.clear();
+        lastTicks.set(tick.code, price);
         let changed = false;
         const positions = state.positions.map(p => {
             if (p.code !== tick.code) return p;
@@ -884,7 +888,7 @@ function start() {
     };
     const stopStatus = subscribeStatusStore(statusChanged);
     import.meta.hot?.dispose(() => {
-        stopMutations(); stopResponses(); stopOrders(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); stopStatus(); channel?.close();
+        stopMutations(); stopResponses(); stopOrders(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); lastTicks.clear(); stopStatus(); channel?.close();
         positionQuotes.forEach(entry => entry.release?.());
         if (publishTimer) clearTimeout(publishTimer);
         clearInterval(stateHeartbeat);
