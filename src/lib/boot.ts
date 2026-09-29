@@ -18,14 +18,17 @@ import {
     fetchInfo,
     subscribeTradeEvents,
 } from './shioaji';
-import { onOrderEvent } from './stream';
+import { getStreamStatus, onOrderEvent, subscribeStatusStore } from './stream';
 import {
     harnessOwnershipCompatible,
+    consumeTrayReadyOnReload,
     loadDesktopSettings,
     localTlsCertExists,
+    markTrayReadyOnReload,
     nativeOwnsHarnessSidecar,
     serverStart,
     serverStatus,
+    setTrayStatus,
 } from './tauri';
 import { logNotice, notify } from './trade';
 import { isChildWindow } from './window-role';
@@ -71,8 +74,23 @@ export function bootstrap() {
     installKeyboardFocusHeal();
     // agent scheduled/triggered tasks run for the app's lifetime
     agentModule?.ensureScheduler();
+    if (isTauri && !isChildWindow()) {
+        const syncTray = () => {
+            const state = getStreamStatus();
+            setTrayStatus(state === 'live' ? 'idle' : state === 'connecting' ? 'conn' : 'error');
+        };
+        subscribeStatusStore(syncTray);
+        const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+        motion.addEventListener('change', syncTray);
+        const initialTrayStatus = consumeTrayReadyOnReload() ? 'ready' : 'cold';
+        syncTray();
+        setTrayStatus(initialTrayStatus);
+    }
     // every order event lands in the 通知中心 log (toasts stay separate)
     onOrderEvent((ev) => {
+        if (ev.kind === 'deal') setTrayStatus('filled');
+        else if (ev.failed) setTrayStatus('error');
+        else if (ev.opType === 'New') setTrayStatus('order');
         const d = describeOrderReport(ev);
         logNotice({
             kind: d.kind === 'err' ? 'err' : 'info',
@@ -192,6 +210,7 @@ async function run() {
                             try {
                                 await fetchHealth();
                                 clearInterval(timer);
+                                markTrayReadyOnReload();
                                 window.location.reload();
                             } catch {
                                 // not up yet
@@ -250,6 +269,7 @@ async function run() {
                 if (!(await serverVersionOk())) return; // warned; keep waiting
             }
             clearInterval(timer);
+            markTrayReadyOnReload();
             window.location.reload();
         } catch {
             // keep waiting

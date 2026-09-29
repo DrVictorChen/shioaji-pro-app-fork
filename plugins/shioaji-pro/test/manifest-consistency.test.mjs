@@ -1,71 +1,62 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
 
-const pluginRoot = new URL("../", import.meta.url);
+const root = new URL('../', import.meta.url);
+const read = async (path) =>
+  (await readFile(new URL(path, root), 'utf8')).replace(/\r\n?/g, '\n');
 
-async function readJson(path) {
-  return JSON.parse(await readFile(new URL(path, pluginRoot), "utf8"));
+function parseSemanticSections(markdown) {
+  const text = markdown.replace(/\r\n?/g, '\n');
+  const sections = new Map();
+  for (const [, heading, body] of text.matchAll(/^## ([^\n]+)\n([\s\S]*?)(?=^## |$(?![\s\S]))/gm)) {
+    sections.set(heading, body);
+  }
+  return sections;
 }
 
-test("Codex and Claude expose the same provider-neutral skill package", async () => {
-  const codex = await readJson(".codex-plugin/plugin.json");
-  const claude = await readJson(".claude-plugin/plugin.json");
-
-  assert.equal(codex.name, "shioaji-pro");
-  assert.equal(claude.name, codex.name);
-  assert.equal(claude.version, codex.version);
-  assert.equal(claude.description, codex.description);
-  assert.equal(codex.skills, "./skills/");
-  assert.equal(claude.skills, codex.skills);
-
-  for (const manifest of [codex, claude]) {
-    for (const executableField of ["scripts", "hooks", "mcpServers"]) {
-      assert.equal(executableField in manifest, false);
+test('Claude and Codex manifests agree and describe a safe skill', async () => {
+  const claude = JSON.parse(await read('.claude-plugin/plugin.json'));
+  const codex = JSON.parse(await read('.codex-plugin/plugin.json'));
+  for (const key of ['name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords', 'skills']) {
+    assert.deepEqual(codex[key], claude[key], `${key} differs between manifests`);
+  }
+  assert.equal(claude.name, 'shioaji-pro');
+  assert.match(claude.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(claude.skills, './skills/');
+  assert.match(claude.description, /safe.*capability-scoped/i);
+  assert.match(codex.interface.shortDescription, /safe/i);
+  assert.match(codex.interface.longDescription, /capability-scoped permissions/i);
+  for (const manifest of [claude, codex]) {
+    for (const field of ['commands', 'scripts', 'hooks', 'mcpServers']) {
+      assert.ok(!Object.hasOwn(manifest, field), `${field} must not be bundled`);
     }
   }
 });
 
-test("the shared skill and required safety references are bundled", async () => {
-  const files = [
-    "skills/shioaji-pro/SKILL.md",
-    "skills/shioaji-pro/references/MCP_TOOLS.md",
-    "skills/shioaji-pro/references/CONTENT_AND_BACKTEST.md",
-    "skills/shioaji-pro/references/SAFETY.md",
-    "skills/shioaji-pro/references/PRIVACY.md"
-  ];
-
-  for (const file of files) {
-    const contents = await readFile(new URL(file, pluginRoot), "utf8");
-    assert.ok(contents.trim().length > 0, `${file} must not be empty`);
+test('every SKILL.md reference exists', async () => {
+  const skill = await read('skills/shioaji-pro/SKILL.md');
+  const references = [...skill.matchAll(/\]\(references\/([^#)]+\.md)(?:#[^)]*)?\)/g)].map((match) => match[1]);
+  assert.ok(references.length > 0);
+  for (const reference of new Set(references)) {
+    assert.ok((await read(`skills/shioaji-pro/references/${reference}`)).trim().length > 0, reference);
+  }
+  for (const required of ['MCP_TOOLS.md', 'CONTENT_AND_BACKTEST.md', 'CONTENT_AUTHORING.md', 'SAFETY.md', 'PRIVACY.md']) {
+    assert.ok(references.includes(required), `${required} must be referenced`);
   }
 });
 
-test("the skill routes native content and bounded backtest reads", async () => {
-  const skill = await readFile(
-    new URL("skills/shioaji-pro/SKILL.md", pluginRoot),
-    "utf8"
-  );
-  const reference = await readFile(
-    new URL(
-      "skills/shioaji-pro/references/CONTENT_AND_BACKTEST.md",
-      pluginRoot
-    ),
-    "utf8"
-  );
-
-  assert.match(skill, /CONTENT_AND_BACKTEST\.md/);
-  for (const tool of [
-    "save_custom_indicator",
-    "save_strategy",
-    "get_backtest_result",
-    "list_backtest_symbol_results",
-    "get_backtest_trades"
-  ]) {
-    assert.match(reference, new RegExp(`\\b${tool}\\b`));
+test('semantic reference retains capability, names, and bounded backtest sections', async () => {
+  const markdown = await read('skills/shioaji-pro/references/MCP_TOOLS.md');
+  const sections = parseSemanticSections(markdown);
+  for (const heading of ['Tool Families', 'Capability Rules', 'Composition', 'v1 semantic names']) {
+    assert.ok(sections.has(heading), `missing ${heading}`);
   }
-  assert.match(reference, /ephemeral/);
-  assert.match(reference, /not a Portfolio Run/);
-  assert.match(reference, /maximum is 100/);
-  assert.match(reference, /latest 500 trades per symbol/);
+  const names = sections.get('v1 semantic names');
+  for (const label of ['Market', 'Account', 'App state', 'Workspace mutation', 'Native content', 'Chart indicators', 'Backtest reads', 'Reusable skills', 'Background tasks', 'Trading']) {
+    assert.match(names, new RegExp(`^- ${label}:`, 'm'), `missing ${label}`);
+  }
+  assert.match(names, /`trade\.preview`:[\s\S]*`trade\.execute`:/);
+  assert.match(names, /bounded, paged/);
+  assert.deepEqual(parseSemanticSections(markdown.replace(/\n/g, '\r\n')), sections);
 });

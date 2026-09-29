@@ -61,11 +61,40 @@ export function reloadWhenHealthy(timeoutMs = 90_000) {
             const { fetchHealth } = await import('./shioaji');
             await fetchHealth();
             clearInterval(t);
+            markTrayReadyOnReload();
             window.location.reload();
         } catch {
             // not up yet
         }
     }, 2000);
+}
+
+const TRAY_READY_KEY = 'shioaji:tray-ready-after-reload';
+
+export function markTrayReadyOnReload(): void {
+    if (!isTauri || isChildWindow()) return;
+    try { sessionStorage.setItem(TRAY_READY_KEY, '1'); } catch { /* storage may be unavailable */ }
+}
+
+export function consumeTrayReadyOnReload(): boolean {
+    if (!isTauri || isChildWindow()) return false;
+    try {
+        const ready = sessionStorage.getItem(TRAY_READY_KEY) === '1';
+        sessionStorage.removeItem(TRAY_READY_KEY);
+        return ready;
+    } catch { return false; }
+}
+
+export type TrayStatus = 'idle' | 'cold' | 'boot' | 'ready' | 'conn' | 'think' | 'order' | 'filled' | 'error';
+
+export function setTrayStatus(status: TrayStatus): void {
+    if (!isTauri || isChildWindow()) return;
+    void import('@tauri-apps/api/core').then(({ invoke }) =>
+        invoke('set_tray_status', {
+            status,
+            reduceMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        }),
+    ).catch(() => undefined);
 }
 
 // ---- shioaji server sidecar ----
@@ -127,6 +156,7 @@ async function spawnServer(
     const { invoke } = await import('@tauri-apps/api/core');
     let pid: number;
     try {
+        setTrayStatus('boot');
         pid = await invoke<number>('spawn_server', {
             args,
             env: fullEnv,
