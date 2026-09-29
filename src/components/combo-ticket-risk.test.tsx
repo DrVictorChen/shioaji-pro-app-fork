@@ -33,7 +33,7 @@ vi.mock('../lib/combo-pick', () => ({ useComboPick: () => null }));
 vi.mock('../lib/option-pick', () => ({ useOptionLegPick: () => null }));
 vi.mock('../lib/price-sync', () => ({ usePickedPrice: () => null }));
 vi.mock('../lib/quote-ownership', () => ({ retainContractQuotes: () => () => undefined }));
-vi.mock('../lib/privacy', () => ({ usePrivacyMode: () => false, maskAccountId: (id: string) => id }));
+vi.mock('../lib/privacy', () => ({ usePrivacyMode: () => false, maskAccountId: (id: string) => id, getPrivacyMoney: () => false, maskMoney: (t: string) => t }));
 vi.mock('../lib/contracts-cache', () => ({ ensureContract: async (code: string) => contracts[code] }));
 vi.mock('../lib/shioaji', () => ({
     buildComboContract: vi.fn(),
