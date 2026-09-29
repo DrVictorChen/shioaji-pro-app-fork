@@ -21,8 +21,10 @@ import {
 import { getStreamStatus, onOrderEvent, subscribeStatusStore } from './stream';
 import {
     harnessOwnershipCompatible,
+    consumeTrayReadyOnReload,
     loadDesktopSettings,
     localTlsCertExists,
+    markTrayReadyOnReload,
     nativeOwnsHarnessSidecar,
     serverStart,
     serverStatus,
@@ -80,8 +82,9 @@ export function bootstrap() {
         subscribeStatusStore(syncTray);
         const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
         motion.addEventListener('change', syncTray);
+        const initialTrayStatus = consumeTrayReadyOnReload() ? 'ready' : 'cold';
         syncTray();
-        setTrayStatus('cold');
+        setTrayStatus(initialTrayStatus);
     }
     // every order event lands in the 通知中心 log (toasts stay separate)
     onOrderEvent((ev) => {
@@ -207,6 +210,7 @@ async function run() {
                             try {
                                 await fetchHealth();
                                 clearInterval(timer);
+                                markTrayReadyOnReload();
                                 window.location.reload();
                             } catch {
                                 // not up yet
@@ -265,6 +269,7 @@ async function run() {
                 if (!(await serverVersionOk())) return; // warned; keep waiting
             }
             clearInterval(timer);
+            markTrayReadyOnReload();
             window.location.reload();
         } catch {
             // keep waiting

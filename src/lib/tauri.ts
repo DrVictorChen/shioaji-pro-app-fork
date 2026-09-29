@@ -61,11 +61,28 @@ export function reloadWhenHealthy(timeoutMs = 90_000) {
             const { fetchHealth } = await import('./shioaji');
             await fetchHealth();
             clearInterval(t);
+            markTrayReadyOnReload();
             window.location.reload();
         } catch {
             // not up yet
         }
     }, 2000);
+}
+
+const TRAY_READY_KEY = 'shioaji:tray-ready-after-reload';
+
+export function markTrayReadyOnReload(): void {
+    if (!isTauri || isChildWindow()) return;
+    try { sessionStorage.setItem(TRAY_READY_KEY, '1'); } catch { /* storage may be unavailable */ }
+}
+
+export function consumeTrayReadyOnReload(): boolean {
+    if (!isTauri || isChildWindow()) return false;
+    try {
+        const ready = sessionStorage.getItem(TRAY_READY_KEY) === '1';
+        sessionStorage.removeItem(TRAY_READY_KEY);
+        return ready;
+    } catch { return false; }
 }
 
 export type TrayStatus = 'idle' | 'cold' | 'boot' | 'ready' | 'conn' | 'think' | 'order' | 'filled' | 'error';
@@ -159,7 +176,6 @@ async function spawnServer(
     while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
         if (await probeInfo(port, scheme)) {
-            setTrayStatus('ready');
             return { ok: true, output: await readServerLog(port) };
         }
         const alive = await invoke<boolean>('process_alive', { pid }).catch(
