@@ -1,13 +1,13 @@
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ load: vi.fn(), save: vi.fn(), start: vi.fn(), stop: vi.fn(), status: vi.fn(), env: vi.fn(), notify: vi.fn(), info: vi.fn(), prepare: vi.fn() }));
+const mocks = vi.hoisted(() => ({ load: vi.fn(), save: vi.fn(), start: vi.fn(), stop: vi.fn(), status: vi.fn(), env: vi.fn(), envCandidate: vi.fn(), ca: vi.fn(), notify: vi.fn(), info: vi.fn(), prepare: vi.fn() }));
 vi.mock('../lib/tauri', () => ({
     isTauri: true, appVersion: async () => 'dev · test',
     loadDesktopSettings: mocks.load, saveDesktopSettings: mocks.save,
     stopAgentsForServerChange: mocks.prepare,
     serverStart: mocks.start, serverStop: mocks.stop, serverStatus: mocks.status,
-    pickEnvFile: mocks.env, pickCaFile: vi.fn(),
+    pickEnvFile: mocks.env, importEnvCandidate: mocks.envCandidate, pickCaFile: mocks.ca,
     subscribeAgentHarnessEnabled: () => () => {}, subscribeAppUpdateState: () => () => {},
     getAppUpdateState: () => updateState, checkForUpdates: vi.fn(), ensureLocalTlsCert: vi.fn(),
     openLatestRelease: vi.fn(), reloadWhenHealthy: vi.fn(), restartAndInstallUpdate: vi.fn(),
@@ -40,8 +40,10 @@ describe('server settings edit and apply workflow', () => {
     const changeKey = async (value: string) => { await act(async () => view.root.findByType(ServerSettingsDialog).findAllByType('input')[0]!.props.onChange({ target: { value } })); };
     it('keeps edits and .env imports in draft; cancelling leaves saved credentials and server alone', async () => {
         await open(); await changeKey('changed-key');
-        mocks.env.mockResolvedValue({ secretKey: 'imported-secret' });
-        await act(async () => button('從 .env').props.onClick());
+        mocks.env.mockResolvedValue({ kind: 'imported', fileName: 's_multi.env', secretKey: 'imported-secret' });
+        await act(async () => button('選擇 .env 檔案').props.onClick());
+        expect(mocks.env).toHaveBeenCalledWith('file');
+        expect(text()).toContain('已從 s_multi.env 匯入，尚未儲存。');
         expect(text()).toContain('尚未儲存');
         expect(mocks.save).not.toHaveBeenCalled();
         await act(async () => button('取消變更').props.onClick());
@@ -49,6 +51,29 @@ describe('server settings edit and apply workflow', () => {
         await act(async () => button('完整設定').props.onClick());
         expect(view.root.findByType(ServerSettingsDialog).findAllByType('input')[0]!.props.value).toBe('test-key');
         expect(mocks.start).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled();
+    });
+    it('shows a choice for multiple folder candidates and imports only the selected name', async () => {
+        await open();
+        const selection = { directory: 'C:\\Keys', candidates: ['.env', 'a.env', 'b.env'] };
+        mocks.env.mockResolvedValue({ kind: 'choose', selection });
+        mocks.envCandidate.mockResolvedValue({ kind: 'imported', fileName: 'b.env', apiKey: 'new-key' });
+        await act(async () => button('選擇資料夾').props.onClick());
+        expect(mocks.env).toHaveBeenCalledWith('directory');
+        expect(text()).toContain('b.env');
+        const select = view.root.findByType('select');
+        await act(async () => select.props.onChange({ target: { value: 'b.env' } }));
+        await act(async () => button('匯入所選檔案').props.onClick());
+        expect(mocks.envCandidate).toHaveBeenCalledExactlyOnceWith(selection, 'b.env');
+        expect(text()).toContain('已從 b.env 匯入，尚未儲存。');
+        expect(mocks.save).not.toHaveBeenCalled();
+    });
+    it('reports a CA picker failure as a certificate error', async () => {
+        await open();
+        await act(async () => button('正式環境').props.onClick());
+        mocks.ca.mockRejectedValue(new Error('fixture'));
+        await act(async () => button('選擇憑證檔').props.onClick());
+        expect(text()).toContain('無法讀取憑證檔。');
+        expect(text()).not.toContain('無法匯入 .env 檔案。');
     });
     it('saves once without restarting and preserves other panels’ latest Harness/TLS settings', async () => {
         await open(); await changeKey('changed-key');

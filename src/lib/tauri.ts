@@ -1421,48 +1421,80 @@ function parseEnvKeys(
     return out;
 }
 
-// lets the user pick a project FOLDER (not the .env file itself) and pulls
-// SJ_API_KEY/SJ_SEC_KEY out of the first matching file found inside it.
-// Native open-file dialogs hide dotfiles by default (macOS/Windows/Linux
-// file pickers all do this — there's no cross-platform API flag to force
-// them visible, only an undiscoverable OS-level shortcut on macOS), so
-// ".env" itself is invisible if picked directly. A directory listing via
-// the fs plugin isn't subject to that UI-level filtering, so picking the
-// containing folder and reading its entries sidesteps the problem entirely.
-export async function pickEnvFile(): Promise<{
-    apiKey?: string;
-    secretKey?: string;
-    error?: string;
-} | null> {
+export type EnvSelection = { directory: string; candidates: string[] };
+export type EnvImportResult =
+    | { kind: 'imported'; fileName: string; apiKey?: string; secretKey?: string }
+    | { kind: 'choose'; selection: EnvSelection }
+    | { kind: 'error'; error: string };
+
+const envFileName = (name: string) => name.endsWith('.env') || name.startsWith('.env.');
+const fileNameFromPath = (path: string) =>
+    path.split(path.startsWith('/') ? '/' : /[/\\]/).pop() ?? path;
+const joinEnvPath = (directory: string, name: string) => {
+    const posix = directory.startsWith('/');
+    const trailingSeparator = posix ? directory.endsWith('/') : /[/\\]$/.test(directory);
+    const separator = posix ? '/' : directory.includes('\\') ? '\\' : '/';
+    return `${directory}${trailingSeparator ? '' : separator}${name}`;
+};
+const checkedFiles = (names: string[]) => `已檢查檔案：${names.length ? names.join('、') : '無'}`;
+
+export function envCandidates(names: string[]): string[] {
+    return names.filter(envFileName).sort((a, b) =>
+        a === '.env' ? -1 : b === '.env' ? 1 : a.localeCompare(b),
+    );
+}
+
+async function readEnvKeys(path: string, fileName: string): Promise<EnvImportResult> {
+    const { readTextFile } = await import('@tauri-apps/plugin-fs');
+    let text: string;
+    try {
+        text = await readTextFile(path);
+    } catch {
+        return { kind: 'error', error: `無法讀取 ${fileName}。${checkedFiles([fileName])}` };
+    }
+    const found = parseEnvKeys(text);
+    return found.apiKey || found.secretKey
+        ? { kind: 'imported', fileName, ...found }
+        : { kind: 'error', error: `${fileName} 沒有 SJ_API_KEY / SJ_SEC_KEY。${checkedFiles([fileName])}` };
+}
+
+// File dialogs can hide ".env" on some platforms; selecting its folder and
+// listing entries also lets the user import that hidden file.
+export async function pickEnvFile(mode: 'file' | 'directory'): Promise<EnvImportResult | null> {
     if (!isTauri) return null;
     const { open } = await import('@tauri-apps/plugin-dialog');
-    const dir = await open({
-        directory: true,
-        title: '選擇專案資料夾（自動尋找裡面的 .env*）',
+    const selected = await open({
+        multiple: false,
+        directory: mode === 'directory',
+        title: mode === 'file' ? '選擇 .env 檔案' : '選擇包含 .env 檔案的資料夾',
     });
-    if (typeof dir !== 'string') return null; // dialog cancelled
-    const { readDir, readTextFile } = await import('@tauri-apps/plugin-fs');
-    const entries = await readDir(dir).catch(() => []);
-    // any file starting with ".env" — .env, .env.local, .env.production,
-    // .env.whatever-custom-name a project happens to use. Exact ".env"
-    // first (most common), then the rest alphabetically for determinism.
-    const candidates = entries
-        .filter((e) => e.isFile && e.name.startsWith('.env'))
-        .map((e) => e.name)
-        .sort((a, b) => (a === '.env' ? -1 : b === '.env' ? 1 : a.localeCompare(b)));
-    for (const candidate of candidates) {
-        const text = await readTextFile(`${dir}/${candidate}`).catch(
-            () => '',
-        );
-        const found = parseEnvKeys(text);
-        if (found.apiKey || found.secretKey) return found;
+    if (typeof selected !== 'string') return null;
+    if (mode === 'file') {
+        const fileName = fileNameFromPath(selected);
+        return envFileName(fileName)
+            ? readEnvKeys(selected, fileName)
+            : { kind: 'error', error: `${fileName} 不是 .env 檔案。${checkedFiles([fileName])}` };
     }
-    return {
-        error:
-            candidates.length > 0
-                ? `找到 ${candidates.join('、')} 但裡面沒有 SJ_API_KEY / SJ_SEC_KEY`
-                : '這個資料夾裡沒有任何 .env 開頭的檔案',
-    };
+    const { readDir } = await import('@tauri-apps/plugin-fs');
+    let names: string[];
+    try {
+        names = (await readDir(selected)).filter(entry => entry.isFile).map(entry => entry.name);
+    } catch {
+        return { kind: 'error', error: `無法讀取資料夾。${checkedFiles([])}` };
+    }
+    const candidates = envCandidates(names);
+    if (!candidates.length) {
+        return { kind: 'error', error: `資料夾裡沒有 .env 檔案。${checkedFiles(names.sort())}` };
+    }
+    if (candidates.length === 1) return readEnvKeys(joinEnvPath(selected, candidates[0]!), candidates[0]!);
+    return { kind: 'choose', selection: { directory: selected, candidates } };
+}
+
+export async function importEnvCandidate(selection: EnvSelection, fileName: string): Promise<EnvImportResult> {
+    if (!selection.candidates.includes(fileName)) {
+        return { kind: 'error', error: `檔案不在候選清單中。${checkedFiles(selection.candidates)}` };
+    }
+    return readEnvKeys(joinEnvPath(selection.directory, fileName), fileName);
 }
 
 // ---- popout windows ----

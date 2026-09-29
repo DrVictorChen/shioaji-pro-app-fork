@@ -197,6 +197,16 @@ export const importBtn = style([
     },
 ]);
 
+export const importRow = style({ display: 'flex', flexWrap: 'wrap', gap: '6px' });
+export const importSelect = style({
+    width: '100%', padding: '8px', borderRadius: vars.radius.md,
+    border: `1px solid ${vars.color.border}`, background: vars.color.inset,
+    color: vars.color.foreground, fontFamily: vars.font.body,
+});
+export const importMessage = style({
+    fontFamily: vars.font.body, fontSize: '0.7rem', color: vars.color.accent,
+});
+
 export const hint = style({
     fontFamily: vars.font.body,
     fontSize: '0.68rem',

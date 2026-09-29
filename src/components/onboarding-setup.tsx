@@ -16,10 +16,13 @@ import {
     pickCaFile,
     isTauri,
     pickEnvFile,
+    importEnvCandidate,
     reloadWhenHealthy,
     saveDesktopSettings,
     serverStart,
     type DesktopSettings,
+    type EnvImportResult,
+    type EnvSelection,
 } from '../lib/tauri';
 import { timedOnboarding } from '../lib/server-actions';
 import { FeatureGate } from './feature-gate';
@@ -53,19 +56,43 @@ export function OnboardingSetup() {
     const [showCaPw, setShowCaPw] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    const [importMessage, setImportMessage] = useState('');
+    const [importPending, setImportPending] = useState(false);
+    const [envSelection, setEnvSelection] = useState<EnvSelection | null>(null);
+    const [envChoice, setEnvChoice] = useState('');
 
     const patch = (next: Partial<DesktopSettings>) =>
         setSettings((s) => ({ ...s, ...next }));
 
-    const importEnv = async () => {
-        const found = await pickEnvFile();
-        if (!found) return; // dialog cancelled
-        if (found.error) {
+    const handleEnvResult = (found: EnvImportResult | null) => {
+        if (!found) return;
+        if (found.kind === 'choose') {
+            setEnvSelection(found.selection);
+            setEnvChoice('');
+        } else if (found.kind === 'error') {
             setError(found.error);
-            return;
+        } else {
+            patch({ ...(found.apiKey !== undefined ? { apiKey: found.apiKey } : {}),
+                ...(found.secretKey !== undefined ? { secretKey: found.secretKey } : {}) });
+            setEnvSelection(null);
+            setImportMessage(`已從 ${found.fileName} 匯入`);
         }
+    };
+
+    const importEnv = async (mode: 'file' | 'directory' | 'selected') => {
+        setImportPending(true);
         setError('');
-        patch(found);
+        setImportMessage('');
+        if (mode !== 'selected') setEnvSelection(null);
+        try {
+            handleEnvResult(mode === 'selected' && envSelection
+                ? await importEnvCandidate(envSelection, envChoice)
+                : mode !== 'selected' ? await pickEnvFile(mode) : null);
+        } catch {
+            setError('無法匯入 .env 檔案。');
+        } finally {
+            setImportPending(false);
+        }
     };
 
     const submit = async () => {
@@ -118,15 +145,20 @@ export function OnboardingSetup() {
                         </div>
                     </div>
 
-                    <button
-                        className={styles.importBtn}
-                        type='button'
-                        disabled={busy}
-                        onClick={importEnv}
-                    >
-                        <FileUp size={13} />
-選資料夾自動讀取 .env
-                    </button>
+                    <div className={styles.importRow}>
+                        <button className={styles.importBtn} type='button' disabled={busy || importPending} onClick={() => void importEnv('file')}><FileUp size={13} />選擇 .env 檔案</button>
+                        <button className={styles.importBtn} type='button' disabled={busy || importPending} onClick={() => void importEnv('directory')}>選擇資料夾</button>
+                    </div>
+                    <span className={styles.hint}>支援 name.env、.env、.env.local；隱藏檔請選資料夾。</span>
+                    {envSelection && <div className={styles.fieldGroup}>
+                        <label className={styles.hint} htmlFor='onboarding-env-choice'>選擇要匯入的檔案</label>
+                        <select id='onboarding-env-choice' className={styles.importSelect} value={envChoice} disabled={busy || importPending} onChange={e => setEnvChoice(e.target.value)}>
+                            <option value=''>請選擇檔案</option>
+                            {envSelection.candidates.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                        <button className={styles.importBtn} type='button' disabled={busy || importPending || !envChoice} onClick={() => void importEnv('selected')}>匯入所選檔案</button>
+                    </div>}
+                    {importMessage && <span className={styles.importMessage} role='status'>{importMessage}</span>}
 
                     <div className={styles.fieldGroup}>
                         <span className={styles.label}>API KEY</span>
@@ -290,7 +322,7 @@ export function OnboardingSetup() {
                             </span>
                         </>
                     ) : (
-                        <button className={styles.submitBtn} onClick={submit}>
+                        <button className={styles.submitBtn} disabled={importPending} onClick={submit}>
                             <KeyRound size={15} />
                             啟動並開始使用
                         </button>

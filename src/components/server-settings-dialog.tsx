@@ -1,6 +1,6 @@
 import { Eye, EyeOff, FileUp, X } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { pickCaFile, pickEnvFile, type DesktopSettings, type ServerStatus } from '../lib/tauri';
+import { importEnvCandidate, pickCaFile, pickEnvFile, type DesktopSettings, type EnvImportResult, type EnvSelection, type ServerStatus } from '../lib/tauri';
 import * as s from './server-settings-dialog.css';
 import { AsyncStatus } from './async-status';
 
@@ -20,6 +20,8 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
     const [pending, setPending] = useState(false);
     const [message, setMessage] = useState('');
     const [error, setError] = useState('');
+    const [envSelection, setEnvSelection] = useState<EnvSelection | null>(null);
+    const [envChoice, setEnvChoice] = useState('');
     const active = useRef(false);
     const dialog = useRef<HTMLDivElement>(null);
     const close = useRef(onClose); close.current = onClose;
@@ -40,7 +42,7 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
                 if (!lockedRef.current) close.current();
             }
             if (event.key !== 'Tab') return;
-            const nodes = Array.from(node.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href], summary, [tabindex="0"]')).filter(el => el.getClientRects().length);
+            const nodes = Array.from(node.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], summary, [tabindex="0"]')).filter(el => el.getClientRects().length);
             const first = nodes[0], last = nodes.at(-1);
             if (!first || !last) { event.preventDefault(); node.focus(); return; }
             if (event.shiftKey && (document.activeElement === first || document.activeElement === node)) { event.preventDefault(); last.focus(); }
@@ -58,20 +60,29 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
         } catch (e) { setError(e instanceof Error ? e.message : '儲存失敗，請重試。'); }
         finally { active.current = false; setPending(false); }
     };
-    const chooseFile = async (kind: 'env' | 'ca') => {
+    const handleEnvResult = (found: EnvImportResult | null) => {
+        if (!found) return;
+        if (found.kind === 'choose') {
+            setEnvSelection(found.selection); setEnvChoice('');
+        } else if (found.kind === 'error') setError(found.error);
+        else {
+            change({ ...(found.apiKey !== undefined ? { apiKey: found.apiKey } : {}), ...(found.secretKey !== undefined ? { secretKey: found.secretKey } : {}) });
+            setEnvSelection(null);
+            setMessage(`已從 ${found.fileName} 匯入，尚未儲存。`);
+        }
+    };
+    const chooseFile = async (kind: 'env-file' | 'env-directory' | 'env-selected' | 'ca') => {
         if (active.current) return;
-        active.current = true; setPending(true); setError('');
+        active.current = true; setPending(true); setError(''); setMessage('');
         try {
             if (kind === 'ca') { const path = await pickCaFile(); if (path) change({ caPath: path }); }
             else {
-                const found = await pickEnvFile();
-                if (found?.error) setError(found.error);
-                else if (found) {
-                    change({ ...(found.apiKey !== undefined ? { apiKey: found.apiKey } : {}), ...(found.secretKey !== undefined ? { secretKey: found.secretKey } : {}) });
-                    setMessage('已讀取金鑰到表單，尚未儲存。');
-                }
+                if (kind !== 'env-selected') setEnvSelection(null);
+                handleEnvResult(kind === 'env-selected' && envSelection
+                    ? await importEnvCandidate(envSelection, envChoice)
+                    : kind !== 'env-selected' ? await pickEnvFile(kind === 'env-file' ? 'file' : 'directory') : null);
             }
-        } catch (e) { setError(e instanceof Error ? e.message : '無法讀取檔案。'); }
+        } catch { setError(kind === 'ca' ? '無法讀取憑證檔。' : '無法匯入 .env 檔案。'); }
         finally { active.current = false; setPending(false); }
     };
     const currentMode = status?.simulation === true ? '模擬' : status?.simulation === false ? '正式' : '環境待確認';
@@ -92,7 +103,15 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
                     <h3 id="server-keys-title" className={s.heading}>API 金鑰</h3>
                     <label className={s.field}><span className={s.label}>API Key</span><input className={s.input} type="password" autoComplete="off" value={draft.apiKey} disabled={locked} onChange={e => change({ apiKey: e.target.value })} /></label>
                     <label className={s.field}><span className={s.label}>Secret Key</span><input className={s.input} type="password" autoComplete="off" value={draft.secretKey} disabled={locked} onChange={e => change({ secretKey: e.target.value })} /></label>
-                    <div className={s.row}><button className={s.button} disabled={locked} onClick={() => void chooseFile('env')}><FileUp size={14} />從 .env 匯入</button><span className={s.hint}>選擇包含 .env 的資料夾</span></div>
+                    <div className={s.row}><button className={s.button} disabled={locked} onClick={() => void chooseFile('env-file')}><FileUp size={14} />選擇 .env 檔案</button><button className={s.button} disabled={locked} onClick={() => void chooseFile('env-directory')}>選擇資料夾</button></div>
+                    <p className={s.hint}>支援 name.env、.env、.env.local；隱藏檔請選資料夾。</p>
+                    {envSelection && <div className={s.field}>
+                        <label className={s.label} htmlFor='server-env-choice'>選擇要匯入的檔案</label>
+                        <div className={s.row}><select id='server-env-choice' className={s.input} style={{ flex: 1 }} value={envChoice} disabled={locked} onChange={e => setEnvChoice(e.target.value)}>
+                            <option value=''>請選擇檔案</option>
+                            {envSelection.candidates.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select><button className={s.button} disabled={locked || !envChoice} onClick={() => void chooseFile('env-selected')}>匯入所選檔案</button></div>
+                    </div>}
                     <p className={s.hint}>金鑰儲存在本機 App 資料夾。</p>
                 </section>
                 <section className={s.section} aria-labelledby="server-environment-title">
