@@ -15,6 +15,7 @@ import {
 import {
     fetchHealth,
     fetchInfo,
+    fetchTradeCacheHealth,
     subscribeTradeEvents,
 } from './shioaji';
 import { ensureStream, getStreamStatus, holdStream, onOrderEvent, releaseStream, subscribeStatusStore } from './stream';
@@ -35,6 +36,7 @@ import {
 } from './tauri';
 import {
     beginBootTiming,
+    endTiming,
     getActiveTiming,
     markStage,
     peekActiveTiming,
@@ -52,6 +54,14 @@ import { logNotice, notify } from './trade';
 import { isChildWindow } from './window-role';
 
 let booted = false;
+let tradingStarted = false;
+
+function startTradingStateOnce() {
+    if (tradingStarted) return;
+    tradingStarted = true;
+    markStage('trading-start');
+    startTradingState();
+}
 
 async function matchesServerIdentity(status: ServerStatus | null, settings: DesktopSettings): Promise<boolean> {
     if (!status?.running) return false;
@@ -154,8 +164,7 @@ export function bootstrap() {
         // and the trading snapshot: its first read starts as soon as the
         // stream is live (subscribe-before-snapshot rule unchanged), no
         // longer after the dashboard mounted
-        startTradingState();
-        markStage('trading-start');
+        startTradingStateOnce();
     }
     // A real App launch: until boot knows whether this page will be
     // replaced by the post-start reload, don't let the dashboard open a
@@ -241,7 +250,7 @@ async function run() {
                         settleBootRun(coldStart ? 'attached' : 'ok');
                         setServerIdentityVerified(true);
                         releaseStream('server confirmed');
-                        startTradingState();
+                        startTradingStateOnce();
                         return;
                     }
                 } else if (matches && status) {
@@ -324,7 +333,7 @@ async function run() {
                     setServerIdentityVerified(true);
                     settleBootRun('ok');
                     releaseStream('server confirmed');
-                    startTradingState();
+                    startTradingStateOnce();
                     return;
                 }
             }
@@ -341,14 +350,17 @@ async function run() {
     // the scheme-agnostic status probe (NOT fetchHealth, which is locked to
     // the persisted scheme) so it still finds the server after a 本機 HTTPS
     // toggle left localStorage pointing at the other listener type.
-    if (!settingsLoaded && isTauri && !isPopout) return;
+    if (!settingsLoaded && isTauri && !isPopout) {
+        endTiming('failed', 'desktop settings unavailable');
+        return;
+    }
     if (!expectedSettings) {
         try {
             const health = await fetchHealth();
             if (serverHealthReady(health) && await serverVersionOk()) {
                 if (!isPopout) setServerIdentityVerified(true);
                 if (timed) settleBootRun('ok');
-                if (!isPopout) startTradingState();
+                if (!isPopout) startTradingStateOnce();
                 // The shared trading store subscribes before its initial snapshot.
                 return; // server was up at boot — components loaded normally
             }
@@ -464,20 +476,33 @@ async function serverVersionOk(): Promise<boolean> {
     }
 }
 
-// The order_event SSE stream only emits heartbeats until each account is
-// explicitly subscribed. Shioaji 1.7.6 requires this in simulation as well
-// (verified on a 1.7.6 simulation sidecar: no report before subscribe_trade);
-// 1.7.5 simulation accepted it as a harmless no-op, so no version gate.
-export async function subscribeTradeReports() {
-    try {
-        const accounts = await loadAccountsShared();
-        await Promise.all(
-            accounts
-                .filter((a) => a.signed)
-                .map((a) => subscribeTradeEvents(a)),
-        );
-    } catch (error) {
-        notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
-        throw error;
-    }
+// Shioaji 1.7.7 restores the token's original trade subscriptions on cached
+// login. Check each signed account before subscribing: a duplicate subscribe
+// can clear another account's relay record on the same session (sw#183).
+// A missing/failed health route falls back to subscribe for older servers.
+// Share the account read with the early trading snapshot and update the store.
+let tradeSubscriptionInFlight: Promise<void> | null = null;
+export function subscribeTradeReports(): Promise<void> {
+    if (tradeSubscriptionInFlight) return tradeSubscriptionInFlight;
+    const run = (async () => {
+        try {
+            const accounts = await loadAccountsShared();
+            for (const account of accounts.filter(a => a.signed)) {
+                let subscribed = false;
+                try {
+                    const health = await fetchTradeCacheHealth(account.account_type as 'S' | 'F', account);
+                    subscribed = !health.reasons.some(r => r.reason === 'NotSubscribed');
+                } catch {
+                    // Pre-1.7.6 sidecar or a transient health read failure.
+                }
+                if (!subscribed) await subscribeTradeEvents(account);
+            }
+        } catch (error) {
+            notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
+            throw error;
+        }
+    })();
+    tradeSubscriptionInFlight = run;
+    void run.finally(() => { tradeSubscriptionInFlight = null; }).catch(() => undefined);
+    return run;
 }

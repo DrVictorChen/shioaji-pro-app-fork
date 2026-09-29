@@ -4,7 +4,19 @@
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const m = vi.hoisted(() => ({ marks: [] as [string, string | undefined][], child: false }));
+const m = vi.hoisted(() => ({
+    marks: [] as [string, string | undefined][], child: false, autoOwn: true,
+    claim: null as null | (() => void), release: null as null | (() => void),
+}));
+vi.mock('./shared-stream', () => ({
+    createSharedStream: (options: { onOwn: () => void; onRelease: () => void }) => {
+        let owner = false;
+        m.claim = () => { owner = true; options.onOwn(); };
+        m.release = () => { owner = false; options.onRelease(); };
+        if (m.autoOwn) m.claim();
+        return { isOwner: () => owner, publish: vi.fn() };
+    },
+}));
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://fixture.invalid', getStreamBase: () => 'http://fixture.invalid' }));
 vi.mock('./api', () => ({ apiPost: vi.fn() }));
 vi.mock('./server-info-store', () => ({ knownServerInfo: () => ({ simulation: true }) }));
@@ -30,6 +42,9 @@ beforeEach(() => {
     FakeEventSource.all = [];
     m.marks = [];
     m.child = false;
+    m.autoOwn = true;
+    m.claim = null;
+    m.release = null;
     vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })));
 });
@@ -137,4 +152,38 @@ it('a hold after the stream started is a no-op', async () => {
     stream.holdStream();
     stream.releaseStream();
     expect(FakeEventSource.all).toHaveLength(1);
+});
+
+it('an early stream waits for ownership and opens only after the owner claim', async () => {
+    m.autoOwn = false;
+    const stream = await import('./stream');
+    stream.ensureStream();
+    vi.advanceTimersByTime(1000);
+    expect(FakeEventSource.all).toHaveLength(0);
+    expect(m.marks).toEqual([]);
+    m.claim!();
+    expect(FakeEventSource.all).toHaveLength(1);
+    expect(m.marks.map(([stage]) => stage)).toEqual(['stream-connect']);
+});
+
+it('releasing a startup hold while following never opens an EventSource', async () => {
+    m.autoOwn = false;
+    const stream = await import('./stream');
+    stream.holdStream();
+    stream.ensureStream();
+    stream.releaseStream('server confirmed');
+    expect(FakeEventSource.all).toHaveLength(0);
+    m.claim!();
+    expect(FakeEventSource.all).toHaveLength(1);
+});
+
+it('a queued fast retry is cancelled when ownership transfers', async () => {
+    const stream = await import('./stream');
+    stream.ensureStream();
+    last().onerror!();
+    m.release!();
+    vi.advanceTimersByTime(stream.STARTUP_RETRY_MS);
+    expect(FakeEventSource.all).toHaveLength(1);
+    m.claim!();
+    expect(FakeEventSource.all).toHaveLength(2);
 });

@@ -28,6 +28,7 @@ beforeEach(() => {
     FakeEventSource.all = [];
     m.post.mockReset(); fetchMock.mockClear();
     vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal('BroadcastChannel', undefined);
     vi.stubGlobal('fetch', fetchMock);
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -179,4 +180,26 @@ it('connection errors after silent connections use the normal backoff (≤ 15 s)
     FakeEventSource.all.at(-1)!.onopen!();
     FakeEventSource.all.at(-1)!.emit('heartbeat');
     expect(stream.getStreamWatchdog()).toMatchObject({ silentConnections: 0, retryDelayMs: 1000 });
+});
+
+it('admits a report event_id once when a replacement connection replays it', async () => {
+    const { default: fixture } = await import('./fixtures/native-simulation-event-id-1.7.6.json');
+    const { stream, first } = await open();
+    const reports: string[] = [];
+    stream.onOrderEvent(report => reports.push(report.eventId));
+    const report = fixture.events[0]!;
+    first.emit('order_event', report);
+    first.onerror!();
+    vi.advanceTimersByTime(1000);
+    const second = FakeEventSource.all.at(-1)!;
+    second.onopen!();
+    second.emit('order_event', report);
+    expect(reports).toEqual(['v1:FO:FSTREAM:RESET1:7']);
+});
+
+it('attaches named event families even when only a follower consumes them', async () => {
+    const { first } = await open();
+    for (const name of ['index_components', 'calculated_index', 'scanner', 'heartbeat']) {
+        expect(first.listeners.has(name)).toBe(true);
+    }
 });

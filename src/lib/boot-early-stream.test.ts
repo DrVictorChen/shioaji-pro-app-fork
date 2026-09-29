@@ -100,6 +100,35 @@ describe('early stream at bootstrap', () => {
         expect(m.ensureStream).toHaveBeenCalledTimes(1);
         // the trading snapshot starts at page load too, not after React mounts
         expect(m.startTrading).toHaveBeenCalledTimes(1);
+        const timing = await import('./startup-timing');
+        expect(timing.getActiveTiming()?.marks.filter(mark => mark.stage === 'trading-start')).toHaveLength(1);
+    });
+
+    it('records trading-start when a cold launch attaches to a healthy server', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: false,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
+                running: true, healthy: true, port: 21322,
+                simulation: true, version: '1.7.7', scheme: 'http',
+            });
+        });
+        await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
+        const timing = await import('./startup-timing');
+        expect(timing.getActiveTiming()?.marks.filter(mark => mark.stage === 'trading-start')).toHaveLength(1);
+    });
+
+    it('ends the continued timing run if desktop settings cannot be read', async () => {
+        await boot('reload', async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockRejectedValueOnce(new Error('settings unavailable'));
+        });
+        const timing = await import('./startup-timing');
+        await vi.waitFor(() => expect(timing.getTimingHistory()[0]?.outcome).toBe('failed'));
+        expect(timing.getActiveTiming()).toBeNull();
     });
 
     it('never in a child window', async () => {
@@ -184,7 +213,7 @@ describe('early stream at bootstrap', () => {
             vi.mocked(tauri.serverStatus)
                 .mockResolvedValueOnce({ running: false })
                 .mockResolvedValueOnce({ running: true, healthy: true, port: 21322,
-                    simulation: true, version: '1.7.6', scheme: 'http' });
+                    simulation: true, version: '1.7.7', scheme: 'http' });
             vi.mocked(tauri.serverStart).mockResolvedValueOnce({
                 ok: false, output: 'spawn failed', port: 21322,
                 attached: false, portChanged: false,
@@ -204,7 +233,7 @@ describe('early stream at bootstrap', () => {
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
                 running: true, healthy: true, port: 21322, simulation: false,
-                version: '1.7.6', scheme: 'http',
+                version: '1.7.7', scheme: 'http',
             });
             vi.mocked(tauri.serverStart).mockResolvedValueOnce({
                 ok: false, output: 'CA inactive', port: 21322,

@@ -897,7 +897,7 @@ export function ComboTicket() {
                 onClick={execute}
             >
                 {!live
-                    ? '⚠ 行情未連線，暫停下單'
+                    ? '⚠ 行情或交易狀態未連線，暫停下單'
                     : busy
                       ? '傳送中…'
                       : armed

@@ -756,7 +756,7 @@ export function FlashOrder({
                     onClick={() => { armedAccountKey.current = accountKey; setArmed((a) => !a); }}
                 >
                     {!live ? (
-                        '⚠ 未連線'
+                        '⚠ 行情或交易狀態未連線'
                     ) : armed ? (
                         <>
                             <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}

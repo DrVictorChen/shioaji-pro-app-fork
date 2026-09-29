@@ -7,13 +7,14 @@ import { subscribeTradeReports } from './boot';
 import { retainQuote } from './quote-ownership';
 import { onTradeResponse } from './trade-observations';
 import { fetchAccountBalance, fetchMargin, fetchPositions, fetchTradeCacheHealth, fetchTrades } from './shioaji';
-import { ensureStream, getStreamStatus, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
+import { ensureStream, getStreamStatus, isStreamOwner, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
 import { applyPositionFill, markPosition, positionFill, reportBody } from './portfolio-projection';
 import { projectOrderReport, projectTradeDeal } from './order-projection';
 import { parseEventId, reportLedger } from './report-ledger';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { takeMutationIntent, type MutationIntent } from './mutation-intent';
 import { cancelledByQuantity, readMark } from './cancel-verification';
+import { getTradingMirrorFresh, invalidateTradingMirror, markTradingMirrorSnapshot } from './trading-mirror-lease';
 import type { OrderEventReport } from './order-report';
 import type { Account, AccountBalance, AccountedPosition, AccountFunds, Margin } from './types/portfolio';
 import type { AccountedTrade, Trade, TradeCacheHealth } from './types/order';
@@ -178,14 +179,23 @@ function schedulePublish() {
     if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publish(); }, 50);
 }
 channel?.addEventListener('message', e => {
-    if (isMirror && e.data?.kind === 'state' && Array.isArray(e.data.state?.positions)
+    if (isMirror && e.data?.kind === 'main-gone') {
+        invalidateTradingMirror();
+        mirroredCacheContinuous = false;
+    } else if (isMirror && e.data?.kind === 'state' && Array.isArray(e.data.state?.positions)
         && Array.isArray(e.data.state?.trades)) {
         state = e.data.state;
         mirroredCacheContinuous = e.data.cacheContinuous === true;
+        if (!isStreamOwner()) markTradingMirrorSnapshot();
         publish();
     } else if (!isMirror && e.data?.kind === 'request') publish();
     else if (!isMirror && e.data?.kind === 'refresh' && queryScopes.includes(e.data.scope)) void refreshTradingState(e.data.scope);
 });
+// Normal close/reload should revoke the mirror's trading lease immediately.
+// Abrupt browser loss is bounded by the short lease and SSE lock handoff.
+if (!isMirror && typeof window !== 'undefined') window.addEventListener('pagehide', () => {
+    channel?.postMessage({ kind: 'main-gone' });
+}, { once: true });
 
 let inFlight: Promise<void> | null = null;
 let inFlightResult: Promise<void> | null = null;
@@ -699,6 +709,7 @@ function start() {
     if (started) return;
     started = true;
     if (isMirror) { channel?.postMessage({ kind: 'request' }); return; }
+    const stateHeartbeat = setInterval(publish, 1000);
     const mutationBaselines = new Map<string, { trade: AccountedTrade | undefined; sequence: number }>();
     const stopMutations = onTradeMutation(event => {
         if (event.phase === 'begin') {
@@ -876,6 +887,8 @@ function start() {
         stopMutations(); stopResponses(); stopOrders(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); stopStatus(); channel?.close();
         positionQuotes.forEach(entry => entry.release?.());
         if (publishTimer) clearTimeout(publishTimer);
+        clearInterval(stateHeartbeat);
+        invalidateTradingMirror();
     });
     ensureStream();
     statusChanged();
@@ -887,7 +900,7 @@ export const getTradingState = () => state;
  *  cache row only ever confirms, a stale cache can only fail to confirm).
  *  Otherwise it goes straight to one refresh:true read. */
 export function cancelCacheTrusted() {
-    return isMirror ? mirroredCacheContinuous : tradeCacheContinuous();
+    return isMirror ? getTradingMirrorFresh() && mirroredCacheContinuous : tradeCacheContinuous();
 }
 /** Local projection shows this account's order Cancelled (report-driven).
  *  Timing hint only — never a cancellation confirmation. */

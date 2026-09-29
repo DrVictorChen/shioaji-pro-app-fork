@@ -55,7 +55,7 @@ beforeEach(() => {
     vi.stubGlobal('fetch', async (url: string) => {
         if (!url.startsWith('http://127.0.0.1:21322/')) throw new Error('offline');
         return new Response(JSON.stringify(url.endsWith('/info')
-            ? { version: '1.7.6', simulation: true }
+            ? { version: '1.7.7', simulation: true }
             : { status: mocks.healthy ? 'healthy' : 'unhealthy' }));
     });
 });

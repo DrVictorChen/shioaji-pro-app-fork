@@ -85,6 +85,7 @@ import {
 import { isTauri, openPopout } from './lib/tauri';
 import { notify } from './lib/trade';
 import { tradingActionObserved, useTradingState } from './lib/trading-state';
+import { ensureStream } from './lib/stream';
 import { ensureAccounts } from './lib/account-store';
 import type { ContractInfo } from './lib/types/contract';
 import {
@@ -557,6 +558,9 @@ function PopoutView({
     type: BlockType;
     code: string | null;
 }) {
+    // Some panels (notably the tick tape) subscribe to raw events without
+    // useQuote; every popout must join the shared stream on its own.
+    useEffect(ensureStream, []);
     const contract = useContract(code);
     useEffect(() => {
         if (code) ensureContract(code).catch(() => undefined);

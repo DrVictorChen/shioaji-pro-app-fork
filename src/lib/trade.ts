@@ -14,6 +14,7 @@ import {
     placeStockOrder,
 } from './shioaji';
 import { getStreamStatus } from './stream';
+import { getTradingMirrorFresh } from './trading-mirror-lease';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
@@ -95,9 +96,9 @@ export function isFuturesContract(contract: ContractBase): boolean {
 // (esp. with real money on the line) must not think a click went through
 // when it didn't (issue #2). UI also disables the buttons; this backs it up.
 export function assertTradingLive() {
-    if (getStreamStatus() !== 'live') {
+    if (getStreamStatus() !== 'live' || !getTradingMirrorFresh()) {
         throw mutationNotStartedError(
-            '行情未連線（非 LIVE）— 為避免誤單已暫停下單，請待連線恢復',
+            '行情非 LIVE 或主視窗交易狀態未連線，已暫停下單，請待連線恢復',
         );
     }
 }
