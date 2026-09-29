@@ -185,15 +185,15 @@ export const caPickBtn = style([
 export const importBtn = style([
     modeBtnBase,
     {
-        flex: 'none', // modeBtnBase's flex:1 is for the side-by-side 模擬/正式
-        // row — without this override the button stretches to fill the
-        // card's remaining column height when used standalone
+        flex: '1 1 0', // 「選擇 .env 檔案」「選擇資料夾」並排平分一列
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         gap: '6px',
         fontWeight: 500,
         borderStyle: 'dashed',
+        borderColor: vars.color.borderBright,
+        color: vars.color.foreground,
     },
 ]);
 
@@ -207,8 +207,10 @@ export const importChoice = style({
         '&:disabled': { opacity: 0.5, cursor: 'default' },
     },
 });
-export const importMessage = style({
-    fontFamily: vars.font.body, fontSize: '0.7rem', color: vars.color.accent,
+const importMessageBase = style({ fontFamily: vars.font.body, fontSize: '0.7rem', overflowWrap: 'anywhere' });
+export const importMessage = styleVariants({
+    ok: [importMessageBase, { color: vars.color.accent }],
+    error: [importMessageBase, { color: vars.color.danger }],
 });
 
 export const hint = style({

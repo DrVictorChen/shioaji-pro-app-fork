@@ -56,7 +56,8 @@ export function OnboardingSetup() {
     const [showCaPw, setShowCaPw] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
-    const [importMessage, setImportMessage] = useState('');
+    // 匯入結果顯示在匯入按鈕下方（錯誤不放到最下面的啟動錯誤區）
+    const [importMessage, setImportMessage] = useState<{ text: string; error: boolean } | null>(null);
     const [importPending, setImportPending] = useState(false);
     const [envSelection, setEnvSelection] = useState<EnvSelection | null>(null);
 
@@ -68,12 +69,12 @@ export function OnboardingSetup() {
         if (found.kind === 'choose') {
             setEnvSelection(found.selection);
         } else if (found.kind === 'error') {
-            setError(found.error);
+            setImportMessage({ text: found.error, error: true });
         } else {
             patch({ ...(found.apiKey !== undefined ? { apiKey: found.apiKey } : {}),
                 ...(found.secretKey !== undefined ? { secretKey: found.secretKey } : {}) });
             setEnvSelection(null);
-            setImportMessage(`已從 ${found.fileName} 匯入`);
+            setImportMessage({ text: `已從 ${found.fileName} 匯入`, error: false });
         }
     };
 
@@ -81,14 +82,14 @@ export function OnboardingSetup() {
     const importEnv = async (mode: 'file' | 'directory', candidate?: string) => {
         setImportPending(true);
         setError('');
-        setImportMessage('');
+        setImportMessage(null);
         if (!candidate) setEnvSelection(null);
         try {
             handleEnvResult(candidate && envSelection
                 ? await importEnvCandidate(envSelection, candidate)
                 : await pickEnvFile(mode));
         } catch {
-            setError('無法匯入 .env 檔案。');
+            setImportMessage({ text: '無法匯入 .env 檔案。', error: true });
         } finally {
             setImportPending(false);
         }
@@ -155,7 +156,7 @@ export function OnboardingSetup() {
                             {envSelection.candidates.map(name => <button key={name} className={styles.importChoice} type='button' disabled={busy || importPending} onClick={() => void importEnv('directory', name)}>{name}</button>)}
                         </div>
                     </div>}
-                    {importMessage && <span className={styles.importMessage} role='status'>{importMessage}</span>}
+                    {importMessage && <span className={styles.importMessage[importMessage.error ? 'error' : 'ok']} role={importMessage.error ? 'alert' : 'status'}>{importMessage.text}</span>}
 
                     <div className={styles.fieldGroup}>
                         <span className={styles.label}>API KEY</span>
