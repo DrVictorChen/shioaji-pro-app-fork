@@ -59,6 +59,12 @@ export function createSharedStream(options: {
 
     const claim = () => {
         if (closed || claiming || owner || Date.now() < deferUntil) return;
+        // A browser without both primitives cannot coordinate multiple tabs.
+        // Fail closed instead of opening one EventSource per popout.
+        if (typeof window !== 'undefined' && (!channel || !locks?.request)) {
+            options.onMissing();
+            return;
+        }
         if (!channel || !locks?.request) {
             owner = true;
             options.onOwn();

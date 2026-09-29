@@ -62,7 +62,7 @@ async function doFetchWithTimeout(
     const timedOut = new Promise<never>((_, reject) => {
         timer = globalThis.setTimeout(() => {
             reject(mutation
-                ? Object.assign(new Error('委託尚未送出，連線忙碌中；請先查詢委託確認結果，再自行決定是否重送'), {
+                ? Object.assign(new Error('連線忙碌，委託送出結果未確認；請求可能已送達，請先查詢委託，勿直接重送'), {
                     mutationOutcomeUnknown: true as const,
                     requestTimedOut: true as const,
                 })

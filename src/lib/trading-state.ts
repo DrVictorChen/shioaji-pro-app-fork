@@ -149,6 +149,23 @@ let publishTimer: ReturnType<typeof setTimeout> | null = null;
 // Mirrors (popouts) have no report ledger; they borrow the main window's
 // cache-continuity verdict for cancel confirmation (cancelCacheTrusted).
 let mirroredCacheContinuous = false;
+let mirrorFresh = !isMirror;
+let mirrorExpiry: ReturnType<typeof setTimeout> | null = null;
+const mirrorListeners = new Set<() => void>();
+export function getTradingMirrorFresh() { return mirrorFresh; }
+export function subscribeTradingMirror(listener: () => void) {
+    mirrorListeners.add(listener);
+    return () => { mirrorListeners.delete(listener); };
+}
+function refreshMirrorLease() {
+    if (mirrorExpiry) clearTimeout(mirrorExpiry);
+    if (!mirrorFresh) { mirrorFresh = true; mirrorListeners.forEach(listener => listener()); }
+    mirrorExpiry = setTimeout(() => {
+        mirrorFresh = false;
+        mirroredCacheContinuous = false;
+        mirrorListeners.forEach(listener => listener());
+    }, 2500);
+}
 function publish() {
     listeners.forEach(l => l());
     if (!isMirror) channel?.postMessage({ kind: 'state', state, cacheContinuous: tradeCacheContinuous() });
@@ -161,6 +178,7 @@ channel?.addEventListener('message', e => {
         && Array.isArray(e.data.state?.trades)) {
         state = e.data.state;
         mirroredCacheContinuous = e.data.cacheContinuous === true;
+        refreshMirrorLease();
         publish();
     } else if (!isMirror && e.data?.kind === 'request') publish();
     else if (!isMirror && e.data?.kind === 'refresh' && queryScopes.includes(e.data.scope)) void refreshTradingState(e.data.scope);
@@ -645,6 +663,7 @@ function start() {
     if (started) return;
     started = true;
     if (isMirror) { channel?.postMessage({ kind: 'request' }); return; }
+    const stateHeartbeat = setInterval(publish, 1000);
     const mutationBaselines = new Map<string, { trade: AccountedTrade | undefined; sequence: number }>();
     const stopMutations = onTradeMutation(event => {
         if (event.phase === 'begin') {
@@ -822,6 +841,8 @@ function start() {
         stopMutations(); stopResponses(); stopOrders(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); stopStatus(); channel?.close();
         positionQuotes.forEach(entry => entry.release?.());
         if (publishTimer) clearTimeout(publishTimer);
+        clearInterval(stateHeartbeat);
+        if (mirrorExpiry) clearTimeout(mirrorExpiry);
     });
     ensureStream();
     statusChanged();
@@ -833,7 +854,7 @@ export const getTradingState = () => state;
  *  cache row only ever confirms, a stale cache can only fail to confirm).
  *  Otherwise it goes straight to one refresh:true read. */
 export function cancelCacheTrusted() {
-    return isMirror ? mirroredCacheContinuous : tradeCacheContinuous();
+    return isMirror ? mirrorFresh && mirroredCacheContinuous : tradeCacheContinuous();
 }
 /** Local projection shows this account's order Cancelled (report-driven).
  *  Timing hint only — never a cancellation confirmation. */

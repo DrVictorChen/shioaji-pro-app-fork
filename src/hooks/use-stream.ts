@@ -3,6 +3,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { ensureContract } from '../lib/contracts-cache';
 import { retainContractQuotes } from '../lib/quote-ownership';
+import { getTradingMirrorFresh, subscribeTradingMirror } from '../lib/trading-state';
 import type { QuoteState, StreamStatus } from '../lib/stream';
 import {
     ensureStream,
@@ -21,7 +22,9 @@ export function useStreamStatus(): StreamStatus {
 // order buttons on anything else so users never fire into a dead connection
 // or think a click sent an order when it didn't (issue #2)
 export function useTradingLive(): boolean {
-    return useStreamStatus() === 'live';
+    const status = useStreamStatus();
+    const mirrorFresh = useSyncExternalStore(subscribeTradingMirror, getTradingMirrorFresh);
+    return status === 'live' && mirrorFresh;
 }
 
 export function useQuote(code: string | null): QuoteState | undefined {

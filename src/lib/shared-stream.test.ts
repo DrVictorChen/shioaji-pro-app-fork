@@ -66,3 +66,14 @@ it('hands a child-owned stream to a newly opened main window', async () => {
     expect(child.release).toHaveBeenCalledTimes(1);
     main.stream.close(); child.stream.close();
 });
+
+it('does not open a browser SSE when cross-window coordination is unavailable', async () => {
+    vi.stubGlobal('window', {});
+    vi.stubGlobal('BroadcastChannel', undefined);
+    vi.stubGlobal('navigator', {});
+    const child = make(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(child.own).not.toHaveBeenCalled();
+    expect(child.stream.isOwner()).toBe(false);
+    child.stream.close();
+});

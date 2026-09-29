@@ -196,3 +196,10 @@ it('admits a report event_id once when a replacement connection replays it', asy
     second.emit('order_event', report);
     expect(reports).toEqual(['v1:FO:FSTREAM:RESET1:7']);
 });
+
+it('attaches named event families even when only a follower consumes them', async () => {
+    const { first } = await open();
+    for (const name of ['index_components', 'calculated_index', 'scanner', 'heartbeat']) {
+        expect(first.listeners.has(name)).toBe(true);
+    }
+});
