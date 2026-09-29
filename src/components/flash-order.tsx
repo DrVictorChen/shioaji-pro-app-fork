@@ -710,13 +710,14 @@ export function FlashOrder({
             <div className={styles.controls}>
                 {/* 收合時只顯示精簡帳號（#176）；透明的原生 select 疊在上面，
                     展開的選單才列出帳號＋戶名 */}
-                <label className={styles.accountPick} title={accountTitle}>
+                <label className={styles.accountPick}>
                     <span className={styles.accountText}>{accountShort}</span>
                     <ChevronDown size={10} aria-hidden />
                     <select
                         className={styles.accountSelect}
                         aria-label="閃電下單帳戶"
-                        title={resolved.following ? '跟隨主畫面帳戶 — 選擇帳戶後此視窗固定使用該帳戶' : '此視窗固定帳戶，不影響其他視窗與主畫面'}
+                        // 透明 select 蓋住標籤，完整帳號＋戶名的 tooltip 要放在 select 上
+                        title={`${accountTitle}\n${resolved.following ? '跟隨主畫面帳戶 — 選擇帳戶後此視窗固定使用該帳戶' : '此視窗固定帳戶，不影響其他視窗與主畫面'}`}
                         value={resolved.following ? FOLLOW_GLOBAL : resolved.unset ? '' : panelKeys[market]}
                         onChange={e => {
                             armedRef.current = false;
