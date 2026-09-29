@@ -4,9 +4,10 @@
 
 import { useSyncExternalStore } from 'react';
 import { isTauri } from './runtime';
-import { themeClasses } from '../theme.css';
+import { themeClasses, vars } from '../theme.css';
+import { CUSTOM_BASES, customTokens, isCustomTheme, type CustomTheme } from './custom-theme';
 
-export type ThemeMode = 'dark' | 'light';
+export type ThemeMode = 'dark' | 'light' | 'custom';
 export type Convention = 'tw' | 'intl';
 // 小／標準／大（2026-09-29 起整體放大一級，原本的 0.85 小拿掉）
 export type FontScale = 1 | 1.15 | 1.3;
@@ -15,10 +16,12 @@ export interface ThemeSettings {
     mode: ThemeMode;
     convention: Convention;
     fontScale: FontScale;
+    /** 自訂配色；mode 為 custom 時套用，切回深色／淺色時保留以便再切回來 */
+    custom?: CustomTheme;
 }
 
 const STORAGE_KEY = 'sj-pro-theme';
-const MODES: ThemeMode[] = ['dark', 'light'];
+const MODES: ThemeMode[] = ['dark', 'light', 'custom'];
 const CONVENTIONS: Convention[] = ['tw', 'intl'];
 const SCALES: FontScale[] = [1, 1.15, 1.3];
 const DEFAULT_SCALE: FontScale = 1.15;
@@ -42,10 +45,13 @@ function load(): ThemeSettings {
                 MODES.includes(mode as ThemeMode) &&
                 CONVENTIONS.includes(s.convention as Convention)
             ) {
+                const custom = isCustomTheme(s.custom) ? s.custom : undefined;
                 return {
-                    mode: mode as ThemeMode,
+                    // 自訂配色遺失時退回深色
+                    mode: mode === 'custom' && !custom ? 'dark' : (mode as ThemeMode),
                     convention: s.convention as Convention,
                     fontScale: migrateScale(s.fontScale),
+                    ...(custom ? { custom } : {}),
                 };
             }
         }
@@ -58,29 +64,57 @@ function load(): ThemeSettings {
 let settings: ThemeSettings = load();
 const listeners = new Set<() => void>();
 
+/** 實際套用的起始底色：自訂配色以其 base 的 theme class 為底 */
+export function baseMode(s: ThemeSettings): 'dark' | 'light' {
+    return s.mode === 'custom' ? (s.custom?.base ?? 'dark') : s.mode;
+}
+
+/** 圖表等以 canvas 繪製的元件用來判斷是否需要重新套色 */
+export function themeKey(s: ThemeSettings): string {
+    const custom = activeCustom(s);
+    return `${s.mode}-${s.convention}${custom ? `-${Object.values(custom).join(',')}` : ''}`;
+}
+
+/** 目前生效的自訂配色（mode 不是 custom 時為 undefined） */
+export function activeCustom(s: ThemeSettings): CustomTheme | undefined {
+    return s.mode === 'custom' ? (s.custom ?? CUSTOM_BASES.dark) : undefined;
+}
+
+const colorVars = vars.color as Record<string, string>;
+// 'var(--color-accent__abc)' → '--color-accent__abc'
+const cssVarName = (ref: string) => ref.slice(4, -1);
+
 function applyClass() {
     const root = document.documentElement;
     for (const cls of Object.values(themeClasses)) {
         root.classList.remove(cls);
     }
-    const key = `${settings.mode}-${settings.convention}`;
+    const base = baseMode(settings);
+    const key = `${base}-${settings.convention}`;
     const cls = themeClasses[key] ?? themeClasses['dark-tw'];
     if (cls) root.classList.add(cls);
+    // 自訂配色：六色推算的 token 以 inline 變數蓋在底色 class 上；
+    // 切回深色／淺色時移除
+    const custom = activeCustom(settings);
+    const tokens = custom ? customTokens(custom, settings.convention) : {};
+    for (const [name, ref] of Object.entries(colorVars)) {
+        const value = tokens[name];
+        if (value) root.style.setProperty(cssVarName(ref), value);
+        else root.style.removeProperty(cssVarName(ref));
+    }
     // light/dark <select>/scrollbar rendering follows this hint too
-    root.style.colorScheme = settings.mode === 'light' ? 'light' : 'dark';
+    root.style.colorScheme = base === 'light' ? 'light' : 'dark';
     // every style is rem-based, so scaling the root font-size scales the UI
     root.style.fontSize = `${16 * settings.fontScale}px`;
 }
 
 // sync the native window chrome (macOS appearance / Windows titlebar)
-// with the in-app theme — dark → dark, light → light
+// with the in-app theme — dark → dark, light → light (custom follows its base)
 async function applyNativeTheme() {
     if (!isTauri) return;
     try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().setTheme(
-            settings.mode === 'light' ? 'light' : 'dark',
-        );
+        await getCurrentWindow().setTheme(baseMode(settings));
     } catch {
         // older runtime without set-theme permission
     }
@@ -124,7 +158,7 @@ export interface ChartColors {
 }
 
 const CHROME: Record<
-    ThemeMode,
+    'dark' | 'light',
     Pick<ChartColors, 'text' | 'grid' | 'crosshair' | 'border' | 'labelBg'>
 > = {
     dark: {
@@ -143,7 +177,7 @@ const CHROME: Record<
     },
 };
 
-const RG: Record<ThemeMode, { red: string; green: string; redVol: string; greenVol: string }> = {
+const RG: Record<'dark' | 'light', { red: string; green: string; redVol: string; greenVol: string }> = {
     dark: {
         red: '#f23645',
         green: '#16b389',
@@ -159,13 +193,36 @@ const RG: Record<ThemeMode, { red: string; green: string; redVol: string; greenV
 };
 
 export function getChartColors(s: ThemeSettings): ChartColors {
-    const rg = RG[s.mode];
+    const custom = activeCustom(s);
+    if (custom) {
+        const t = customTokens(custom, s.convention);
+        const up = t.up!;
+        const down = t.down!;
+        return {
+            up,
+            upVol: withAlpha(up, 0.42),
+            down,
+            downVol: withAlpha(down, 0.4),
+            text: t.mutedForeground!,
+            grid: withAlpha(t.border!, 0.7),
+            crosshair: t.accent!,
+            border: t.border!,
+            labelBg: t.panelRaised!,
+        };
+    }
+    const mode = baseMode(s);
+    const rg = RG[mode];
     const isTw = s.convention === 'tw';
     return {
         up: isTw ? rg.red : rg.green,
         upVol: isTw ? rg.redVol : rg.greenVol,
         down: isTw ? rg.green : rg.red,
         downVol: isTw ? rg.greenVol : rg.redVol,
-        ...CHROME[s.mode],
+        ...CHROME[mode],
     };
+}
+
+function withAlpha(hex: string, a: number): string {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
 }

@@ -50,6 +50,7 @@ import { setSoundEnabled, soundEnabled } from '../lib/sounds';
 import {
     setThemeSettings,
     useThemeSettings,
+    baseMode,
     type Convention,
     type FontScale,
     type ThemeMode,
@@ -67,6 +68,8 @@ import {
     isAgentHarnessEnabled,
     setAgentHarnessEnabled,
 } from '../lib/tauri';
+import { CUSTOM_BASES } from '../lib/custom-theme';
+import { CustomThemeEditor } from './custom-theme-editor';
 import { ExternalLink } from './external-link';
 import { Orb } from './orb';
 import * as hud from './hud-header.css';
@@ -76,6 +79,7 @@ import * as styles from './settings-dialog.css';
 const MODE_OPTIONS: { key: ThemeMode; label: string }[] = [
     { key: 'dark', label: '深色' },
     { key: 'light', label: '淺色' },
+    { key: 'custom', label: '自訂' },
 ];
 
 const CONVENTION_OPTIONS: { key: Convention; label: string }[] = [
@@ -112,12 +116,19 @@ function AppearanceSection() {
                     <button
                         key={m.key}
                         className={hud.opt[settings.mode === m.key ? 'on' : 'off']}
-                        onClick={() => setThemeSettings({ mode: m.key })}
+                        onClick={() =>
+                            setThemeSettings(
+                                m.key === 'custom'
+                                    ? { mode: 'custom', custom: settings.custom ?? CUSTOM_BASES[baseMode(settings)] }
+                                    : { mode: m.key },
+                            )
+                        }
                     >
                         {m.label}
                     </button>
                 ))}
             </div>
+            {settings.mode === 'custom' && <CustomThemeEditor />}
             <span className={hud.settingLabel}>漲跌顏色 Price Colors</span>
             <div className={hud.settingGroup}>
                 {CONVENTION_OPTIONS.map((c) => (

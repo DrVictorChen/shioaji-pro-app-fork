@@ -12,7 +12,7 @@ import {
 import { Pause, Play } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { fetchHistoryTicks } from '../lib/shioaji';
-import { getChartColors, useThemeSettings } from '../lib/theme-store';
+import { getChartColors, useThemeSettings, baseMode } from '../lib/theme-store';
 import type { ContractBase } from '../lib/types/contract';
 import { fmtInt, fmtPrice } from '../lib/utils/format';
 import { dateStrOffset, wallClockToUtc } from '../lib/utils/kbars';
@@ -88,7 +88,8 @@ export function ReplayPanel({ contract }: { contract: ContractBase }) {
             seriesRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [`${themeSettings.mode}`]);
+        // 只在深／淺底色改變時重建：重建會清掉已回放的線，自訂顏色微調不值得
+    }, [baseMode(themeSettings)]);
 
     // load ticks
     useEffect(() => {
