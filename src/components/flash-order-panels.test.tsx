@@ -144,6 +144,22 @@ it('says the order was not sent when the account changes during confirmation', a
     });
 });
 
+it('uses the same not-sent notice when a flatten confirmation sees an account change', async () => {
+    let rejectOrder!: (error: Error) => void;
+    mocks.place.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOrder = reject; }));
+    await act(async () => { view = create(render()); });
+    await act(async () => { button(panels()[0], '啟用閃電下單').props.onClick(); });
+    await act(async () => { button(panels()[0], '平倉').props.onClick(); });
+    keys = [{ F: 'F:BR:12345B' }, keys[1]];
+    await act(async () => { view.update(render()); });
+    await act(async () => { rejectOrder(new Error('確認期間帳戶已變更，請重新確認')); });
+    expect(mocks.notify).toHaveBeenCalledWith({
+        kind: 'err',
+        title: '閃電下單未送出',
+        body: '確認期間帳戶已變更，這筆沒有送出，請重新確認',
+    });
+});
+
 it('keeps a fixed price ladder fixed when its account changes', async () => {
     await act(async () => { view = create(render()); });
     const follow = () => panels()[0].findAllByType('button').find(b => b.props.title?.includes('點擊固定') || b.props.title?.includes('點擊恢復跟隨'))!;

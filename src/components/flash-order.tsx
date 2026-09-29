@@ -42,6 +42,19 @@ const EDGE = 2; // auto-recenter when last price gets this close to the edge
 
 const keyOf = (p: number) => p.toFixed(2);
 const FOLLOW_GLOBAL = '__follow__';
+const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
+
+function accountChangedBeforeSend(error: unknown): boolean {
+    return error instanceof Error && error.message === ACCOUNT_CHANGED_DURING_CONFIRMATION;
+}
+
+function notifyAccountChangedBeforeSend(): void {
+    notify({
+        kind: 'err',
+        title: '閃電下單未送出',
+        body: '確認期間帳戶已變更，這筆沒有送出，請重新確認',
+    });
+}
 
 type PosMarks = { mixed: boolean; twoWay: boolean; stale: boolean; fifo: boolean };
 
@@ -570,12 +583,8 @@ export function FlashOrder({
             });
             onOrdersChangedRef.current?.();
         } catch (e) {
-            const accountChanged = e instanceof Error && e.message === '確認期間帳戶已變更，請重新確認';
-            notify({
-                kind: 'err',
-                title: accountChanged ? '閃電下單未送出' : '⚡ 閃電下單失敗',
-                body: accountChanged ? '確認期間帳戶已變更，這筆沒有送出，請重新確認' : e instanceof Error ? e.message : String(e),
-            });
+            if (accountChangedBeforeSend(e)) notifyAccountChangedBeforeSend();
+            else notify({ kind: 'err', title: '⚡ 閃電下單失敗', body: e instanceof Error ? e.message : String(e) });
         } finally {
             inflightRef.current.delete(key);
             force();
@@ -659,7 +668,8 @@ export function FlashOrder({
             notify({ kind: 'info', title: '⚡ 平倉已送出', body: '請以委託與成交回報確認結果' });
             onOrdersChangedRef.current?.();
         } catch (error) {
-            notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+            if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
+            else notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
         } finally { inflightRef.current.delete(key); }
     }, [pos, stillPanelAccount]);
 
