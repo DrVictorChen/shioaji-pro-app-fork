@@ -68,6 +68,18 @@ export function reloadWhenHealthy(timeoutMs = 90_000) {
     }, 2000);
 }
 
+export type TrayStatus = 'idle' | 'boot' | 'conn' | 'think' | 'order' | 'filled' | 'error';
+
+export function setTrayStatus(status: TrayStatus): void {
+    if (!isTauri || isChildWindow()) return;
+    void import('@tauri-apps/api/core').then(({ invoke }) =>
+        invoke('set_tray_status', {
+            status,
+            reduceMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        }),
+    ).catch(() => undefined);
+}
+
 // ---- shioaji server sidecar ----
 
 export interface ServerStatus {
@@ -127,6 +139,7 @@ async function spawnServer(
     const { invoke } = await import('@tauri-apps/api/core');
     let pid: number;
     try {
+        setTrayStatus('boot');
         pid = await invoke<number>('spawn_server', {
             args,
             env: fullEnv,
