@@ -33,6 +33,7 @@ export function CustomThemeEditor() {
                     <button
                         key={b.key}
                         className={hud.opt[custom.base === b.key ? 'on' : 'off']}
+                        aria-pressed={custom.base === b.key}
                         title='以此為起點，六個顏色會換成它的預設值'
                         onClick={() => custom.base !== b.key && apply(CUSTOM_BASES[b.key])}
                     >
@@ -46,6 +47,7 @@ export function CustomThemeEditor() {
                     <button
                         key={p.name}
                         className={styles.preset[same(p.theme, custom) ? 'on' : 'off']}
+                        aria-pressed={same(p.theme, custom)}
                         onClick={() => apply(p.theme)}
                     >
                         <span className={styles.presetChip} aria-hidden>

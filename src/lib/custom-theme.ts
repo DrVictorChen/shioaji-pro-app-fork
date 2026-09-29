@@ -93,7 +93,8 @@ export function customTokens(t: CustomTheme, convention: Convention): Record<str
     const down = convention === 'tw' ? t.green : t.red;
     const dim = dark ? 0.13 : 0.1;
     const flash = dark ? 0.2 : 0.16;
-    const mutedFg = mix(fg, t.panel, 0.42);
+    // 淺底時次要文字要更接近文字色，維持 4.5:1 以上的對比
+    const mutedFg = mix(fg, t.panel, dark ? 0.42 : 0.3);
     return {
         background: t.background,
         panel: t.panel,

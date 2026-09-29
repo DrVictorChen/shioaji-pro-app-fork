@@ -44,7 +44,7 @@ globalStyle(`${presetChip} > span`, { width: 8, height: 14 });
 
 export const swatches = style({
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(10rem, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(10rem, 100%), 1fr))',
     gap: vars.space.xs,
 });
 
