@@ -94,7 +94,9 @@ export function createSharedStream(options: {
             post(options.snapshot());
         }
         else if (options.main || Date.now() - lastAlive > 1700) {
-            if (Date.now() - lastAlive > 1700) options.onMissing();
+            // A hidden owner may have throttled timers while still holding
+            // the lock and receiving SSE. Only a successful lock claim proves
+            // the old owner is gone; silence alone must not mark quotes DOWN.
             claim();
         }
     }, 500);

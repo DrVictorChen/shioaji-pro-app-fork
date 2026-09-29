@@ -14,7 +14,7 @@ import {
     placeStockOrder,
 } from './shioaji';
 import { getStreamStatus } from './stream';
-import { getTradingMirrorFresh } from './trading-state';
+import { getTradingMirrorFresh } from './trading-mirror-lease';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {

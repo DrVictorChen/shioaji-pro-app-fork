@@ -13,6 +13,7 @@ import { reportLedger } from './report-ledger';
 import { knownServerInfo } from './server-info-store';
 import { createSharedStream, type StreamWire } from './shared-stream';
 import { isChildWindow } from './window-role';
+import { invalidateTradingMirror } from './trading-mirror-lease';
 
 /** `stale`: the EventSource still looks open but no heartbeat or event
  *  arrived within the watchdog window (e.g. the sidecar behind a proxy was
@@ -655,6 +656,7 @@ export function ensureStream() {
             name: `sj-market-stream:${typeof location === 'undefined' ? 'test' : location.origin}:${getApiBase()}:${getStreamBase()}`,
             main: !isChildWindow(),
             onOwn: () => {
+                if (isChildWindow()) invalidateTradingMirror();
                 ownerListeners.forEach(listener => listener());
                 everDown = true;
                 connect();

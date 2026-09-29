@@ -55,3 +55,17 @@ it.each(['/api/v1/order/place_order', '/api/v1/order/cancel_order'])('aborts a q
     expect(sent).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 });
+
+it.each(['/api/v1/order/place_order', '/api/v1/order/cancel_order'])('times out %s even when response headers arrive but the body stalls', async path => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        return Promise.resolve({ ok: true, json: () => new Promise(() => undefined) } as Response);
+    }));
+    const pending = apiPost(path, {});
+    const failure = expect(pending).rejects.toMatchObject({ requestTimedOut: true });
+    await vi.advanceTimersByTimeAsync(3000);
+    await failure;
+    expect(signal?.aborted).toBe(true);
+});

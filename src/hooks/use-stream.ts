@@ -3,7 +3,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { ensureContract } from '../lib/contracts-cache';
 import { retainContractQuotes } from '../lib/quote-ownership';
-import { getTradingMirrorFresh, subscribeTradingMirror } from '../lib/trading-state';
+import { getTradingMirrorFresh, subscribeTradingMirror } from '../lib/trading-mirror-lease';
 import type { QuoteState, StreamStatus } from '../lib/stream';
 import {
     ensureStream,

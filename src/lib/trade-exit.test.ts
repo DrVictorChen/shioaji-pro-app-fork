@@ -9,7 +9,7 @@ vi.mock('./order-confirm', () => ({ requestOrderConfirm: m.confirm, accountConfi
 vi.mock('./risk', () => ({ checkOrderAllowed: m.risk, getRiskSettings: () => ({ confirmManualOrders: true }) }));
 vi.mock('./stream', () => ({ getStreamStatus: () => m.live }));
 vi.mock('./shioaji', () => ({ placeStockOrder: m.stock, placeFuturesOrder: m.future, fetchTrades: m.fetch, cancelOrder: m.cancel, cancelOrders: (ids: string[]) => Promise.allSettled(ids.map(id => m.cancel(id))), fetchTradeCacheHealth: m.health }));
-vi.mock('./trading-state', () => ({ tradeCacheContinuous: () => m.continuous, getTradingMirrorFresh: () => true }));
+vi.mock('./trading-state', () => ({ tradeCacheContinuous: () => m.continuous }));
 import { placeStockExitByShares, placeQuickOrder, cancelAllOrders, onNotice } from './trade';
 const account = { account_type:'S', account_id:'a', broker_id:'b', signed:true, person_id:'fixture', username:'fixture' };
 const contract = { code:'2330',security_type:'STK',exchange:'TSE',limit_down:90,limit_up:110 } as ContractBase & {limit_down:number;limit_up:number};

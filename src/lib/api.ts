@@ -2,6 +2,7 @@
 
 import { getApiBase, isTauri } from './runtime';
 import { isAgentHarnessEnabled } from './agent-harness-state';
+import { getTradingMirrorFresh } from './trading-mirror-lease';
 
 // resolved per request — the server port can move at runtime (e.g. the boot
 // flow discovers the default port occupied and starts on a fallback), and a
@@ -50,13 +51,12 @@ async function doFetch(url: string, init?: RequestInit): Promise<Response> {
     return fetch(url, init);
 }
 
-async function doFetchWithTimeout(
-    url: string,
-    init: RequestInit,
+async function runWithTimeout<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
     timeoutMs?: number,
     mutation = false,
-): Promise<Response> {
-    if (!timeoutMs) return doFetch(url, init);
+): Promise<T> {
+    if (!timeoutMs) return operation(new AbortController().signal);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const timedOut = new Promise<never>((_, reject) => {
@@ -71,7 +71,7 @@ async function doFetchWithTimeout(
         }, timeoutMs);
     });
     try {
-        return await Promise.race([doFetch(url, { ...init, signal: controller.signal }), timedOut]);
+        return await Promise.race([operation(controller.signal), timedOut]);
     } finally {
         globalThis.clearTimeout(timer!);
     }
@@ -113,6 +113,9 @@ export async function apiPost<T>(
     body: unknown,
     opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
 ): Promise<T> {
+    if (AGENT_HARNESS_MUTATIONS.has(path) && !getTradingMirrorFresh()) {
+        throw Object.assign(new Error('主視窗交易狀態未同步，委託尚未送出；請重新開啟主視窗'), { mutationNotStarted: true as const });
+    }
     const harnessEnabled = isAgentHarnessEnabled();
     if (
         shouldRejectUnsignedAgentMutation(
@@ -163,18 +166,16 @@ export async function apiPost<T>(
         return res.json() as Promise<T>;
     }
     const timedMutation = path === '/api/v1/order/place_order' || path === '/api/v1/order/cancel_order';
-    const res = await doFetchWithTimeout(
-        base() + path,
-        {
+    return runWithTimeout(async signal => {
+        const res = await doFetch(base() + path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
-        },
-        opts?.timeoutMs ?? (timedMutation ? 3000 : undefined),
-        timedMutation,
-    );
-    if (!res.ok) await throwApiError(res);
-    return res.json() as Promise<T>;
+            signal,
+        });
+        if (!res.ok) await throwApiError(res);
+        return res.json() as Promise<T>;
+    }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);
 }
 
 export async function apiPut<T>(path: string, body: unknown): Promise<T> {

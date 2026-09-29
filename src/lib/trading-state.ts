@@ -7,13 +7,14 @@ import { subscribeTradeReports } from './boot';
 import { retainQuote } from './quote-ownership';
 import { onTradeResponse } from './trade-observations';
 import { fetchAccountBalance, fetchMargin, fetchPositions, fetchTradeCacheHealth, fetchTrades } from './shioaji';
-import { ensureStream, getStreamStatus, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
+import { ensureStream, getStreamStatus, isStreamOwner, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
 import { applyPositionFill, markPosition, positionFill, reportBody } from './portfolio-projection';
 import { projectOrderReport, projectTradeDeal } from './order-projection';
 import { parseEventId, reportLedger } from './report-ledger';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { takeMutationIntent, type MutationIntent } from './mutation-intent';
 import { cancelledByQuantity, readMark } from './cancel-verification';
+import { getTradingMirrorFresh, invalidateTradingMirror, markTradingMirrorSnapshot } from './trading-mirror-lease';
 import type { OrderEventReport } from './order-report';
 import type { Account, AccountBalance, AccountedPosition, AccountFunds, Margin } from './types/portfolio';
 import type { AccountedTrade, Trade, TradeCacheHealth } from './types/order';
@@ -149,23 +150,6 @@ let publishTimer: ReturnType<typeof setTimeout> | null = null;
 // Mirrors (popouts) have no report ledger; they borrow the main window's
 // cache-continuity verdict for cancel confirmation (cancelCacheTrusted).
 let mirroredCacheContinuous = false;
-let mirrorFresh = !isMirror;
-let mirrorExpiry: ReturnType<typeof setTimeout> | null = null;
-const mirrorListeners = new Set<() => void>();
-export function getTradingMirrorFresh() { return mirrorFresh; }
-export function subscribeTradingMirror(listener: () => void) {
-    mirrorListeners.add(listener);
-    return () => { mirrorListeners.delete(listener); };
-}
-function refreshMirrorLease() {
-    if (mirrorExpiry) clearTimeout(mirrorExpiry);
-    if (!mirrorFresh) { mirrorFresh = true; mirrorListeners.forEach(listener => listener()); }
-    mirrorExpiry = setTimeout(() => {
-        mirrorFresh = false;
-        mirroredCacheContinuous = false;
-        mirrorListeners.forEach(listener => listener());
-    }, 2500);
-}
 function publish() {
     listeners.forEach(l => l());
     if (!isMirror) channel?.postMessage({ kind: 'state', state, cacheContinuous: tradeCacheContinuous() });
@@ -174,15 +158,23 @@ function schedulePublish() {
     if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publish(); }, 50);
 }
 channel?.addEventListener('message', e => {
-    if (isMirror && e.data?.kind === 'state' && Array.isArray(e.data.state?.positions)
+    if (isMirror && e.data?.kind === 'main-gone') {
+        invalidateTradingMirror();
+        mirroredCacheContinuous = false;
+    } else if (isMirror && e.data?.kind === 'state' && Array.isArray(e.data.state?.positions)
         && Array.isArray(e.data.state?.trades)) {
         state = e.data.state;
         mirroredCacheContinuous = e.data.cacheContinuous === true;
-        refreshMirrorLease();
+        if (!isStreamOwner()) markTradingMirrorSnapshot();
         publish();
     } else if (!isMirror && e.data?.kind === 'request') publish();
     else if (!isMirror && e.data?.kind === 'refresh' && queryScopes.includes(e.data.scope)) void refreshTradingState(e.data.scope);
 });
+// Normal close/reload should revoke the mirror's trading lease immediately.
+// Abrupt browser loss is bounded by the short lease and SSE lock handoff.
+if (!isMirror && typeof window !== 'undefined') window.addEventListener('pagehide', () => {
+    channel?.postMessage({ kind: 'main-gone' });
+}, { once: true });
 
 let inFlight: Promise<void> | null = null;
 let inFlightResult: Promise<void> | null = null;
@@ -842,7 +834,7 @@ function start() {
         positionQuotes.forEach(entry => entry.release?.());
         if (publishTimer) clearTimeout(publishTimer);
         clearInterval(stateHeartbeat);
-        if (mirrorExpiry) clearTimeout(mirrorExpiry);
+        invalidateTradingMirror();
     });
     ensureStream();
     statusChanged();
@@ -854,7 +846,7 @@ export const getTradingState = () => state;
  *  cache row only ever confirms, a stale cache can only fail to confirm).
  *  Otherwise it goes straight to one refresh:true read. */
 export function cancelCacheTrusted() {
-    return isMirror ? mirrorFresh && mirroredCacheContinuous : tradeCacheContinuous();
+    return isMirror ? getTradingMirrorFresh() && mirroredCacheContinuous : tradeCacheContinuous();
 }
 /** Local projection shows this account's order Cancelled (report-driven).
  *  Timing hint only — never a cancellation confirmation. */
