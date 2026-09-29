@@ -23,6 +23,12 @@
 
 export type PortfolioCalendar = 'union' | 'intersection';
 
+/** One band of a tick ladder: prices at or above `from` trade in steps of `tick`. */
+export interface TickBand {
+    from: number;
+    tick: number;
+}
+
 /** Per-asset simulated execution assumptions. */
 export interface PortfolioExecutionConfig {
     /** Notional multiplier per quantity unit (e.g. 1000 shares per lot, 200 per TXF contract). */
@@ -39,8 +45,14 @@ export interface PortfolioExecutionConfig {
     taxBothPct: number;
     /** Adverse slippage in ticks per side. */
     slippageTicks: number;
-    /** Price of one tick. */
+    /** Price of one tick when no `tickLadder` is given (and in the legacy vector engine). */
     tickSize: number;
+    /**
+     * Exchange tick bands by price (stocks: 0.01 below 10, 0.05 below 50, ...).
+     * Slippage steps tick by tick across bands and limit prices are rounded onto
+     * the grid (buys down, sells up). Omitted: one band of `tickSize`.
+     */
+    tickLadder?: readonly TickBand[];
 }
 
 export interface StrategyAsset {

@@ -37,6 +37,7 @@ export const CORE_MESSAGE_TABLE = {
         BARS_OHLC_INCONSISTENT: '{assetId} OHLC 範圍不一致',
         EXECUTION_FIELD_MISSING: '缺少 execution.{field}',
         EXECUTION_FIELD_UNKNOWN: '未知 execution 欄位: {field}',
+        TICK_LADDER_INVALID: '{assetId} tickLadder 無效',
         LIQUIDATE_AT_END_INVALID: 'liquidateAtEnd 必須是 boolean',
         STRATEGY_RESULT_NOT_ARRAY: 'strategy 必須回傳 intent 陣列或 undefined',
         STRATEGY_RESULT_INVALID: 'strategy 必須回傳 intent 陣列、{ intents, diagnostics } 或 undefined',
