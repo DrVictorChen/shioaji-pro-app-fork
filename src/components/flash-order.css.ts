@@ -232,9 +232,7 @@ export const oddBanner = style({
     color: vars.color.amber,
     background: 'rgba(224, 164, 60, 0.08)',
     borderBottom: `1px solid ${vars.color.border}`,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
+    lineHeight: 1.35,
     flexShrink: 0,
 });
 

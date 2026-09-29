@@ -1639,7 +1639,7 @@ export function CandleChart({
                 </label>
                 {stockChart && !isCombo && (
                     <button
-                        className={styles.modeBtn[oddTrade ? 'armed' : 'normal']}
+                        className={styles.modeBtn[oddTrade ? 'active' : 'normal']}
                         aria-pressed={oddTrade}
                         title={oddTrade
                             ? '盤中零股：數量以股計；點價為限價，停損停利觸發後以漲跌停價送零股限價。點擊改回整股'
