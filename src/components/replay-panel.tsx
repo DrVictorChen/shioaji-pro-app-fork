@@ -12,7 +12,7 @@ import {
 import { Pause, Play } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { fetchHistoryTicks } from '../lib/shioaji';
-import { getChartColors, useThemeSettings } from '../lib/theme-store';
+import { getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import type { ContractBase } from '../lib/types/contract';
 import { fmtInt, fmtPrice } from '../lib/utils/format';
 import { dateStrOffset, wallClockToUtc } from '../lib/utils/kbars';
@@ -88,7 +88,7 @@ export function ReplayPanel({ contract }: { contract: ContractBase }) {
             seriesRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [`${themeSettings.mode}`]);
+    }, [themeKeyOf(themeSettings)]);
 
     // load ticks
     useEffect(() => {

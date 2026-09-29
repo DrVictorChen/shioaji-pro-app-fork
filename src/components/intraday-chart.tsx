@@ -40,7 +40,7 @@ import {
     supportsSessionSplit,
     type SessionWindow,
 } from '../lib/intraday-session';
-import { getChartColors, useThemeSettings } from '../lib/theme-store';
+import { getChartColors, useThemeSettings, themeKey as themeKeyOf, baseMode } from '../lib/theme-store';
 import type { ContractInfo } from '../lib/types/contract';
 import type { KBars } from '../lib/types/market';
 import { fmtPrice } from '../lib/utils/format';
@@ -431,12 +431,12 @@ export function IntradayChart({
     const quote = useQuote(contract.code);
     const themeSettings = useThemeSettings();
     const colors = getChartColors(themeSettings);
-    const themeKey = `${themeSettings.mode}-${themeSettings.convention}`;
+    const themeKey = themeKeyOf(themeSettings);
     // 顯示設定的組合鍵 — load effect 與 live guard 必須用同一份。
     // 線寬不進 key：滑桿拖動連發，不能每步都整段重載
     const optsKey = `${themeKey}|${scaleMode}|${chartStyle}|${volMode}`;
     const isIndex = contract.security_type === 'IND';
-    const avgColor = themeSettings.mode === 'light' ? '#b97f14' : '#e0a43c';
+    const avgColor = baseMode(themeSettings) === 'light' ? '#b97f14' : '#e0a43c';
 
     // ---- chart lifecycle（theme 換色重建 — 便宜且罕見）----
     useEffect(() => {

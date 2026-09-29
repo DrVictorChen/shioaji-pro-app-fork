@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { fetchKbars } from '../lib/shioaji';
-import { useThemeSettings } from '../lib/theme-store';
+import { useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import type { ContractBase } from '../lib/types/contract';
 import { dateStrOffset } from '../lib/utils/kbars';
 import { vars } from '../theme.css';
@@ -74,7 +74,7 @@ export function Sparkline({
     const [pts, setPts] = useState<number[]>([]);
     const [resizeSeq, setResizeSeq] = useState(0);
     const theme = useThemeSettings();
-    const themeKey = `${theme.mode}-${theme.convention}`;
+    const themeKey = themeKeyOf(theme);
 
     useEffect(() => {
         let cancelled = false;

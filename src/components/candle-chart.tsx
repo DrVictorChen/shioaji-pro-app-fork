@@ -69,7 +69,7 @@ import { subscribeCustoms } from '../lib/custom-indicators';
 import type { IndicatorPoint } from '../lib/indicators';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
-import { getChartColors, useThemeSettings } from '../lib/theme-store';
+import { getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
 import { isCancelUnconfirmed } from '../lib/cancel-verification';
 import { cancellationSummary } from '../lib/trade-mutations';
@@ -182,7 +182,7 @@ export function CandleChart({
     const tf = TIMEFRAMES[tfIdx] ?? TIMEFRAMES[1];
     const themeSettings = useThemeSettings();
     const colors = getChartColors(themeSettings);
-    const themeKey = `${themeSettings.mode}-${themeSettings.convention}`;
+    const themeKey = themeKeyOf(themeSettings);
     const [mode, setMode] = useState<TradeMode>('observe');
     const [tradeQty, setTradeQty] = useState(1);
     // 組合商品（合成合約）只能用組合單下單 — 圖上禁用交易模式

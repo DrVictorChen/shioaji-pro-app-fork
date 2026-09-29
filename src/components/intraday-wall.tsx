@@ -37,7 +37,7 @@ import {
     fetchWatchlists,
     type ServerWatchlist
 } from '../lib/shioaji';
-import { getChartColors, useThemeSettings } from '../lib/theme-store';
+import { getChartColors, useThemeSettings, themeKey as themeKeyOf, baseMode } from '../lib/theme-store';
 import type { ContractInfo } from '../lib/types/contract';
 import type { KBars, Snapshot } from '../lib/types/market';
 import { fmtPrice } from '../lib/utils/format';
@@ -238,10 +238,10 @@ function MiniIntraday({
     const quote = useQuote(contract.code);
     const themeSettings = useThemeSettings();
     const colors = getChartColors(themeSettings);
-    const themeKey = `${themeSettings.mode}-${themeSettings.convention}`;
+    const themeKey = themeKeyOf(themeSettings);
     const dispKey = dispKeyOf(disp);
     const isIndex = contract.security_type === 'IND';
-    const avgColor = themeSettings.mode === 'light' ? '#b97f14' : '#e0a43c';
+    const avgColor = baseMode(themeSettings) === 'light' ? '#b97f14' : '#e0a43c';
     const showVol = disp.vol && !isIndex;
     // lightweight-charts 型別標整數，但 renderer 直通 canvas lineWidth，
     // 小數實測有效（與單圖同款 0.5 髮絲線）
