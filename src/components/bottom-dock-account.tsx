@@ -35,6 +35,7 @@ import type {
     AccountedPosition,
     Margin,
 } from '../lib/types/portfolio';
+import { bizDateLabel, settleDateLabel } from '../lib/settle-date';
 import { fmtMoney, fmtSigned } from '../lib/utils/format';
 import { vars } from '../theme.css';
 import {
@@ -51,29 +52,6 @@ import * as panel from './panel.css';
 
 function dirOfAmount(n: number): 'up' | 'down' | 'flat' {
     return n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
-}
-
-const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
-
-// T+n 的預估交割日（跳過週末；國定假日無法本地判斷，僅供全 0 佔位列）
-function bizDateLabel(offset: number): string {
-    const d = new Date();
-    let left = offset;
-    while (left > 0) {
-        d.setDate(d.getDate() + 1);
-        if (d.getDay() !== 0 && d.getDay() !== 6) left--;
-    }
-    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(
-        d.getDate(),
-    ).padStart(2, '0')} (${WEEKDAYS[d.getDay()]})`;
-}
-
-// server 回的 date（YYYY-MM-DD）→ MM/DD (週X)；不可解析就原樣顯示
-function settleDateLabel(raw: string): string {
-    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
-    if (!m) return raw;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    return `${m[2]}/${m[3]} (${WEEKDAYS[d.getDay()]})`;
 }
 
 function Loading({ text }: { text: string }) {
