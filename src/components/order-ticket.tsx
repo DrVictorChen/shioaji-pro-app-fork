@@ -58,6 +58,8 @@ import * as styles from './order-ticket.css';
 
 const acctKey = (a: Account) => `${a.broker_id}-${a.account_id}`;
 
+const UNIT_CHANGED_MESSAGE = '確認期間單位已變更（整股／零股），未送出，請重新確認';
+
 export function OrderTicket({
     contract,
     onPlaced,
@@ -295,6 +297,10 @@ export function OrderTicket({
                 });
                 if (!approved) throw new Error('已取消下單');
             }
+            // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
+            if (orderLotRef.current !== orderLot) {
+                throw new Error(UNIT_CHANGED_MESSAGE);
+            }
             if (!isSelectedAccountUnchanged(orderAccount)) {
                 throw new Error(ACCOUNT_CHANGED_MESSAGE);
             }
@@ -493,6 +499,10 @@ export function OrderTicket({
                         .join('、')}`,
                 });
                 if (!approved) throw new Error('已取消下單');
+            }
+            // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
+            if (orderLotRef.current !== orderLot) {
+                throw new Error(UNIT_CHANGED_MESSAGE);
             }
             // 分倉帳戶是明確指定的；確認期間任一帳戶不可用就整批不送
             if (allocation.some((e) => !isAccountAvailable(e.account))) {
@@ -873,8 +883,12 @@ export function OrderTicket({
                                     onClick={() => {
                                         if (lot === orderLot) return;
                                         setOrderLot(lot);
-                                        // 單位改變時數量歸 1，避免 500 股變成 500 張
+                                        // 單位改變時數量歸 1，避免 500 股變成 500 張；
+                                        // 分倉固定量同理清空，確認步驟全部解除
                                         setQty(1);
+                                        setFixedQty({});
+                                        setArmed(false);
+                                        setSplitArmed(false);
                                         if (isOddLot(lot)) {
                                             // 零股只能現股限價 ROD（#204）
                                             setPriceType('LMT');

@@ -21,6 +21,7 @@ const contract = { code: '2330', security_type: 'STK', reference: 100, limit_up:
 const order = (id: string, lot: string, quantity: number) => ({ account: accounts[0], contract, order: { id, account: accounts[0], price: 100, action: 'Buy', quantity, order_lot: lot },
     status: { status: 'Submitted', order_quantity: quantity, deal_quantity: 0, cancel_quantity: 0, deals: [] } }) as unknown as Trade;
 const trades = [order('lot', 'Common', 2), order('odd', 'IntradayOdd', 300)];
+const chip = (label: string) => view.root.findAllByType('button').find(b => String(b.props.title ?? '').startsWith('刪除') && text(b) === label)!;
 const positions = [{ account: accounts[0], id: 0, code: '2330', direction: 'Buy' as const, quantity: 1500, price: 100, last_price: 100, pnl: 0, cond: 'Cash' }];
 const text = (n: ReactTestInstance): string => n.children.map(c => typeof c === 'string' ? c : text(c)).join('');
 let view!: ReactTestRenderer;
@@ -75,4 +76,16 @@ it('futures panels have no odd-lot toggle', async () => {
     const fut = { code: 'TMF', security_type: 'FUT', reference: 100 } as unknown as ContractInfo;
     await act(async () => { view = create(createElement(FlashOrder, { contract: fut, trades: [], positions: [] })); });
     expect(button('零股')).toBeUndefined();
+});
+
+it('cancelling a chip only cancels orders of the shown unit at that price', async () => {
+    mocks.cancel.mockResolvedValue({});
+    await act(async () => { view = create(createElement(FlashOrder, { contract, trades, positions })); });
+    await act(async () => { button('零股').props.onClick(); });
+    await act(async () => { await chip('300').props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+    expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual(['odd']);
+    mocks.cancel.mockClear();
+    await act(async () => { button('零股').props.onClick(); });
+    await act(async () => { await chip('2').props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+    expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual(['lot']);
 });

@@ -5,9 +5,12 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
 import type { ContractInfo } from '../lib/types/contract';
 const m = vi.hoisted(() => ({ confirm: vi.fn(), stock: vi.fn(), risk: vi.fn() }));
-const h = vi.hoisted(() => ({ account: { account_type: 'S', broker_id: 'BR', account_id: '99887766A', signed: true, person_id: '', username: '' } }));
+const h = vi.hoisted(() => {
+    const account = { account_type: 'S', broker_id: 'BR', account_id: '99887766A', signed: true, person_id: '', username: '' };
+    return { account, second: { ...account, account_id: '11223344B' }, accounts: [account] as unknown[] };
+});
 vi.mock('../lib/account-store', () => {
-    const state = () => ({ accounts: [h.account], selectedStock: h.account, selectedFutures: null, loaded: true });
+    const state = () => ({ accounts: h.accounts, selectedStock: h.account, selectedFutures: null, loaded: true });
     return { useAccounts: state, getAccountState: state, selectAccount: vi.fn() };
 });
 vi.mock('../lib/order-confirm', () => ({ requestOrderConfirm: m.confirm, accountConfirmLabel: (a: Account) => `${a.broker_id}-${a.account_id}` }));
@@ -31,6 +34,7 @@ const qtyInput = () => view.root.findAll(n => n.type === 'input' && String(n.pro
 
 beforeEach(() => {
     vi.clearAllMocks();
+    h.accounts = [h.account];
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     vi.stubGlobal('document', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
@@ -71,4 +75,39 @@ it('switching unit resets the quantity so shares never become lots', async () =>
     await act(async () => { btn('整股').props.onClick(); });
     expect(qtyInput().props.value).toBe(1);
     expect(qtyInput().props['aria-label']).toBe('數量（張）');
+});
+
+it('switching unit clears per-account split quantities and disarms the split confirm', async () => {
+    h.accounts = [h.account, h.second];
+    await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { btn('多帳戶分倉').props.onClick(); });
+    await act(async () => { btn('固定').props.onClick(); });
+    const splitInputs = () => view.root.findAll(n => n.type === 'input' && n.props.inputMode === 'numeric' && n.props.placeholder === '0');
+    expect(splitInputs()).toHaveLength(2);
+    for (const i of splitInputs()) await act(async () => { i.props.onChange({ target: { value: '500' } }); });
+    const splitBtn = () => view.root.findAllByType('button').find(b => /分倉(買進|賣出)/.test(text(b)))!;
+    await act(async () => { await splitBtn().props.onClick(); }); // armed: 確認分倉買進 1000股
+    expect(text(splitBtn())).toContain('確認分倉');
+    await act(async () => { btn('整股').props.onClick(); });
+    // 500 股 per account must never become 500 張
+    expect(splitInputs().map(i => i.props.value)).toEqual(['', '']);
+    expect(text(splitBtn())).not.toContain('確認');
+    expect(splitBtn().props.disabled).toBe(true);
+    expect(m.stock).not.toHaveBeenCalled();
+});
+
+it('a unit change while the confirm dialog is open sends nothing', async () => {
+    let approve!: (v: boolean) => void;
+    m.confirm.mockReturnValue(new Promise<boolean>(r => { approve = r; }));
+    await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { qtyInput().props.onChange({ target: { value: '500' } }); });
+    await act(async () => { await exec().props.onClick(); });
+    let pending!: Promise<unknown>;
+    await act(async () => { pending = exec().props.onClick(); });
+    await act(async () => { btn('整股').props.onClick(); });
+    await act(async () => { approve(true); await pending; });
+    expect(m.stock).not.toHaveBeenCalled();
+    expect(text(view.root)).toContain('單位已變更');
 });

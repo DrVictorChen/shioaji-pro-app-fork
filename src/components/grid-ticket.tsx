@@ -5,7 +5,7 @@
 // custom_field so only our own orders are touched.
 
 import { RefreshCw, Zap } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useQuote, useTradingLive } from '../hooks/use-stream';
 import { accountConfirmLabel, requestOrderConfirm } from '../lib/order-confirm';
 import {
@@ -71,6 +71,7 @@ export function GridTicket({
     const [armed, setArmed] = useState(false);
     const [follow, setFollow] = useState(false);
     const [busy, setBusy] = useState(false);
+    const unitLabelId = useId();
     // account pinned by the running 動態跟隨 loop (display only)
     const [followAccountShown, setFollowAccountShown] = useState<Account | null>(null);
     const priv = usePrivacyMode();
@@ -139,11 +140,17 @@ export function GridTicket({
         return out;
     };
 
-    const placeAt = async (price: number, account: Account) => {
+    // batch: unit/quantity/side fixed at the start of a manual 鋪單 so a
+    // mid-batch toggle can't change later orders after the risk check (#204)
+    const placeAt = async (
+        price: number,
+        account: Account,
+        batch?: { qtyPer: number; odd: boolean; side: Action },
+    ) => {
         recentPlace.current.set(keyOf(price), Date.now());
         const c = contractRef.current;
-        const p = paramsRef.current;
-        const s = sideRef.current;
+        const p = batch ?? paramsRef.current;
+        const s = batch?.side ?? sideRef.current;
         const req = {
             action: s,
             price,
@@ -167,7 +174,8 @@ export function GridTicket({
 
     const layGrid = async () => {
         if (!armed || busy || last === null) return;
-        const blocked = checkOrderAllowed(qtyPer * levels, odd ? 'IntradayOdd' : undefined);
+        const batch = { qtyPer, odd, side };
+        const blocked = checkOrderAllowed(batch.qtyPer * levels, batch.odd ? 'IntradayOdd' : undefined);
         if (blocked) {
             notify({ kind: 'err', title: '風控阻擋', body: blocked });
             return;
@@ -181,6 +189,21 @@ export function GridTicket({
             notify({ kind: 'err', title: '鋪單未送出', body: '缺少有效且已簽署的下單帳戶' });
             return;
         }
+        // 從確認到送完都鎖住單位切換
+        setBusy(true);
+        try {
+            await sendBatch(prices, gridAccount, batch);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const sendBatch = async (
+        prices: number[],
+        gridAccount: Account,
+        batch: { qtyPer: number; odd: boolean; side: Action },
+    ) => {
+        const { qtyPer, odd, side } = batch;
         // 手動鋪單整批確認一次（動態跟隨的補單不屬手動，不再問）
         if (getRiskSettings().confirmManualOrders && prices.length > 0) {
             const priceRange = `${fmtPrice(Math.min(...prices))} ～ ${fmtPrice(
@@ -203,11 +226,10 @@ export function GridTicket({
             notify({ kind: 'err', title: '鋪單未送出', body: ACCOUNT_CHANGED_MESSAGE });
             return;
         }
-        setBusy(true);
         let ok = 0;
         for (const price of prices) {
             try {
-                await placeAt(price, gridAccount);
+                await placeAt(price, gridAccount, batch);
                 ok += 1;
             } catch (e) {
                 notify({
@@ -222,7 +244,6 @@ export function GridTicket({
             title: '🧱 鋪單完成',
             body: `${contract.code} ${odd ? '零股' : ''}${side === 'Buy' ? '買' : '賣'}邊 ${ok}/${prices.length} 筆`,
         });
-        setBusy(false);
         onChangedRef.current?.();
     };
 
@@ -400,8 +421,8 @@ export function GridTicket({
             {numField('間隔(檔)', step, setStep, 1, 10)}
             {!futures && (
                 <div className={styles.fieldRow}>
-                    <span className={styles.fieldLabel}>單位</span>
-                    <div className={styles.segGroup}>
+                    <span className={styles.fieldLabel} id={unitLabelId}>單位</span>
+                    <div className={styles.segGroup} role="radiogroup" aria-labelledby={unitLabelId}>
                         {([
                             ['Common', '整股'],
                             ['IntradayOdd', '盤中零股'],
@@ -409,6 +430,9 @@ export function GridTicket({
                             <button
                                 key={value}
                                 className={styles.seg[lot === value ? 'on' : 'off']}
+                                role="radio"
+                                aria-checked={lot === value}
+                                disabled={busy}
                                 title={value === 'IntradayOdd' ? '盤中零股：每檔以股計（1～999 股），限價 ROD、僅現股' : '整股以張計'}
                                 onClick={() => {
                                     if (lot === value) return;

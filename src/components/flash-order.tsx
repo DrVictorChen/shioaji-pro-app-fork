@@ -635,6 +635,9 @@ export function FlashOrder({
                 (t.contract.code === code ||
                     getAliasFor(t.contract.code) === code) &&
                 t.order.action === action &&
+                // 只刪目前單位的委託：點 300 股的格子不可連帶刪掉同價的整股單（#204）
+                (contractRef.current.security_type !== 'STK' ||
+                    isOddLot(t.order.order_lot) === oddRef.current) &&
                 keyOf(t.status.modified_price || t.order.price) ===
                     keyOf(price),
         );

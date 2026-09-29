@@ -62,3 +62,24 @@ it('odd-lot follow ignores whole-lot grid orders at the same prices', async () =
     expect(m.stock.mock.calls.map(c => [c[1].price, c[1].order_lot])).toEqual([[98, 'IntradayOdd'], [97, 'IntradayOdd'], [96, 'IntradayOdd'], [95, 'IntradayOdd']]);
     expect(m.risk).toHaveBeenCalledWith(1, 'IntradayOdd');
 });
+
+it('a batch keeps the unit and quantity it was confirmed with; unit buttons are locked while sending', async () => {
+    let approve!: (v: boolean) => void;
+    m.confirm.mockReturnValue(new Promise<boolean>(r => { approve = r; }));
+    await act(async () => { view = create(createElement(GridTicket, { contract, trades: [] })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { view.root.findAllByType('input')[3]!.props.onChange({ target: { value: '250' } }); });
+    await act(async () => { btn('解鎖鋪單').props.onClick(); });
+    let pending!: Promise<unknown>;
+    await act(async () => { pending = btn('鋪 ').props.onClick(); });
+    const unitBtn = (label: string) => view.root.findAll(n => n.type === 'button' && n.props.role === 'radio' && text(n) === label)[0]!;
+    expect(unitBtn('整股').props.disabled).toBe(true);
+    expect(unitBtn('盤中零股').props['aria-checked']).toBe(true);
+    // even if the quantity is edited during the confirm, the batch sends what was confirmed
+    await act(async () => { view.root.findAllByType('input')[3]!.props.onChange({ target: { value: '7' } }); });
+    await act(async () => { approve(true); await pending; });
+    expect(m.stock).toHaveBeenCalledTimes(5);
+    expect(m.stock.mock.calls.every(c => c[1].order_lot === 'IntradayOdd' && c[1].quantity === 250)).toBe(true);
+    expect(unitBtn('整股').props.disabled).toBe(false);
+    expect(unitBtn('整股').props['aria-checked']).toBe(false);
+});
