@@ -85,6 +85,8 @@ export interface Block {
     type: BlockType;
     // null → follows the globally selected symbol; string → pinned to a code
     pin: string | null;
+    // 閃電下單面板自己的帳戶（每市場一組 key）— 沒有 key 的市場跟隨主畫面
+    flashAccounts?: import('./flash-account').FlashAccountKeys;
     // Market-pulse presets can open multiple panels on distinct views.
     pulseVisualization?: 'distribution' | 'flow';
     pulseSections?: PulseSection[];
@@ -94,11 +96,54 @@ export interface Block {
     wallList?: string;
     wallCols?: number;
     wallRows?: number;
+    // 時段選擇（issue #73）— K 線全盤/僅日盤、當日走勢自動/日盤/夜盤，
+    // 跟版面一起持久化；缺省 = 全盤 / 自動
+    chartSession?: 'all' | 'day';
+    intradaySession?: 'auto' | 'day' | 'night';
 }
 
 export interface Workspace {
     blocks: Block[];
     layout: LayoutItem[];
+}
+
+export type SessionConfigPatch = Partial<
+    Pick<Block, 'chartSession' | 'intradaySession'>
+>;
+
+// 開彈出視窗時把面板的時段選擇帶進 URL（session=…）
+export function popoutSessionParam(block: Block): Record<string, string> {
+    const session =
+        block.type === 'chart'
+            ? block.chartSession
+            : block.type === 'intraday'
+              ? block.intradaySession
+              : undefined;
+    return session ? { session } : {};
+}
+
+// 彈出視窗讀回 URL 的 session — 依面板類型只接受已知值
+export function popoutSessionFromQuery(q: URLSearchParams): SessionConfigPatch {
+    const v = q.get('session');
+    return {
+        chartSession: v === 'all' || v === 'day' ? v : undefined,
+        intradaySession:
+            v === 'auto' || v === 'day' || v === 'night' ? v : undefined,
+    };
+}
+
+// 面板時段選擇寫回 workspace（跟版面/版面庫一起存）
+export function withBlockSessionConfig(
+    w: Workspace,
+    id: string,
+    patch: SessionConfigPatch,
+): Workspace {
+    return {
+        ...w,
+        blocks: w.blocks.map((block) =>
+            block.id === id ? { ...block, ...patch } : block,
+        ),
+    };
 }
 
 export interface Profile {
@@ -795,4 +840,13 @@ let blockCounter = Date.now() % 100000;
 export function newBlockId(type: BlockType): string {
     blockCounter += 1;
     return `${type}-${blockCounter}`;
+}
+
+// Merge a partial update into one block (panel settings persisted with the
+// workspace / layout library).
+export function withBlockPatch(w: Workspace, id: string, patch: Partial<Block>): Workspace {
+    return {
+        ...w,
+        blocks: w.blocks.map((block) => (block.id === id ? { ...block, ...patch } : block)),
+    };
 }

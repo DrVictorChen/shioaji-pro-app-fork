@@ -7,9 +7,10 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // price). Click bid/ask columns to fire LMT orders, click your own order
 // chips to cancel, market buy/sell + flatten + cancel-all in the action bar.
 
-import { accountFor, selectAccount, useAccounts } from '../lib/account-store';
+import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { maskAccountId, usePrivacyMode } from '../lib/privacy';
-import { accountMatches, scopedFlashRows } from '../lib/flash-account';
+import { accountMatches, flashAccountKey, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashMarket } from '../lib/flash-account';
+import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { Zap } from 'lucide-react';
 import {
     memo,
@@ -31,7 +32,7 @@ import { useTickBandsVersion } from '../lib/tick-bands';
 import { notify, placeQuickOrder, placeStockExitByShares } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
 import { ACTIVE_ORDER_STATUSES, type Action, type Trade } from '../lib/types/order';
-import type { AccountedPosition } from '../lib/types/portfolio';
+import type { Account, AccountedPosition } from '../lib/types/portfolio';
 import { fmtInt, fmtPrice, fmtSigned } from '../lib/utils/format';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import * as styles from './flash-order.css';
@@ -40,6 +41,36 @@ const ROW_H = 22; // must match row height in flash-order.css.ts
 const EDGE = 2; // auto-recenter when last price gets this close to the edge
 
 const keyOf = (p: number) => p.toFixed(2);
+const FOLLOW_GLOBAL = '__follow__';
+const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
+
+function accountChangedBeforeSend(error: unknown): boolean {
+    return error instanceof Error && error.message === ACCOUNT_CHANGED_DURING_CONFIRMATION;
+}
+
+function notifyAccountChangedBeforeSend(): void {
+    notify({
+        kind: 'err',
+        title: '閃電下單未送出',
+        body: '確認期間帳戶已變更，這筆沒有送出，請重新確認',
+    });
+}
+
+type PosMarks = { mixed: boolean; twoWay: boolean; stale: boolean; fifo: boolean };
+
+// 閃電持倉列的成本來源標記（僅期貨）
+function posLabel(p: PosMarks): string {
+    const state = p.stale ? '待更新' : p.fifo ? '' : '估算';
+    if (p.mixed) return state ? `多空並存 ${state}` : '多空並存';
+    return state || 'FIFO';
+}
+
+function posNote(p: PosMarks): string {
+    const rows = p.mixed ? '持倉同時有買、賣兩列（券商或即時估算尚未沖銷）；' : '今日有買賣沖銷；';
+    if (p.stale) return `${rows}有成交回報尚未套用或委託／持倉待對帳，數字可能過時，請更新持倉確認`;
+    if (p.fifo) return `${rows}成本與損益依本交易日成交逐筆先進先出（FIFO）沖銷計算`;
+    return `${rows}本交易日成交無法完整對上持倉（可能含前期留倉或成交未載入），顯示持倉列加權平均，可能與先進先出（FIFO）結果不同，請以持倉面板確認`;
+}
 
 interface RowProps {
     price: number;
@@ -181,22 +212,47 @@ export function FlashOrder({
     trades: allTrades = [],
     positions: allPositions = [],
     onOrdersChanged,
+    accountKeys,
+    onAccountKeysChange,
+    followMain = true,
+    reconcilePending = false,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
     trades?: Trade[];
     positions?: AccountedPosition[];
     onOrdersChanged?: () => void;
+    // this panel's own account per market (issue #139); a market without a
+    // key follows the app-wide selection. With onAccountKeysChange the
+    // owner (workspace block / popout window) persists it; otherwise the
+    // choice lives only in this component.
+    accountKeys?: FlashAccountKeys;
+    onAccountKeysChange?: (keys: FlashAccountKeys) => void;
+    // false in popout windows: they cannot see the main window's live
+    // selection, so they only ever use their pinned/chosen account
+    followMain?: boolean;
+    /** Orders or positions await reconciliation (missed or unapplied
+     * reports): today's fills may be incomplete, so no FIFO cost. */
+    reconcilePending?: boolean;
 }) {
     const { quote, snapshot: initialSnapshot, book: display } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
     const accountState = useAccounts();
     const privacy = usePrivacyMode();
-    const market = contract.security_type === 'STK' ? 'S' : 'F';
-    const account = market === 'S' ? accountState.selectedStock : accountState.selectedFutures;
+    const market: FlashMarket = contract.security_type === 'STK' ? 'S' : 'F';
+    const [localKeys, setLocalKeys] = useState<FlashAccountKeys>(accountKeys ?? {});
+    const panelKeys = onAccountKeysChange ? (accountKeys ?? {}) : localKeys;
+    const globalAccount = market === 'S' ? accountState.selectedStock : accountState.selectedFutures;
     const eligible = accountState.accounts.filter(a => a.signed && a.account_type === market);
-    const activeAccount = eligible.find(a => accountMatches(a, account));
-    const accountKey = activeAccount ? `${activeAccount.account_type}:${activeAccount.broker_id}:${activeAccount.account_id}` : '';
+    const resolved = resolveFlashAccount(accountState.accounts, market, panelKeys[market], globalAccount, followMain);
+    const activeAccount = resolved.account;
+    // account list not fetched yet (startup / a fresh popout): a saved key
+    // is not "unavailable" yet — say so, ordering stays disabled meanwhile
+    const accountsLoading = !accountState.loaded;
+    // idempotent — a popout / 閃電全開 tile has no dock or settings dialog
+    // that would otherwise fetch the account list (#139)
+    useEffect(ensureAccounts, []);
+    const accountKey = activeAccount ? flashAccountKey(activeAccount) : '';
     const trades = scopedFlashRows(allTrades, activeAccount);
     const positions = scopedFlashRows(allPositions, activeAccount);
     const accountRef = useRef(activeAccount);
@@ -235,10 +291,14 @@ export function FlashOrder({
     const onOrdersChangedRef = useRef(onOrdersChanged);
     onOrdersChangedRef.current = onOrdersChanged;
 
-    // reset on symbol change
+    // Price navigation belongs to the symbol, not the trading account.
     useEffect(() => {
         setAnchor(null);
         setFollow(true);
+    }, [contract.code]);
+
+    // Account changes still disarm an active ladder.
+    useEffect(() => {
         setArmed(false);
     }, [contract.code, accountKey]);
 
@@ -453,27 +513,54 @@ export function FlashOrder({
         let net = 0;
         let cost = 0;
         let qtySum = 0;
-        let pnl = 0;
+        let rowPnl = 0;
+        const sideQty = { Buy: 0, Sell: 0 };
         for (const p of matches) {
             net += p.direction === 'Sell' ? -p.quantity : p.quantity;
             cost += p.price * p.quantity;
             qtySum += p.quantity;
-            pnl += p.pnl || 0;
+            rowPnl += p.pnl || 0;
+            sideQty[p.direction === 'Sell' ? 'Sell' : 'Buy'] += p.quantity;
         }
         if (net === 0) return null;
-        const avg = qtySum > 0 ? cost / qtySum : 0;
+        // Futures only (stock margin longs and short sales are real separate
+        // positions). Intra-session the broker — and the live projection of
+        // New fills — keeps separate Buy and Sell rows for one contract, and
+        // blending them (#116) is not the cost the broker's FIFO netting will
+        // give. With offsetting activity, replay this trading day's fills
+        // FIFO; show it only when today's fills fully explain the rows.
+        // Otherwise keep exactly the rows' figures and mark them 估算, or
+        // 待更新 while reports await reconciliation.
+        const futures = market === 'F';
+        const mixed = futures && sideQty.Buy > 0 && sideQty.Sell > 0;
+        const codes = new Set(matches.map(p => p.code));
+        const code = codes.size === 1 ? matches[0]!.code : null;
+        const since = tradingDayStart(Date.now() / 1000);
+        const twoWay = futures && code !== null && hasTwoWayFills(trades, code, since);
+        const fills = (mixed || twoWay) && code !== null && !reconcilePending ? collectFills(trades, code, since) : null;
+        const mark = last !== null && last > 0 ? last : matches.find(p => p.last_price > 0)?.last_price ?? 0;
+        const fifo = fills ? fifoPosition(matches, fills, contract.multiplier ?? 0, mark) : null;
+        const fifoOk = fifo !== null && !fifo.seeded;
+        const rowAvg = qtySum > 0 ? cost / qtySum : 0;
+        const avg = fifoOk ? fifo.avg : rowAvg;
+        const pnl = fifoOk ? fifo.pnl : rowPnl;
+        const stale = futures && reconcilePending;
         const safeExit = matches.every(p => Number.isInteger(p.quantity) && p.quantity > 0)
             && new Set(matches.map(p => p.direction)).size === 1
             && (market !== 'S' || matches.every(p => 'cond' in p && p.cond === 'Cash'));
-        return { net, avg, avgKey: keyOf(roundToTick(contract, avg)), pnl, safeExit };
-    }, [positions, contract]);
+        return { net, avg, avgKey: keyOf(roundToTick(contract, avg)), pnl, safeExit, mixed, twoWay, stale, fifo: fifoOk };
+    }, [positions, trades, contract, reconcilePending, last]);
 
 
     // ---- order actions (all gated by the arm toggle) ----
 
+    // the panel must still trade with the account captured at click time —
+    // re-checked after the (optional) confirmation dialog
+    const stillPanelAccount = useCallback((captured: Account) => () => accountMatches(accountRef.current, captured), []);
+
     const send = useCallback(async (action: Action, price: number | null) => {
         const capturedAccount = accountRef.current;
-        if (!armedRef.current || !capturedAccount || !accountMatches(capturedAccount, accountFor(capturedAccount.account_type as 'S' | 'F'))) return;
+        if (!armedRef.current || !capturedAccount) return;
         const q = Math.max(1, qtyRef.current);
         const key = `${action}:${price === null ? 'MKT' : keyOf(price)}`;
         if (inflightRef.current.has(key)) return; // double-click guard
@@ -485,7 +572,7 @@ export function FlashOrder({
                 action,
                 price,
                 q,
-                { account: capturedAccount },
+                { account: capturedAccount, isAccountCurrent: stillPanelAccount(capturedAccount) },
             );
             notify({
                 kind: 'ok',
@@ -496,16 +583,13 @@ export function FlashOrder({
             });
             onOrdersChangedRef.current?.();
         } catch (e) {
-            notify({
-                kind: 'err',
-                title: '⚡ 閃電下單失敗',
-                body: e instanceof Error ? e.message : String(e),
-            });
+            if (accountChangedBeforeSend(e)) notifyAccountChangedBeforeSend();
+            else notify({ kind: 'err', title: '⚡ 閃電下單失敗', body: e instanceof Error ? e.message : String(e) });
         } finally {
             inflightRef.current.delete(key);
             force();
         }
-    }, []);
+    }, [stillPanelAccount]);
 
     const onCell = useCallback(
         (action: Action, price: number) => void send(action, price),
@@ -518,7 +602,7 @@ export function FlashOrder({
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
-                accountMatches((t as Trade & { account?: import('../lib/types/portfolio').Account }).account ?? t.order.account, capturedAccount) &&
+                accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, capturedAccount) &&
                 remainingWorkingOrderQuantity(t) > 0 &&
                 (t.contract.code === code ||
                     getAliasFor(t.contract.code) === code) &&
@@ -548,7 +632,7 @@ export function FlashOrder({
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
-                accountMatches((t as Trade & { account?: import('../lib/types/portfolio').Account }).account ?? t.order.account, capturedAccount) &&
+                accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, capturedAccount) &&
                 remainingWorkingOrderQuantity(t) > 0 &&
                 (t.contract.code === code ||
                     getAliasFor(t.contract.code) === code),
@@ -569,8 +653,7 @@ export function FlashOrder({
 
     const flatten = useCallback(async () => {
         const account = accountRef.current;
-        if (!pos?.safeExit || !armedRef.current || !account
-            || !accountMatches(account, accountFor(account.account_type as 'S' | 'F'))) return;
+        if (!pos?.safeExit || !armedRef.current || !account) return;
         const key = `flatten:${account.account_type}:${account.broker_id}:${account.account_id}`;
         if (inflightRef.current.has(key)) return;
         inflightRef.current.add(key);
@@ -578,16 +661,17 @@ export function FlashOrder({
         const action = pos.net > 0 ? 'Sell' : 'Buy';
         try {
             if (account.account_type === 'S') {
-                await placeStockExitByShares(contract, action, Math.abs(pos.net), account);
+                await placeStockExitByShares(contract, action, Math.abs(pos.net), account, { isAccountCurrent: stillPanelAccount(account) });
             } else {
-                await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover' });
+                await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account) });
             }
             notify({ kind: 'info', title: '⚡ 平倉已送出', body: '請以委託與成交回報確認結果' });
             onOrdersChangedRef.current?.();
         } catch (error) {
-            notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+            if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
+            else notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
         } finally { inflightRef.current.delete(key); }
-    }, [pos]);
+    }, [pos, stillPanelAccount]);
 
     // ---- render ----
 
@@ -609,14 +693,38 @@ export function FlashOrder({
     return (
         <div className={styles.wrap}>
             <div className={styles.controls}>
-                <select aria-label="閃電下單帳戶" value={accountKey} onChange={e => {
-                    armedRef.current = false;
-                    setArmed(false);
-                    const next = eligible.find(a => `${a.account_type}:${a.broker_id}:${a.account_id}` === e.target.value);
-                    if (next) selectAccount(next);
-                }}>
-                    {!activeAccount && <option value="">無可用帳戶</option>}
-                    {eligible.map(a => <option key={`${a.broker_id}:${a.account_id}`} value={`${a.account_type}:${a.broker_id}:${a.account_id}`}>
+                <select
+                    aria-label="閃電下單帳戶"
+                    title={resolved.following ? '跟隨主畫面帳戶 — 選擇帳戶後此視窗固定使用該帳戶' : '此視窗固定帳戶，不影響其他視窗與主畫面'}
+                    value={resolved.following ? FOLLOW_GLOBAL : resolved.unset ? '' : panelKeys[market]}
+                    onChange={e => {
+                        armedRef.current = false;
+                        setArmed(false);
+                        const value = e.target.value;
+                        if (value === FOLLOW_GLOBAL ? !followMain : !eligible.some(a => flashAccountKey(a) === value)) return;
+                        const next = { ...panelKeys };
+                        if (value === FOLLOW_GLOBAL) delete next[market];
+                        else next[market] = value;
+                        // drop the old account right away so nothing queued before
+                        // the re-render can still fire with it
+                        accountRef.current = undefined;
+                        if (onAccountKeysChange) onAccountKeysChange(next);
+                        else setLocalKeys(next);
+                    }}
+                >
+                    {followMain ? (
+                        <option value={FOLLOW_GLOBAL}>
+                            {!resolved.following
+                                ? '跟隨主畫面'
+                                : activeAccount
+                                  ? `跟隨主畫面 ${activeAccount.broker_id}-${maskAccountId(activeAccount.account_id, privacy)}`
+                                  : accountsLoading
+                                    ? '跟隨主畫面（帳戶載入中）'
+                                    : '跟隨主畫面（無可用帳戶）'}
+                        </option>
+                    ) : resolved.unset && <option value=''>請選擇帳戶</option>}
+                    {resolved.missing && <option value={panelKeys[market]}>{accountsLoading ? '帳戶載入中' : '帳戶不可用'}</option>}
+                    {eligible.map(a => <option key={flashAccountKey(a)} value={flashAccountKey(a)}>
                         {a.broker_id}-{maskAccountId(a.account_id, privacy)}
                     </option>)}
                 </select>
@@ -713,6 +821,11 @@ export function FlashOrder({
                         {pos.net > 0 ? '多' : '空'} {Math.abs(pos.net)}
                     </span>
                     <span>@ {fmtPrice(pos.avg)}</span>
+                    {(pos.mixed || pos.twoWay || pos.stale) && (
+                        <span className={styles.posMixed} title={posNote(pos)}>
+                            {posLabel(pos)}
+                        </span>
+                    )}
                     <span
                         className={
                             pos.pnl >= 0 ? styles.posLong : styles.posShort

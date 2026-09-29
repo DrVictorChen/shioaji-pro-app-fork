@@ -2,29 +2,32 @@
 
 Read this reference when the user asks to create or inspect a Shioaji Pro
 custom indicator, mount or change a chart indicator, create a strategy, or
-inspect a backtest result. These operations use semantic
-App Tools; they do not grant trading authority.
+inspect a backtest result. These operations use semantic App Tools; they do not
+grant trading authority. For source code, supported `ta.*` functions, signal
+semantics, execution timing, and validation examples, also read
+[CONTENT_AUTHORING.md](CONTENT_AUTHORING.md).
 
 ## Indicators and Strategies
 
 - An unqualified request to create an indicator or strategy in a connected
   Shioaji Pro session means native App content, not Pine Script or a workspace
-  file.
+  file. A source snippet is not a saved App item.
 - Use `list_custom_indicators` before editing an existing indicator and
   `save_custom_indicator` to create or update it. Overwriting an existing
   shared definition requires the App's content confirmation because it affects
   every chart using that definition. A concurrent definition change invalidates
   the proposed overwrite; read again and prepare a new proposal.
 - Use `list_strategies` before editing an existing strategy and `save_strategy`
-  to create or update it.
-- When converting an indicator into a strategy, preserve its parameters and
-  signal meaning, then make entry and exit conditions explicit.
+  to create or update it. When converting an indicator into a strategy,
+  preserve its parameters and signal meaning, then make entry and exit
+  conditions explicit.
 - Supply a new opaque caller-generated `idempotency_key` for each mutation
   intent. Preserve it with its exact arguments for a transport retry. A changed
   payload, including corrected source or parameters, requires a new key.
-- A validation failure is actionable feedback. Correct the source and submit
-  the same user intent again. Completion requires a successful receipt and a
-  fresh list read showing the saved content.
+- A validation failure is actionable feedback. Correct the source with the
+  runtime defined in [CONTENT_AUTHORING.md](CONTENT_AUTHORING.md), then submit
+  the corrected intent with a new key. Completion requires a successful receipt
+  and a fresh list read showing the saved content.
 
 ## Chart Indicator Workflow
 
@@ -103,6 +106,60 @@ State that limitation when it affects the answer. A `multi` result is a Batch
 Run of independent single-symbol tests, not a Portfolio Run; do not infer
 cross-symbol capital allocation, portfolio exposure, or portfolio-level risk.
 
-The current semantic tools read the latest App result. They do not start,
-configure, persist, or reproduce a backtest. Ask the user to run it in the App
-when no result exists, and report unavailable capabilities plainly.
+## Persistent Portfolio Research
+
+The Phase 2 tools use an immutable revision and a persistent run ID. Read
+`list_strategy_revisions` or `get_strategy_revision` before changing a shared
+strategy. `create_strategy_revision` creates a child of the current head;
+updating an existing artifact requires content confirmation. The source and
+parameters are pinned, and an older run remains unchanged after a new revision.
+
+Call `start_backtest_run` with `revision_id`, `code`, interval `minutes`,
+`days`, optional parameter values, quantity in lots/contracts, capital,
+discount, futures fee, and slippage ticks. It reads K-bars and simulates fills;
+it has no broker order path. Use `get_backtest_run` for progress or
+`cancel_backtest_run` to stop. A cancelled run is terminal; late worker output
+cannot replace it. `list_backtest_runs` can recover IDs after the panel closes.
+
+After completion, read `get_backtest_summary` for the manifest and versioned
+metrics. Its bounded `rejections` summary gives counts, reasons, and an
+estimated capital need when all entries are blocked. If any rejections occur,
+explain them in the reply and suggest adjusting initial capital when funding
+blocks entries; do not report only "zero trades". Keep the 1× leverage default.
+For the #35 execution question, the manifest records interval, date
+range, pinned data snapshot ID, fees, tax, tick, lot, multiplier, sizing, and versions;
+`get_backtest_run_trades` shows entry and exit times/prices. The manifest's
+`signalExecution` records all-bar evaluation, close confirmation, next
+available open fills, and no engine daily-entry cap. Inspect the pinned source
+with `get_strategy_revision` to determine authored OR/AND conditions and
+filters; metrics alone cannot prove those rules. Page trades in
+chunks of at most 50 and request `get_backtest_equity` with at most 500 points.
+`compare_backtest_runs` accepts 2–10 run IDs and returns compact metrics.
+`open_backtest_run` opens a deep link; select a trade row to zoom the chart to
+its entry/exit interval.
+`get_backtest_portfolio` reads portfolio metrics, per-asset and tag attribution,
+and paged fills, rejections, and diagnostics. Request at most 20 rows per page.
+
+These tools require `ui.control`, not `trade.preview` or `trade.execute`.
+Starting, reading, cancelling, comparing, and opening research requires no
+trading approval. Tool schemas define exact arguments and idempotency keys.
+
+Use `start_portfolio_backtest` with `universe_kind: static`, one to eight
+explicit codes, and `calendar: union | intersection`. One code follows the
+same portfolio engine. Missing data is a partial failure: name the unavailable
+asset and gap from the manifest; do not count it as a zero-return trade.
+Dynamic selectors are unavailable until survivorship-bias rules exist.
+
+For optimization, pass a complete parameter value space, Grid or Random
+search (Random needs a seed and count), nonoverlapping train/test dates,
+resource limits, minimum trades, and a cost ratio limit to
+`start_optimization_job`. Poll `get_optimization_job`; use
+`cancel_optimization_job` if requested. Read `list_optimization_candidates`
+by pages of at most 20, then `get_optimization_candidate` for selected
+train/test metrics and child run IDs. Ranking uses train results. Report train
+and held-out test separately, describe their gap and sensitivity, and warn
+about overfitting before recommending another experiment. Use child run IDs
+with `get_backtest_summary`, bounded trade/equity readers, and
+`open_backtest_run` for inspection. `export_backtest_run` produces CSV trades,
+JSON manifest, PNG equity, or Markdown research report; the App owns the save
+destination. No research tool sends an order.

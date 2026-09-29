@@ -15,7 +15,7 @@ const m = vi.hoisted(() => ({
 vi.mock('./runtime', async (orig) => ({ ...(await orig<object>()), isTauri: true }));
 vi.mock('./window-role', () => ({ isChildWindow: () => m.child }));
 vi.mock('./features', () => ({ agentModule: undefined }));
-vi.mock('./stream', () => ({ ensureStream: m.ensureStream, holdStream: m.holdStream, releaseStream: m.releaseStream, onOrderEvent: vi.fn() }));
+vi.mock('./stream', () => ({ ensureStream: m.ensureStream, holdStream: m.holdStream, releaseStream: m.releaseStream, onOrderEvent: vi.fn(), getStreamStatus: () => 'disconnected', subscribeStatusStore: vi.fn() }));
 vi.mock('./trade', () => ({ notify: vi.fn(), logNotice: vi.fn() }));
 vi.mock('./frontend-ready', () => ({ appReadySignals: () => [], watchFrontendReady: vi.fn(), startStallProbe: vi.fn() }));
 vi.mock('./trading-state', () => ({ startTradingState: m.startTrading }));
@@ -35,6 +35,9 @@ vi.mock('./tauri', () => ({
     nativeOwnsHarnessSidecar: vi.fn(async () => false),
     caActive: vi.fn(async () => false),
     harnessOwnershipCompatible: () => true,
+    consumeTrayReadyOnReload: () => false,
+    markTrayReadyOnReload: vi.fn(),
+    setTrayStatus: vi.fn(),
 }));
 
 const store = new Map<string, string>();
@@ -59,6 +62,7 @@ async function boot(lastStage: 'reload' | 'wait-health' | null, configure?: () =
             bootTimers.delete(timer);
         },
         setInterval, clearInterval,
+        matchMedia: () => ({ addEventListener: vi.fn() }),
         location: { search: '', reload: vi.fn() },
     }));
     vi.stubGlobal('performance', { getEntriesByType: () => [{ type: m.navType }], timeOrigin: Date.now(), now: () => 0 });

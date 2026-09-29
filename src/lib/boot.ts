@@ -17,18 +17,21 @@ import {
     fetchInfo,
     subscribeTradeEvents,
 } from './shioaji';
-import { ensureStream, holdStream, onOrderEvent, releaseStream } from './stream';
+import { ensureStream, getStreamStatus, holdStream, onOrderEvent, releaseStream, subscribeStatusStore } from './stream';
 import {
     harnessOwnershipCompatible,
     caActive,
+    consumeTrayReadyOnReload,
     loadDesktopSettings,
     localTlsCertExists,
+    markTrayReadyOnReload,
     nativeOwnsHarnessSidecar,
     reloadWhenHealthy,
     serverStart,
     serverStatus,
     type DesktopSettings,
     type ServerStatus,
+    setTrayStatus,
 } from './tauri';
 import {
     beginBootTiming,
@@ -114,8 +117,23 @@ export function bootstrap() {
     installKeyboardFocusHeal();
     // agent scheduled/triggered tasks run for the app's lifetime
     agentModule?.ensureScheduler();
+    if (isTauri && !isChildWindow()) {
+        const syncTray = () => {
+            const state = getStreamStatus();
+            setTrayStatus(state === 'live' ? 'idle' : state === 'connecting' ? 'conn' : 'error');
+        };
+        subscribeStatusStore(syncTray);
+        const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+        motion.addEventListener('change', syncTray);
+        const initialTrayStatus = consumeTrayReadyOnReload() ? 'ready' : 'cold';
+        syncTray();
+        setTrayStatus(initialTrayStatus);
+    }
     // every order event lands in the 通知中心 log (toasts stay separate)
     onOrderEvent((ev) => {
+        if (ev.kind === 'deal') setTrayStatus('filled');
+        else if (ev.failed) setTrayStatus('error');
+        else if (ev.opType === 'New') setTrayStatus('order');
         const d = describeOrderReport(ev);
         logNotice({
             kind: d.kind === 'err' ? 'err' : 'info',
@@ -287,6 +305,7 @@ async function run() {
                         // account snapshot than this page. Refresh once.
                         markStage('healthy', 'attached server');
                         markStage('reload', 'attached server');
+                        markTrayReadyOnReload();
                         window.location.reload();
                         return;
                     }
@@ -378,6 +397,7 @@ async function run() {
                 markStage('healthy', 'boot watchdog');
                 markStage('reload');
             }
+            markTrayReadyOnReload();
             window.location.reload();
         } catch {
             // keep waiting

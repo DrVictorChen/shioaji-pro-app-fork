@@ -12,11 +12,13 @@ vi.mock('./shioaji', () => ({
 
 import {
     getPendingOrderConfirm,
+    primeOrderConfirmSimulation,
     requestOrderConfirm,
     resetOrderConfirmForTest,
     resolveOrderConfirm,
     setSimulationCacheForTest,
 } from './order-confirm';
+import { fetchInfo } from './shioaji';
 
 const req = {
     code: 'CCFI6',
@@ -29,9 +31,18 @@ const req = {
 
 afterEach(() => {
     resetOrderConfirmForTest();
+    vi.clearAllMocks();
 });
 
 describe('requestOrderConfirm', () => {
+    it('preloads the server mode for a tile before its first confirmation', async () => {
+        await primeOrderConfirmSimulation();
+        const promise = requestOrderConfirm(req);
+        expect(getPendingOrderConfirm()?.simulation).toBe(true);
+        expect(fetchInfo).toHaveBeenCalledTimes(1);
+        resolveOrderConfirm(false);
+        await promise;
+    });
     it('確認 → resolve true，pending 清空', async () => {
         const promise = requestOrderConfirm(req);
         await vi.waitFor(() =>

@@ -311,6 +311,7 @@ export function fetchOptions(
         strikeMax?: number;
         expiryWeekday?: string;
     } = {},
+    opts?: { signal?: AbortSignal },
 ) {
     return apiGet<ContractInfo[]>(
         `/api/v1/data/contracts/options${contractQuery({
@@ -322,12 +323,14 @@ export function fetchOptions(
             expiry_weekday: filters.expiryWeekday,
             region: 'TW',
         })}`,
+        opts,
     );
 }
 
-export function fetchOptionRoots() {
+export function fetchOptionRoots(opts?: { signal?: AbortSignal }) {
     return apiGet<ContractRoot[]>(
         '/api/v1/data/contracts/options/roots?region=TW',
+        opts,
     );
 }
 
@@ -1388,8 +1391,10 @@ export interface ComboTrade {
 export function placeComboOrder(
     combo: { legs: ManagedComboLegReq[]; combo_type?: ComboType | null },
     order: ComboOrderReq,
+    // explicit account captured by the caller; omitted = current selection
+    account?: Account,
 ) {
-    const acc = accountFor('F');
+    const acc = account ?? accountFor('F');
     return apiPost<ComboTrade>('/api/v1/order/place_comboorder', {
         combo_contract: {
             legs: combo.legs,
