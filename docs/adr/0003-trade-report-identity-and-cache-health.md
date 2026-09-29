@@ -13,7 +13,7 @@ update_status。ADR 0002 當時「cache-only Trade HTTP API 不是本次前提�
 
 ## 決策
 
-- **訂閱**：每個已簽署帳戶都呼叫 `subscribe_trade`，正式與模擬相同。1.7.6 模擬 sidecar 實測未訂閱時
+- **訂閱（1.7.6 舊行為）**：每個已簽署帳戶都呼叫 `subscribe_trade`，正式與模擬相同。1.7.6 模擬 sidecar 實測未訂閱時
   order_event 只有 heartbeat；1.7.5 模擬對此為 no-op，無需版本判斷。
   1.7.7 修訂：cached login 會保留 token 原有訂閱。Pro 先逐一讀每個已簽署帳戶的 `trade_cache_health`，
   只有 `reasons[].reason` 含 `NotSubscribed`，或 health 無法讀取（含舊版無路由）時，才依序呼叫
