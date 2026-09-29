@@ -1,0 +1,144 @@
+// Error, rejection and diagnostic codes of the backtest core, with the single
+// zh-TW translation table. Cores emit codes plus parameters; this module is the
+// only place that turns them into the Chinese text users (and persisted
+// rejection records) see.
+
+import type { PortfolioDiagnosticKind, RiskReason } from './schema';
+
+/**
+ * The single zh-TW message table of the backtest core. Keys are stable codes;
+ * `{name}` is replaced by `params.name` rendered with ECMAScript
+ * `String(value)`; other braces are literal. A native core embeds the same
+ * table (exported as JSON next to the golden files) and must render identical
+ * text, because rejection messages are persisted in research records.
+ */
+export const CORE_MESSAGE_TABLE = {
+    schemaVersion: 'backtest-core-messages-v1',
+    errors: {
+        VALUE_NOT_FINITE: '{label} 必須是有限數值',
+        VALUE_OUT_OF_RANGE: '{label} 必須在 [{min}, {max}]',
+        VALUE_OUT_OF_RANGE_INTEGER: '{label} 必須在 [{min}, {max}] 且為整數',
+        INPUT_NOT_CLONEABLE: '{label} 必須可建立資料快照',
+        INPUT_NOT_RECORD: '{label} 必須是資料物件',
+        UNIVERSE_UNSUPPORTED: '只支援 static universe 與 union/intersection calendar',
+        UNIVERSE_SIZE: 'universe 商品數必須在 1..{max}',
+        ASSET_ID_INVALID: 'strategy asset id 重複或為空: {assetId}',
+        ASSET_SYMBOL_INVALID: 'strategy asset symbol 重複或為空: {symbol}',
+        ASSET_IDENTIFIER_CONFLICT: '商品識別衝突: {symbol}',
+        PRIMARY_ASSET_MISSING: 'primaryAsset 必須存在於 universe',
+        BARS_MISSING: '缺少 {assetId} 的 bars',
+        BARS_FIELD_NOT_ARRAY: '{assetId}.{field} 必須是陣列',
+        BARS_LENGTH_MISMATCH: '{assetId}.{field} 長度不一致',
+        BARS_TIME_NOT_FINITE: '{assetId}.time[{index}] 必須是有限數值',
+        BARS_TIME_NOT_INCREASING: '{assetId}.time 必須嚴格遞增且不可重複',
+        BARS_AVAILABILITY_NOT_BOOLEAN: 'availability 必須是 boolean',
+        BARS_VOLUME_INVALID: '{assetId}.volume[{index}] 無效',
+        BARS_PRICE_INVALID: '{assetId}.{field}[{index}] 無效；價格範圍 [{min}, {max}]',
+        BARS_OHLC_INCONSISTENT: '{assetId} OHLC 範圍不一致',
+        EXECUTION_FIELD_MISSING: '缺少 execution.{field}',
+        EXECUTION_FIELD_UNKNOWN: '未知 execution 欄位: {field}',
+        LIQUIDATE_AT_END_INVALID: 'liquidateAtEnd 必須是 boolean',
+        STRATEGY_RESULT_NOT_ARRAY: 'strategy 必須回傳 intent 陣列或 undefined',
+        STRATEGY_RESULT_INVALID: 'strategy 必須回傳 intent 陣列、{ intents, diagnostics } 或 undefined',
+        STRATEGY_DIAGNOSTIC_INVALID: 'strategy diagnostic 格式、時間或商品無效',
+        STRATEGY_CALLBACK_FAILED: 'strategy callback 失敗: {detail}',
+        STRATEGY_INTENTS_UNVERIFIABLE: 'strategy intents 無法驗證: {detail}',
+        UNIVERSE_UNKNOWN_ASSET: 'universe 外商品: {asset}',
+        INTENT_NOT_CLONEABLE: 'intent 必須是可複製資料',
+        INTENT_TAG_INVALID: 'intent.tag 必須是字串',
+        INTENT_ORDER_INVALID: 'intent.order 無效',
+        INTENT_UNKNOWN_ASSET: 'intent 指向 universe 外商品: {assetId}',
+        INTENT_DUPLICATE_ASSET: '同商品、同週期只能有一個 intent: {assetId}',
+        INTENT_KIND_UNKNOWN: '未知 intent kind',
+        ENTRY_SIDE_INVALID: 'entry.side 無效',
+        ENTRY_QUANTITY_NONPOSITIVE: 'entry.quantity 必須大於 0',
+        REDUCE_SIZE_AMBIGUOUS: 'reduce 只能指定 quantity 或 fraction',
+        REDUCE_FRACTION_RANGE: 'reduce.fraction 必須在 (0, 1]',
+        REDUCE_QUANTITY_NONPOSITIVE: 'reduce.quantity 必須大於 0',
+        REDUCE_BELOW_LOT: '非零 reduce 小於一個 lot',
+        CLOSE_FIRST_INVALID: 'targetQuantity.closeFirst 必須是 boolean',
+        TARGET_BELOW_LOT: '{assetId} 非零 {kind} 小於一個 lot',
+        SIGNAL_ADAPTER_UNKNOWN_ASSET: 'Signal adapter 指向 universe 外商品: {assetId}',
+        SIGNAL_RULE_DUPLICATE: '重複 Signal DSL collector: {assetId}.{name}',
+        REQUEST_INVALID: '回測請求格式無效: {detail}',
+        MODE_UNSUPPORTED: '{mode} 模式不支援: {detail}',
+        INTENT_STREAM_UNKNOWN_TIME: 'intent stream 含有不在決策時間軸上的紀錄: {time}',
+        INTERNAL: '{detail}',
+    },
+    rejections: {
+        RISK_WEIGHT_NEEDS_EQUITY: { reason: 'nonpositive-equity', message: '非零 targetWeight 需要正有限 portfolio equity' },
+        RISK_WEIGHT_MISSING_CLOSE: { reason: 'missing-price', message: '{assetId} 本週期沒有可用 close，不能換算 targetWeight' },
+        RISK_MISSING_VALUATION_PRICE: { reason: 'missing-price', message: '{assetId} 缺少估值價格' },
+        RISK_UNPRICED_POSITION: { reason: 'missing-price', message: '{assetId} 沒有可用估值價格，不能規劃訂單' },
+        RISK_NO_HISTORY: { reason: 'missing-price', message: '商品沒有可用歷史 K 棒，無法建立非零部位' },
+        RISK_NONPOSITIVE_EQUITY: { reason: 'nonpositive-equity', message: 'portfolio equity 不大於 0，拒絕建立訂單' },
+        RISK_GROSS_LEVERAGE: { reason: 'gross-leverage', message: '共享資金風控失敗: gross leverage {leverage} > {limit}' },
+        RISK_NET_LEVERAGE: { reason: 'net-leverage', message: '共享資金風控失敗: net leverage {leverage} > {limit}' },
+        RISK_INVALID_FILL_PRICE: { reason: 'invalid-fill-price', message: '滑價後成交價必須大於 0' },
+        RISK_LIMIT_NOT_REACHED: { reason: 'limit-not-reached', message: '下一根可用 K 棒未觸及限價' },
+        RISK_UNAVAILABLE_BAR: { reason: 'unavailable-bar', message: '缺 K 或停牌，等待下一個可成交 open' },
+    },
+    riskReasonLabels: {
+        'gross-leverage': '槓桿／資金不足',
+        'net-leverage': '淨槓桿限制',
+        'nonpositive-equity': '可用資金不足',
+        'missing-price': '缺少價格',
+        'unavailable-bar': '行情資料暫缺',
+        'invalid-fill-price': '成交價格無效',
+        'limit-not-reached': '限價未觸及',
+    },
+    diagnosticLabels: {
+        'signal-conflict': '同時觸發多個訊號',
+        'lot-rounding': '數量依交易單位捨去',
+    },
+} as const;
+
+const table = CORE_MESSAGE_TABLE;
+
+export const CORE_ERROR_CODES = Object.freeze(Object.keys(table.errors)) as readonly CoreErrorCode[];
+export type CoreErrorCode = keyof typeof table.errors;
+
+export const REJECTION_MESSAGE_KEYS = Object.freeze(Object.keys(table.rejections)) as readonly RejectionMessageKey[];
+export type RejectionMessageKey = keyof typeof table.rejections;
+
+export const RISK_REASONS = Object.freeze(Object.keys(table.riskReasonLabels)) as readonly RiskReason[];
+export const DIAGNOSTIC_KINDS = Object.freeze(Object.keys(table.diagnosticLabels)) as readonly PortfolioDiagnosticKind[];
+
+/** Parameter values are rendered with ECMAScript `String(value)`. */
+export type MessageParams = Readonly<Record<string, string | number>>;
+
+const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9]*)\}/g;
+
+function render(template: string, params: MessageParams): string {
+    return template.replace(PLACEHOLDER, (whole, name: string) =>
+        Object.hasOwn(params, name) ? String(params[name]) : whole);
+}
+
+export function isCoreErrorCode(value: unknown): value is CoreErrorCode {
+    return typeof value === 'string' && Object.hasOwn(table.errors, value);
+}
+
+/** zh-TW text of one error code, without time/asset context. */
+export function coreErrorText(code: CoreErrorCode, params: MessageParams = {}): string {
+    return render(table.errors[code], params);
+}
+
+/** Reason code and exact persisted message of a simulated order rejection. */
+export function rejectionReason(key: RejectionMessageKey, params: MessageParams = {}):
+    { code: RiskReason; message: string } {
+    const entry = table.rejections[key];
+    return { code: entry.reason, message: render(entry.message, params) };
+}
+
+export function riskReasonLabel(reason: RiskReason): string {
+    return table.riskReasonLabels[reason];
+}
+
+export function diagnosticLabel(kind: PortfolioDiagnosticKind): string {
+    return table.diagnosticLabels[kind];
+}
+
+/** Formats a number exactly like the TypeScript core's `toFixed(4)` leverage text. */
+export function formatLeverage(value: number): string {
+    return value.toFixed(4);
+}
