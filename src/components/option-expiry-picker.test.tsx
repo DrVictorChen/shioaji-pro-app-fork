@@ -252,3 +252,24 @@ it('toggles closed when the button is pressed again', () => {
     act(() => trigger(r).props.onClick());
     expect(listbox(r)).toHaveLength(0);
 });
+
+it('keeps the keyboard row on the same contract when the list updates while open', () => {
+    const onChange = vi.fn();
+    const r = render('TXU:2026-10-02', onChange);
+    act(() => trigger(r).props.onKeyDown(key('ArrowDown')));
+    // 今日到期的 TXY 下架：清單少一列，鍵盤位置仍停在 TXU
+    act(() => r.update(createElement(OptionExpiryPicker, { expiries: EXPIRIES.slice(1), value: 'TXU:2026-10-02', onChange })));
+    act(() => listbox(r)[0]!.props.onKeyDown(key('Enter')));
+    expect(onChange).not.toHaveBeenCalled(); // 重選目前的到期只會關閉
+    expect(listbox(r)).toHaveLength(0);
+});
+
+it('Tab closes, returns focus to the button and lets the browser move on', () => {
+    const r = render('TXU:2026-10-02');
+    act(() => trigger(r).props.onKeyDown(key('ArrowDown')));
+    const tab = key('Tab');
+    act(() => listbox(r)[0]!.props.onKeyDown(tab));
+    expect(listbox(r)).toHaveLength(0);
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(tab.preventDefault).not.toHaveBeenCalled();
+});

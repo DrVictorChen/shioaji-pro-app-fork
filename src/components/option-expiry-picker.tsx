@@ -180,9 +180,13 @@ function ExpiryList({
     onClose: (restoreFocus: boolean) => void;
 }) {
     const listRef = useRef<HTMLDivElement | null>(null);
-    const [active, setActive] = useState(() =>
-        Math.max(0, expiries.findIndex((e) => e.key === value)),
-    );
+    // 以契約 key 記住目前的鍵盤位置：清單開著時到期清單更新（例如到期
+    // 契約下架）也不會錯位到別的契約
+    const [activeKey, setActiveKey] = useState<string | undefined>(() => value);
+    const found = expiries.findIndex((e) => e.key === activeKey);
+    const active = found >= 0 ? found : Math.max(0, expiries.findIndex((e) => e.key === value));
+    const setActive = (next: number | ((a: number) => number)) =>
+        setActiveKey(expiries[typeof next === 'function' ? next(active) : next]?.key);
     const [pos, setPos] = useState<CSSProperties | undefined>(undefined);
     const closeRef = useRef(onClose);
     closeRef.current = onClose;
@@ -271,8 +275,9 @@ function ExpiryList({
                 onClose(true);
                 break;
             case 'Tab':
+                // 焦點先回到按鈕，再讓 Tab 照常移到下一個（Shift+Tab 上一個）控制項
                 onClose(true);
-                break;
+                return;
             default:
                 return;
         }
@@ -282,7 +287,7 @@ function ExpiryList({
 
     const groups = groupByMonth(expiries);
     const first = groups[0]?.month ?? '';
-    const activeKey = expiries[active]?.key;
+    const activeOptionKey = expiries[active]?.key;
     const optionId = (key: string) => `${id}-${key.replace(/[^A-Za-z0-9]/g, '')}`;
 
     const list = (
@@ -292,7 +297,7 @@ function ExpiryList({
             role="listbox"
             aria-label="到期契約"
             tabIndex={-1}
-            aria-activedescendant={activeKey ? optionId(activeKey) : undefined}
+            aria-activedescendant={activeOptionKey ? optionId(activeOptionKey) : undefined}
             className={styles.list}
             style={pos}
             onKeyDown={onKeyDown}
