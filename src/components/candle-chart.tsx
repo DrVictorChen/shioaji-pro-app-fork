@@ -71,6 +71,7 @@ import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
 import { getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
+import { ODD_LOT_MAX_SHARES } from '../lib/odd-lot';
 import { isCancelUnconfirmed } from '../lib/cancel-verification';
 import { cancellationSummary } from '../lib/trade-mutations';
 import {
@@ -185,6 +186,17 @@ export function CandleChart({
     const themeKey = themeKeyOf(themeSettings);
     const [mode, setMode] = useState<TradeMode>('observe');
     const [tradeQty, setTradeQty] = useState(1);
+    // 股票圖表下單單位（#204）：整股（張）或盤中零股（股）
+    const [tradeLot, setTradeLot] = useState<'Common' | 'IntradayOdd'>('Common');
+    const stockChart = contract.security_type === 'STK';
+    const oddTrade = stockChart && tradeLot === 'IntradayOdd';
+    const tradeLotRef = useRef(tradeLot);
+    tradeLotRef.current = tradeLot;
+    useEffect(() => {
+        // 換商品回整股；零股的股數不能沿用成張數
+        if (tradeLotRef.current !== 'Common') setTradeQty(1);
+        setTradeLot('Common');
+    }, [contract.code]);
     // 組合商品（合成合約）只能用組合單下單 — 圖上禁用交易模式
     const isCombo = Boolean((contract as { combo?: unknown }).combo);
     // 在點價/停損/停利模式中切到組合商品 → 強制回觀察，殘留的交易
@@ -379,15 +391,17 @@ export function CandleChart({
             }
             const qty = qtyRef.current;
             const last = lastPriceRef.current;
+            const odd = c.security_type === 'STK' && tradeLotRef.current === 'IntradayOdd';
+            const lot = odd ? { orderLot: 'IntradayOdd' as const } : {};
             setMode('observe'); // one-shot
             if (m === 'buy' || m === 'sell') {
                 const action = m === 'buy' ? 'Buy' : 'Sell';
-                placeQuickOrder(c, action, price, qty)
+                placeQuickOrder(c, action, price, qty, odd ? { orderLot: 'IntradayOdd' } : undefined)
                     .then((trade) =>
                         notify({
                             kind: 'ok',
                             title: `📈 圖表${action === 'Buy' ? '買進' : '賣出'}已送出`,
-                            body: `${c.code} ${qty} @ ${fmtPrice(price)} (${trade.status.status})`,
+                            body: `${c.code} ${qty}${odd ? ' 股（零股）' : ''} @ ${fmtPrice(price)} (${trade.status.status})`,
                         }),
                     )
                     .catch((e) =>
@@ -428,6 +442,7 @@ export function CandleChart({
                     action: below ? 'Sell' : 'Buy',
                     quantity: qty,
                     kind: 'stop',
+                    ...lot,
                 }, c);
             } else {
                 addTrigger({
@@ -437,6 +452,7 @@ export function CandleChart({
                     action: below ? 'Buy' : 'Sell',
                     quantity: qty,
                     kind: 'take',
+                    ...lot,
                 }, c);
             }
         });
@@ -1311,7 +1327,7 @@ export function CandleChart({
                 title:
                     t.kind === 'alert'
                         ? '警示'
-                        : `${t.kind === 'stop' ? '停損' : '停利'}${t.action === 'Buy' ? '買' : '賣'}${t.quantity}`,
+                        : `${t.kind === 'stop' ? '停損' : '停利'}${t.action === 'Buy' ? '買' : '賣'}${t.quantity}${t.orderLot === 'IntradayOdd' ? '股' : ''}`,
             }),
         );
         return () => {
@@ -1606,19 +1622,36 @@ export function CandleChart({
                 ))}
                 <label
                     className={styles.qtyWrap}
-                    title='圖表下單數量（點價買賣/停損/停利的口數或張數）'
+                    title={oddTrade ? '圖表下單股數（盤中零股 1～999 股，限價）' : '圖表下單數量（點價買賣/停損/停利的口數或張數）'}
                 >
                     量
                     <input
                         className={styles.qtyInput}
                         value={tradeQty}
                         inputMode='numeric'
+                        aria-label={oddTrade ? '圖表下單股數' : '圖表下單數量'}
                         onChange={(e) => {
                             const v = Number(e.target.value);
-                            if (Number.isInteger(v) && v >= 1) setTradeQty(v);
+                            if (Number.isInteger(v) && v >= 1 && (!oddTrade || v <= ODD_LOT_MAX_SHARES)) setTradeQty(v);
                         }}
                     />
+                    {stockChart && (oddTrade ? '股' : '張')}
                 </label>
+                {stockChart && !isCombo && (
+                    <button
+                        className={styles.modeBtn[oddTrade ? 'armed' : 'normal']}
+                        aria-pressed={oddTrade}
+                        title={oddTrade
+                            ? '盤中零股：數量以股計；點價為限價，停損停利觸發後以漲跌停價送零股限價。點擊改回整股'
+                            : '改用盤中零股（以股計，僅現股限價）'}
+                        onClick={() => {
+                            setTradeLot(oddTrade ? 'Common' : 'IntradayOdd');
+                            setTradeQty(1);
+                        }}
+                    >
+                        零股
+                    </button>
+                )}
                 <button
                     className={
                         styles.indicatorBtn[
@@ -1674,8 +1707,10 @@ export function CandleChart({
                     <div className={styles.modeHint}>
                         {mode === 'buy' && '點擊圖表價位 → 限價買進'}
                         {mode === 'sell' && '點擊圖表價位 → 限價賣出'}
-                        {mode === 'stop' && '點擊價位掛停損（觸價市價單）'}
-                        {mode === 'take' && '點擊價位掛停利（觸價市價單）'}
+                        {mode === 'buy' && oddTrade && '（盤中零股）'}
+                        {mode === 'sell' && oddTrade && '（盤中零股）'}
+                        {mode === 'stop' && (oddTrade ? '點擊價位掛零股停損（觸價後以漲跌停價送零股限價）' : '點擊價位掛停損（觸價市價單）')}
+                        {mode === 'take' && (oddTrade ? '點擊價位掛零股停利（觸價後以漲跌停價送零股限價）' : '點擊價位掛停利（觸價市價單）')}
                         {mode === 'alert' && '點擊價位設定到價警示（只通知不下單）'}
                     </div>
                 )}
@@ -1753,7 +1788,7 @@ export function CandleChart({
                                     {t.condition === 'below' ? '≤' : '≥'}
                                     {fmtPrice(t.price)}
                                     {t.kind !== 'alert' &&
-                                        ` ${t.action === 'Buy' ? '買' : '賣'}${t.quantity}`}
+                                        ` ${t.action === 'Buy' ? '買' : '賣'}${t.quantity}${t.orderLot === 'IntradayOdd' ? '股' : ''}`}
                                     {t.suspended && (
                                         <span title={t.suspended}> 未啟用</span>
                                     )}

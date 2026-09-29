@@ -188,7 +188,8 @@ it('stock margin long and short sale on the same stock keep main\'s gross blend 
         ({ account: stockAccount, id, code: '2330', direction, quantity, price, last_price: 1010, pnl, yd_quantity: quantity, cond });
     const { bar, label } = await render([srow(0, 'Buy', 3, 1000, 3000, 'MarginTrading'), srow(1, 'Sell', 1, 1030, 1000, 'ShortSelling')], stock, [], true);
     // Same as main: net 2, (3×1000 + 1×1030) / 4, P&L 3000 + 1000; no label even while reconciling.
-    expect(bar).toContain('"多"," ","2"');
+    // stock rows are in shares (#204): net 2 shares reads 2股
+    expect(bar).toContain('"多"," ","2股"');
     expect(bar).toContain('1,007.5');
     expect(bar).toContain('+4,000.00');
     expect(label).toBeNull();

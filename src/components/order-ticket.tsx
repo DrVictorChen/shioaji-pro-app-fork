@@ -33,6 +33,7 @@ import {
     isSelectedAccountUnchanged,
 } from '../lib/order-account';
 import { checkOrderAllowed, getRiskSettings } from '../lib/risk';
+import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, orderQtyUnit, stockOrderProblem } from '../lib/odd-lot';
 import { currentProtectionEnv } from '../lib/protection-env';
 import { fetchInfo, placeFuturesOrder, placeStockOrder } from '../lib/shioaji';
 import { notify } from '../lib/trade';
@@ -88,6 +89,8 @@ export function OrderTicket({
         text: string;
     } | null>(null);
     const priceTouched = useRef(false);
+    const orderLotRef = useRef(orderLot);
+    orderLotRef.current = orderLot;
 
     // ---- multi-account: chip + split-order (分倉) state ----
     const [acctMenuOpen, setAcctMenuOpen] = useState(false);
@@ -114,6 +117,8 @@ export function OrderTicket({
         setFeedback(null);
         setPriceType('LMT');
         setOrderType('ROD');
+        // 零股數量是股數：換商品回到整股時歸 1，避免股數被當成張數
+        if (orderLotRef.current !== 'Common') setQty(1);
         setOrderLot('Common');
         setOrderCond('Cash');
         setOctype('Auto');
@@ -223,8 +228,12 @@ export function OrderTicket({
         setArmed(false);
         setBusy(true);
         try {
-            const blocked = checkOrderAllowed(qty);
+            const blocked = checkOrderAllowed(qty, isFutures ? undefined : orderLot);
             if (blocked) throw new Error(blocked);
+            if (!isFutures) {
+                const problem = stockOrderProblem({ quantity: qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort });
+                if (problem) throw new Error(problem);
+            }
             const p = priceType === 'LMT' ? Number(price) : 0;
             if (priceType === 'LMT' && (!Number.isFinite(p) || p <= 0)) {
                 throw new Error('限價單需要有效價格');
@@ -276,12 +285,8 @@ export function OrderTicket({
                     action,
                     price: priceType === 'LMT' ? p : null,
                     quantity: qty,
-                    unit: isFutures
-                        ? '口'
-                        : orderLot === 'IntradayOdd'
-                          ? '股'
-                          : '張',
-                    note: `${orderType}${
+                    unit: orderQtyUnit(isFutures, orderLot),
+                    note: `${orderType}${!isFutures && orderLot !== 'Common' ? `・${lotLabel(orderLot)}` : ''}${
                         !isFutures && orderCond !== 'Cash'
                             ? `・${orderCond === 'MarginTrading' ? '融資' : '融券'}`
                             : ''
@@ -346,6 +351,7 @@ export function OrderTicket({
                         exchange: contract.exchange ?? '',
                         action,
                         quantity: qty,
+                        orderLot: isFutures ? undefined : orderLot,
                         stopPrice: bracketStop,
                         takePrice: bracketTake,
                     });
@@ -375,7 +381,8 @@ export function OrderTicket({
         }
     };
 
-    const qtyUnit = isFutures ? '口' : orderLot === 'IntradayOdd' ? '股' : '張';
+    const qtyUnit = orderQtyUnit(isFutures, orderLot);
+    const odd = !isFutures && isOddLot(orderLot);
     const { accounts, selectedStock, selectedFutures } = useAccounts();
     const priv = usePrivacyMode();
     const activeAccount = isFutures ? selectedFutures : selectedStock;
@@ -461,6 +468,12 @@ export function OrderTicket({
             if (!splitValid || allocation.length === 0) {
                 throw new Error('分倉設定無效');
             }
+            if (!isFutures) {
+                for (const e of allocation) {
+                    const problem = stockOrderProblem({ quantity: e.qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort });
+                    if (problem) throw new Error(problem);
+                }
+            }
             const p = priceType === 'LMT' ? Number(price) : 0;
             if (priceType === 'LMT' && (!Number.isFinite(p) || p <= 0)) {
                 throw new Error('限價單需要有效價格');
@@ -473,8 +486,8 @@ export function OrderTicket({
                     action,
                     price: priceType === 'LMT' ? p : null,
                     quantity: splitTotal,
-                    unit: isFutures ? '口' : '張',
-                    note: `分倉送出 ${allocation.length} 個帳戶`,
+                    unit: qtyUnit,
+                    note: `分倉送出 ${allocation.length} 個帳戶${odd ? `・${lotLabel(orderLot)}` : ''}`,
                     accountLabel: `分倉 ${allocation.length} 戶：${allocation
                         .map((e) => `${accountConfirmLabel(e.account)}×${e.qty}`)
                         .join('、')}`,
@@ -490,7 +503,7 @@ export function OrderTicket({
             // 逐戶送出（sequential — deterministic order, per-order risk）
             for (const { account, qty: q } of allocation) {
                 const label = `${account.broker_id}-${maskAccountId(account.account_id, priv)}`;
-                const blocked = checkOrderAllowed(q);
+                const blocked = checkOrderAllowed(q, isFutures ? undefined : orderLot);
                 if (blocked) {
                     fail.push(`${label}: ${blocked}`);
                     continue;
@@ -741,15 +754,16 @@ export function OrderTicket({
                     <input
                         className={styles.numInput}
                         value={qty}
+                        aria-label={`數量（${qtyUnit}）`}
                         onChange={(e) => {
                             const v = Number(e.target.value);
-                            if (Number.isInteger(v) && v >= 0) setQty(v);
+                            if (Number.isInteger(v) && v >= 0 && (!odd || v <= ODD_LOT_MAX_SHARES)) setQty(v);
                         }}
                         inputMode='numeric'
                     />
                     <button
                         className={styles.stepBtn}
-                        onClick={() => setQty((q) => q + 1)}
+                        onClick={() => setQty((q) => (odd ? clampLotQuantity(q + 1, orderLot) : q + 1))}
                     >
                         +
                     </button>
@@ -767,6 +781,8 @@ export function OrderTicket({
                                 className={
                                     styles.seg[priceType === pt ? 'on' : 'off']
                                 }
+                                disabled={odd && pt !== 'LMT'}
+                                title={odd && pt !== 'LMT' ? ODD_LOT_TEXT.priceType : undefined}
                                 onClick={() => {
                                     setPriceType(pt);
                                     setArmed(false);
@@ -789,6 +805,8 @@ export function OrderTicket({
                                 className={
                                     styles.seg[orderType === ot ? 'on' : 'off']
                                 }
+                                disabled={odd && ot !== 'ROD'}
+                                title={odd && ot !== 'ROD' ? ODD_LOT_TEXT.orderType : undefined}
                                 onClick={() => {
                                     setOrderType(ot);
                                     setArmed(false);
@@ -834,7 +852,8 @@ export function OrderTicket({
                             {(
                                 [
                                     ['Common', '整股'],
-                                    ['IntradayOdd', '零股'],
+                                    ['IntradayOdd', '盤中零股'],
+                                    ['Odd', '盤後零股'],
                                 ] as [StockOrderLot, string][]
                             ).map(([lot, label]) => (
                                 <button
@@ -844,8 +863,26 @@ export function OrderTicket({
                                             orderLot === lot ? 'on' : 'off'
                                         ]
                                     }
+                                    title={
+                                        lot === 'IntradayOdd'
+                                            ? '盤中零股 09:00–13:30，以股計（1～999 股），限價 ROD'
+                                            : lot === 'Odd'
+                                              ? '盤後零股 13:40–14:30 收單、14:30 一次撮合，以股計（1～999 股），限價 ROD'
+                                              : '整股以張計（1 張 = 1,000 股）'
+                                    }
                                     onClick={() => {
+                                        if (lot === orderLot) return;
                                         setOrderLot(lot);
+                                        // 單位改變時數量歸 1，避免 500 股變成 500 張
+                                        setQty(1);
+                                        if (isOddLot(lot)) {
+                                            // 零股只能現股限價 ROD（#204）
+                                            setPriceType('LMT');
+                                            setOrderType('ROD');
+                                            setOrderCond('Cash');
+                                            setDaytradeShort(false);
+                                            if (lot === 'Odd') setBracketOn(false);
+                                        }
                                         setArmed(false);
                                     }}
                                 >
@@ -854,6 +891,12 @@ export function OrderTicket({
                             ))}
                         </div>
                     </div>
+                )}
+                {odd && (
+                    <span className={styles.costRow}>
+                        {lotLabel(orderLot)}：以股計（1～{ODD_LOT_MAX_SHARES} 股）· 限價 ROD · 僅現股，不可融資券或當沖
+                        {orderLot === 'Odd' ? ' · 13:40–14:30 收單，14:30 一次撮合' : ''}
+                    </span>
                 )}
 
                 {!isFutures && orderLot === 'Common' && (
@@ -940,7 +983,7 @@ export function OrderTicket({
                         </div>
                     )}
 
-                {!splitOpen && (
+                {!splitOpen && orderLot !== 'Odd' && (
                     <div className={styles.fieldRow}>
                         <span className={styles.fieldLabel}>括號單</span>
                         <div className={styles.segGroup}>
@@ -956,7 +999,7 @@ export function OrderTicket({
                         </div>
                     </div>
                 )}
-                {!splitOpen && bracketOn && (
+                {!splitOpen && bracketOn && orderLot !== 'Odd' && (
                     <div className={styles.fieldRow}>
                         <span className={styles.fieldLabel}>損/利</span>
                         <div className={styles.bracketInputs}>
@@ -1223,7 +1266,7 @@ export function OrderTicket({
                     action={action}
                     price={priceType === 'LMT' ? Number(price) : null}
                     qty={splitOpen && splitMode === 'fixed' ? splitTotal : qty}
-                    odd={!isFutures && orderLot === 'IntradayOdd'}
+                    odd={odd}
                     daytrade={!isFutures && daytradeShort}
                 />
 

@@ -1,6 +1,7 @@
 import { getApiBase } from './runtime';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { noteMutationIntent } from './mutation-intent';
+import { stockOrderProblem } from './odd-lot';
 import { markConfirmedCancellation, observeTradeMutation } from './trade-mutations';
 import { createCancelBatch, readMark, sharedAuthoritativeTrades, verifyCancellation, type CancelBatchMember } from './cancel-verification';
 import { observeMarketSnapshots } from './market-snapshot-store';
@@ -773,6 +774,9 @@ export function placeStockOrder(
     account?: Account,
     opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
 ) {
+    // 零股不支援的組合（融資券／當沖／市價／IOC／超過 999 股）一律在送出前擋下（#204）
+    const problem = stockOrderProblem(order);
+    if (problem) return Promise.reject(Object.assign(new Error(problem), { mutationNotStarted: true as const }));
     const selected = account ?? accountFor('S');
     return apiPost<Trade>('/api/v1/order/place_order', {
         contract: contractKey(contract),

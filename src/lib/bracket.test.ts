@@ -853,8 +853,11 @@ describe('pre-order bracket validation (entry is not sent when invalid)', () => 
         expect(validateBracketRequest({ ...base, referencePrice: null })).toMatch('參考價');
         expect(validateBracketRequest({ ...base, stopPrice: null, takePrice: null })).toMatch('需要停損價或停利價');
         expect(validateBracketRequest({ ...base, octype: 'Cover' })).toMatch('Cover');
-        expect(validateBracketRequest({ ...base, isFutures: false, orderLot: 'IntradayOdd' })).toMatch('現股整張');
-        expect(validateBracketRequest({ ...base, isFutures: false, orderCond: 'MarginTrading' })).toMatch('現股整張');
+        // #204: 盤中零股（現股）可以掛括號單；盤後零股與信用條件不行
+        expect(validateBracketRequest({ ...base, isFutures: false, orderLot: 'IntradayOdd' })).toBeNull();
+        expect(validateBracketRequest({ ...base, isFutures: false, orderLot: 'Odd' })).toMatch('盤後零股');
+        expect(validateBracketRequest({ ...base, isFutures: false, orderLot: 'IntradayOdd', orderCond: 'MarginTrading' })).toMatch('融資券');
+        expect(validateBracketRequest({ ...base, isFutures: false, orderCond: 'MarginTrading' })).toMatch('僅支援現股');
         expect(validateBracketRequest({ ...base, isFutures: false, orderLot: 'Common', orderCond: 'Cash' })).toBeNull();
     });
 });

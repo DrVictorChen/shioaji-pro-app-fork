@@ -44,7 +44,7 @@ import {
 import { onTrackedReport, recentReportsFor } from './bracket-reports';
 import { getPrivacyMode, maskAccountId } from './privacy';
 import { ensureContract, getCachedContract } from './contracts-cache';
-import { actionLabel, conditionLabel, contractLabel, kindLabel as pendingKindLabel } from './pending-trigger-view';
+import { actionLabel, conditionLabel, contractLabel, exitStyleLabel, kindLabel as pendingKindLabel } from './pending-trigger-view';
 import { claimExecutor, createCommandBus, isExecutor, isMainWindow } from './main-window-commands';
 import type { OrderEventReport } from './order-report';
 import {
@@ -62,9 +62,10 @@ import { getStreamStatus, onAnyTick, onStreamEvent, subscribeStatusStore } from 
 import { notify, placeQuickOrder } from './trade';
 import { getTradingState } from './trading-state';
 import { fmtPrice } from './utils/format';
+import { isOddLot, ODD_LOT_MAX_SHARES, oddLotMarketablePrice, SHARES_PER_LOT, sharesToUnits, stockQtyUnit } from './odd-lot';
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
-import type { Action, FuturesOCType, Trade } from './types/order';
+import type { Action, FuturesOCType, StockOrderLot, Trade } from './types/order';
 
 /** Why protection resumed with a first-tick check (#144). */
 export type RestoreReason = 'restart' | 'disconnect' | 'env';
@@ -89,6 +90,9 @@ export interface TriggerOrder {
     account?: AccountRef;
     orderCode?: string; // tradable code (target_code || code)
     octype?: FuturesOCType; // futures exits from brackets use Cover
+    // stocks: IntradayOdd → quantity in shares, sent as a LIMIT at the price
+    // limit (零股沒有市價單, #204); absent = Common lots (張)
+    orderLot?: StockOrderLot;
     bracketId?: string;
     suspended?: string; // reason this trigger will not execute
     createdAt?: number;
@@ -106,6 +110,7 @@ export interface ExitRecord extends BracketExit {
     market: 'stock' | 'futures';
     orderCode: string;
     action: Action; // exit direction
+    orderLot?: StockOrderLot; // IntradayOdd → quantities in shares
     reserveKey: string;
     requested: number;
     acknowledged?: boolean;
@@ -253,10 +258,23 @@ function kindLabel(t: Pick<TriggerOrder, 'kind'>) {
     return t.kind === 'stop' ? '停損單已掛' : t.kind === 'take' ? '停利單已掛' : '警示已設';
 }
 
+function qtyText(t: Pick<TriggerOrder, 'quantity' | 'orderLot'>, quantity = t.quantity): string {
+    return isOddLot(t.orderLot) ? `${quantity} 股` : `${quantity}`;
+}
+
 function describe(t: TriggerOrder) {
     return t.kind === 'alert'
         ? `${t.code} 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} 時通知`
-        : `${t.code} 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} → 市價${t.action === 'Buy' ? '買' : '賣'} ${t.quantity}${t.group ? '（OCO）' : ''}`;
+        : `${t.code} 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}${t.group ? '（OCO）' : ''}`;
+}
+
+/** Odd-lot triggers: stocks only, 盤中零股 only, 1–999 shares. */
+function oddLotTriggerProblem(t: Pick<TriggerOrder, 'kind' | 'orderLot' | 'quantity' | 'account'>): string | null {
+    if (t.kind === 'alert' || !t.orderLot || t.orderLot === 'Common') return null;
+    if (t.account?.account_type !== 'S') return '零股觸價單僅支援股票';
+    if (t.orderLot !== 'IntradayOdd') return '觸價單僅支援整股與盤中零股；盤後零股為收盤後一次撮合，無法即時觸價';
+    if (!Number.isSafeInteger(t.quantity) || t.quantity < 1 || t.quantity > ODD_LOT_MAX_SHARES) return `零股觸價單數量須為 1～${ODD_LOT_MAX_SHARES} 股`;
+    return null;
 }
 
 function handleCommand(cmd: Command): unknown {
@@ -269,6 +287,8 @@ function handleCommand(cmd: Command): unknown {
         delete t.awaitingRecross;
         if (!hasContext(t)) throw new Error('觸價單缺少帳戶或伺服器資訊，未建立');
         if (t.bracketId) throw new Error('括號單保護只由主視窗建立');
+        const oddProblem = oddLotTriggerProblem(t);
+        if (oddProblem) throw new Error(oddProblem);
         if (t.group && processedGroups[groupKey(t.env, t.group)]) throw new Error('此 OCO 群組已觸發過，不再建立');
         triggers = [...triggers, t];
         commit();
@@ -301,6 +321,7 @@ function withContext(t: NewTrigger, contract?: ContractBase): NewTrigger | strin
     if (!contract) return '缺少商品資訊，無法固定下單帳戶';
     const futures = contract.security_type === 'FUT' || contract.security_type === 'OPT';
     if (!futures && contract.security_type !== 'STK') return '此商品不支援觸價下單';
+    if (futures && t.orderLot && t.orderLot !== 'Common') return '期貨選擇權沒有零股，觸價單未建立';
     const s = getAccountState();
     const selected = futures ? s.selectedFutures : s.selectedStock;
     if (!selected?.signed || selected.account_type !== (futures ? 'F' : 'S')) return '沒有可用的已簽署帳戶，觸價單未建立';
@@ -419,6 +440,7 @@ export interface BracketArm {
     orderCode: string;
     entryAction: Action;
     octype?: FuturesOCType;
+    orderLot?: StockOrderLot; // IntradayOdd → quantity in shares
     stopPrice: number | null;
     takePrice: number | null;
     quantity: number;
@@ -439,7 +461,8 @@ export function armBracketGroup(arm: BracketArm): boolean {
         return true;
     }
     const base = { code: arm.code, action: exit, quantity: arm.quantity, group: arm.group, env: arm.env,
-        account: arm.account, orderCode: arm.orderCode, octype: arm.octype, bracketId: arm.bracketId, createdAt: Date.now() };
+        account: arm.account, orderCode: arm.orderCode, octype: arm.octype, bracketId: arm.bracketId, createdAt: Date.now(),
+        ...(arm.orderLot && isOddLot(arm.orderLot) ? { orderLot: arm.orderLot } : {}) };
     const added: TriggerOrder[] = [];
     if (arm.stopPrice !== null) {
         added.push({ ...base, id: newId(), kind: 'stop', price: arm.stopPrice,
@@ -489,8 +512,16 @@ export function reservedQuantity(key: string): number {
         .reduce((s, e) => s + Math.max(0, e.quantity - e.filled), 0);
 }
 
-/** Known position (in exit order units) that `action` would close, or null
- * when the shared position view is not a confirmed snapshot. */
+/** Stock reservations in SHARES: whole-lot and odd-lot exits of the same
+ * stock and side draw on the same holding (#204). */
+function reservedShares(key: string): number {
+    return exits.filter(e => e.reserveKey === key && !isResolved(e))
+        .reduce((s, e) => s + Math.max(0, e.quantity - e.filled) * (isOddLot(e.orderLot) ? 1 : SHARES_PER_LOT), 0);
+}
+
+/** Known position that `action` would close — shares for stocks, contracts
+ * for futures — or null when the shared position view is not a confirmed
+ * snapshot. */
 function closablePosition(account: AccountRef, orderCode: string, action: Action): number | null {
     const state = getTradingState();
     const q = state.queries?.positions;
@@ -501,9 +532,8 @@ function closablePosition(account: AccountRef, orderCode: string, action: Action
         && p.code === orderCode && p.direction === direction
         // bracket stock exits are Cash sells: margin/short rows are not closable by them
         && (account.account_type !== 'S' || !('cond' in p) || !p.cond || p.cond === 'Cash'));
-    const total = rows.reduce((s, p) => s + p.quantity, 0);
-    // stock positions are held in shares; bracket exits are Common lots
-    return account.account_type === 'S' ? Math.floor(total / 1000) : total;
+    // stock positions are held in shares
+    return rows.reduce((s, p) => s + p.quantity, 0);
 }
 
 /** Decide the exit quantity for a firing trigger.
@@ -514,7 +544,7 @@ function closablePosition(account: AccountRef, orderCode: string, action: Action
  * - stock bracket exits are Cash sells that could otherwise open a day-trade
  *   short: capped by the confirmed Cash position minus reserved exits, and
  *   refused while the position is unknown and another exit is unresolved. */
-export function planExitQuantity(t: Pick<TriggerOrder, 'quantity' | 'bracketId' | 'account'>, reserved: number,
+export function planExitQuantity(t: Pick<TriggerOrder, 'quantity' | 'bracketId' | 'account' | 'orderLot'>, reserved: number,
     closable: number | null): { quantity: number; detail?: string } {
     if (!t.bracketId) return { quantity: t.quantity };
     if (t.account?.account_type === 'F') {
@@ -525,7 +555,10 @@ export function planExitQuantity(t: Pick<TriggerOrder, 'quantity' | 'bracketId' 
     if (closable !== null) {
         const free = Math.max(0, closable - reserved);
         if (free <= 0) return { quantity: 0, detail: '現股持倉已被其他出場委託保留或已無部位，未送出' };
-        if (free < t.quantity) return { quantity: free, detail: `可賣出現股僅 ${free} 張，其餘 ${t.quantity - free} 張未保護` };
+        if (free < t.quantity) {
+            const unit = stockQtyUnit(t.orderLot);
+            return { quantity: free, detail: `可賣出現股僅 ${free} ${unit}，其餘 ${t.quantity - free} ${unit}未保護` };
+        }
         return { quantity: t.quantity };
     }
     if (reserved > 0) return { quantity: 0, detail: '持倉未確認且另有出場委託未完成；為避免超賣未送出' };
@@ -562,6 +595,7 @@ function reserve(t: TriggerOrder, lastPrice: number): { rec: ExitRecord; sibling
         id: `ex-${t.id}`, triggerId: t.id, bracketId: t.bracketId, env, account,
         market: account.account_type === 'S' ? 'stock' : 'futures', orderCode, action: t.action,
         reserveKey, requested: t.quantity, kind: t.kind, quantity: plan.quantity,
+        ...(isOddLot(t.orderLot) ? { orderLot: t.orderLot } : {}),
         status: plan.quantity > 0 ? 'sending' : 'not-sent', filled: 0, fills: {}, detail: plan.detail, at: Date.now(),
     };
     exits = [...exits, rec];
@@ -579,8 +613,22 @@ function reserve(t: TriggerOrder, lastPrice: number): { rec: ExitRecord; sibling
 
 function planFor(t: TriggerOrder) {
     const reserveKey = reserveKeyOf(t.env!, t.account!, t.orderCode!, t.action);
-    return planExitQuantity(t, reservedQuantity(reserveKey), t.bracketId ? closablePosition(t.account!, t.orderCode!, t.action) : null);
+    const closable = t.bracketId ? closablePosition(t.account!, t.orderCode!, t.action) : null;
+    if (t.account?.account_type !== 'S') return planExitQuantity(t, reservedQuantity(reserveKey), closable);
+    // Stocks: holdings and reservations are compared in shares, then expressed
+    // in this exit's unit (whole lots for 整股, shares for 零股).
+    const resShares = reservedShares(reserveKey);
+    const reserved = isOddLot(t.orderLot) ? resShares : Math.ceil(resShares / SHARES_PER_LOT);
+    return planExitQuantity(t, reserved,
+        closable === null ? null : reserved + sharesToUnits(Math.max(0, closable - resShares), t.orderLot));
 }
+
+/** Limit price of an odd-lot exit (none for whole lots / futures). */
+function exitPrice(t: TriggerOrder, contract: ContractBase): number | null | 'missing' {
+    if (!isOddLot(t.orderLot)) return null;
+    return oddLotMarketablePrice(contract as ContractBase & { limit_up?: number; limit_down?: number }, t.action) ?? 'missing';
+}
+const ODD_PRICE_MISSING = '零股需要有效漲跌停價作為限價，未送出';
 
 function fire(t: TriggerOrder, lastPrice: number) {
     const r = reserve(t, lastPrice);
@@ -627,11 +675,15 @@ const notSentExit = (t: TriggerOrder, rec: ExitRecord, detail: string) => {
 
 function exitSent(t: TriggerOrder, rec: ExitRecord, trade: Trade, lastPrice: number) {
     const orderId = trade.order.id;
-    updateExit(rec.id, e => ({ ...e, status: e.filled >= e.quantity ? 'filled' : 'working', orderId, at: Date.now() }));
+    const odd = isOddLot(t.orderLot);
+    updateExit(rec.id, e => ({ ...e, status: e.filled >= e.quantity ? 'filled' : 'working', orderId, at: Date.now(),
+        // odd-lot exits are ROD limits at the price limit: the rest keeps
+        // working until filled or cancelled (reports / 對帳), no IOC settle
+        ...(odd && e.filled < e.quantity ? { detail: `${e.detail ? `${e.detail}；` : ''}零股以漲跌停價限價 ROD 送出，依成交回報更新` } : {}) }));
     for (const report of recentReportsFor(envBase(rec.env), orderId)) applyExitReport(report, envBase(rec.env));
-    scheduleIocCheck(rec.id);
+    if (!odd) scheduleIocCheck(rec.id);
     notify({ kind: 'ok', title: t.kind === 'stop' ? '停損觸發' : '停利觸發',
-        body: `${t.code} @${lastPrice} → 市價${t.action === 'Buy' ? '買' : '賣'} ${rec.quantity} (${trade.status.status})` });
+        body: `${t.code} @${lastPrice} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)} (${trade.status.status})` });
 }
 
 function exitUnknown(t: TriggerOrder, rec: ExitRecord, message: string) {
@@ -645,12 +697,15 @@ const notStarted = (e: unknown) => !!(e as { mutationNotStarted?: boolean })?.mu
 async function dispatch(t: TriggerOrder, rec: ExitRecord, lastPrice: number) {
     const ctx = await sendContext(t, rec.env);
     if (typeof ctx === 'string') { notSentExit(t, rec, ctx); return; }
+    const price = exitPrice(t, ctx.contract);
+    if (price === 'missing') { notSentExit(t, rec, ODD_PRICE_MISSING); return; }
     try {
-        const trade = await placeQuickOrder(ctx.contract, t.action, null, rec.quantity, {
+        const trade = await placeQuickOrder(ctx.contract, t.action, price, rec.quantity, {
             bypassRisk: true, // protective exit — never blocked by kill switch
             source: 'auto', // 使用者可能不在場，不彈確認
             account: ctx.account,
             ocType: t.octype,
+            orderLot: isOddLot(t.orderLot) ? t.orderLot : undefined,
         });
         exitSent(t, rec, trade, lastPrice);
     } catch (e) {
@@ -689,16 +744,19 @@ async function sendPending(id: string, allowUnpast: boolean) {
     if (typeof ctx === 'string') { refused(ctx); return; }
     const planned = planFor(first);
     if (planned.quantity <= 0) { refused(planned.detail ?? '沒有可送出的數量'); return; }
+    const price = exitPrice(first, ctx.contract);
+    if (price === 'missing') { refused(ODD_PRICE_MISSING); return; }
     // A manual trigger may be an entry: it is a user order (risk checks,
     // manual confirm). Bracket exits stay protective.
     const userOrder = !first.bracketId;
     const box: { fired: { t: TriggerOrder; rec: ExitRecord; siblings: TriggerOrder[]; gk: string | null; price: number } | null } = { fired: null };
     try {
-        const trade = await placeQuickOrder(ctx.contract, first.action, null, planned.quantity, {
+        const trade = await placeQuickOrder(ctx.contract, first.action, price, planned.quantity, {
             bypassRisk: !userOrder,
             source: userOrder ? 'manual' : 'auto',
             account: ctx.account,
             ocType: first.octype,
+            orderLot: isOddLot(first.orderLot) ? first.orderLot : undefined,
             confirmLivePriceCode: userOrder ? first.code : undefined,
             beforeSend: () => {
                 const cur = triggers.find(x => x.id === id);
@@ -959,7 +1017,7 @@ const fmtDiff = (d: number) => `${d > 0 ? '+' : ''}${Number(d.toFixed(4))}`;
 export function describePending(t: TriggerOrder, price: number | undefined, priv: boolean): string {
     const acct = t.account ? `${t.account.account_type === 'F' ? '[期]' : '[證]'}${maskAccountId(t.account.account_id, priv)} ` : '';
     const now = price === undefined ? '目前價未知' : `目前 ${price}（差 ${fmtDiff(price - t.price)}）`;
-    return `${t.code} ${acct}${t.kind === 'stop' ? '停損' : '停利'} 市價${t.action === 'Buy' ? '買' : '賣'} ${t.quantity}`
+    return `${t.code} ${acct}${t.kind === 'stop' ? '停損' : '停利'} ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}`
         + ` 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} · ${now}`;
 }
 
@@ -974,7 +1032,7 @@ function holdPending(held: { t: TriggerOrder; reason: RestoreReason }[], price: 
     commit();
     for (const { t, reason } of held) {
         notify({ kind: 'err', title: '觸價單待確認（未自動送出）',
-            body: `${pendingName(t)}　${pendingKindLabel(t)}・市價${actionLabel(t)}。`
+            body: `${pendingName(t)}　${pendingKindLabel(t)}・${exitStyleLabel(t)}${actionLabel(t)}。`
                 + `價格已${conditionLabel(t)}（偵測時 ${fmtPrice(price)}），沒有自動送單，請到畫面下方的待確認面板處理。` });
     }
 }

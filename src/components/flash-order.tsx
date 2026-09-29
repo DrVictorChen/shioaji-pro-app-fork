@@ -33,7 +33,8 @@ import { notify, placeQuickOrder, placeStockExitByShares } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
 import { ACTIVE_ORDER_STATUSES, type Action, type Trade } from '../lib/types/order';
 import type { Account, AccountedPosition } from '../lib/types/portfolio';
-import { fmtInt, fmtPrice, fmtSigned } from '../lib/utils/format';
+import { fmtInt, fmtPrice, fmtSigned, fmtStockLots } from '../lib/utils/format';
+import { clampLotQuantity, isOddLot, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT } from '../lib/odd-lot';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import * as styles from './flash-order.css';
@@ -260,6 +261,9 @@ export function FlashOrder({
     accountRef.current = activeAccount;
     const privMoney = usePrivacyMoney();
     const [qty, setQty] = useState(1);
+    // 股票：整股（張）或盤中零股（股）（#204）
+    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>('Common');
+    const odd = market === 'S' && lot === 'IntradayOdd';
     const [armed, setArmed] = useState(false);
     const [anchor, setAnchor] = useState<number | null>(null);
     const [follow, setFollow] = useState(true);
@@ -281,6 +285,8 @@ export function FlashOrder({
     armedRef.current = armed && armedAccountKey.current === accountKey;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
+    const oddRef = useRef(odd);
+    oddRef.current = odd;
     const lastRef = useRef(last);
     lastRef.current = last;
     const tradesRef = useRef(trades);
@@ -302,6 +308,12 @@ export function FlashOrder({
     useEffect(() => {
         setArmed(false);
     }, [contract.code, accountKey]);
+
+    // 換商品回整股；零股的股數不能沿用成張數
+    useEffect(() => {
+        if (oddRef.current) setQty(1);
+        setLot('Common');
+    }, [contract.code]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
     // click can't fire into a dead connection (issue #2)
@@ -460,6 +472,10 @@ export function FlashOrder({
         return { maxVol: m, sumBid: sb, sumAsk: sa };
     }, [book]);
 
+    // Stock chips / fills show only the current unit's orders (整股 in 張,
+    // 零股 in 股) so a price level never adds lots and shares together.
+    const lotShown = useCallback((t: Trade) => market !== 'S' || isOddLot(t.order.order_lot) === odd, [market, odd]);
+
     // my working orders at each price level
     const myOrders = useMemo(() => {
         const m = new Map<string, { buy: number; sell: number }>();
@@ -469,6 +485,7 @@ export function FlashOrder({
             if (tc !== contract.code && getAliasFor(tc) !== contract.code) {
                 continue;
             }
+            if (!lotShown(t)) continue;
             // HTTP status.order_quantity can be 0 (1.7.6) — use the shared
             // original-quantity rule.
             const remaining = remainingWorkingOrderQuantity(t);
@@ -481,7 +498,7 @@ export function FlashOrder({
             m.set(key, cur);
         }
         return m;
-    }, [trades, contract.code]);
+    }, [trades, contract.code, lotShown]);
 
     // today's fills aggregated per price level (from each trade's deals)
     const myFills = useMemo(() => {
@@ -491,6 +508,7 @@ export function FlashOrder({
             if (tc !== contract.code && getAliasFor(tc) !== contract.code) {
                 continue;
             }
+            if (!lotShown(t)) continue;
             for (const d of t.status.deals ?? []) {
                 if (!d.quantity) continue;
                 const key = keyOf(Number(d.price));
@@ -501,7 +519,7 @@ export function FlashOrder({
             }
         }
         return m;
-    }, [trades, contract.code]);
+    }, [trades, contract.code, lotShown]);
 
     // net position for this symbol (alias-aware for continuous contracts)
     const pos = useMemo(() => {
@@ -562,8 +580,13 @@ export function FlashOrder({
     const send = useCallback(async (action: Action, price: number | null) => {
         const capturedAccount = accountRef.current;
         if (!armedRef.current || !capturedAccount) return;
+        const oddLot = oddRef.current;
         const q = Math.max(1, qtyRef.current);
-        const key = `${action}:${price === null ? 'MKT' : keyOf(price)}`;
+        if (oddLot && price === null) {
+            notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: ODD_LOT_TEXT.priceType });
+            return;
+        }
+        const key = `${oddLot ? 'odd:' : ''}${action}:${price === null ? 'MKT' : keyOf(price)}`;
         if (inflightRef.current.has(key)) return; // double-click guard
         inflightRef.current.add(key);
         force();
@@ -573,12 +596,16 @@ export function FlashOrder({
                 action,
                 price,
                 q,
-                { account: capturedAccount, isAccountCurrent: stillPanelAccount(capturedAccount) },
+                {
+                    account: capturedAccount,
+                    isAccountCurrent: stillPanelAccount(capturedAccount),
+                    ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
+                },
             );
             notify({
                 kind: 'ok',
-                title: `⚡ ${action === 'Buy' ? '買進' : '賣出'}已送出`,
-                body: `${contractRef.current.code} ${q} @ ${
+                title: `⚡ ${oddLot ? '零股' : ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
+                body: `${contractRef.current.code} ${q}${oddLot ? ' 股' : ''} @ ${
                     price === null ? '市價' : fmtPrice(price)
                 } (${trade.status.status})`,
             });
@@ -685,11 +712,19 @@ export function FlashOrder({
             ? last > topRow
             : false;
 
-    const workingCount = useMemo(() => {
+    // 全刪 cancels every working order of the symbol (both units); the other
+    // unit's orders are not on the ladder, so say how many there are
+    const { workingCount, otherLotOrders } = useMemo(() => {
         let n = 0;
+        let other = 0;
         for (const v of myOrders.values()) n += v.buy + v.sell;
-        return n;
-    }, [myOrders]);
+        for (const t of trades) {
+            if (remainingWorkingOrderQuantity(t) <= 0) continue;
+            if (t.contract.code !== contract.code && getAliasFor(t.contract.code) !== contract.code) continue;
+            if (!lotShown(t)) other += 1;
+        }
+        return { workingCount: n, otherLotOrders: other };
+    }, [myOrders, trades, contract.code, lotShown]);
 
     const symbolLabel = flashSymbolLabel(contract);
     const accountLabels = flashAccountLabels(eligible, privacy);
@@ -759,21 +794,41 @@ export function FlashOrder({
                 </button>
                 <input
                     className={styles.qtyInput}
-                    aria-label='數量'
-                    title='數量'
+                    aria-label={odd ? '數量（股）' : '數量'}
+                    title={odd ? `零股數量 1～${ODD_LOT_MAX_SHARES} 股` : '數量'}
                     value={qty}
                     inputMode='numeric'
                     onChange={(e) => {
                         const v = Number(e.target.value);
-                        if (Number.isInteger(v) && v >= 0) setQty(v);
+                        if (Number.isInteger(v) && v >= 0 && (!odd || v <= ODD_LOT_MAX_SHARES)) setQty(v);
                     }}
                 />
                 <button
                     className={styles.stepBtn}
-                    onClick={() => setQty((v) => v + 1)}
+                    onClick={() => setQty((v) => (odd ? clampLotQuantity(v + 1, 'IntradayOdd') : v + 1))}
                 >
                     ＋
                 </button>
+                {market === 'S' && (
+                    <>
+                        <span className={styles.qtyUnit}>{odd ? '股' : '張'}</span>
+                        <button
+                            className={styles.lotBtn[odd ? 'on' : 'off']}
+                            aria-pressed={odd}
+                            title={odd
+                                ? '盤中零股：以股計（1～999 股）、只能點價限價、僅現股。點擊改回整股'
+                                : '改用盤中零股（以股計，只能點價限價）'}
+                            onClick={() => {
+                                armedRef.current = false;
+                                setArmed(false);
+                                setQty(1);
+                                setLot(odd ? 'Common' : 'IntradayOdd');
+                            }}
+                        >
+                            零股
+                        </button>
+                    </>
+                )}
                 <span className={styles.rowBreak} aria-hidden />
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
@@ -811,13 +866,17 @@ export function FlashOrder({
             </div>
             <div className={styles.actionBar}>
                 <button
-                    className={`${styles.mktBtn.buy} ${armed ? '' : styles.disabledCell}`}
+                    className={`${styles.mktBtn.buy} ${armed && !odd ? '' : styles.disabledCell}`}
+                    disabled={odd}
+                    title={odd ? ODD_LOT_TEXT.priceType : undefined}
                     onClick={() => void send('Buy', null)}
                 >
                     市價買
                 </button>
                 <button
-                    className={`${styles.mktBtn.sell} ${armed ? '' : styles.disabledCell}`}
+                    className={`${styles.mktBtn.sell} ${armed && !odd ? '' : styles.disabledCell}`}
+                    disabled={odd}
+                    title={odd ? ODD_LOT_TEXT.priceType : undefined}
                     onClick={() => void send('Sell', null)}
                 >
                     市價賣
@@ -825,7 +884,11 @@ export function FlashOrder({
                 {pos && (
                     <button
                         className={`${styles.flatBtn} ${armed ? '' : styles.disabledCell}`}
-                        title={pos.safeExit ? `市價平倉 ${Math.abs(pos.net)}` : '持倉方向或交易條件不明，請使用持倉面板確認'}
+                        title={pos.safeExit
+                            ? market === 'S'
+                                ? `平倉 ${fmtStockLots(Math.abs(pos.net))}（整張市價、零股以漲跌停價限價）`
+                                : `市價平倉 ${Math.abs(pos.net)}`
+                            : '持倉方向或交易條件不明，請使用持倉面板確認'}
                         disabled={!pos.safeExit || !armed || !activeAccount}
                         onClick={() => void flatten()}
                     >
@@ -834,7 +897,7 @@ export function FlashOrder({
                 )}
                 <button
                     className={styles.cancelAllBtn}
-                    disabled={workingCount === 0}
+                    disabled={workingCount === 0 && otherLotOrders === 0}
                     onClick={() => void cancelSymbol()}
                 >
                     全刪{workingCount > 0 ? ` ${workingCount}` : ''}
@@ -842,8 +905,9 @@ export function FlashOrder({
             </div>
             {pos && (
                 <div className={styles.posBar}>
-                    <span className={pos.net > 0 ? styles.posLong : styles.posShort}>
-                        {pos.net > 0 ? '多' : '空'} {Math.abs(pos.net)}
+                    <span className={pos.net > 0 ? styles.posLong : styles.posShort}
+                        title={market === 'S' ? `${Math.abs(pos.net).toLocaleString()} 股（含零股）` : undefined}>
+                        {pos.net > 0 ? '多' : '空'} {market === 'S' ? fmtStockLots(Math.abs(pos.net)) : Math.abs(pos.net)}
                     </span>
                     <span>@ {fmtPrice(pos.avg)}</span>
                     {(pos.mixed || pos.twoWay || pos.stale) && (
@@ -858,6 +922,11 @@ export function FlashOrder({
                     >
                         {maskMoney(fmtSigned(pos.pnl), privMoney)}
                     </span>
+                </div>
+            )}
+            {odd && (
+                <div className={styles.oddBanner} title='盤中零股與整股分開撮合，成交價可能與整股五檔不同'>
+                    盤中零股 · 以股計 · 只限價 ROD · 僅現股；五檔為整股行情（張）
                 </div>
             )}
             <div className={styles.headRow}>
@@ -929,12 +998,19 @@ export function FlashOrder({
             </div>
             <div className={styles.totalsRow}>
                 {display?.source === 'snapshot' && <span title={display.time}>快照一檔</span>}
+                {otherLotOrders > 0 && (
+                    <span title={`梯形只顯示${odd ? '零股' : '整股'}委託；全刪會一併刪除`}>
+                        另有{odd ? '整股' : '零股'}委託 {otherLotOrders} 筆
+                    </span>
+                )}
                 <span className={styles.totalBid}>Σ買 {fmtInt(sumBid)}</span>
                 <span className={styles.totalAsk}>Σ賣 {fmtInt(sumAsk)}</span>
             </div>
             <div className={styles.hint}>
                 {armed
-                    ? '點買量=限價買 · 點賣量=限價賣 · 點單量=刪單 · Esc 鎖定'
+                    ? odd
+                        ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · 點單量=刪單 · Esc 鎖定`
+                        : '點買量=限價買 · 點賣量=限價賣 · 點單量=刪單 · Esc 鎖定'
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
             </div>
         </div>

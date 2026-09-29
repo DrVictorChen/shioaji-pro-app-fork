@@ -9,6 +9,7 @@ import { dismissBracket } from '../lib/bracket';
 import { ensureContract, useContract } from '../lib/contracts-cache';
 import {
     actionLabel,
+    exitStyleLabel,
     conditionLabel,
     contractLabel,
     distanceLabel,
@@ -97,6 +98,7 @@ function Row({ trigger, price, envNow, sending }: {
     useEffect(() => { void ensureContract(trigger.code).catch(() => undefined); }, [trigger.code]);
     const name = contractLabel(trigger.code, contract);
     const act = actionLabel(trigger);
+    const style = exitStyleLabel(trigger);
     const distance = shown === undefined ? null : distanceLabel(trigger, shown);
     const acct = trigger.account
         ? `${trigger.account.account_type === 'F' ? '期貨' : '證券'}帳戶 ${maskAccountId(trigger.account.account_id, priv)}`
@@ -106,7 +108,7 @@ function Row({ trigger, price, envNow, sending }: {
             <div className={styles.rowHead}>
                 <span className={trigger.kind === 'take' ? styles.kindTake : styles.kindStop}>{kindLabel(trigger)}</span>
                 <span className={trigger.action === 'Buy' ? styles.buy : styles.sell}>{act}</span>
-                <span className={styles.orderType}>市價單</span>
+                <span className={styles.orderType}>{style}單</span>
                 {trigger.pending && <span className={styles.detected}>偵測於 {detectedAt(trigger.pending.at)}</span>}
             </div>
             <div className={styles.product}>
@@ -165,8 +167,8 @@ function Row({ trigger, price, envNow, sending }: {
                     }}
                 >
                     {sending ? '送出處理中'
-                        : confirm === 'send-unpast' ? `目前已未穿價：再按一次仍市價${act}（目前 ${fmtPrice(shown)}）`
-                            : confirm === 'send' ? `再按一次確認：市價${act}（目前 ${fmtPrice(shown)}）` : '立即送出市價單'}
+                        : confirm === 'send-unpast' ? `目前已未穿價：再按一次仍${style}${act}（目前 ${fmtPrice(shown)}）`
+                            : confirm === 'send' ? `再按一次確認：${style}${act}（目前 ${fmtPrice(shown)}）` : `立即送出${style}單`}
                 </button>
                 <button
                     className={styles.button}

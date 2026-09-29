@@ -34,6 +34,7 @@ import {
     type Trade,
 } from '../lib/types/order';
 import { fmtPrice } from '../lib/utils/format';
+import { isOddLot, ODD_LOT_MAX_SHARES, orderQtyUnit } from '../lib/odd-lot';
 import { stepPrice } from '../lib/utils/ticksize';
 import * as styles from './order-ticket.css';
 import * as flash from './flash-order.css';
@@ -62,6 +63,11 @@ export function GridTicket({
     const [levels, setLevels] = useState(5);
     const [step, setStep] = useState(1); // ticks between levels
     const [qtyPer, setQtyPer] = useState(1);
+    // 股票：整股（張）或盤中零股（股）（#204）
+    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>('Common');
+    const futures = isFuturesContract(contract);
+    const odd = !futures && lot === 'IntradayOdd';
+    const unit = orderQtyUnit(futures, lot);
     const [armed, setArmed] = useState(false);
     const [follow, setFollow] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -82,8 +88,8 @@ export function GridTicket({
     lastRef.current = last;
     const sideRef = useRef(side);
     sideRef.current = side;
-    const paramsRef = useRef({ startOff, levels, step, qtyPer });
-    paramsRef.current = { startOff, levels, step, qtyPer };
+    const paramsRef = useRef({ startOff, levels, step, qtyPer, odd });
+    paramsRef.current = { startOff, levels, step, qtyPer, odd };
     const onChangedRef = useRef(onOrdersChanged);
     onChangedRef.current = onOrdersChanged;
     const cycleBusy = useRef(false);
@@ -96,10 +102,12 @@ export function GridTicket({
     // a resend (ADR 0004); they stay until the user reconciles manually.
     const unresolvedCancels = useRef(new Set<string>());
 
-    // reset on symbol change
+    // reset on symbol change（零股股數不沿用成張數）
     useEffect(() => {
         setArmed(false);
         setFollow(false);
+        if (paramsRef.current.odd) setQtyPer(1);
+        setLot('Common');
     }, [contract.code]);
 
     // our working grid orders for this symbol
@@ -153,13 +161,13 @@ export function GridTicket({
         return placeStockOrder(c, {
             ...req,
             price_type: 'LMT',
-            order_lot: 'Common',
+            order_lot: p.odd ? 'IntradayOdd' : 'Common',
         }, account);
     };
 
     const layGrid = async () => {
         if (!armed || busy || last === null) return;
-        const blocked = checkOrderAllowed(qtyPer * levels);
+        const blocked = checkOrderAllowed(qtyPer * levels, odd ? 'IntradayOdd' : undefined);
         if (blocked) {
             notify({ kind: 'err', title: '風控阻擋', body: blocked });
             return;
@@ -185,8 +193,8 @@ export function GridTicket({
                 price: null,
                 priceLabel: priceRange,
                 quantity: qtyPer * prices.length,
-                unit: isFuturesContract(contract) ? '口' : '張',
-                note: `網格鋪單 ${prices.length} 檔 × ${qtyPer}`,
+                unit,
+                note: `網格鋪單 ${prices.length} 檔 × ${qtyPer}${odd ? ' 股・盤中零股限價 ROD' : ''}`,
                 accountLabel: accountConfirmLabel(gridAccount),
             }).catch(() => false);
             if (!approved) return;
@@ -212,7 +220,7 @@ export function GridTicket({
         notify({
             kind: ok === prices.length ? 'ok' : 'info',
             title: '🧱 鋪單完成',
-            body: `${contract.code} ${side === 'Buy' ? '買' : '賣'}邊 ${ok}/${prices.length} 筆`,
+            body: `${contract.code} ${odd ? '零股' : ''}${side === 'Buy' ? '買' : '賣'}邊 ${ok}/${prices.length} 筆`,
         });
         setBusy(false);
         onChangedRef.current?.();
@@ -238,8 +246,9 @@ export function GridTicket({
     // capped per cycle so a fast market can't burst orders
     useEffect(() => {
         if (!follow || !armed) return;
-        // 跟隨啟動時固定帳戶（#139）：補單、刪單只針對這個帳戶的網格單，
-        // 之後改選帳戶不影響；帳戶不可用就停止跟隨
+        // 跟隨啟動時固定帳戶（#139）與交易單位（#204）：補單、刪單只針對
+        // 這個帳戶、這個單位的網格單，之後改選帳戶不影響；帳戶不可用就停止跟隨
+        const followOdd = paramsRef.current.odd;
         const followAccount = captureSelectedAccount(
             isFuturesContract(contractRef.current) ? 'F' : 'S',
         );
@@ -269,6 +278,7 @@ export function GridTicket({
                         ACTIVE_ORDER_STATUSES.has(t.status.status) &&
                         t.order.custom_field === GRID_TAG &&
                         t.order.action === sideRef.current &&
+                        isOddLot(t.order.order_lot) === followOdd &&
                         accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, followAccount) &&
                         (t.contract.code === c.code ||
                             getAliasFor(t.contract.code) === c.code),
@@ -307,7 +317,7 @@ export function GridTicket({
                     // (the poll hasn't caught up — re-placing would double)
                     if (!have.has(k) && !recentPlace.current.has(k)) {
                         // 風控鎖／單筆上限／當日虧損上限同樣擋自動補單
-                        const blocked = checkOrderAllowed(paramsRef.current.qtyPer);
+                        const blocked = checkOrderAllowed(paramsRef.current.qtyPer, followOdd ? 'IntradayOdd' : undefined);
                         if (blocked) {
                             stop(blocked);
                             break;
@@ -388,13 +398,38 @@ export function GridTicket({
             {numField('起始檔距', startOff, setStartOff, 1, 50)}
             {numField('檔數', levels, setLevels, 1, MAX_LEVELS)}
             {numField('間隔(檔)', step, setStep, 1, 10)}
-            {numField('每檔量', qtyPer, setQtyPer, 1, 99)}
+            {!futures && (
+                <div className={styles.fieldRow}>
+                    <span className={styles.fieldLabel}>單位</span>
+                    <div className={styles.segGroup}>
+                        {([
+                            ['Common', '整股'],
+                            ['IntradayOdd', '盤中零股'],
+                        ] as const).map(([value, label]) => (
+                            <button
+                                key={value}
+                                className={styles.seg[lot === value ? 'on' : 'off']}
+                                title={value === 'IntradayOdd' ? '盤中零股：每檔以股計（1～999 股），限價 ROD、僅現股' : '整股以張計'}
+                                onClick={() => {
+                                    if (lot === value) return;
+                                    setLot(value);
+                                    setQtyPer(1);
+                                    setFollow(false);
+                                }}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+            {numField(`每檔量(${unit})`, qtyPer, setQtyPer, 1, odd ? ODD_LOT_MAX_SHARES : 99)}
 
             {preview.length > 0 && (
                 <span className={styles.costRow}>
                     預覽：{fmtPrice(preview[0])} ~{' '}
                     {fmtPrice(preview[preview.length - 1])}（{preview.length}{' '}
-                    檔 × {qtyPer}）
+                    檔 × {qtyPer} {unit}{odd ? '・盤中零股限價' : ''}）
                 </span>
             )}
 
@@ -465,7 +500,7 @@ export function GridTicket({
                     {gridOrders
                         .map(
                             (t) =>
-                                `${t.order.action === 'Buy' ? '買' : '賣'}${fmtPrice(
+                                `${isOddLot(t.order.order_lot) ? '零' : ''}${t.order.action === 'Buy' ? '買' : '賣'}${fmtPrice(
                                     t.status.modified_price || t.order.price,
                                 )}`,
                         )

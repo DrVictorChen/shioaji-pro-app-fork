@@ -94,3 +94,15 @@ it('beforeSend runs after confirmation; its refusal is mutationNotStarted and no
     expect(order).toEqual(['confirm', 'before']);
     expect(m.stock).not.toHaveBeenCalled();
 });
+
+// #204 零股：沒有市價單；限價送出帶 IntradayOdd，風控以零股單位檢查
+it('odd lots: a market order is refused before confirmation or sending', async () => {
+    await expect(placeQuickOrder(contract, 'Buy', null, 100, { orderLot: 'IntradayOdd' })).rejects.toMatchObject({ mutationNotStarted: true, message: expect.stringContaining('限價') });
+    expect(m.confirm).not.toHaveBeenCalled(); expect(m.stock).not.toHaveBeenCalled();
+});
+it('odd lots: a limit order goes out as IntradayOdd LMT ROD in shares; risk sees the lot', async () => {
+    await placeQuickOrder(contract, 'Buy', 100, 300, { orderLot: 'IntradayOdd' });
+    expect(m.risk).toHaveBeenCalledWith(300, 'IntradayOdd');
+    expect(m.confirm.mock.calls[0]![0]).toMatchObject({ unit: '股', quantity: 300, note: expect.stringContaining('盤中零股') });
+    expect(m.stock.mock.calls[0]![1]).toMatchObject({ quantity: 300, price: 100, price_type: 'LMT', order_type: 'ROD', order_lot: 'IntradayOdd' });
+});
