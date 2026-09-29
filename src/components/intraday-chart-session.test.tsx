@@ -22,9 +22,10 @@ vi.mock('../hooks/use-stream', async () => {
     };
 });
 const fetchMock = vi.fn();
+let historyRevision = 0;
 vi.mock('../lib/chart-history', () => ({
     fetchChartHistory: (...a: unknown[]) => fetchMock(...a),
-    nextChartHistoryRevision: () => Math.random(),
+    nextChartHistoryRevision: () => ++historyRevision,
 }));
 
 import { IntradayChart } from './intraday-chart';
@@ -111,6 +112,7 @@ beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     created.length = 0;
     quote = undefined;
+    historyRevision = 0;
     fetchMock.mockReset();
 });
 afterEach(() => {
@@ -123,6 +125,77 @@ afterEach(() => {
 const setNow = (s: string) => vi.setSystemTime(new Date(`${s}+08:00`));
 
 describe('IntradayChart session toggle', () => {
+    it('backfills the whole previous night after a long holiday', async () => {
+        setNow('2026-09-29T10:12:00');
+        const data = kbars([
+            ['2026-09-24T15:00:00', '2026-09-25T05:00:00', (t) => t < T('2026-09-25T00:00:00') ? 22000 : 22500],
+            ['2026-09-29T08:45:00', '2026-09-29T10:12:00', () => 22600],
+        ]);
+        fetchMock.mockImplementation(async (_contract: unknown, start: string, end: string) => {
+            const indices = data.datetime.flatMap((dt, i) => dt.slice(0, 10) >= start && dt.slice(0, 10) <= end ? [i] : []);
+            return Object.fromEntries(Object.entries(data).map(([key, values]) => [key, indices.map((i) => values[i]) ]));
+        });
+        const r = mount({ contract: fut, sessionMode: 'night', onSessionModeChange: () => {} });
+        await flush();
+        const d = price().last as any[];
+        expect(iso(d[0].time)).toBe('2026-09-24T15:01');
+        expect(iso(d[d.length - 1].time)).toBe('2026-09-25T05:00');
+        expect(d).toHaveLength(840);
+        expect(d[0].value).toBe(22000);
+        expect(created.filter((c) => c.kind === 'Histogram').at(-1)?.last).toHaveLength(840);
+        const chip = r.root.find((n) => n.type === 'button' && n.props['aria-haspopup'] === 'menu');
+        expect(chip.children.join('')).toBe('09/24 夜盤');
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('finds the previous night across a Spring Festival length closure', async () => {
+        setNow('2026-02-25T10:12:00');
+        const data = kbars([
+            ['2026-02-13T15:00:00', '2026-02-14T05:00:00', () => 22000],
+            ['2026-02-25T08:45:00', '2026-02-25T10:12:00', () => 22600],
+        ]);
+        fetchMock.mockImplementation(async (_contract: unknown, start: string, end: string) => {
+            const indices = data.datetime.flatMap((dt, i) => dt.slice(0, 10) >= start && dt.slice(0, 10) <= end ? [i] : []);
+            return Object.fromEntries(Object.entries(data).map(([key, values]) => [key, indices.map((i) => values[i])]));
+        });
+        mount({ contract: fut, sessionMode: 'night', onSessionModeChange: () => {} });
+        await flush();
+        const d = price().last as any[];
+        expect(iso(d[0].time)).toBe('2026-02-13T15:01');
+        expect(iso(d[d.length - 1].time)).toBe('2026-02-14T05:00');
+        expect(d).toHaveLength(840);
+    });
+
+    it('switching back to the active day fetches fresh history, while past night stays cached', async () => {
+        setNow('2026-09-29T10:08:00');
+        const earlier = kbars([['2026-09-29T08:45:00', '2026-09-29T10:08:00', () => 22500]]);
+        const later = kbars([['2026-09-29T08:45:00', '2026-09-29T10:12:00', () => 22500]]);
+        const night = kbars([['2026-09-28T15:00:00', '2026-09-29T05:00:00', () => 22400]]);
+        const cache = new Map<string, unknown>();
+        fetchMock.mockImplementation(async (_contract: unknown, start: string, end: string, opts: { revision?: number }) => {
+            const key = `${start}|${end}|${opts?.revision ?? 0}`;
+            if (!cache.has(key)) {
+                const day = Date.now() < Date.parse('2026-09-29T02:12:00Z') ? earlier : later;
+                cache.set(key, Object.fromEntries(
+                    Object.keys(day).map((field) => [field, [...(night as any)[field], ...(day as any)[field]]]),
+                ));
+            }
+            return cache.get(key);
+        });
+        let mode: any = 'day';
+        const onChange = (m: any) => (mode = m);
+        const r = mount({ contract: fut, sessionMode: mode, onSessionModeChange: onChange });
+        const rerender = (m: any) => act(() => r.update(createElement(IntradayChart, { contract: fut, sessionMode: m, onSessionModeChange: onChange } as any)));
+        await flush();
+        expect(iso((price().last as any[]).at(-1).time)).toBe('2026-09-29T10:08');
+        setNow('2026-09-29T10:12:00');
+        await switchTo(r, '夜盤', rerender);
+        expect(fetchMock.mock.calls[1]?.[3]?.revision).toBe(fetchMock.mock.calls[0]?.[3]?.revision);
+        await switchTo(r, '日盤', rerender);
+        expect(iso((price().last as any[]).at(-1).time)).toBe('2026-09-29T10:12');
+        expect(fetchMock.mock.calls[2]?.[3]?.revision).not.toBe(fetchMock.mock.calls[0]?.[3]?.revision);
+    });
+
     it('evening 20:00, auto → night; locked day → today 08:46..13:45; night ticks ignored', async () => {
         setNow('2026-09-25T20:00:30');
         fetchMock.mockResolvedValue(DATA);

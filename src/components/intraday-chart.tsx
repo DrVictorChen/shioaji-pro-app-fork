@@ -311,6 +311,7 @@ export function IntradayChart({
         : 'auto';
     const sessionModeRef = useRef(sessionMode);
     sessionModeRef.current = sessionMode;
+    const loadedSessionModeRef = useRef(sessionMode);
     const [sessionPopOpen, setSessionPopOpen] = useState(false);
     const pickSessionMode = (m: IntradaySessionMode) => {
         setLocalSessionMode(m);
@@ -701,6 +702,19 @@ export function IntradayChart({
     // ---- history load: pick the last session present in the data ----
     useEffect(() => {
         const loadKey = `${contract.code}|${reloadSeq}|${optsKey}|${sessionMode}`;
+        const now = nowWallClockUtc();
+        const current = sessionWindowFor(contract.security_type, now);
+        const switchedToActiveSession =
+            loadedSessionModeRef.current !== sessionMode &&
+            now > current.start && now <= current.end &&
+            (sessionMode === 'auto' || (sessionMode === 'night') === current.night);
+        loadedSessionModeRef.current = sessionMode;
+        // A completed request may be minutes old when switching back to the
+        // running session. Give that transition a new cache revision immediately;
+        // closed sessions still reuse their cached history.
+        const historyRevision = switchedToActiveSession
+            ? nextChartHistoryRevision()
+            : reloadSeq;
         loadedKeyRef.current = '';
         sessionRef.current = null;
         liveRef.current = null;
@@ -864,11 +878,35 @@ export function IntradayChart({
             loadedKeyRef.current = loadKey;
             chartRef.current?.timeScale().fitContent();
         };
-        // range covers weekends/holidays and夜盤掛次日檔期的怪癖
-        fetchChartHistory(contract, dateStrOffset(4), dateStrOffset(-1), { revision: reloadSeq })
-            .then((k) => {
+        // Query recent data first. A night can begin before the first queried
+        // midnight (or before a long holiday); only then backfill. Shioaji
+        // limits a kbars request to 30 calendar days, so the older chunk starts
+        // 29 days back and overlaps the recent query at its boundary.
+        const recentStart = dateStrOffset(4);
+        fetchChartHistory(contract, recentStart, dateStrOffset(-1), { revision: historyRevision })
+            .then(async (k) => {
                 if (cancelled || !priceSeriesRef.current) return;
-                const all = kbarsToMinBars(k);
+                let all = kbarsToMinBars(k);
+                const lastRecent = all[all.length - 1];
+                const needNight = sessionMode === 'night' ||
+                    (sessionMode === 'auto' && lastRecent !== undefined &&
+                        sessionWindowFor(contract.security_type, lastRecent.time).night);
+                if (needNight) {
+                    const lastNight = [...all].reverse().find((b) =>
+                        sessionWindowFor(contract.security_type, b.time).night,
+                    );
+                    const queryStart = wallClockToUtc(`${recentStart}T00:00:00`);
+                    if (!lastNight || sessionWindowFor(contract.security_type, lastNight.time).start < queryStart) {
+                        const older = kbarsToMinBars(await fetchChartHistory(
+                            contract, dateStrOffset(29), recentStart,
+                            { revision: historyRevision },
+                        ));
+                        if (cancelled || !priceSeriesRef.current) return;
+                        // The boundary date is intentionally queried twice.
+                        all = [...new Map([...older, ...all].map((b) => [b.time, b])).values()]
+                            .sort((a, b) => a.time - b.time);
+                    }
+                }
                 const last = all[all.length - 1];
                 const pend =
                     pendingWinRef.current?.code === contract.code
