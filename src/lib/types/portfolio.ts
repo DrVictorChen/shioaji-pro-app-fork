@@ -31,6 +31,12 @@ export interface FuturePosition {
     price: number;
     last_price: number;
     pnl: number;
+    /** App projection only (never from the broker): open lots oldest first
+     * when live fills left more than one, so a close consumes them FIFO. */
+    lots?: { price: number; quantity: number; aggregate?: boolean; snapshot?: boolean }[];
+    /** App projection only: a close partly consumed an aggregate broker row,
+     * so the FIFO cost/P&L shown is an estimate until the next snapshot. */
+    costUncertain?: boolean;
 }
 
 export type Position = StockPosition | FuturePosition;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collectFills, fifoPosition as fifoAt, hasTwoWayFills, tradingDayStart, type FifoFill } from './futures-fifo';
+import { collectFills, consumeFifo, fifoPosition as fifoAt, hasTwoWayFills, tradingDayStart, type FifoFill } from './futures-fifo';
 import type { Action, Deal, Trade } from './types/order';
 
 const trade = (id: string, action: Action, deals: Deal[], code = 'MXFI6', target: string | null = null, status = 'Filled'): Trade => ({
@@ -188,5 +188,29 @@ describe('fifoPosition', () => {
         expect(fifoPosition([row('Buy', 2, 103.33, 115)], [fill('a', 'Buy', 110, 1, 1), fill('b', 'Sell', 120, 1, 2)], 50)).toBeNull();
         // unknown multiplier
         expect(fifoPosition(rows, [fill('a', 'Sell', 45546, 1, 1), fill('b', 'Sell', 45559, 1, 2), fill('c', 'Buy', 45513, 1, 3)], 0)).toBeNull();
+    });
+});
+
+describe('consumeFifo (shared with the position projection, #85)', () => {
+    it('closes the oldest lots first and splits a partly closed lot', () => {
+        const lots = [{ price: 48520, quantity: 1 }, { price: 48525, quantity: 2 }];
+        expect(consumeFifo(lots, 2)).toEqual({ open: [{ price: 48525, quantity: 1 }],
+            closed: [{ price: 48520, quantity: 1 }, { price: 48525, quantity: 1 }] });
+        expect(lots).toHaveLength(2); // input untouched
+        expect(consumeFifo(lots, 5).open).toEqual([]);
+        expect(consumeFifo(lots, 0)).toEqual({ open: lots, closed: [] });
+    });
+    it('agrees with the Flash replay on the live-QA reproduction', async () => {
+        const { applyPositionFill } = await import('./portfolio-projection');
+        const owner = { account_type: 'F', broker_id: 'b', account_id: 'a', person_id: '', signed: true, username: '' };
+        const base = { key: '', tradeId: '', account: owner, code: 'TXFJ6', ts: 1, condition: '', openClose: 'New' };
+        let rows = applyPositionFill([], { ...base, key: '1', action: 'Buy', quantity: 1, price: 48520 }, 200)!;
+        rows = applyPositionFill(rows, { ...base, key: '2', action: 'Buy', quantity: 1, price: 48525 }, 200, 48525)!;
+        // Flash replay sees the un-netted rows (New Sell opens its own row).
+        const flash = fifoAt([row('Buy', 2, 48522.5, 48523), row('Sell', 1, 48523, 48523)], [
+            fill('1', 'Buy', 48520, 1, 1), fill('2', 'Buy', 48525, 1, 2), fill('3', 'Sell', 48523, 1, 3)], 200, 48523)!;
+        rows = applyPositionFill(rows, { ...base, key: '3', action: 'Sell', quantity: 1, price: 48523, openClose: 'Cover' }, 200, 48523)!;
+        expect(flash).toMatchObject({ net: 1, avg: 48525, pnl: -400 });
+        expect(rows[0]).toMatchObject({ quantity: 1, price: flash.avg, pnl: flash.pnl });
     });
 });
