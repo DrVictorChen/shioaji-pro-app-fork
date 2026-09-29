@@ -513,7 +513,8 @@ function BlockView(props: BlockViewProps) {
             <PanelChrome
                 title={`${meta.label}${pulseMarket}`}
                 symbolCode={symbol?.code}
-                symbolName={symbol?.name}
+                // 閃電下單的商品名稱改在面板內的名稱列顯示（#176）
+                symbolName={block.type === 'flash' ? undefined : symbol?.name}
                 pinnable={meta.pinnable}
                 pin={block.pin}
                 currentCode={selected?.code ?? null}
@@ -692,7 +693,7 @@ function PopoutView({
                 <PanelChrome
                     title={meta.label}
                     symbolCode={contract?.code}
-                    symbolName={contract?.name}
+                    symbolName={type === 'flash' ? undefined : contract?.name}
                 />
                 <PanelErrorBoundary label={meta.label}>
                     {body}

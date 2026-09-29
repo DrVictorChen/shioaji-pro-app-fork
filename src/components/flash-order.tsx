@@ -8,10 +8,10 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // chips to cancel, market buy/sell + flatten + cancel-all in the action bar.
 
 import { ensureAccounts, useAccounts } from '../lib/account-store';
-import { maskAccountId, usePrivacyMode } from '../lib/privacy';
+import { usePrivacyMode } from '../lib/privacy';
 import { accountMatches, flashAccountKey, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashMarket } from '../lib/flash-account';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
-import { Zap } from 'lucide-react';
+import { ChevronDown, Zap } from 'lucide-react';
 import {
     memo,
     useCallback,
@@ -35,6 +35,7 @@ import { ACTIVE_ORDER_STATUSES, type Action, type Trade } from '../lib/types/ord
 import type { Account, AccountedPosition } from '../lib/types/portfolio';
 import { fmtInt, fmtPrice, fmtSigned } from '../lib/utils/format';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
+import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import * as styles from './flash-order.css';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
@@ -690,45 +691,66 @@ export function FlashOrder({
         return n;
     }, [myOrders]);
 
+    const symbolLabel = flashSymbolLabel(contract);
+    const accountLabels = flashAccountLabels(eligible, privacy);
+    const accountShort = resolved.following
+        ? activeAccount ? `跟隨 ${accountLabels.short(activeAccount)}` : accountsLoading ? '帳戶載入中' : '無可用帳戶'
+        : resolved.missing ? (accountsLoading ? '帳戶載入中' : '帳戶不可用')
+        : activeAccount ? accountLabels.short(activeAccount) : '選擇帳戶';
+    const accountTitle = activeAccount
+        ? `${resolved.following ? '跟隨主畫面：' : ''}${accountLabels.long(activeAccount)}`
+        : '選擇閃電下單帳戶';
+
     return (
         <div className={styles.wrap}>
+            <div className={styles.symbolRow} title={symbolLabel.title}>
+                <span className={styles.symbolName}>{symbolLabel.name}</span>
+                <span className={styles.symbolMeta}>{symbolLabel.meta}</span>
+            </div>
             <div className={styles.controls}>
-                <select
-                    aria-label="閃電下單帳戶"
-                    title={resolved.following ? '跟隨主畫面帳戶 — 選擇帳戶後此視窗固定使用該帳戶' : '此視窗固定帳戶，不影響其他視窗與主畫面'}
-                    value={resolved.following ? FOLLOW_GLOBAL : resolved.unset ? '' : panelKeys[market]}
-                    onChange={e => {
-                        armedRef.current = false;
-                        setArmed(false);
-                        const value = e.target.value;
-                        if (value === FOLLOW_GLOBAL ? !followMain : !eligible.some(a => flashAccountKey(a) === value)) return;
-                        const next = { ...panelKeys };
-                        if (value === FOLLOW_GLOBAL) delete next[market];
-                        else next[market] = value;
-                        // drop the old account right away so nothing queued before
-                        // the re-render can still fire with it
-                        accountRef.current = undefined;
-                        if (onAccountKeysChange) onAccountKeysChange(next);
-                        else setLocalKeys(next);
-                    }}
-                >
-                    {followMain ? (
-                        <option value={FOLLOW_GLOBAL}>
-                            {!resolved.following
-                                ? '跟隨主畫面'
-                                : activeAccount
-                                  ? `跟隨主畫面 ${activeAccount.broker_id}-${maskAccountId(activeAccount.account_id, privacy)}`
-                                  : accountsLoading
-                                    ? '跟隨主畫面（帳戶載入中）'
-                                    : '跟隨主畫面（無可用帳戶）'}
-                        </option>
-                    ) : resolved.unset && <option value=''>請選擇帳戶</option>}
-                    {resolved.missing && <option value={panelKeys[market]}>{accountsLoading ? '帳戶載入中' : '帳戶不可用'}</option>}
-                    {eligible.map(a => <option key={flashAccountKey(a)} value={flashAccountKey(a)}>
-                        {a.broker_id}-{maskAccountId(a.account_id, privacy)}
-                    </option>)}
-                </select>
-                <span className={styles.qtyLabel}>量</span>
+                {/* 收合時只顯示精簡帳號（#176）；透明的原生 select 疊在上面，
+                    展開的選單才列出帳號＋戶名 */}
+                <label className={styles.accountPick}>
+                    <span className={styles.accountText}>{accountShort}</span>
+                    <ChevronDown size={10} aria-hidden />
+                    <select
+                        className={styles.accountSelect}
+                        aria-label="閃電下單帳戶"
+                        // 透明 select 蓋住標籤，完整帳號＋戶名的 tooltip 要放在 select 上
+                        title={`${accountTitle}\n${resolved.following ? '跟隨主畫面帳戶 — 選擇帳戶後此視窗固定使用該帳戶' : '此視窗固定帳戶，不影響其他視窗與主畫面'}`}
+                        value={resolved.following ? FOLLOW_GLOBAL : resolved.unset ? '' : panelKeys[market]}
+                        onChange={e => {
+                            armedRef.current = false;
+                            setArmed(false);
+                            const value = e.target.value;
+                            if (value === FOLLOW_GLOBAL ? !followMain : !eligible.some(a => flashAccountKey(a) === value)) return;
+                            const next = { ...panelKeys };
+                            if (value === FOLLOW_GLOBAL) delete next[market];
+                            else next[market] = value;
+                            // drop the old account right away so nothing queued before
+                            // the re-render can still fire with it
+                            accountRef.current = undefined;
+                            if (onAccountKeysChange) onAccountKeysChange(next);
+                            else setLocalKeys(next);
+                        }}
+                    >
+                        {followMain ? (
+                            <option value={FOLLOW_GLOBAL}>
+                                {!resolved.following
+                                    ? '跟隨主畫面'
+                                    : activeAccount
+                                      ? `跟隨主畫面 ${accountLabels.long(activeAccount)}`
+                                      : accountsLoading
+                                        ? '跟隨主畫面（帳戶載入中）'
+                                        : '跟隨主畫面（無可用帳戶）'}
+                            </option>
+                        ) : resolved.unset && <option value=''>請選擇帳戶</option>}
+                        {resolved.missing && <option value={panelKeys[market]}>{accountsLoading ? '帳戶載入中' : '帳戶不可用'}</option>}
+                        {eligible.map(a => <option key={flashAccountKey(a)} value={flashAccountKey(a)}>
+                            {accountLabels.long(a)}
+                        </option>)}
+                    </select>
+                </label>
                 <button
                     className={styles.stepBtn}
                     onClick={() => setQty((v) => Math.max(1, v - 1))}
@@ -737,6 +759,8 @@ export function FlashOrder({
                 </button>
                 <input
                     className={styles.qtyInput}
+                    aria-label='數量'
+                    title='數量'
                     value={qty}
                     inputMode='numeric'
                     onChange={(e) => {
@@ -750,6 +774,7 @@ export function FlashOrder({
                 >
                     ＋
                 </button>
+                <span className={styles.rowBreak} aria-hidden />
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
                     disabled={!live || !activeAccount}
