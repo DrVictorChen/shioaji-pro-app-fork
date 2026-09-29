@@ -76,3 +76,21 @@ it('aborts when the explicit account becomes unavailable during confirmation (#1
     await expect(placeQuickOrder(contract, 'Buy', 100, 1, { account })).rejects.toMatchObject({ mutationNotStarted: true });
     expect(m.stock).not.toHaveBeenCalled();
 });
+it('the confirmation shows the captured account, not the selected one', async () => {
+    const bound = { ...account, account_id: 'bound' };
+    m.accounts = [account, bound];
+    await placeQuickOrder(contract, 'Buy', null, 1, { account: bound });
+    expect(m.confirm.mock.calls[0]![0].accountLabel).toBe('b-bound');
+});
+it('passes a pending trigger quote code into the manual confirmation', async () => {
+    await placeQuickOrder(contract, 'Buy', null, 1, { confirmLivePriceCode: '2330' });
+    expect(m.confirm.mock.calls[0]![0].livePriceCode).toBe('2330');
+});
+it('beforeSend runs after confirmation; its refusal is mutationNotStarted and nothing is sent', async () => {
+    const order: string[] = [];
+    m.confirm.mockImplementation(async () => { order.push('confirm'); return true; });
+    await expect(placeQuickOrder(contract, 'Buy', null, 1, { beforeSend: () => { order.push('before'); throw new Error('gone'); } }))
+        .rejects.toMatchObject({ mutationNotStarted: true, message: 'gone' });
+    expect(order).toEqual(['confirm', 'before']);
+    expect(m.stock).not.toHaveBeenCalled();
+});

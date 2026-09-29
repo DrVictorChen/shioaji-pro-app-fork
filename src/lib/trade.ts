@@ -126,6 +126,7 @@ async function confirmManualOrder(
     orderLot?: StockOrderLot,
     note?: string,
     account?: Account,
+    livePriceCode?: string,
 ): Promise<void> {
     if (!getRiskSettings().confirmManualOrders) return;
     const approved = await requestOrderConfirm({
@@ -138,6 +139,7 @@ async function confirmManualOrder(
         // 顯示實際送單的帳戶（閃電下單各視窗可與主畫面選擇不同）
         accountLabel: account ? accountConfirmLabel(account) : undefined,
         note,
+        livePriceCode,
     });
     if (!approved) throw new OrderConfirmCancelled();
 }
@@ -158,6 +160,11 @@ export async function placeQuickOrder(
         agentAuto?: boolean;
         // 呼叫端的帳戶仍是送單帳戶？確認期間改選帳戶就中止（閃電下單各視窗）
         isAccountCurrent?: () => boolean;
+        // runs synchronously after confirmation and risk checks, right
+        // before sending; throwing refuses the order (nothing is sent)
+        beforeSend?: () => void;
+        // 待確認觸價單在人工確認視窗顯示持續更新的目前成交價。
+        confirmLivePriceCode?: string;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
@@ -185,6 +192,7 @@ export async function placeQuickOrder(
             opts?.orderLot,
             undefined,
             capturedAccount,
+            opts?.confirmLivePriceCode,
         );
     }
     assertTradingLive();
@@ -192,6 +200,14 @@ export async function placeQuickOrder(
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     if (capturedAccount && !getAccountState().accounts.some(a => a.signed && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity); if (blocked) throw mutationNotStartedError(blocked); }
+    if (opts?.beforeSend) {
+        try {
+            opts.beforeSend();
+        } catch (e) {
+            // refused by the caller before sending: nothing was sent
+            throw mutationNotStartedError(e instanceof Error ? e.message : String(e));
+        }
+    }
     trackActivity(
         '下單',
         `${contract.code} ${action === 'Buy' ? '買' : '賣'} ${quantity} @${price ?? '市價'}`,
