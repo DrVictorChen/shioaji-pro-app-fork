@@ -118,6 +118,18 @@ it('replaying the customer\'s fills live (rows netted by the projection) shows t
     expect(label).toBe('FIFO');
 });
 
+it('a reloaded broker FIFO-netted row keeps the FIFO label', async () => {
+    book.close = 48040;
+    const fills = [filled('a', 'Sell', 48077, at(1)), filled('b', 'Sell', 48053, at(2)), filled('c', 'Buy', 48053, at(3))];
+    // The snapshot has only Sell 1 @ 48053; the earlier mixed rows were
+    // Sell 2 @ 48065 and Buy 1 @ 48053.
+    const { bar, label } = await render([row(0, 'Sell', 1, 48053, 650)], contract, fills);
+    expect(bar).toContain('"空"," ","1"');
+    expect(bar).toContain('48,053');
+    expect(bar).toContain('+650.00');
+    expect(label).toBe('FIFO');
+});
+
 it('replaying New fills live (projection keeps opposite rows) also reaches the FIFO cost', async () => {
     let rows: AccountedPosition[] = [];
     for (const t of customerFills()) {

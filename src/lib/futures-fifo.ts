@@ -139,11 +139,11 @@ const PRICE_EPS = 0.01;
 /**
  * Quantities can balance while a buy/sell pair is missing from `fills`, so
  * without carried lots the rows' prices must also follow from the fills:
- * un-netted rows cost exactly what each side filled; rows the live
- * projection netted carry the average-netting replay's price.
+ * un-netted rows cost exactly what each side filled; a netted row carries
+ * either the live projection's average-netting price or the broker's FIFO cost.
  */
 function pricesExplained(rowQty: Record<Action, number>, rowCost: Record<Action, number>,
-    fillQty: Record<Action, number>, fillCost: Record<Action, number>, fills: FifoFill[]): boolean {
+    fillQty: Record<Action, number>, fillCost: Record<Action, number>, fills: FifoFill[], fifoAvg: number): boolean {
     if (rowQty.Buy === fillQty.Buy && rowQty.Sell === fillQty.Sell) {
         return (['Buy', 'Sell'] as const).every(a => Math.abs(rowCost[a] - fillCost[a]) <= PRICE_EPS * Math.max(1, rowQty[a]));
     }
@@ -165,7 +165,8 @@ function pricesExplained(rowQty: Record<Action, number>, rowCost: Record<Action,
     }
     const side = pos > 0 ? 'Buy' : 'Sell';
     return pos === rowQty.Buy - rowQty.Sell && pos !== 0
-        && Math.abs(rowCost[side] / rowQty[side] - avg) <= PRICE_EPS;
+        && (Math.abs(rowCost[side] / rowQty[side] - avg) <= PRICE_EPS
+            || Math.abs(rowCost[side] / rowQty[side] - fifoAvg) <= PRICE_EPS);
 }
 
 /**
@@ -198,7 +199,6 @@ export function fifoPosition(rows: Row[], fills: FifoFill[], multiplier: number,
         // Rows holding more of a side than today filled means lots on both
         // sides predate today — not explainable.
         if (rowQty.Buy > fillQty.Buy || rowQty.Sell > fillQty.Sell) return null;
-        if (!pricesExplained(rowQty, rowCost, fillQty, fillCost, fills)) return null;
     } else {
         const action = carried > 0 ? 'Buy' : 'Sell';
         const other = carried > 0 ? 'Sell' : 'Buy';
@@ -231,8 +231,9 @@ export function fifoPosition(rows: Row[], fills: FifoFill[], multiplier: number,
     }
     // FIFO keeps the net: net = carried + today's net = the rows' net.
     const seeded = carried !== 0;
+    const avg = qty > 0 ? cost / qty : 0;
+    if (!seeded && !pricesExplained(rowQty, rowCost, fillQty, fillCost, fills, avg)) return null;
     if (qty === 0) return { net: 0, avg: 0, pnl: 0, lots, seeded };
-    const avg = cost / qty;
     const pnl = Math.round((last - avg) * net * multiplier);
     return { net, avg, pnl: pnl === 0 ? 0 : pnl, lots, seeded };
 }
