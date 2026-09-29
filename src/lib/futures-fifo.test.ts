@@ -111,6 +111,16 @@ describe('fifoPosition', () => {
         expect(fifoPosition([row('Sell', 1, 45552.5, 45532)], fills, 50)).toMatchObject({ net: -1, avg: 45559, pnl: 1350, seeded: false });
     });
 
+    it('accepts a broker net row priced at the FIFO lot after reload', () => {
+        // Only today's fills and the reloaded position row remain. The broker
+        // nets Sell 2 @ 48065 / Buy 1 @ 48053 to Sell 1 @ 48053 (FIFO).
+        const fills = [fill('a:1', 'Sell', 48077, 1, 10), fill('b:1', 'Sell', 48053, 1, 20), fill('c:1', 'Buy', 48053, 1, 30)];
+        expect(fifoPosition([row('Sell', 1, 48053, 48040)], fills, 50)).toEqual({
+            net: -1, avg: 48053, pnl: 650, lots: [{ action: 'Sell', price: 48053, quantity: 1 }], seeded: false,
+        });
+        expect(fifoPosition([row('Sell', 1, 48060, 48040)], fills, 50)).toBeNull();
+    });
+
     it('a hidden buy/sell pair that balances quantities is caught by the row price', () => {
         // Visible: Buy 100, Buy 101, Sell 110 (FIFO would say long 1 @ 101). Hidden: Buy 105, Sell 106.
         // Live-netted row: Buy 1 @ 102.75, not the average replay's 100.5.
