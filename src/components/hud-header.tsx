@@ -22,6 +22,8 @@ import { LayoutLibrary } from './layout-library';
 import { MarketBar } from './market-bar';
 import { ServerManager } from './server-manager';
 import { SettingsDialog } from './settings-dialog';
+import { flashPopoutParams, reseedPopoutFlashAccounts } from '../lib/flash-account';
+import { mainFlashSelection } from '../lib/order-account';
 import * as styles from './hud-header.css';
 
 const STATUS_LABEL = {
@@ -153,7 +155,13 @@ function FlashTilesMenu({ flashCodes }: { flashCodes: string[] }) {
                                 className={styles.flashLayoutItem}
                                 onClick={() => {
                                     close();
-                                    void openFlashTiles(flashCodes, lay);
+                                    const global = mainFlashSelection();
+                                    void openFlashTiles(flashCodes, lay, (code) =>
+                                        flashPopoutParams(undefined, global, `tile:${code}`),
+                                        (_code, params) => {
+                                            if (params.win) reseedPopoutFlashAccounts(params.win, undefined, global);
+                                        },
+                                    );
                                 }}
                             >
                                 <FlashThumb layout={lay} />

@@ -10,6 +10,7 @@
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
 import type { Action } from './types/order';
+import type { Account } from './types/portfolio';
 
 export interface OrderConfirmRequest {
     code: string;
@@ -64,8 +65,8 @@ export function resolveOrderConfirm(approved: boolean): void {
 let simulationCache: boolean | null = null;
 let simulationInflight: Promise<void> | null = null;
 
-/** Label of the account an order will actually use (last 4 digits shown). */
-export function accountConfirmLabel(account: { broker_id: string; account_id: string }): string {
+// 確認視窗一律遮罩帳號（只露末四碼），不受隱私模式開關影響
+export function accountConfirmLabel(account: Pick<Account, 'broker_id' | 'account_id'>): string {
     const id = account.account_id;
     const masked = id.length > 4 ? `${'*'.repeat(id.length - 4)}${id.slice(-4)}` : id;
     return `${account.broker_id}-${masked}`;
@@ -77,7 +78,7 @@ function selectedAccountLabel(unit: string): string | undefined {
     return account ? accountConfirmLabel(account) : undefined;
 }
 
-function primeSimulation(): Promise<void> {
+export function primeOrderConfirmSimulation(): Promise<void> {
     if (simulationCache !== null) return Promise.resolve();
     simulationInflight ??= fetchInfo()
         .then((info) => {
@@ -123,7 +124,7 @@ export function requestOrderConfirm(
         };
         // 環境資訊最多等 800ms — 拿不到就以未知呈現
         void Promise.race([
-            primeSimulation(),
+            primeOrderConfirmSimulation(),
             new Promise<void>((r) => setTimeout(r, 800)),
         ]).then(start);
     });

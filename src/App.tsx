@@ -35,6 +35,7 @@ import { OptPayoff } from './components/opt-payoff';
 import { OptionChain } from './components/option-chain';
 import { Orb } from './components/orb';
 import { OrderConfirmHost } from './components/order-confirm-dialog';
+import { primeOrderConfirmSimulation } from './lib/order-confirm';
 import { OrderTicket } from './components/order-ticket';
 import { PanelChrome } from './components/panel-chrome';
 import { PanelErrorBoundary } from './components/panel-error-boundary';
@@ -83,6 +84,7 @@ import {
 import { isTauri, openPopout } from './lib/tauri';
 import { notify } from './lib/trade';
 import { tradingActionObserved, useTradingState } from './lib/trading-state';
+import { ensureAccounts } from './lib/account-store';
 import type { ContractInfo } from './lib/types/contract';
 import {
     BLOCK_META,
@@ -106,7 +108,17 @@ import {
     type PulseSection,
     type PulseSectionWeights,
     type Workspace,
+    withBlockPatch,
 } from './lib/workspace';
+import { mainFlashSelection } from './lib/order-account';
+import {
+    flashPopoutParams,
+    reseedPopoutFlashAccounts,
+    loadPopoutFlashAccounts,
+    savePopoutFlashAccounts,
+    touchPopoutFlashAccounts,
+    type FlashAccountKeys,
+} from './lib/flash-account';
 
 const POPOUT_TYPES: ReadonlySet<string> = new Set([
     'chart',
@@ -160,6 +172,7 @@ function BlockBody({
     onSelectCode,
     onPulseConfigChange,
     onWallConfigChange,
+    onFlashAccountsChange,
     onSessionConfigChange,
     refreshTrading,
 }: {
@@ -180,6 +193,7 @@ function BlockBody({
         cols: number,
         rows: number,
     ) => void;
+    onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }) {
@@ -268,6 +282,8 @@ function BlockBody({
                     trades={dockProps.trades}
                     positions={dockProps.positions}
                     onOrdersChanged={dockProps.onTradesChanged}
+                    accountKeys={block.flashAccounts}
+                    onAccountKeysChange={(keys) => onFlashAccountsChange(block.id, keys)}
                 />
             ) : (
                 <BlockPlaceholder />
@@ -454,6 +470,7 @@ interface BlockViewProps {
         cols: number,
         rows: number,
     ) => void;
+    onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }
@@ -481,12 +498,23 @@ function BlockView(props: BlockViewProps) {
                 onRemove={() => onRemove(block.id)}
                 onPopout={
                     POPOUT_TYPES.has(block.type)
-                        ? () =>
+                        ? () => {
+                              const global = mainFlashSelection();
+                              const flashParams = block.type === 'flash'
+                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`)
+                                  : undefined;
                               void openPopout(
                                   block.type,
                                   contract?.code ?? null,
-                                  popoutSessionParam(block),
-                              )
+                                  // popout 開啟時固定帳戶：面板自己的選擇，跟隨主畫面的市場
+                                  // 則取此刻主畫面的選擇（popout 不會即時跟隨）
+                                  {
+                                      ...popoutSessionParam(block),
+                                      ...flashParams,
+                                  },
+                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global) : undefined,
+                              );
+                          }
                         : undefined
                 }
             />
@@ -496,6 +524,9 @@ function BlockView(props: BlockViewProps) {
         </section>
     );
 }
+
+// 閃電下單 popout 的視窗 id（issue #139）— 帳戶選擇依此存在本機，URL 不帶帳號
+const POPOUT_WINDOW_ID = popoutQuery.get('win') || null;
 
 function PopoutView({
     type,
@@ -509,8 +540,23 @@ function PopoutView({
         if (code) ensureContract(code).catch(() => undefined);
     }, [code]);
     const trading = useTradingState();
+    // Tiles have no HUD header to fetch /info before the first confirmation.
+    useEffect(() => {
+        if (type === 'flash') void primeOrderConfirmSimulation();
+    }, [type]);
+    // popouts (incl. 閃電全開 tiles, web and desktop alike) have no dock or
+    // settings dialog to trigger the account fetch — load it here (#139)
+    useEffect(ensureAccounts, []);
     const tradesState = { data: trading.trades, refresh: tradingActionObserved };
     const popoutPositionsState = { data: trading.positions, refresh: tradingActionObserved };
+    // popout 不在 workspace 裡 — 帳戶依視窗 id 存在本機（開啟時由開啟端固定並預先寫入）
+    const [flashAccounts, setFlashAccounts] = useState(() => loadPopoutFlashAccounts(POPOUT_WINDOW_ID));
+    // heartbeat: a long-open popout must not be evicted as "stale"
+    useEffect(() => {
+        if (type !== 'flash' || !POPOUT_WINDOW_ID) return;
+        const t = setInterval(() => touchPopoutFlashAccounts(POPOUT_WINDOW_ID), 10 * 60_000);
+        return () => clearInterval(t);
+    }, [type]);
     const meta = BLOCK_META[type];
 
     let body: React.ReactNode = <BlockPlaceholder />;
@@ -584,6 +630,12 @@ function PopoutView({
                         onOrdersChanged={() => {
                             tradesState.refresh();
                             popoutPositionsState.refresh();
+                        }}
+                        accountKeys={flashAccounts}
+                        followMain={false}
+                        onAccountKeysChange={(keys) => {
+                            setFlashAccounts(keys);
+                            savePopoutFlashAccounts(POPOUT_WINDOW_ID, keys);
                         }}
                     />
                 );
@@ -1035,6 +1087,18 @@ function MainApp() {
         [workspace, updateWorkspace],
     );
 
+    // generic per-block field update (persisted with the workspace)
+    const patchBlock = useCallback(
+        (id: string, patch: Partial<Block>) => {
+            updateWorkspace(withBlockPatch(workspace, id, patch));
+        },
+        [workspace, updateWorkspace],
+    );
+    const setBlockFlashAccounts = useCallback(
+        (id: string, flashAccounts: FlashAccountKeys) =>
+            patchBlock(id, { flashAccounts }),
+        [patchBlock],
+    );
     const setBlockSessionConfig = useCallback(
         (id: string, patch: SessionConfigPatch) => {
             updateWorkspace(withBlockSessionConfig(workspace, id, patch));
@@ -1312,6 +1376,7 @@ function MainApp() {
                                     onSelectCode={selectByCode}
                                     onPulseConfigChange={setBlockPulseConfig}
                                     onWallConfigChange={setBlockWallConfig}
+                                    onFlashAccountsChange={setBlockFlashAccounts}
                                     onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
                                 />

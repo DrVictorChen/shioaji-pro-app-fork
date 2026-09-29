@@ -136,7 +136,7 @@ async function confirmManualOrder(
         price,
         quantity,
         unit: orderUnit(contract, orderLot),
-        // the account the order is bound to, not whatever is selected now
+        // 顯示實際送單的帳戶（閃電下單各視窗可與主畫面選擇不同）
         accountLabel: account ? accountConfirmLabel(account) : undefined,
         note,
         livePriceCode,
@@ -158,6 +158,8 @@ export async function placeQuickOrder(
         source?: 'manual' | 'auto' | 'agent';
         agentCallId?: string;
         agentAuto?: boolean;
+        // 呼叫端的帳戶仍是送單帳戶？確認期間改選帳戶就中止（閃電下單各視窗）
+        isAccountCurrent?: () => boolean;
         // runs synchronously after confirmation and risk checks, right
         // before sending; throwing refuses the order (nothing is sent)
         beforeSend?: () => void;
@@ -195,6 +197,7 @@ export async function placeQuickOrder(
     }
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
+    if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     if (capturedAccount && !getAccountState().accounts.some(a => a.signed && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity); if (blocked) throw mutationNotStartedError(blocked); }
     if (opts?.beforeSend) {
@@ -270,6 +273,7 @@ export async function placeStockExitByShares(
     action: Action,
     shares: number,
     account?: Account,
+    opts?: { isAccountCurrent?: () => boolean },
 ): Promise<Trade[]> {
     const capturedAccount = account ?? getAccountState().selectedStock ?? undefined;
     const base = getApiBase();
@@ -296,6 +300,7 @@ export async function placeStockExitByShares(
     );
     assertTradingLive();
     if (getApiBase() !== base) throw mutationNotStartedError('確認期間伺服器已切換');
+    if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     const out: Trade[] = [];
     if (lots > 0) {
         out.push(
