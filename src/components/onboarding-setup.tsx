@@ -64,8 +64,12 @@ export function OnboardingSetup() {
     const patch = (next: Partial<DesktopSettings>) =>
         setSettings((s) => ({ ...s, ...next }));
 
-    const handleEnvResult = (found: EnvImportResult | null) => {
+    // 對話框取消（null）時畫面保持原狀；有結果才清掉上一次的訊息與候選清單
+    const handleEnvResult = (found: EnvImportResult | null, newPick: boolean) => {
         if (!found) return;
+        setError('');
+        setImportMessage(null);
+        if (newPick) setEnvSelection(null);
         if (found.kind === 'choose') {
             setEnvSelection(found.selection);
         } else if (found.kind === 'error') {
@@ -81,13 +85,10 @@ export function OnboardingSetup() {
     // candidate: a file name from the folder's candidate list (envSelection)
     const importEnv = async (mode: 'file' | 'directory', candidate?: string) => {
         setImportPending(true);
-        setError('');
-        setImportMessage(null);
-        if (!candidate) setEnvSelection(null);
         try {
             handleEnvResult(candidate && envSelection
                 ? await importEnvCandidate(envSelection, candidate)
-                : await pickEnvFile(mode));
+                : await pickEnvFile(mode), !candidate);
         } catch {
             setImportMessage({ text: '無法匯入 .env 檔案。', error: true });
         } finally {

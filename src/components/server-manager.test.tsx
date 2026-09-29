@@ -65,6 +65,15 @@ describe('server settings edit and apply workflow', () => {
         expect(text()).toContain('已從 b.env 匯入，尚未儲存。');
         expect(mocks.save).not.toHaveBeenCalled();
     });
+    it('keeps the previous import error when the next file dialog is cancelled', async () => {
+        await open();
+        mocks.env.mockResolvedValueOnce({ kind: 'error', error: 'bad.env 沒有 SJ_API_KEY / SJ_SEC_KEY。' });
+        await act(async () => button('選擇 .env 檔案').props.onClick());
+        expect(text()).toContain('bad.env 沒有 SJ_API_KEY');
+        mocks.env.mockResolvedValueOnce(null);
+        await act(async () => button('選擇 .env 檔案').props.onClick());
+        expect(text()).toContain('bad.env 沒有 SJ_API_KEY');
+    });
     it('reports a CA picker failure as a certificate error', async () => {
         await open();
         await act(async () => button('正式環境').props.onClick());

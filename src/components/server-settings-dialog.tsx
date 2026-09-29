@@ -59,8 +59,11 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
         } catch (e) { setError(e instanceof Error ? e.message : '儲存失敗，請重試。'); }
         finally { active.current = false; setPending(false); }
     };
-    const handleEnvResult = (found: EnvImportResult | null) => {
+    // 對話框取消（null）時畫面保持原狀；有結果才清掉上一次的訊息與候選清單
+    const handleEnvResult = (found: EnvImportResult | null, newPick: boolean) => {
         if (!found) return;
+        setError(''); setMessage('');
+        if (newPick) setEnvSelection(null);
         if (found.kind === 'choose') {
             setEnvSelection(found.selection);
         } else if (found.kind === 'error') setError(found.error);
@@ -73,14 +76,14 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
     // candidate: a file name from the folder's candidate list (envSelection)
     const chooseFile = async (kind: 'env-file' | 'env-directory' | 'ca', candidate?: string) => {
         if (active.current) return;
-        active.current = true; setPending(true); setError(''); setMessage('');
+        active.current = true; setPending(true);
+        if (kind === 'ca') { setError(''); setMessage(''); }
         try {
             if (kind === 'ca') { const path = await pickCaFile(); if (path) change({ caPath: path }); }
             else {
-                if (!candidate) setEnvSelection(null);
                 handleEnvResult(candidate && envSelection
                     ? await importEnvCandidate(envSelection, candidate)
-                    : await pickEnvFile(kind === 'env-file' ? 'file' : 'directory'));
+                    : await pickEnvFile(kind === 'env-file' ? 'file' : 'directory'), !candidate);
             }
         } catch { setError(kind === 'ca' ? '無法讀取憑證檔。' : '無法匯入 .env 檔案。'); }
         finally { active.current = false; setPending(false); }
