@@ -75,7 +75,6 @@ import * as styles from './settings-dialog.css';
 
 const MODE_OPTIONS: { key: ThemeMode; label: string }[] = [
     { key: 'dark', label: '深色' },
-    { key: 'midnight', label: '純黑' },
     { key: 'light', label: '淺色' },
 ];
 
@@ -141,10 +140,9 @@ function AppearanceSection() {
             <div className={hud.settingGroup}>
                 {(
                     [
-                        [0.85, '小'],
-                        [1, '標準'],
-                        [1.15, '大'],
-                        [1.3, '特大'],
+                        [1, '小'],
+                        [1.15, '標準'],
+                        [1.3, '大'],
                     ] as [FontScale, string][]
                 ).map(([scale, label]) => (
                     <button

@@ -1,6 +1,6 @@
 // src/theme.css.ts — themeable design tokens.
-// 3 modes (dark / midnight / light) × 2 price-color conventions
-// (tw: red-up green-down, intl: green-up red-down) = 6 theme classes.
+// 2 modes (dark / light) × 2 price-color conventions
+// (tw: red-up green-down, intl: green-up red-down) = 4 theme classes.
 
 import {
     createTheme,
@@ -29,28 +29,8 @@ interface Palette {
     greenFlash: string;
 }
 
+// 深色＝原本的純黑（使用者 2026-09-29 決定只留純黑與淺色）
 const dark: Palette = {
-    background: '#0e1116',
-    panel: '#141922',
-    panelRaised: '#181f2a',
-    inset: '#0b0e13',
-    foreground: '#dde3ee',
-    muted: '#1d2530',
-    mutedForeground: '#8b94a7',
-    border: '#222b37',
-    borderBright: '#334052',
-    accent: '#3d8bff',
-    accentDim: 'rgba(61, 139, 255, 0.12)',
-    amber: '#e0a43c',
-    red: '#f23645',
-    redDim: 'rgba(242, 54, 69, 0.12)',
-    redFlash: 'rgba(242, 54, 69, 0.18)',
-    green: '#16b389',
-    greenDim: 'rgba(22, 179, 137, 0.12)',
-    greenFlash: 'rgba(22, 179, 137, 0.16)',
-};
-
-const midnight: Palette = {
     background: '#000000',
     panel: '#0a0c10',
     panelRaised: '#10131a',
@@ -151,8 +131,6 @@ export const [darkTwClass, vars] = createTheme(makeTokens(dark, 'tw'));
 export const themeClasses: Record<string, string> = {
     'dark-tw': darkTwClass,
     'dark-intl': createTheme(vars, makeTokens(dark, 'intl')),
-    'midnight-tw': createTheme(vars, makeTokens(midnight, 'tw')),
-    'midnight-intl': createTheme(vars, makeTokens(midnight, 'intl')),
     'light-tw': createTheme(vars, makeTokens(light, 'tw')),
     'light-intl': createTheme(vars, makeTokens(light, 'intl')),
 };
