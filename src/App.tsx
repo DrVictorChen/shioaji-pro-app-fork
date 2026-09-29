@@ -56,6 +56,7 @@ import { useHotkeys } from './hooks/use-hotkeys';
 import { useWatchlist } from './hooks/use-watchlist';
 import { trackActivity } from './lib/activity';
 import { registerAgentAppCommandHost } from './lib/agent-app-command';
+import { requestedBacktestPanelId, selectBacktestPanelId } from './lib/backtest-link-routing';
 import {
     isAgentHarnessEnabled,
     subscribeAgentHarnessEnabled,
@@ -94,7 +95,11 @@ import {
     newBlockId,
     saveProfiles,
     saveWorkspace,
+    popoutSessionFromQuery,
+    popoutSessionParam,
     toRenderGeom,
+    withBlockSessionConfig,
+    type SessionConfigPatch,
     type Block,
     type BlockType,
     type Profile,
@@ -130,6 +135,10 @@ const POPOUT_TYPES: ReadonlySet<string> = new Set([
 const popoutQuery = new URLSearchParams(window.location.search);
 const POPOUT_TYPE = popoutQuery.get('popout');
 const POPOUT_CODE = popoutQuery.get('code') || null;
+// 彈出視窗繼承面板的時段選擇（只當初始值，之後各自獨立）
+const popoutSession = popoutSessionFromQuery(popoutQuery);
+const popoutChartSession = popoutSession.chartSession;
+const popoutIntradaySession = popoutSession.intradaySession;
 
 // resolves a block's contract: pinned code (contract cache) or global selection
 function useBlockContract(
@@ -161,6 +170,7 @@ function BlockBody({
     onPulseConfigChange,
     onWallConfigChange,
     onFlashAccountsChange,
+    onSessionConfigChange,
     refreshTrading,
 }: {
     block: Block;
@@ -181,6 +191,7 @@ function BlockBody({
         rows: number,
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
+    onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }) {
     if (contract?.security_type === 'IND' && indexBlockMessage(block.type)) {
@@ -209,6 +220,10 @@ function BlockBody({
                         contract={contract}
                         trades={dockProps.trades}
                         onOrdersChanged={dockProps.onTradesChanged}
+                        sessionMode={block.chartSession}
+                        onSessionModeChange={(chartSession) =>
+                            onSessionConfigChange(block.id, { chartSession })
+                        }
                     />
                 </>
             ) : (
@@ -216,7 +231,13 @@ function BlockBody({
             );
         case 'intraday':
             return contract ? (
-                <IntradayChart contract={contract} />
+                <IntradayChart
+                    contract={contract}
+                    sessionMode={block.intradaySession}
+                    onSessionModeChange={(intradaySession) =>
+                        onSessionConfigChange(block.id, { intradaySession })
+                    }
+                />
             ) : (
                 <BlockPlaceholder />
             );
@@ -252,7 +273,7 @@ function BlockBody({
             );
         case 'flash':
             return contract ? (
-                <FlashOrder
+                <LiveFlashOrder
                     snapshot={snapshot}
                     contract={contract}
                     trades={dockProps.trades}
@@ -351,7 +372,7 @@ function BlockBody({
             return (
                 <FeatureGate feature='backtest'>
                     {BtPanel ? (
-                        <BtPanel contract={contract} onPick={onSelectCode} />
+                        <BtPanel contract={contract} onPick={onSelectCode} panelId={block.id} />
                     ) : null}
                 </FeatureGate>
             );
@@ -379,6 +400,17 @@ function BlockBody({
                 <BlockPlaceholder />
             );
     }
+}
+
+// 閃電下單的 FIFO 成本需要今日成交完整：委託或持倉待對帳時改顯示估算
+function LiveFlashOrder(props: Omit<React.ComponentProps<typeof FlashOrder>, 'reconcilePending'>) {
+    const { queries } = useTradingState();
+    return (
+        <FlashOrder
+            {...props}
+            reconcilePending={queries.orders.needsReconcile || queries.positions.needsReconcile}
+        />
+    );
 }
 
 function BlockPlaceholder() {
@@ -436,6 +468,7 @@ interface BlockViewProps {
         rows: number,
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
+    onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }
 
@@ -468,9 +501,12 @@ function BlockView(props: BlockViewProps) {
                                   contract?.code ?? null,
                                   // popout 開啟時固定帳戶：面板自己的選擇，跟隨主畫面的市場
                                   // 則取此刻主畫面的選擇（popout 不會即時跟隨）
-                                  block.type === 'flash'
-                                      ? flashPopoutParams(block.flashAccounts, mainFlashSelection(), `panel:${block.id}:${contract?.code ?? ''}`)
-                                      : undefined,
+                                  {
+                                      ...popoutSessionParam(block),
+                                      ...(block.type === 'flash'
+                                          ? flashPopoutParams(block.flashAccounts, mainFlashSelection(), `panel:${block.id}:${contract?.code ?? ''}`)
+                                          : {}),
+                                  },
                               )
                         : undefined
                 }
@@ -547,12 +583,18 @@ function PopoutView({
                             contract={contract}
                             trades={tradesState.data ?? []}
                             onOrdersChanged={tradesState.refresh}
+                            sessionMode={popoutChartSession}
                         />
                     </>
                 );
                 break;
             case 'intraday':
-                body = <IntradayChart contract={contract} />;
+                body = (
+                    <IntradayChart
+                        contract={contract}
+                        sessionMode={popoutIntradaySession}
+                    />
+                );
                 break;
             case 'depth':
                 body = <DepthLadder contract={contract} code={contract.code} />;
@@ -570,7 +612,7 @@ function PopoutView({
                 break;
             case 'flash':
                 body = (
-                    <FlashOrder
+                    <LiveFlashOrder
                         contract={contract}
                         trades={tradesState.data ?? []}
                         positions={popoutPositionsState.data ?? []}
@@ -927,6 +969,7 @@ function MainApp() {
                 blocks: [...workspace.blocks, { id, type, pin: null }],
                 layout: [...workspace.layout, item],
             });
+            return id;
         },
         [workspace, updateWorkspace],
     );
@@ -949,6 +992,49 @@ function MainApp() {
                 1300,
             );
         });
+    }, []);
+
+    // Persistent research links are owned by the backtest panel. The App
+    // only ensures that the panel exists and is visible on load or navigation.
+    const addBacktestRef = useRef(addBlock);
+    addBacktestRef.current = addBlock;
+    const locateBacktestRef = useRef(locateBlock);
+    locateBacktestRef.current = locateBlock;
+    const initialBacktestLinkRef = useRef({
+        runId: new URLSearchParams(window.location.search).get('backtest_run'),
+        panelId: new URLSearchParams(window.location.search).get('backtest_panel'),
+    });
+    useEffect(() => {
+        const openLinkedRun = (event?: Event) => {
+            const runId = new URLSearchParams(window.location.search).get('backtest_run');
+            if (!runId) return;
+            const requested = requestedBacktestPanelId(
+                (event as CustomEvent<{ panelId?: string }> | undefined)?.detail?.panelId,
+                new URLSearchParams(window.location.search).get('backtest_panel'),
+                initialBacktestLinkRef.current.runId === runId
+                    ? initialBacktestLinkRef.current.panelId : null,
+            );
+            const blocks = workspaceRef.current.blocks;
+            const existingId = selectBacktestPanelId(blocks, requested);
+            const panelId = existingId ?? addBacktestRef.current('backtest');
+            if (!panelId) return;
+            if (existingId) locateBacktestRef.current(panelId);
+            // Keep the target in the URL until a newly added panel mounts. The
+            // selected panel removes this routing parameter after opening.
+            const url = new URL(window.location.href);
+            url.searchParams.set('backtest_panel', panelId);
+            history.replaceState(history.state, '', url);
+            window.dispatchEvent(new CustomEvent('shioaji:target-backtest-run', {
+                detail: { runId, panelId },
+            }));
+        };
+        window.addEventListener('shioaji:open-backtest-run', openLinkedRun);
+        window.addEventListener('popstate', openLinkedRun);
+        openLinkedRun();
+        return () => {
+            window.removeEventListener('shioaji:open-backtest-run', openLinkedRun);
+            window.removeEventListener('popstate', openLinkedRun);
+        };
     }, []);
 
     const removeBlock = useCallback(
@@ -1000,6 +1086,12 @@ function MainApp() {
         (id: string, flashAccounts: FlashAccountKeys) =>
             patchBlock(id, { flashAccounts }),
         [patchBlock],
+    );
+    const setBlockSessionConfig = useCallback(
+        (id: string, patch: SessionConfigPatch) => {
+            updateWorkspace(withBlockSessionConfig(workspace, id, patch));
+        },
+        [workspace, updateWorkspace],
     );
 
     const setBlockPulseConfig = useCallback(
@@ -1272,6 +1364,7 @@ function MainApp() {
                                     onPulseConfigChange={setBlockPulseConfig}
                                     onWallConfigChange={setBlockWallConfig}
                                     onFlashAccountsChange={setBlockFlashAccounts}
+                                    onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
                                 />
                             </div>

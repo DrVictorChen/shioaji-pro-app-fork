@@ -253,6 +253,7 @@ export function HudHeader({
     return (
         <header className={styles.header}>
             <div className={styles.logoBlock}>
+                <span className={styles.logoMark} aria-hidden="true" />
                 <span className={styles.logoMain}>Shioaji Pro</span>
                 <span className={styles.logoSub}>
                     交易終端

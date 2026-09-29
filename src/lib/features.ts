@@ -38,6 +38,7 @@ export interface ClosedModules {
         Panel: React.ComponentType<{
             contract: import('./types/contract').ContractInfo | null;
             onPick: (code: string) => void;
+            panelId: string;
         }>;
     };
 }

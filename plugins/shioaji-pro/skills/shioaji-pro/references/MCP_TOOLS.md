@@ -8,11 +8,12 @@ calling a tool. The families below describe intent, not permission.
 
 | Family | Typical intent | Capability tier |
 | --- | --- | --- |
-| `market` | Health, contracts, quotes, subscriptions, market context | `market.read` |
-| `account` | Accounts, balances, positions, orders, settlements | `account.read` |
+| `market` | Quotes, snapshots, product search, K-bar summaries, and scanners | `market.read` |
+| `account` | Positions, working orders, balances, margin, and risk indicators | `account.read` |
 | `workspace` | Select a contract; inspect or change panels, links, and layouts | `ui.control` |
-| `content` | List or save native custom indicators and strategies; mount, inspect, adjust or remove chart instances | `ui.control` |
-| `backtest` | Read the latest backtest summary, symbol metrics, or selected trades | `ui.control` |
+| `content` | Create App-native indicators and strategies; mount, inspect, adjust, or remove chart instances; manage reusable skills | `ui.control` |
+| `backtest` | Create revisions, run static portfolios and optimization, inspect bounded results, and export | `ui.control` |
+| `task` | Create and manage background monitoring or scheduled workflows | `task.manage` |
 | `trade` preview | Validate an exact order or mutation without execution | `trade.preview` |
 | `trade` execute/reconcile | Execute an approved operation or resolve its outcome | `trade.execute` |
 
@@ -37,24 +38,47 @@ past success or conversation text.
 
 ## v1 semantic names
 
-- App state: `get_app_state`, `list_panels`.
+- Market: `get_quote`, `get_snapshots`, `search_products`,
+  `get_kbar_summary`, `get_scanner`.
+- Account: `get_positions`, `get_working_orders`, `get_account`.
+- App state: `get_app_state`, `list_panels`, `get_user_activity`.
 - Workspace mutation: `select_contract`, `add_panel`, `remove_panel`,
   `set_panel_pin`, `apply_layout`. Panel pinning uses a contract code; omitting
   the code restores linked behavior. Layouts identify both `source`
   (`preset` or `profile`) and `name`.
 - Native content: `list_custom_indicators`, `save_custom_indicator`,
-  `list_strategies`, `save_strategy`.
+  `list_strategies`, `save_strategy`. In a Shioaji Pro conversation, an
+  unqualified indicator or strategy request targets these tools rather than
+  Pine Script, Python, or a workspace file.
 - Chart indicators: `mount_indicator`, `list_indicator_instances`,
   `update_indicator_instance`, `remove_indicator_instance`. Read
-  [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md) for exact argument roles,
-  panel focus, opaque revisions, bounded reads and content confirmations.
+  [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md) for panel focus, opaque
+  revisions, bounded reads, exact argument roles, and content confirmations.
 - Backtest reads: `get_backtest_result`, `list_backtest_symbol_results`,
-  `get_backtest_trades`. Follow
-  [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md) so large results are read
-  progressively instead of copied into one response.
-- Trading: `preview_order`, `place_order`, `cancel_order`, `reconcile_order`.
-  Every mutation requires a caller-generated stable `idempotency_key` and the
-  same key must never be reused for a different payload.
+  `get_backtest_trades`. These legacy tools read an ephemeral Batch Run with
+  bounded, paged drill-down.
+- Research runs: `create_strategy_revision`, `get_strategy_revision`,
+  `list_strategy_revisions`, `start_backtest_run`, `list_backtest_runs`,
+  `get_backtest_run`, `cancel_backtest_run`, `get_backtest_summary`,
+  `get_backtest_run_trades`, `get_backtest_equity`, `get_backtest_portfolio`,
+  `compare_backtest_runs`, `open_backtest_run`,
+  `start_portfolio_backtest`, `start_optimization_job`,
+  `get_optimization_job`, `cancel_optimization_job`,
+  `list_optimization_candidates`, `get_optimization_candidate`,
+  `export_backtest_run`. All use `ui.control` and
+  operate on persistent research runs. Follow
+  [CONTENT_AND_BACKTEST.md](CONTENT_AND_BACKTEST.md). Report rejection counts
+  and reasons from `get_backtest_summary`; recommend a funding adjustment when
+  all entries are blocked.
+- Reusable skills: `use_skill`, `read_skill_reference`, `save_skill`.
+- Background tasks: `create_task`, `list_tasks`, `set_task_enabled`,
+  `delete_task`, `get_task_runs`, `notify_user`.
+- Trading: `trade.preview`: `preview_order`; `trade.execute`:
+  `place_order`, `cancel_order`, `reconcile_order`.
 
-These are the v1 tools. Do not invent task, audit, approval-token, or raw HTTP
-tools when they are not present in the connected server's advertised schema.
+Every mutation requires a caller-generated stable `idempotency_key` and the
+same key must never be reused for a different payload.
+
+Availability still depends on the connected server's advertised schema and the
+session's granted capabilities. Do not invent audit, approval-token, raw HTTP,
+or any other tools when they are absent.
