@@ -3,97 +3,85 @@
 import { style, styleVariants } from '@vanilla-extract/css';
 import { vars } from '../theme.css';
 
-// 可捲動提示：超出可視範圍的一側淡出
-const FADE = '18px';
-
-export const strip = style({
+// 收合列：‹ [到期摘要 ▾] › — 只佔一列、不橫向捲動；極窄時摘要以省略號截斷
+export const picker = style({
     display: 'flex',
     alignItems: 'stretch',
-    gap: '6px',
-    // 以剩餘空間伸展，但至少容得下月份與一個標籤（選取的會捲入可見），
-    // 工具列其他元素再長也不會把選擇器擠到看不見
-    flex: '1 1 0',
-    minWidth: '7.5rem',
-    overflowX: 'auto',
-    overflowY: 'hidden',
-    scrollbarWidth: 'thin',
-    overscrollBehaviorX: 'contain',
-    // 預留捲軸空間，overlay 捲軸不壓到標籤文字
-    paddingBottom: '4px',
-    selectors: {
-        '&[data-fade="start"]': {
-            maskImage: `linear-gradient(to right, transparent, #000 ${FADE})`,
-        },
-        '&[data-fade="end"]': {
-            maskImage: `linear-gradient(to left, transparent, #000 ${FADE})`,
-        },
-        '&[data-fade="both"]': {
-            maskImage: `linear-gradient(to right, transparent, #000 ${FADE}, #000 calc(100% - ${FADE}), transparent)`,
-        },
-    },
-});
-
-export const group = style({
-    display: 'flex',
-    alignItems: 'center',
     gap: '2px',
-    flexShrink: 0,
-    selectors: {
-        '& + &': {
-            paddingLeft: '6px',
-            borderLeft: `1px solid ${vars.color.border}`,
-        },
-    },
+    flex: '0 1 auto',
+    minWidth: 0,
 });
 
-export const monthLabel = style({
-    fontFamily: vars.font.display,
-    fontSize: '0.58rem',
-    fontWeight: 600,
-    color: vars.color.mutedForeground,
-    padding: '0 2px',
-    whiteSpace: 'nowrap',
-});
-
-const chipBase = style({
+const controlBase = style({
     display: 'inline-flex',
-    alignItems: 'baseline',
-    gap: '4px',
-    flexShrink: 0,
-    whiteSpace: 'nowrap',
+    alignItems: 'center',
     fontFamily: vars.font.mono,
     fontSize: '0.66rem',
     fontVariantNumeric: 'tabular-nums',
-    padding: '2px 6px',
-    cursor: 'pointer',
+    color: vars.color.foreground,
     background: 'transparent',
-    border: '1px solid transparent',
+    border: `1px solid ${vars.color.border}`,
     borderRadius: vars.radius.sm,
-    color: vars.color.mutedForeground,
-    ':hover': { color: vars.color.foreground, background: vars.color.muted },
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    ':hover': { background: vars.color.muted, borderColor: vars.color.borderBright },
     ':focus-visible': {
         outline: `1px solid ${vars.color.accent}`,
         outlineOffset: '-1px',
     },
+    ':disabled': {
+        cursor: 'default',
+        opacity: 0.4,
+        background: 'transparent',
+        borderColor: vars.color.border,
+    },
 });
 
-export const chip = styleVariants({
-    off: [chipBase],
-    on: [
-        chipBase,
-        {
-            color: vars.color.foreground,
-            background: vars.color.accentDim,
-            borderColor: vars.color.accent,
-            ':hover': {
-                color: vars.color.foreground,
+export const step = style([
+    controlBase,
+    {
+        justifyContent: 'center',
+        flexShrink: 0,
+        width: '1.4rem',
+        padding: 0,
+        fontSize: '0.8rem',
+        lineHeight: 1,
+        color: vars.color.mutedForeground,
+        ':hover': { color: vars.color.foreground },
+    },
+]);
+
+export const trigger = style([
+    controlBase,
+    {
+        gap: '5px',
+        minWidth: 0,
+        flex: '0 1 auto',
+        padding: '2px 6px',
+        overflow: 'hidden',
+        selectors: {
+            '&[aria-expanded="true"]': {
+                borderColor: vars.color.accent,
                 background: vars.color.accentDim,
             },
         },
-    ],
+    },
+]);
+
+export const caret = style({
+    flexShrink: 0,
+    marginLeft: '1px',
+    fontSize: '0.6rem',
+    color: vars.color.mutedForeground,
+});
+
+export const empty = style({
+    color: vars.color.mutedForeground,
 });
 
 const dateBase = style({
+    flexShrink: 0,
+    fontFamily: vars.font.mono,
     fontWeight: 600,
 });
 
@@ -109,18 +97,124 @@ export const date = styleVariants({
     ],
 });
 
-const kindBase = style({
+export const weekday = style({
+    flexShrink: 0,
+    fontFamily: vars.font.display,
+    fontSize: '0.62rem',
+    color: vars.color.mutedForeground,
+});
+
+const badgeBase = style({
+    flexShrink: 0,
+    fontFamily: vars.font.display,
+    fontSize: '0.56rem',
+    fontWeight: 600,
+    lineHeight: 1.3,
+    padding: '0 4px',
+    borderRadius: vars.radius.sm,
+    border: '1px solid transparent',
+});
+
+export const badge = styleVariants({
+    monthly: [
+        badgeBase,
+        {
+            color: vars.color.accent,
+            background: vars.color.accentDim,
+            borderColor: vars.color.accent,
+        },
+    ],
+    weekly: [
+        badgeBase,
+        {
+            color: vars.color.mutedForeground,
+            background: vars.color.muted,
+            borderColor: vars.color.border,
+        },
+    ],
+});
+
+const daysBase = style({
+    fontFamily: vars.font.display,
+    fontSize: '0.6rem',
+    whiteSpace: 'nowrap',
+});
+
+export const days = styleVariants({
+    normal: [daysBase, { color: vars.color.mutedForeground }],
+    today: [daysBase, { color: vars.color.danger, fontWeight: 600 }],
+});
+
+// 收合列的剩餘天數最先讓位（省略號截斷）
+export const triggerDays = style({
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+});
+
+// ---- 展開清單（portal 到 body、fixed 定位，不被面板 overflow／transform 裁切）----
+
+export const list = style({
+    position: 'fixed',
+    zIndex: 1000,
+    boxSizing: 'border-box',
+    overflowY: 'auto',
+    overflowX: 'hidden',
+    overscrollBehavior: 'contain',
+    padding: '4px',
+    background: vars.color.panelRaised,
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.md,
+    boxShadow: '0 6px 20px rgba(0, 0, 0, 0.35)',
+    color: vars.color.foreground,
+    outline: 'none',
+    scrollbarWidth: 'thin',
+});
+
+export const groupLabel = style({
     fontFamily: vars.font.display,
     fontSize: '0.58rem',
-    fontWeight: 500,
+    fontWeight: 600,
+    color: vars.color.mutedForeground,
+    padding: '6px 6px 2px',
 });
 
-export const kind = styleVariants({
-    monthly: [kindBase, { color: vars.color.accent }],
-    weekly: [kindBase],
+export const firstGroupLabel = style({
+    paddingTop: '2px',
 });
 
-export const days = style({
-    fontSize: '0.58rem',
-    opacity: 0.75,
+export const option = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '4px 6px',
+    fontSize: '0.66rem',
+    fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
+    borderRadius: vars.radius.sm,
+    border: '1px solid transparent',
+    cursor: 'pointer',
+    color: vars.color.foreground,
+    selectors: {
+        '&[data-active="true"]': { background: vars.color.muted },
+        '&[aria-selected="true"]': {
+            background: vars.color.accentDim,
+            borderColor: vars.color.accent,
+        },
+        '&[data-active="true"][aria-selected="true"]': {
+            boxShadow: `inset 0 0 0 1px ${vars.color.accent}`,
+        },
+    },
+});
+
+export const shiftedNote = style({
+    flexShrink: 0,
+    fontFamily: vars.font.display,
+    fontSize: '0.56rem',
+    color: vars.color.amber,
+});
+
+export const optionDays = style({
+    marginLeft: 'auto',
+    paddingLeft: '10px',
 });

@@ -48,7 +48,14 @@ export function pushEscHandler(h: Handler): () => void {
 export function useEscClose(onClose: Handler) {
     const ref = useRef(onClose);
     ref.current = onClose;
-    useEffect(() => pushEscHandler(() => ref.current()), []);
+    useEffect(
+        // 無 DOM 的環境（node 測試）沒有 window，不入栈
+        () =>
+            typeof window === 'undefined'
+                ? undefined
+                : pushEscHandler(() => ref.current()),
+        [],
+    );
 }
 
 // 測試用

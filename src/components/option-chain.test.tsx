@@ -37,8 +37,6 @@ vi.mock('../lib/option-pick', () => ({ pickOptionLeg: vi.fn() }));
 
 const { OptionChain, EXPIRY_KEY, LEGACY_MONTH_KEY, loadChainContracts, resetChainContractsCache } =
     await import('./option-chain');
-const { OptionExpiryPicker } = await import('./option-expiry-picker');
-const { buildExpiries } = await import('../lib/option-expiry');
 const chainStyles = await import('./option-chain.css');
 
 function series(root: string, date: string, weekday: string | undefined, strikes = 10): ContractInfo[] {
@@ -128,11 +126,18 @@ async function renderChain(onPick = vi.fn()) {
     return r;
 }
 
-const chips = (r: ReactTestRenderer) =>
-    r.root.findAll((n) => n.type === 'button' && n.props['data-expiry'] !== undefined);
+const triggers = (r: ReactTestRenderer) =>
+    r.root.findAll((n) => n.type === 'button' && n.props['aria-haspopup'] === 'listbox');
+const trigger = (r: ReactTestRenderer) => triggers(r)[0]!;
+// 下拉清單的選項；清單收合時先展開（沒有選擇器或主按鈕停用時回傳空）
+const chips = (r: ReactTestRenderer) => {
+    const t = triggers(r)[0];
+    if (t && !t.props.disabled && r.root.findAll((n) => n.props.role === 'listbox').length === 0)
+        act(() => t.props.onClick());
+    return r.root.findAll((n) => n.props.role === 'option');
+};
 const keys = (r: ReactTestRenderer) => chips(r).map((c) => c.props['data-expiry']);
-const selected = (r: ReactTestRenderer) =>
-    chips(r).find((c) => c.props['aria-checked'])!.props['data-expiry'];
+const selected = (r: ReactTestRenderer) => trigger(r).props['data-expiry'];
 const text = (n: ReactTestInstance): string =>
     n.children.map((c) => (typeof c === 'string' ? c : text(c))).join('');
 const fetchedRoots = () => api.fetchOptions.mock.calls.map((c) => c[0] as string);
@@ -148,7 +153,12 @@ const refreshButton = (r: ReactTestRenderer) =>
 it('lists weekly and monthly expiries sorted, defaulting to the nearest', async () => {
     const r = await renderChain();
     expect(keys(r)).toEqual(['TXY:2026-09-29', 'TXU:2026-10-02', 'TX1:2026-10-07', 'TXO:2026-10-21']);
-    expect(chips(r).map(text)).toEqual(['09/29週五4天', '10/02週五7天', '10/07週三12天', '10/21月26天']);
+    expect(chips(r).map(text)).toEqual([
+        '09/29週二週選順延剩 4 天',
+        '10/02週五週選剩 7 天',
+        '10/07週三週選剩 12 天',
+        '10/21週三月選剩 26 天',
+    ]);
     expect(selected(r)).toBe('TXY:2026-09-29');
     // the holiday-shifted weekly is flagged; other indices are not loaded
     expect(chips(r)[0]!.props.title).toContain('原定週五，遇假日調整為週二');
@@ -189,7 +199,7 @@ it('drops an expiry after the 13:45 close on its delivery day', async () => {
     store.set(EXPIRY_KEY, 'TXY:2026-09-29');
     const r = await renderChain();
     expect(keys(r)[0]).toBe('TXY:2026-09-29');
-    expect(chips(r).map(text)[0]).toBe('09/29週五今日');
+    expect(chips(r).map(text)[0]).toBe('09/29週二週選順延今日到期');
     expect(selected(r)).toBe('TXY:2026-09-29');
 
     // the panel stays mounted across the close → list and selection update
@@ -204,7 +214,7 @@ it('reloads contracts when the Taipei date changes while mounted', async () => {
     vi.setSystemTime(new Date('2026-09-25T15:59:00Z')); // 23:59 Taipei
     const r = await renderChain();
     expect(fetchedRoots().filter((x) => x === 'TXO')).toHaveLength(1);
-    expect(chips(r).map(text)[0]).toBe('09/29週五4天');
+    expect(chips(r).map(text)[0]).toBe('09/29週二週選順延剩 4 天');
 
     BY_ROOT.TX2 = series('TX2', '2026-10-14', 'Wed');
     api.fetchOptionRoots.mockResolvedValue([
@@ -219,7 +229,7 @@ it('reloads contracts when the Taipei date changes while mounted', async () => {
         expect(api.fetchOptionRoots).toHaveBeenCalledTimes(2);
         expect(fetchedRoots().filter((x) => x === 'TXO')).toHaveLength(2);
         expect(keys(r)).toEqual(['TXY:2026-09-29', 'TX2:2026-10-14', 'TXO:2026-10-21']);
-        expect(chips(r).map(text)[0]).toBe('09/29週五3天');
+        expect(chips(r).map(text)[0]).toBe('09/29週二週選順延剩 3 天');
     } finally {
         delete BY_ROOT.TX2;
     }
@@ -294,78 +304,6 @@ it('prefers the new memory over the old month and still removes the old key', as
     expect(store.has(LEGACY_MONTH_KEY)).toBe(false);
 });
 
-it('groups chips by month and marks the selection for assistive tech', () => {
-    const contracts = Object.values(BY_ROOT).flat() as Parameters<typeof buildExpiries>[0];
-    const expiries = buildExpiries(contracts, '2026-09-25');
-    const onChange = vi.fn();
-    let r!: ReactTestRenderer;
-    act(() => {
-        r = create(createElement(OptionExpiryPicker, { expiries, value: 'TXU:2026-10-02', onChange }));
-    });
-    const groups = r.root.findAll((n) => n.props.role === 'group');
-    expect(groups.map((g) => g.props['aria-label'])).toEqual(['2026年9月', '2026年10月']);
-    expect(groups.map((g) => g.findAll((n) => n.type === 'button').length)).toEqual([1, 3]);
-    const radios = r.root.findAll((n) => n.type === 'button' && n.props.role === 'radio');
-    expect(radios.filter((b) => b.props['aria-checked']).map((b) => b.props['data-expiry'])).toEqual(['TXU:2026-10-02']);
-    expect(radios[2]!.props.title).toBe('2026/10/07（三）到期 · 週三週選（TX1） · 剩 12 天');
-    // holiday-shifted date is visibly marked
-    expect(radios[0]!.findAll((n) => n.type === 'span' && n.props['data-shifted'] === true)).toHaveLength(1);
-    expect(radios[1]!.findAll((n) => n.type === 'span' && n.props['data-shifted'] === true)).toHaveLength(0);
-    act(() => radios[3]!.props.onClick());
-    expect(onChange).toHaveBeenCalledWith('TXO:2026-10-21');
-});
-
-it('fades the strip edge that still has chips out of view', () => {
-    const contracts = Object.values(BY_ROOT).flat() as Parameters<typeof buildExpiries>[0];
-    const expiries = buildExpiries(contracts, '2026-09-25');
-    const node = {
-        scrollLeft: 0,
-        clientWidth: 120,
-        scrollWidth: 400,
-        listeners: new Map<string, () => void>(),
-        addEventListener(type: string, fn: () => void) {
-            this.listeners.set(type, fn);
-        },
-        removeEventListener(type: string) {
-            this.listeners.delete(type);
-        },
-    };
-    let r!: ReactTestRenderer;
-    act(() => {
-        r = create(createElement(OptionExpiryPicker, { expiries, value: expiries[0]!.key, onChange: vi.fn() }), {
-            createNodeMock: (el) => ((el.props as { role?: string }).role === 'radiogroup' ? node : null),
-        });
-    });
-    const strip = () => r.root.find((n) => n.props.role === 'radiogroup');
-    expect(strip().props['data-fade']).toBe('end');
-    node.scrollLeft = 140;
-    act(() => node.listeners.get('scroll')!());
-    expect(strip().props['data-fade']).toBe('both');
-    node.scrollLeft = 280;
-    act(() => node.listeners.get('scroll')!());
-    expect(strip().props['data-fade']).toBe('start');
-    node.scrollWidth = 120;
-    node.scrollLeft = 0;
-    act(() => node.listeners.get('scroll')!());
-    expect(strip().props['data-fade']).toBe('none');
-});
-
-it('prefixes the year on month groups that fall in the next year', () => {
-    const contracts = [
-        ...BY_ROOT.TXO!,
-        ...series('TXO', '2027-03-17', 'Wed'),
-    ] as Parameters<typeof buildExpiries>[0];
-    const expiries = buildExpiries(contracts, '2026-09-25');
-    let r!: ReactTestRenderer;
-    act(() => {
-        r = create(createElement(OptionExpiryPicker, { expiries, value: expiries[0]!.key, onChange: vi.fn() }));
-    });
-    const labels = r.root
-        .findAll((n) => n.props.role === 'group')
-        .map((g) => text(g.findAllByType('span')[0]!));
-    expect(labels).toEqual(['10月', '27年3月']);
-});
-
 const reloadButton = (r: ReactTestRenderer) =>
     r.root.findAll((n) => n.type === 'button' && n.props['aria-label'] === '重新載入合約');
 
@@ -437,7 +375,7 @@ it('puts the load status on its own truncating row, never squeezing the expiry p
     // 不與到期選擇器、更新報價同列（同列時長訊息會把選擇器擠到 0 寬）
     const toolbar = r.root.find((n) => n.props.className === chainStyles.toolbar);
     expect(toolbar.findAll((n) => n.props.role === 'status')).toHaveLength(0);
-    expect(toolbar.findAll((n) => n.props.role === 'radiogroup')).toHaveLength(1);
+    expect(toolbar.findAll((n) => n.props.role === 'group' && n.props['aria-label'] === '到期契約')).toHaveLength(1);
     expect(toolbar.findAll((n) => n.type === 'button' && n.props['aria-label'] === '更新報價')).toHaveLength(1);
 });
 

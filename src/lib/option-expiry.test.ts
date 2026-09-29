@@ -228,7 +228,8 @@ describe('buildExpiries', () => {
         const list = buildExpiries(sameDay, '2026-10-21');
         expect(list.map((e) => e.key)).toEqual(['TXO:2026-10-21', 'TX3:2026-10-21']);
         expect(list[0]!.daysLeft).toBe(0);
-        expect(daysLeftLabel(0)).toBe('今日');
+        expect(daysLeftLabel(0)).toBe('今日到期');
+        expect(daysLeftLabel(3)).toBe('剩 3 天');
     });
 
     it('returns only the contracts of the selected weekly expiry', () => {
