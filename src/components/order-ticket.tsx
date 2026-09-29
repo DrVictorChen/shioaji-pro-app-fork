@@ -1242,7 +1242,7 @@ export function OrderTicket({
                         disabled={splitBusy || !live || !splitValid}
                     >
                         {!live
-                            ? '⚠ 行情未連線，暫停下單'
+                            ? '⚠ 行情或交易狀態未連線，暫停下單'
                             : splitBusy
                               ? '傳送中…'
                               : splitArmed
@@ -1264,7 +1264,7 @@ export function OrderTicket({
                         disabled={busy || qty < 1 || !live}
                     >
                         {!live
-                            ? '⚠ 行情未連線，暫停下單'
+                            ? '⚠ 行情或交易狀態未連線，暫停下單'
                             : busy
                               ? '傳送中…'
                               : armed

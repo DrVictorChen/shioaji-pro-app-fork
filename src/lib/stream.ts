@@ -11,6 +11,9 @@ import {
 } from './order-report';
 import { reportLedger } from './report-ledger';
 import { knownServerInfo } from './server-info-store';
+import { createSharedStream, type StreamWire } from './shared-stream';
+import { isChildWindow } from './window-role';
+import { invalidateTradingMirror } from './trading-mirror-lease';
 
 /** `stale`: the EventSource still looks open but no heartbeat or event
  *  arrived within the watchdog window (e.g. the sidecar behind a proxy was
@@ -58,6 +61,12 @@ export function getAliasFor(actualCode: string): string | undefined {
 }
 let status: StreamStatus = 'connecting';
 let lastHeartbeat = 0;
+const ownerListeners = new Set<() => void>();
+export function isStreamOwner() { return shared?.isOwner() === true; }
+export function subscribeStreamOwner(listener: () => void) {
+    ownerListeners.add(listener);
+    return () => { ownerListeners.delete(listener); };
+}
 
 const quoteListeners = new Map<string, Set<Listener>>();
 const statusListeners = new Set<Listener>();
@@ -76,7 +85,7 @@ function emitFullContractRefresh(
     eventId: string,
     publishedAt: string,
 ) {
-    emitContractChange({
+    const change: ContractChangeEvent = {
         event_id: eventId,
         action,
         region: 'TW',
@@ -86,7 +95,9 @@ function emitFullContractRefresh(
         info_changed: true,
         info_scope: 'ALL',
         info_shards: [],
-    });
+    };
+    emitContractChange(change);
+    shared?.publish({ kind: 'event', name: 'contract_event', raw: JSON.stringify(change) });
 }
 
 // React 通知採 50ms 批次 — 開盤 tick 風暴（多面板×多檔訂閱）下逐筆
@@ -128,6 +139,7 @@ function setStatus(s: StreamStatus) {
         status = s;
         statusListeners.forEach((l) => l());
     }
+    if (shared?.isOwner()) shared.publish({ kind: 'status', status: s, heartbeat: lastHeartbeat });
 }
 
 function handleTick(raw: string) {
@@ -326,15 +338,19 @@ export const REPLAY_BATCH = 40;
 export const REPLAY_WINDOW_MS = 5000;
 let replaying: Promise<void> | null = null;
 let replayAgain = false;
-function resubscribeAll(): Promise<void> {
+function replay(onlyCapabilities: boolean): Promise<void> {
     if (replaying) { replayAgain = true; return replaying; }
-    replaying = replayOnce().finally(() => {
+    replaying = replayOnce(onlyCapabilities).finally(() => {
         replaying = null;
         if (replayAgain) { replayAgain = false; void resubscribeAll(); }
     });
     return replaying;
 }
-async function replayOnce() {
+function resubscribeAll(): Promise<void> { return replay(false); }
+function resubscribeCapabilities(): Promise<void> {
+    return capabilityRegistry.size ? replay(true) : Promise.resolve();
+}
+async function replayOnce(onlyCapabilities = false) {
     let failed = false;
     let sent = 0;
     let windowStart = Date.now();
@@ -346,7 +362,7 @@ async function replayOnce() {
         }
         sent++;
     };
-    for (const body of [...subscriptionRegistry.values()]) {
+    for (const body of onlyCapabilities ? [] : [...subscriptionRegistry.values()]) {
         await pace();
         try {
             const response = await apiPost<{ success?: boolean; message?: string }>(
@@ -381,6 +397,7 @@ async function replayOnce() {
 }
 
 let es: EventSource | null = null;
+let shared: ReturnType<typeof createSharedStream> | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retryDelay = 1000;
 let everDown = false;
@@ -391,13 +408,24 @@ let everDown = false;
 // opening dedicated per-channel EventSources (six HTTP/1.1 streams used
 // to exhaust the browser's per-origin connection pool).
 const namedListeners = new Map<string, Set<(raw: string) => void>>();
+// These families may have consumers only in follower popouts. The owner must
+// subscribe to their SSE names even when it has no local listener.
+const sharedNamedEvents = ['index_components', 'calculated_index', 'scanner', 'heartbeat'];
+const attachedNamed = new Set<string>();
 
 function attachNamed(source: EventSource, name: string) {
+    if (attachedNamed.has(name)) return;
+    attachedNamed.add(name);
     source.addEventListener(name, (event) => {
         markActivity();
-        const set = namedListeners.get(name);
-        set?.forEach((listener) => listener((event as MessageEvent).data));
+        dispatchNamed(name, (event as MessageEvent).data);
     });
+}
+
+function dispatchNamed(name: string, raw: string) {
+    // heartbeat is already forwarded by the core listener below.
+    if (name !== 'heartbeat') shared?.publish({ kind: 'event', name, raw });
+    namedListeners.get(name)?.forEach((listener) => listener(raw));
 }
 
 export function onStreamEvent(
@@ -450,11 +478,12 @@ function scheduleReconnect(cap = NORMAL_RETRY_MAX_MS) {
     es = null;
     if (retryTimer) clearTimeout(retryTimer);
     const delay = Math.min(retryDelay, cap);
-    retryTimer = setTimeout(connect, delay);
+    retryTimer = setTimeout(() => { if (shared?.isOwner()) connect(); }, delay);
     retryDelay = Math.min(delay * 2, cap);
 }
 let lastCheckGap = 0;
 function checkWatchdog() {
+    if (shared && !shared.isOwner()) return;
     const now = Date.now();
     const gap = lastCheckAt > 0 ? now - lastCheckAt : 0;
     // One grace per resume: only when this check is late but the previous one
@@ -483,8 +512,50 @@ export function getStreamWatchdog() {
 function listen(source: EventSource, name: string, handler: (event: MessageEvent) => void) {
     source.addEventListener(name, (event) => {
         markActivity();
-        handler(event as MessageEvent);
+        const message = event as MessageEvent;
+        shared?.publish({ kind: 'event', name, raw: message.data });
+        handler(message);
     });
+}
+
+function dispatchWire(wire: StreamWire) {
+    if (wire.kind === 'status') {
+        if (wire.heartbeat) lastHeartbeat = wire.heartbeat;
+        setStatus(wire.status);
+        return;
+    }
+    markActivity();
+    const { name, raw } = wire;
+    if (name === 'tick_stk' || name === 'tick_fop') handleTick(raw);
+    else if (name === 'bidask_stk' || name === 'bidask_fop') handleBidAsk(raw);
+    else if (name === 'quote_idx') handleIndexQuote(raw);
+    else if (name === 'order_event') handleOrderEvent(raw);
+    else if (name === 'contract_event') {
+        const change = JSON.parse(raw) as ContractChangeEvent;
+        emitContractChange(change);
+        // Each popout owns its capability subscriptions. A new SSE owner
+        // cannot replay another window's local registry, so each follower
+        // restores its own after a reconnect or daily maintenance.
+        if (change.action === 'RECONNECT' || change.action === 'MAINTENANCE') void resubscribeCapabilities();
+    }
+    else if (name === 'heartbeat') {
+        lastHeartbeat = Date.now();
+        setStatus('live');
+    }
+    // heartbeat also has a named subscriber (trigger activity).
+    if (namedListeners.has(name)) namedListeners.get(name)?.forEach(listener => listener(raw));
+}
+
+function handleOrderEvent(raw: string) {
+    const report = normalizeOrderEvent(JSON.parse(raw));
+    if (!report) return;
+    const admitted = reportLedger.admit(
+        { base: getApiBase(), simulation: knownServerInfo()?.simulation },
+        report.eventId,
+        report.kind,
+    );
+    if (admitted.duplicate) return;
+    orderEventListeners.forEach((l) => l(report));
 }
 
 function connect() {
@@ -493,6 +564,7 @@ function connect() {
     setStatus(status === 'stale' ? 'stale' : 'connecting');
     // region filters contract_event only; other families are unfiltered
     es = new EventSource(`${getStreamBase()}/api/v1/stream/data?region=TW`);
+    attachedNamed.clear();
 
     es.onopen = () => {
         // A connection only proves healthy once a heartbeat arrives; until
@@ -521,24 +593,7 @@ function connect() {
     listen(es, 'quote_idx', (e) =>
         handleIndexQuote((e as MessageEvent).data),
     );
-    listen(es, 'order_event', (e) => {
-        // the server wraps the body one level under its variant name
-        // ({state, data:{FuturesOrder:{...}}}) — normalize before fan-out
-        const report = normalizeOrderEvent(
-            JSON.parse((e as MessageEvent).data),
-        );
-        if (!report) return;
-        // Shioaji 1.7.6 delivers every decoded receipt, repeats included.
-        // The same complete event_id in the same environment is one report:
-        // drop it before any toast, projection or strategy sees it twice.
-        const admitted = reportLedger.admit(
-            { base: getApiBase(), simulation: knownServerInfo()?.simulation },
-            report.eventId,
-            report.kind,
-        );
-        if (admitted.duplicate) return;
-        orderEventListeners.forEach((l) => l(report));
-    });
+    listen(es, 'order_event', (e) => handleOrderEvent(e.data));
     listen(es, 'contract_event', (event) => {
         const change = JSON.parse(
             (event as MessageEvent).data,
@@ -552,7 +607,7 @@ function connect() {
         retryDelay = 1000;
         setStatus('live');
     });
-    for (const name of namedListeners.keys()) {
+    for (const name of [...sharedNamedEvents, ...namedListeners.keys()]) {
         attachNamed(es, name);
     }
 
@@ -570,6 +625,7 @@ function connect() {
 let lastMaintenance: string | null = null;
 
 async function watchMaintenance() {
+    if (shared && !shared.isOwner()) return;
     try {
         const res = await fetch(`${getApiBase()}/api/v1/health`);
         if (!res.ok) return;
@@ -596,10 +652,30 @@ let started = false;
 export function ensureStream() {
     if (!started) {
         started = true;
-        connect();
+        shared = createSharedStream({
+            name: `sj-market-stream:${typeof location === 'undefined' ? 'test' : location.origin}:${getApiBase()}:${getStreamBase()}`,
+            main: !isChildWindow(),
+            onOwn: () => {
+                if (isChildWindow()) invalidateTradingMirror();
+                ownerListeners.forEach(listener => listener());
+                everDown = true;
+                connect();
+                void watchMaintenance();
+            },
+            onRelease: () => {
+                ownerListeners.forEach(listener => listener());
+                es?.close();
+                es = null;
+                if (retryTimer) clearTimeout(retryTimer);
+                retryTimer = null;
+                setStatus('connecting');
+            },
+            onWire: dispatchWire,
+            onMissing: () => { if (status === 'live') setStatus('down'); },
+            snapshot: () => ({ kind: 'status', status, heartbeat: lastHeartbeat }),
+        });
         lastCheckAt = Date.now();
         watchdogTimer = setInterval(checkWatchdog, WATCHDOG_TICK_MS);
-        void watchMaintenance();
         setInterval(watchMaintenance, 60000);
     }
 }
@@ -668,7 +744,7 @@ export function onContractEvent(
 // SSE 連線與殭屍 listener（每 tick 重複灌、CPU 飆高）。一變更就整頁
 // 重載，開發期不會再累積疊層。
 if (import.meta.hot) {
-    import.meta.hot.dispose(() => { if (watchdogTimer) clearInterval(watchdogTimer); });
+    import.meta.hot.dispose(() => { if (watchdogTimer) clearInterval(watchdogTimer); shared?.close(); es?.close(); });
     import.meta.hot.accept(() => {
         import.meta.hot?.invalidate();
     });

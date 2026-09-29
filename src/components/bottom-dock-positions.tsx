@@ -417,7 +417,7 @@ export function PositionsPane({
                                         }
                                         title={
                                             !live
-                                                ? '行情未連線，暫停下單'
+                                                ? '行情或交易狀態未連線，暫停下單'
                                                 : !armed
                                                   ? '已鎖定 — 點表頭鎖頭解鎖平/反'
                                                   : '市價沖銷此倉位'
@@ -439,7 +439,7 @@ export function PositionsPane({
                                         }
                                         title={
                                             !live
-                                                ? '行情未連線，暫停下單'
+                                                ? '行情或交易狀態未連線，暫停下單'
                                                 : !armed
                                                   ? '已鎖定 — 點表頭鎖頭解鎖平/反'
                                                   : '同帳戶市價反向兩倍（翻倉）'
@@ -654,7 +654,7 @@ export function PositionsPane({
                         }
                         title={
                             !live
-                                ? '行情未連線，暫停下單'
+                                ? '行情或交易狀態未連線，暫停下單'
                                 : !armed
                                   ? '已鎖定 — 點鎖頭解鎖批次平倉'
                                   : `以市價沖銷已選 ${selCount} 筆持倉`

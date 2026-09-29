@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ subscribe: vi.fn(), unsubscribe: vi.fn(), status: 'live', changed: undefined as (() => void) | undefined }));
+const mocks = vi.hoisted(() => ({ subscribe: vi.fn(), unsubscribe: vi.fn(), status: 'live', changed: undefined as (() => void) | undefined, owner: false, ownerChanged: undefined as (() => void) | undefined }));
 vi.mock('./runtime', () => ({ getApiBase: () => 'test-api' }));
 vi.mock('./shioaji', () => ({ subscribeQuote: mocks.subscribe, unsubscribeQuote: mocks.unsubscribe }));
-vi.mock('./stream', () => ({ getStreamStatus: () => mocks.status, subscribeStatusStore: (fn: () => void) => { mocks.changed = fn; return () => {}; } }));
+vi.mock('./stream', () => ({ getStreamStatus: () => mocks.status, subscribeStatusStore: (fn: () => void) => { mocks.changed = fn; return () => {}; }, isStreamOwner: () => mocks.owner, subscribeStreamOwner: (fn: () => void) => { mocks.ownerChanged = fn; return () => {}; } }));
 const contract = { code: '2330', security_type: 'STK' as const, exchange: 'TSE' as const, target_code: null };
 
 describe('quote ownership shared consumers', () => {
     beforeEach(() => {
         vi.resetModules(); vi.clearAllMocks(); vi.stubGlobal('BroadcastChannel', undefined);
-        mocks.status = 'live'; mocks.changed = undefined;
+        mocks.status = 'live'; mocks.changed = undefined; mocks.owner = false; mocks.ownerChanged = undefined;
         mocks.subscribe.mockResolvedValue({ success: true }); mocks.unsubscribe.mockResolvedValue({ success: true });
     });
     afterEach(() => vi.unstubAllGlobals());
@@ -75,5 +75,16 @@ describe('quote ownership shared consumers', () => {
             await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS + 10);
             expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
         } finally { vi.useRealTimers(); }
+    });
+    it('lets a popout subscribe its quotes after it becomes the SSE owner', async () => {
+        vi.stubGlobal('location', { search: '?popout=chart' });
+        const { retainQuote } = await import('./quote-ownership');
+        const release = retainQuote(contract, 'Tick');
+        await Promise.resolve();
+        expect(mocks.subscribe).not.toHaveBeenCalled();
+        mocks.owner = true;
+        mocks.ownerChanged?.();
+        await vi.waitFor(() => expect(mocks.subscribe).toHaveBeenCalledWith(contract, 'Tick'));
+        release();
     });
 });

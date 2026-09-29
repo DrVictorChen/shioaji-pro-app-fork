@@ -22,7 +22,7 @@ vi.mock('./trade-observations', () => ({ onTradeResponse: (cb: typeof mocks.resp
 vi.mock('./contracts-cache', () => ({ ensureContract: mocks.ensure, getCachedContract: mocks.cached }));
 vi.mock('./quote-ownership', () => ({ retainQuote: () => vi.fn() }));
 vi.mock('./shioaji', () => ({ fetchPositions: mocks.positions, fetchTrades: mocks.trades, fetchAccountBalance: mocks.balance, fetchMargin: mocks.margin, fetchTradeCacheHealth: mocks.health }));
-vi.mock('./stream', () => ({ ensureStream: vi.fn(), getStreamStatus: () => mocks.status,
+vi.mock('./stream', () => ({ ensureStream: vi.fn(), getStreamStatus: () => mocks.status, isStreamOwner: () => false,
     onOrderEvent: (cb: typeof mocks.order) => { mocks.order = cb; return vi.fn(); },
     onAnyTick: () => vi.fn(), subscribeStatusStore: (cb: typeof mocks.statusChanged) => { mocks.statusChanged = cb; return vi.fn(); },
 }));
@@ -65,6 +65,27 @@ beforeEach(async () => {
     await act(async () => { root = create(createElement(Consumer)); });
 });
 afterEach(async () => { await act(async () => { root?.unmount(); }); root = undefined; vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it('revokes a popout trading snapshot when the main window announces pagehide', async () => {
+    const channels: Array<{ name: string; fire: (data: unknown) => void }> = [];
+    class Channel {
+        listener?: (event: { data: unknown }) => void;
+        constructor(public name: string) { channels.push(this); }
+        addEventListener(_name: string, listener: (event: { data: unknown }) => void) { this.listener = listener; }
+        postMessage(_data: unknown) { /* main is supplied by the fixture */ }
+        fire(data: unknown) { this.listener?.({ data }); }
+    }
+    vi.resetModules();
+    vi.stubGlobal('location', { search: '?popout=ticket' });
+    vi.stubGlobal('BroadcastChannel', Channel);
+    const lease = await import('./trading-mirror-lease');
+    await import('./trading-state');
+    const channel = channels.find(candidate => candidate.name.startsWith('sj-trading-state:'))!;
+    channel.fire({ kind: 'state', state: { positions: [], trades: [] }, cacheContinuous: true });
+    expect(lease.getTradingMirrorFresh()).toBe(true);
+    channel.fire({ kind: 'main-gone' });
+    expect(lease.getTradingMirrorFresh()).toBe(false);
+});
 
 describe('shared trading state with isolated broker fixtures', () => {
     it('reads funds for every signed account and preserves only the failed account snapshot', async () => {

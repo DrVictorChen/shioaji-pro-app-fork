@@ -2,6 +2,7 @@
 
 import { getApiBase, isTauri } from './runtime';
 import { isAgentHarnessEnabled } from './agent-harness-state';
+import { getTradingMirrorFresh } from './trading-mirror-lease';
 
 // resolved per request — the server port can move at runtime (e.g. the boot
 // flow discovers the default port occupied and starts on a fallback), and a
@@ -50,18 +51,29 @@ async function doFetch(url: string, init?: RequestInit): Promise<Response> {
     return fetch(url, init);
 }
 
-async function doFetchWithTimeout(
-    url: string,
-    init: RequestInit,
+async function runWithTimeout<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
     timeoutMs?: number,
-): Promise<Response> {
-    if (!timeoutMs) return doFetch(url, init);
+    mutation = false,
+): Promise<T> {
+    if (!timeoutMs) return operation(new AbortController().signal);
     const controller = new AbortController();
-    const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    let timer: ReturnType<typeof setTimeout>;
+    const timedOut = new Promise<never>((_, reject) => {
+        timer = globalThis.setTimeout(() => {
+            reject(mutation
+                ? Object.assign(new Error('連線忙碌，委託送出結果未確認；請求可能已送達，請先查詢委託，勿直接重送'), {
+                    mutationOutcomeUnknown: true as const,
+                    requestTimedOut: true as const,
+                })
+                : new DOMException('aborted', 'AbortError'));
+            controller.abort();
+        }, timeoutMs);
+    });
     try {
-        return await doFetch(url, { ...init, signal: controller.signal });
+        return await Promise.race([operation(controller.signal), timedOut]);
     } finally {
-        globalThis.clearTimeout(timer);
+        globalThis.clearTimeout(timer!);
     }
 }
 
@@ -101,6 +113,9 @@ export async function apiPost<T>(
     body: unknown,
     opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
 ): Promise<T> {
+    if (AGENT_HARNESS_MUTATIONS.has(path) && !getTradingMirrorFresh()) {
+        throw Object.assign(new Error('主視窗交易狀態未同步，委託尚未送出；請重新開啟主視窗'), { mutationNotStarted: true as const });
+    }
     const harnessEnabled = isAgentHarnessEnabled();
     if (
         shouldRejectUnsignedAgentMutation(
@@ -150,19 +165,17 @@ export async function apiPost<T>(
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }
-    const res = await doFetchWithTimeout(
-        base() + path,
-        {
+    const timedMutation = path === '/api/v1/order/place_order' || path === '/api/v1/order/cancel_order';
+    return runWithTimeout(async signal => {
+        const res = await doFetch(base() + path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
-        },
-        // opt-in only — order paths must never abort an in-flight request
-        // (an aborted POST tells us nothing about whether it was executed)
-        opts?.timeoutMs,
-    );
-    if (!res.ok) await throwApiError(res);
-    return res.json() as Promise<T>;
+            signal,
+        });
+        if (!res.ok) await throwApiError(res);
+        return res.json() as Promise<T>;
+    }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);
 }
 
 export async function apiPut<T>(path: string, body: unknown): Promise<T> {
