@@ -63,9 +63,10 @@ const sameAccount = (p: AccountedPosition, fill: PositionFill) => p.account?.acc
 
 type Lot = { price: number; quantity: number; aggregate?: boolean };
 
-/** Open lots of a futures/options row, oldest first. A snapshot row carries no
- * lot detail: it is one lot at the broker's row cost, marked `aggregate` when
- * it holds more than one contract (its real lots may have different prices). */
+/** Open lots of a futures/options row, oldest first. Rows the projection built
+ * always carry `lots`. A broker snapshot row carries none: it is one lot at
+ * the row cost, marked `aggregate` when it holds more than one contract (its
+ * real lots may have different prices). */
 function rowLots(p: AccountedPosition): Lot[] {
     const lots = 'lots' in p ? p.lots : undefined;
     return lots?.length ? lots
@@ -100,9 +101,11 @@ export function applyPositionFill(rows: AccountedPosition[], fill: PositionFill,
     const same = matches.filter(p => p.direction === fill.action);
     const opposite = matches.filter(p => p.direction !== fill.action);
     if (same.length > 1 || opposite.length > 1 || (same.length && opposite.length && fill.openClose === 'Auto')) return null;
+    // Another account's row may carry an older mark: only this account's rows
+    // (their own last_price) or the caller's fresh tick are trusted.
     const known = positive(mark) ? mark
-        : rows.find(p => p.code === fill.code && positive(p.last_price))?.last_price;
-    const marked = (p: AccountedPosition) => positive(known) ? markPosition(p, known, multiplier) : p;
+        : rows.find(p => sameAccount(p, fill) && p.code === fill.code && positive(p.last_price))?.last_price;
+    const marked = (p: AccountedPosition) => positive(mark) ? markPosition(p, mark, multiplier) : p;
     let remaining = fill.quantity;
     let next = rows.slice();
     if (fill.openClose !== 'New' && opposite.length) {
@@ -130,7 +133,7 @@ export function applyPositionFill(rows: AccountedPosition[], fill: PositionFill,
             const pnl = theo(open) + (m.pnl - theo(lots)) * q / m.quantity;
             const { lots: _drop, costUncertain: _was, ...rest } = m as AccountedPosition & { lots?: Lot[]; costUncertain?: boolean };
             return [{ ...rest, quantity: q, price: lotCost(open) / q, pnl,
-                ...(open.length > 1 ? { lots: open } : {}), ...(uncertain ? { costUncertain: true } : {}) }];
+                lots: open, ...(uncertain ? { costUncertain: true } : {}) }];
         });
     }
     if (remaining && fill.openClose === 'Cover') return null;
@@ -155,7 +158,9 @@ export function applyPositionFill(rows: AccountedPosition[], fill: PositionFill,
         const pnl = (last - fill.price) * remaining * multiplier * (fill.action === 'Buy' ? 1 : -1);
         next.push({ id: -Math.floor(fill.ts * 1000), code: fill.code, direction: fill.action,
             quantity: remaining, price: fill.price, last_price: last, pnl: pnl === 0 ? 0 : pnl, account: fill.account,
-            ...(!futures ? { yd_quantity: 0, cond: fill.condition } : {}),
+            // In-session lots are exact, whatever their size; only broker
+            // aggregates (rows without lots) are uncertain.
+            ...(!futures ? { yd_quantity: 0, cond: fill.condition } : { lots: [{ price: fill.price, quantity: remaining }] }),
         });
     }
     return next;

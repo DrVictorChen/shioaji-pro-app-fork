@@ -980,7 +980,7 @@ describe('fill mark uses only a fresh cached tick', () => {
 
 // #85 review P1-1: position_unit rows are aggregates; a partial close cannot
 // know which lot's price FIFO consumed, so positions go 待對帳 (成本估算).
-it('flags a partial futures close of an aggregate snapshot row as a cost estimate', async () => {
+async function aggregatePartialClose() {
     mocks.account.account_type = 'F';
     mocks.margin.mockResolvedValue({ equity: 1000 });
     mocks.cached.mockReturnValue({ code: 'TXFI6', multiplier: 200 });
@@ -994,19 +994,67 @@ it('flags a partial futures close of an aggregate snapshot row as a cost estimat
         order: { ...body.order, action: 'Sell', oc_type: 'Cover' },
         contract: { code: 'TXF', full_code: 'TXFI6', security_type: 'FUT', exchange: 'TAIFEX' },
     } } })!);
-    await emit(normalizeOrderEvent({ state: 'FuturesDeal', data: { FuturesDeal: {
-        trade_id: 'new', seqno: 'new', ordno: 'new', exchange_seq: 'c1', broker_id: 'fixture', account_id: 'a',
-        code: 'TXF', full_code: 'TXFI6', action: 'Sell', price: 110, quantity: 1, ts: epoch + 4,
-    } } })!);
+    await coverDeal('c1');
     const p = store.getTradingState().positions.find(r => r.code === 'TXFI6')!;
     expect(p).toMatchObject({ quantity: 1, price: 110, costUncertain: true });
     const q = store.getTradingState().queries.positions;
     expect(q.needsReconcile).toBe(true);
     expect(q.reasons).toContain('cost-estimate');
+}
+async function coverDeal(seq: string) {
+    await emit(normalizeOrderEvent({ state: 'FuturesDeal', data: { FuturesDeal: {
+        trade_id: 'new', seqno: 'new', ordno: 'new', exchange_seq: seq, broker_id: 'fixture', account_id: 'a',
+        code: 'TXF', full_code: 'TXFI6', action: 'Sell', price: 110, quantity: 1, ts: epoch + 4,
+    } } })!);
+}
+const costReasons = () => store.getTradingState().queries.positions.reasons ?? [];
+it('flags a partial futures close of an aggregate snapshot row as a cost estimate', async () => {
+    await aggregatePartialClose();
     // The next authoritative snapshot replaces the row and clears the reason.
     mocks.positions.mockResolvedValue([{ id: 1, code: 'TXFI6', direction: 'Buy', quantity: 1, price: 120, last_price: 110, pnl: -2000 }]);
     vi.advanceTimersByTime(1500);
     await act(async () => { await store.refreshTradingState('positions'); });
-    expect(store.getTradingState().queries.positions.reasons ?? []).not.toContain('cost-estimate');
+    expect(costReasons()).not.toContain('cost-estimate');
     expect(store.getTradingState().positions.find(r => r.code === 'TXFI6')).not.toHaveProperty('costUncertain');
+});
+it('clears the cost estimate once the flagged holding goes flat', async () => {
+    await aggregatePartialClose();
+    await coverDeal('c2');
+    expect(store.getTradingState().positions.find(r => r.code === 'TXFI6')).toBeUndefined();
+    expect(costReasons()).not.toContain('cost-estimate');
+});
+it('keeps the cost estimate when a racing report makes the refresh skip the snapshot', async () => {
+    await aggregatePartialClose();
+    const pending = deferred<unknown[]>();
+    mocks.positions.mockImplementationOnce(() => pending.promise);
+    vi.advanceTimersByTime(1500);
+    let refresh!: Promise<void>;
+    await act(async () => { refresh = store.refreshTradingState('positions'); });
+    await flush();
+    await emit(order('other', 100, epoch + 5)); // a report during the read
+    await act(async () => { pending.resolve([{ id: 1, code: 'TXFI6', direction: 'Buy', quantity: 1, price: 120, last_price: 110, pnl: -2000 }]); await refresh; });
+    expect(store.getTradingState().positions.find(r => r.code === 'TXFI6')).toMatchObject({ costUncertain: true });
+    expect(costReasons()).toContain('cost-estimate');
+});
+
+// review P2: one account's refresh must not retire another account's fresh tick.
+it('an account refresh does not discard a fresh tick for another account', async () => {
+    mocks.extraAccounts = [{ ...mocks.account, account_id: 'b' }];
+    mocks.positions.mockReset().mockImplementation(async (_t: string, a: Account) => a.account_id === 'a' ? [baseline()] : []);
+    vi.advanceTimersByTime(1500);
+    await act(async () => { await store.refreshTradingState('positions'); });
+    vi.advanceTimersByTime(100);
+    await act(async () => { mocks.tick!({ code: '2330', close: '105' }); });
+    // b's read fails: only a's snapshot is refreshed.
+    mocks.positions.mockImplementation(async (_t: string, a: Account) => { if (a.account_id === 'b') throw new Error('503'); return [baseline()]; });
+    vi.advanceTimersByTime(1500);
+    await act(async () => { await store.refreshTradingState('positions'); });
+    await emit(normalizeOrderEvent({ state: 'StockDeal', data: { StockDeal: {
+        trade_id: 'bb', seqno: 'bb', ordno: 'bb', exchange_seq: 'fill-b', broker_id: 'fixture', account_id: 'b',
+        action: 'Buy', code: '2330', price: 101, quantity: 1, order_lot: 'Common', order_cond: 'Cash', ts: epoch + 4,
+    } } })!);
+    const b = store.getTradingState().positions.find(p => p.account?.account_id === 'b')!;
+    expect(b).toMatchObject({ quantity: 1000, price: 101, last_price: 105, pnl: 4000 });
+    // a was re-marked by its own snapshot (100), newer than the tick.
+    expect(store.getTradingState().positions.find(p => p.account?.account_id === 'a')).toMatchObject({ last_price: 100 });
 });

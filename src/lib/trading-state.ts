@@ -155,9 +155,20 @@ function resolve(scope: TradingQueryScope, reasons: readonly ReconcileReason[], 
 // An authoritative read (update_status / position snapshot) rebuilds the tab
 // from the broker. A cache-only resync replaces only the order view with the
 // sidecar's report projection, so it cannot confirm an unknown mutation.
+/** Clear the cost-estimate causes of one account (optionally one code). */
+function resolveCostEstimate(account: Account, code?: string) {
+    const entry = reasonState.positions.get('cost-estimate');
+    if (!entry) return;
+    const prefix = `cost-estimate:${accountKey(account)}:`;
+    for (const cause of [...entry.keys()]) {
+        if (code === undefined ? cause.startsWith(prefix) : cause === prefix + code) resolve('positions', ['cost-estimate'], Number.POSITIVE_INFINITY, cause);
+    }
+}
 const AUTHORITATIVE_RESOLVES: Record<TradingQueryScope, readonly ReconcileReason[]> = {
     orders: ['metadata-missing', 'disconnect', 'snapshot-boundary', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event', 'not-subscribed', 'mutation-outcome', 'query-failed', 'overflow'],
-    positions: ['cost-estimate', 'metadata-missing', 'unknown-fill', 'disconnect', 'snapshot-boundary', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event', 'not-subscribed', 'mutation-outcome', 'query-failed'],
+    // cost-estimate is not here: it clears only when this account's snapshot
+    // is actually applied, or when the flagged holding no longer exists.
+    positions: ['metadata-missing', 'unknown-fill', 'disconnect', 'snapshot-boundary', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event', 'not-subscribed', 'mutation-outcome', 'query-failed'],
     account: ['disconnect', 'query-failed'],
 };
 const CACHE_RESYNC_RESOLVES: readonly ReconcileReason[] = ['metadata-missing', 'disconnect', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event'];
@@ -229,9 +240,10 @@ const reportKey = (report: OrderEventReport) => report.eventId ? `event:${report
 
 const positionQuotes = new Map<string, { release?: () => void }>();
 // Latest non-simulated tick per code (price + receive time), so a fill never
-// rewinds a newer quote (#85 B-4). Only trusted while it is newer than the
-// row's mark source (the account snapshot); cleared on snapshot refresh,
-// stream reconnect, and when the code's position quote is released.
+// rewinds a newer quote (#85 B-4). Only trusted for an account while it is
+// newer than that account's snapshot (its rows' mark source) and fresh; so an
+// account refresh retires older ticks for that account only. Cleared on
+// stream reconnect and when the code's position quote is released.
 const lastTicks = new Map<string, { price: number; at: number }>();
 const TICK_MARK_MAX_AGE_MS = 60_000;
 /** The cached tick for a fill, only when it is newer than the account's
@@ -364,8 +376,9 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         const positions = await timedRead(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', account));
                         if (positionStart === eventSequence || !hadSnapshot) {
                             snapshotEnds.set(accountKey(account), Date.now() / 1000);
-                            // The snapshot is now the freshest mark source.
-                            lastTicks.clear();
+                            // Ticks received before this instant no longer mark this
+                            // account (tickMark compares with snapshotEnds).
+                            resolveCostEstimate(account);
                             state = { ...state, positions: [...state.positions.filter(p => !matches(p.account)), ...positions.map(p => ({ ...p, account }))] };
                         }
                         // Without a server watermark, do not add a fill on top of
@@ -673,6 +686,8 @@ function applyDeal(report: OrderEventReport) {
         if (split) raise('positions', 'cost-estimate',
             `${fill.code} 部分平倉沖銷到券商彙總持倉（無逐筆明細），FIFO 成本與損益為估算；請按更新以券商持倉對帳`,
             `cost-estimate:${accountKey(fill.account)}:${fill.code}`);
+        // Flat, or the aggregate lot fully closed: nothing is estimated any more.
+        else resolveCostEstimate(fill.account, fill.code);
         prepareQuotes();
         releasePositionMeta(key);
     } else if (!fill && !knownOrder) {

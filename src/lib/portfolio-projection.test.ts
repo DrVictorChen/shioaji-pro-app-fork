@@ -38,10 +38,16 @@ describe('position projection', () => {
         // New row: tick known → marked at it; none known → fill price.
         expect(applyPositionFill([], buy, 200, 48530)![0]).toMatchObject({ last_price: 48530, pnl: 2000 });
         expect(applyPositionFill([], buy, 200)![0]).toMatchObject({ last_price: 48520, pnl: 0 });
-        // Another row of the same contract already carries the newer mark.
-        const other: AccountedPosition = { id: 5, code: 'TXFJ6', direction: 'Sell', quantity: 1, price: 48500,
-            last_price: 48510, pnl: -2000, account: { ...f, account_id: 'b' } };
-        expect(applyPositionFill([other], buy, 200)![1]).toMatchObject({ last_price: 48510, pnl: -2000 });
+        // This account's own row of the contract carries a usable mark …
+        const own: AccountedPosition = { id: 5, code: 'TXFJ6', direction: 'Sell', quantity: 1, price: 48500,
+            last_price: 48510, pnl: -2000, account: f };
+        expect(applyPositionFill([own], buy, 200)![1]).toMatchObject({ last_price: 48510, pnl: -2000 });
+        // … another account's row may be older and is never borrowed (review P1).
+        const other: AccountedPosition = { ...own, last_price: 48400, account: { ...f, account_id: 'b' } };
+        expect(applyPositionFill([other], buy, 200)![1]).toMatchObject({ last_price: 48520, pnl: 0 });
+        // Neither is an existing holding re-marked from another account.
+        const mine: AccountedPosition = { ...own, direction: 'Buy', price: 48520, last_price: 48530, pnl: 2000 };
+        expect(applyPositionFill([other, mine], buy, 200)![1]).toMatchObject({ quantity: 2, last_price: 48530, pnl: 4000 });
     });
     it('reduces or removes only the matching account holding', () => {
         const other = { ...base, account: { ...account, account_id: 'b' } };
@@ -90,7 +96,7 @@ describe('position projection', () => {
         expect(moved.pnl).toBe(sign * 5800);
         const second = applyPositionFill([moved, other], { ...cover, key: 'cover-2', price: 123 }, 200, 123)!;
         expect(second[0]).toMatchObject({ quantity: 2, price: 120, pnl: sign * 1200 });
-        expect(second[0]).not.toHaveProperty('lots');
+        expect(second[0]).toHaveProperty('lots', [{ price: 120, quantity: 2 }]);
         // The aggregate lot is gone; the rest are this session's own fills.
         expect(second[0]).not.toHaveProperty('costUncertain');
         const closed = applyPositionFill([second[0]!, other], { ...cover, key: 'cover-rest', quantity: 2, price: 123 }, 200)!;
@@ -105,6 +111,16 @@ describe('position projection', () => {
         rows = applyPositionFill(rows, { ...buy, key: 's1', action: 'Sell', price: 48523, openClose: 'Cover' }, 200, 48523)!;
         // Broker position_unit: 1 @48525, −400 (was 1 @48522.5, +100 weighted).
         expect(rows).toEqual([expect.objectContaining({ direction: 'Buy', quantity: 1, price: 48525, last_price: 48523, pnl: -400 })]);
+    });
+    it('a multi-contract lot opened by one fill this session closes exactly (review P2)', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        const buy: PositionFill = { ...fill, account: owner, code: 'TXFJ6', quantity: 2, price: 100, openClose: 'New' };
+        let rows = applyPositionFill([], buy, 200)!;
+        expect(rows[0]).toHaveProperty('lots', [{ price: 100, quantity: 2 }]);
+        rows = applyPositionFill(rows, { ...buy, key: 'b2', quantity: 1, price: 120 }, 200, 120)!;
+        rows = applyPositionFill(rows, { ...buy, key: 's1', action: 'Sell', quantity: 1, price: 110, openClose: 'Cover' }, 200, 110)!;
+        expect(rows[0]).toMatchObject({ quantity: 2, price: 110, lots: [{ price: 100, quantity: 1 }, { price: 120, quantity: 1 }] });
+        expect(rows[0]).not.toHaveProperty('costUncertain');
     });
     it('reverses an Auto futures fill: closes every lot, remainder opens at the fill price', () => {
         const owner: Account = { ...account, account_type: 'F' };
