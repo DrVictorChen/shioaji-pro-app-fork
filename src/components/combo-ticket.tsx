@@ -40,6 +40,7 @@ import {
     type ComboType,
     type ManagedComboContract
 } from '../lib/shioaji';
+import { checkOrderAllowed } from '../lib/risk';
 import { assertTradingLive, notify } from '../lib/trade';
 import { captureSelectedAccount, usableCapturedAccount } from '../lib/order-account';
 import { maskAccountId, usePrivacyMode } from '../lib/privacy';
@@ -531,6 +532,17 @@ export function ComboTicket() {
             });
             return;
         }
+        // 共用風控（#150）：Kill Switch／單筆上限／當日虧損上限，被擋就停監控
+        const blocked = checkOrderAllowed(qty);
+        if (blocked) {
+            setWatchOn(false);
+            notify({
+                kind: 'err',
+                title: '🎯 到價監控停止',
+                body: `風控阻擋：${blocked}，未送單`,
+            });
+            return;
+        }
         w.firing = true;
         w.lastFire = Date.now();
         setAttempts((a) => a + 1);
@@ -586,6 +598,12 @@ export function ComboTicket() {
                 title: '組合單未送出',
                 body: '請輸入有效淨價（可為 0 或負值）',
             });
+            return;
+        }
+        // 共用風控（#150）：與下單面板、閃電下單、網格同一套檢查
+        const blocked = checkOrderAllowed(qty);
+        if (blocked) {
+            notify({ kind: 'err', title: '風控阻擋', body: blocked });
             return;
         }
         setBusy(true);
@@ -932,6 +950,11 @@ export function ComboTicket() {
                         const account = captureSelectedAccount('F');
                         if (!account) {
                             notify({ kind: 'err', title: '到價監控未啟動', body: '缺少有效且已簽署的期貨下單帳戶' });
+                            return;
+                        }
+                        const blocked = checkOrderAllowed(qty);
+                        if (blocked) {
+                            notify({ kind: 'err', title: '到價監控未啟動', body: `風控阻擋：${blocked}` });
                             return;
                         }
                         watchAccountRef.current = account;

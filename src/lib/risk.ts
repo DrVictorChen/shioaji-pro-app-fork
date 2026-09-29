@@ -3,6 +3,7 @@
 // flipping the manual lock blocks all order entries.
 
 import { useSyncExternalStore } from 'react';
+import { getPrivacyMoney, maskMoney } from './privacy';
 
 export interface RiskSettings {
     enabled: boolean; // master switch for the rules below
@@ -101,7 +102,9 @@ export function checkOrderAllowed(quantity: number): string | null {
         return `超過單筆上限 ${settings.maxQty}（本筆 ${quantity}）`;
     }
     if (settings.maxDailyLoss > 0 && dailyPnl <= -settings.maxDailyLoss) {
-        return `當日虧損 ${Math.round(dailyPnl)} 已達上限 -${settings.maxDailyLoss}，下單封鎖`;
+        // 這段文字會進 toast 與通知中心：開啟遮金額時不顯示金額
+        const priv = getPrivacyMoney();
+        return `當日虧損 ${maskMoney(String(Math.round(dailyPnl)), priv)} 已達上限 -${maskMoney(String(settings.maxDailyLoss), priv)}，下單封鎖`;
     }
     return null;
 }
