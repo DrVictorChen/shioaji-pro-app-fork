@@ -3,6 +3,8 @@
 // resident observation task can mine recurring workflows and converge them
 // into skills (Hermes-style procedural memory, learned by watching).
 
+import { twTimeHM } from './utils/date';
+
 const KEY = 'sj-agent-activity-v1';
 const ENABLE_KEY = 'sj-agent-observe';
 const MAX_EVENTS = 400;
@@ -72,16 +74,14 @@ export function trackActivity(kind: string, detail = '') {
     }
 }
 
-// formatted log for the agent（時間 動作 細節, newest last）
+// formatted log for the agent（台灣時間 動作 細節, newest last）— 時間固定
+// 用台北時區，海外或非台北時區的電腦也與交易所時間一致
 export function activityLog(hours = 24): string[] {
     const cutoff = Date.now() - hours * 3600_000;
     return buf
         .filter((e) => e.ts >= cutoff)
         .map((e) => {
-            const d = new Date(e.ts);
-            const hh = String(d.getHours()).padStart(2, '0');
-            const mm = String(d.getMinutes()).padStart(2, '0');
-            return `${hh}:${mm} ${e.kind}${e.detail ? ` ${e.detail}` : ''}`;
+            return `${twTimeHM(e.ts)} ${e.kind}${e.detail ? ` ${e.detail}` : ''}`;
         });
 }
 
