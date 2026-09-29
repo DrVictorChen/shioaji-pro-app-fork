@@ -1436,7 +1436,8 @@ const joinEnvPath = (directory: string, name: string) => {
     const separator = posix ? '/' : directory.includes('\\') ? '\\' : '/';
     return `${directory}${trailingSeparator ? '' : separator}${name}`;
 };
-const checkedFiles = (names: string[]) => `已檢查檔案：${names.length ? names.join('、') : '無'}`;
+const checkedFiles = (names: string[]) =>
+    `已檢查檔案：${names.length ? names.slice(0, 8).join('、') + (names.length > 8 ? ` 等 ${names.length} 個` : '') : '無'}`;
 
 export function envCandidates(names: string[]): string[] {
     return names.filter(envFileName).sort((a, b) =>

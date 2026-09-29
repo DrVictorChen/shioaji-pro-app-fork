@@ -59,7 +59,6 @@ export function OnboardingSetup() {
     const [importMessage, setImportMessage] = useState('');
     const [importPending, setImportPending] = useState(false);
     const [envSelection, setEnvSelection] = useState<EnvSelection | null>(null);
-    const [envChoice, setEnvChoice] = useState('');
 
     const patch = (next: Partial<DesktopSettings>) =>
         setSettings((s) => ({ ...s, ...next }));
@@ -68,7 +67,6 @@ export function OnboardingSetup() {
         if (!found) return;
         if (found.kind === 'choose') {
             setEnvSelection(found.selection);
-            setEnvChoice('');
         } else if (found.kind === 'error') {
             setError(found.error);
         } else {
@@ -79,15 +77,16 @@ export function OnboardingSetup() {
         }
     };
 
-    const importEnv = async (mode: 'file' | 'directory' | 'selected') => {
+    // candidate: a file name from the folder's candidate list (envSelection)
+    const importEnv = async (mode: 'file' | 'directory', candidate?: string) => {
         setImportPending(true);
         setError('');
         setImportMessage('');
-        if (mode !== 'selected') setEnvSelection(null);
+        if (!candidate) setEnvSelection(null);
         try {
-            handleEnvResult(mode === 'selected' && envSelection
-                ? await importEnvCandidate(envSelection, envChoice)
-                : mode !== 'selected' ? await pickEnvFile(mode) : null);
+            handleEnvResult(candidate && envSelection
+                ? await importEnvCandidate(envSelection, candidate)
+                : await pickEnvFile(mode));
         } catch {
             setError('無法匯入 .env 檔案。');
         } finally {
@@ -151,12 +150,10 @@ export function OnboardingSetup() {
                     </div>
                     <span className={styles.hint}>支援 name.env、.env、.env.local；隱藏檔請選資料夾。</span>
                     {envSelection && <div className={styles.fieldGroup}>
-                        <label className={styles.hint} htmlFor='onboarding-env-choice'>選擇要匯入的檔案</label>
-                        <select id='onboarding-env-choice' className={styles.importSelect} value={envChoice} disabled={busy || importPending} onChange={e => setEnvChoice(e.target.value)}>
-                            <option value=''>請選擇檔案</option>
-                            {envSelection.candidates.map(name => <option key={name} value={name}>{name}</option>)}
-                        </select>
-                        <button className={styles.importBtn} type='button' disabled={busy || importPending || !envChoice} onClick={() => void importEnv('selected')}>匯入所選檔案</button>
+                        <span className={styles.hint}>{`資料夾裡有 ${envSelection.candidates.length} 個 .env 檔案，選一個匯入：`}</span>
+                        <div className={styles.importRow}>
+                            {envSelection.candidates.map(name => <button key={name} className={styles.importChoice} type='button' disabled={busy || importPending} onClick={() => void importEnv('directory', name)}>{name}</button>)}
+                        </div>
                     </div>}
                     {importMessage && <span className={styles.importMessage} role='status'>{importMessage}</span>}
 

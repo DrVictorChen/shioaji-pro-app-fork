@@ -198,10 +198,14 @@ export const importBtn = style([
 ]);
 
 export const importRow = style({ display: 'flex', flexWrap: 'wrap', gap: '6px' });
-export const importSelect = style({
-    width: '100%', padding: '8px', borderRadius: vars.radius.md,
+export const importChoice = style({
+    padding: '5px 10px', borderRadius: vars.radius.md, cursor: 'pointer',
     border: `1px solid ${vars.color.border}`, background: vars.color.inset,
-    color: vars.color.foreground, fontFamily: vars.font.body,
+    color: vars.color.foreground, fontFamily: vars.font.mono, fontSize: '0.75rem',
+    selectors: {
+        '&:hover:not(:disabled)': { borderColor: vars.color.accent, color: vars.color.accent },
+        '&:disabled': { opacity: 0.5, cursor: 'default' },
+    },
 });
 export const importMessage = style({
     fontFamily: vars.font.body, fontSize: '0.7rem', color: vars.color.accent,

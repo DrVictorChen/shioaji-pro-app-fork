@@ -44,8 +44,8 @@ describe('first-run .env import', () => {
         expect(JSON.stringify(view.toJSON())).toContain('支援 name.env、.env、.env.local；隱藏檔請選資料夾。');
         await act(async () => button('選擇資料夾').props.onClick());
         expect(mocks.env).toHaveBeenCalledWith('directory');
-        await act(async () => view.root.findByType('select').props.onChange({ target: { value: 's_multi.env' } }));
-        await act(async () => button('匯入所選檔案').props.onClick());
+        expect(JSON.stringify(view.toJSON())).toContain('資料夾裡有 2 個 .env 檔案');
+        await act(async () => button('s_multi.env').props.onClick());
         expect(mocks.envCandidate).toHaveBeenCalledExactlyOnceWith(selection, 's_multi.env');
         expect(JSON.stringify(view.toJSON())).toContain('已從 s_multi.env 匯入');
         await act(async () => view.unmount());

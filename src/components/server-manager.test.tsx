@@ -60,9 +60,7 @@ describe('server settings edit and apply workflow', () => {
         await act(async () => button('選擇資料夾').props.onClick());
         expect(mocks.env).toHaveBeenCalledWith('directory');
         expect(text()).toContain('b.env');
-        const select = view.root.findByType('select');
-        await act(async () => select.props.onChange({ target: { value: 'b.env' } }));
-        await act(async () => button('匯入所選檔案').props.onClick());
+        await act(async () => button('b.env').props.onClick());
         expect(mocks.envCandidate).toHaveBeenCalledExactlyOnceWith(selection, 'b.env');
         expect(text()).toContain('已從 b.env 匯入，尚未儲存。');
         expect(mocks.save).not.toHaveBeenCalled();

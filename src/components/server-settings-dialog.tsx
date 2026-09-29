@@ -21,7 +21,6 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
     const [message, setMessage] = useState('');
     const [error, setError] = useState('');
     const [envSelection, setEnvSelection] = useState<EnvSelection | null>(null);
-    const [envChoice, setEnvChoice] = useState('');
     const active = useRef(false);
     const dialog = useRef<HTMLDivElement>(null);
     const close = useRef(onClose); close.current = onClose;
@@ -42,7 +41,7 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
                 if (!lockedRef.current) close.current();
             }
             if (event.key !== 'Tab') return;
-            const nodes = Array.from(node.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], summary, [tabindex="0"]')).filter(el => el.getClientRects().length);
+            const nodes = Array.from(node.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href], summary, [tabindex="0"]')).filter(el => el.getClientRects().length);
             const first = nodes[0], last = nodes.at(-1);
             if (!first || !last) { event.preventDefault(); node.focus(); return; }
             if (event.shiftKey && (document.activeElement === first || document.activeElement === node)) { event.preventDefault(); last.focus(); }
@@ -63,7 +62,7 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
     const handleEnvResult = (found: EnvImportResult | null) => {
         if (!found) return;
         if (found.kind === 'choose') {
-            setEnvSelection(found.selection); setEnvChoice('');
+            setEnvSelection(found.selection);
         } else if (found.kind === 'error') setError(found.error);
         else {
             change({ ...(found.apiKey !== undefined ? { apiKey: found.apiKey } : {}), ...(found.secretKey !== undefined ? { secretKey: found.secretKey } : {}) });
@@ -71,16 +70,17 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
             setMessage(`已從 ${found.fileName} 匯入，尚未儲存。`);
         }
     };
-    const chooseFile = async (kind: 'env-file' | 'env-directory' | 'env-selected' | 'ca') => {
+    // candidate: a file name from the folder's candidate list (envSelection)
+    const chooseFile = async (kind: 'env-file' | 'env-directory' | 'ca', candidate?: string) => {
         if (active.current) return;
         active.current = true; setPending(true); setError(''); setMessage('');
         try {
             if (kind === 'ca') { const path = await pickCaFile(); if (path) change({ caPath: path }); }
             else {
-                if (kind !== 'env-selected') setEnvSelection(null);
-                handleEnvResult(kind === 'env-selected' && envSelection
-                    ? await importEnvCandidate(envSelection, envChoice)
-                    : kind !== 'env-selected' ? await pickEnvFile(kind === 'env-file' ? 'file' : 'directory') : null);
+                if (!candidate) setEnvSelection(null);
+                handleEnvResult(candidate && envSelection
+                    ? await importEnvCandidate(envSelection, candidate)
+                    : await pickEnvFile(kind === 'env-file' ? 'file' : 'directory'));
             }
         } catch { setError(kind === 'ca' ? '無法讀取憑證檔。' : '無法匯入 .env 檔案。'); }
         finally { active.current = false; setPending(false); }
@@ -106,11 +106,8 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
                     <div className={s.row}><button className={s.button} disabled={locked} onClick={() => void chooseFile('env-file')}><FileUp size={14} />選擇 .env 檔案</button><button className={s.button} disabled={locked} onClick={() => void chooseFile('env-directory')}>選擇資料夾</button></div>
                     <p className={s.hint}>支援 name.env、.env、.env.local；隱藏檔請選資料夾。</p>
                     {envSelection && <div className={s.field}>
-                        <label className={s.label} htmlFor='server-env-choice'>選擇要匯入的檔案</label>
-                        <div className={s.row}><select id='server-env-choice' className={s.input} style={{ flex: 1 }} value={envChoice} disabled={locked} onChange={e => setEnvChoice(e.target.value)}>
-                            <option value=''>請選擇檔案</option>
-                            {envSelection.candidates.map(name => <option key={name} value={name}>{name}</option>)}
-                        </select><button className={s.button} disabled={locked || !envChoice} onClick={() => void chooseFile('env-selected')}>匯入所選檔案</button></div>
+                        <span className={s.hint}>{`資料夾裡有 ${envSelection.candidates.length} 個 .env 檔案，選一個匯入：`}</span>
+                        <div className={s.row}>{envSelection.candidates.map(name => <button key={name} className={s.button} disabled={locked} onClick={() => void chooseFile('env-directory', name)}>{name}</button>)}</div>
                     </div>}
                     <p className={s.hint}>金鑰儲存在本機 App 資料夾。</p>
                 </section>
