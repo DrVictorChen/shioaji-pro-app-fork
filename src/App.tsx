@@ -94,7 +94,11 @@ import {
     newBlockId,
     saveProfiles,
     saveWorkspace,
+    popoutSessionFromQuery,
+    popoutSessionParam,
     toRenderGeom,
+    withBlockSessionConfig,
+    type SessionConfigPatch,
     type Block,
     type BlockType,
     type Profile,
@@ -121,6 +125,10 @@ const POPOUT_TYPES: ReadonlySet<string> = new Set([
 const popoutQuery = new URLSearchParams(window.location.search);
 const POPOUT_TYPE = popoutQuery.get('popout');
 const POPOUT_CODE = popoutQuery.get('code') || null;
+// 彈出視窗繼承面板的時段選擇（只當初始值，之後各自獨立）
+const popoutSession = popoutSessionFromQuery(popoutQuery);
+const popoutChartSession = popoutSession.chartSession;
+const popoutIntradaySession = popoutSession.intradaySession;
 
 // resolves a block's contract: pinned code (contract cache) or global selection
 function useBlockContract(
@@ -151,6 +159,7 @@ function BlockBody({
     onSelectCode,
     onPulseConfigChange,
     onWallConfigChange,
+    onSessionConfigChange,
     refreshTrading,
 }: {
     block: Block;
@@ -170,6 +179,7 @@ function BlockBody({
         cols: number,
         rows: number,
     ) => void;
+    onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }) {
     if (contract?.security_type === 'IND' && indexBlockMessage(block.type)) {
@@ -198,6 +208,10 @@ function BlockBody({
                         contract={contract}
                         trades={dockProps.trades}
                         onOrdersChanged={dockProps.onTradesChanged}
+                        sessionMode={block.chartSession}
+                        onSessionModeChange={(chartSession) =>
+                            onSessionConfigChange(block.id, { chartSession })
+                        }
                     />
                 </>
             ) : (
@@ -205,7 +219,13 @@ function BlockBody({
             );
         case 'intraday':
             return contract ? (
-                <IntradayChart contract={contract} />
+                <IntradayChart
+                    contract={contract}
+                    sessionMode={block.intradaySession}
+                    onSessionModeChange={(intradaySession) =>
+                        onSessionConfigChange(block.id, { intradaySession })
+                    }
+                />
             ) : (
                 <BlockPlaceholder />
             );
@@ -433,6 +453,7 @@ interface BlockViewProps {
         cols: number,
         rows: number,
     ) => void;
+    onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }
 
@@ -463,6 +484,7 @@ function BlockView(props: BlockViewProps) {
                               void openPopout(
                                   block.type,
                                   contract?.code ?? null,
+                                  popoutSessionParam(block),
                               )
                         : undefined
                 }
@@ -525,12 +547,18 @@ function PopoutView({
                             contract={contract}
                             trades={tradesState.data ?? []}
                             onOrdersChanged={tradesState.refresh}
+                            sessionMode={popoutChartSession}
                         />
                     </>
                 );
                 break;
             case 'intraday':
-                body = <IntradayChart contract={contract} />;
+                body = (
+                    <IntradayChart
+                        contract={contract}
+                        sessionMode={popoutIntradaySession}
+                    />
+                );
                 break;
             case 'depth':
                 body = <DepthLadder contract={contract} code={contract.code} />;
@@ -1005,6 +1033,13 @@ function MainApp() {
         [workspace, updateWorkspace],
     );
 
+    const setBlockSessionConfig = useCallback(
+        (id: string, patch: SessionConfigPatch) => {
+            updateWorkspace(withBlockSessionConfig(workspace, id, patch));
+        },
+        [workspace, updateWorkspace],
+    );
+
     const setBlockPulseConfig = useCallback(
         (
             id: string,
@@ -1274,6 +1309,7 @@ function MainApp() {
                                     onSelectCode={selectByCode}
                                     onPulseConfigChange={setBlockPulseConfig}
                                     onWallConfigChange={setBlockWallConfig}
+                                    onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
                                 />
                             </div>
