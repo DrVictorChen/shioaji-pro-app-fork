@@ -241,7 +241,7 @@ function BlockBody({
             );
         case 'flash':
             return contract ? (
-                <FlashOrder
+                <LiveFlashOrder
                     snapshot={snapshot}
                     contract={contract}
                     trades={dockProps.trades}
@@ -366,6 +366,17 @@ function BlockBody({
                 <BlockPlaceholder />
             );
     }
+}
+
+// 閃電下單的 FIFO 成本需要今日成交完整：委託或持倉待對帳時改顯示估算
+function LiveFlashOrder(props: Omit<React.ComponentProps<typeof FlashOrder>, 'reconcilePending'>) {
+    const { queries } = useTradingState();
+    return (
+        <FlashOrder
+            {...props}
+            reconcilePending={queries.orders.needsReconcile || queries.positions.needsReconcile}
+        />
+    );
 }
 
 function BlockPlaceholder() {
@@ -537,7 +548,7 @@ function PopoutView({
                 break;
             case 'flash':
                 body = (
-                    <FlashOrder
+                    <LiveFlashOrder
                         contract={contract}
                         trades={tradesState.data ?? []}
                         positions={popoutPositionsState.data ?? []}
