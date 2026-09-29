@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { shouldProxyAgentHarnessMutation } from './api';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { apiPost, shouldProxyAgentHarnessMutation } from './api';
+
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('agent harness mutation routing', () => {
     it('keeps normal UI orders on the direct HTTP path while disabled', () => {
@@ -35,4 +37,21 @@ describe('agent harness mutation routing', () => {
             ),
         ).toBe(false);
     });
+});
+
+it.each(['/api/v1/order/place_order', '/api/v1/order/cancel_order'])('aborts a queued %s request after three seconds and never sends it later', async path => {
+    vi.useFakeTimers();
+    let sent = false;
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+        setTimeout(() => { if (!init.signal?.aborted) sent = true; resolve(new Response('{}')); }, 5000);
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = apiPost(path, {});
+    const failure = expect(pending).rejects.toMatchObject({ requestTimedOut: true });
+    await vi.advanceTimersByTimeAsync(3000);
+    await failure;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(sent).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 });

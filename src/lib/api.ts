@@ -54,14 +54,26 @@ async function doFetchWithTimeout(
     url: string,
     init: RequestInit,
     timeoutMs?: number,
+    mutation = false,
 ): Promise<Response> {
     if (!timeoutMs) return doFetch(url, init);
     const controller = new AbortController();
-    const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    let timer: ReturnType<typeof setTimeout>;
+    const timedOut = new Promise<never>((_, reject) => {
+        timer = globalThis.setTimeout(() => {
+            reject(mutation
+                ? Object.assign(new Error('委託尚未送出，連線忙碌中；請先查詢委託確認結果，再自行決定是否重送'), {
+                    mutationOutcomeUnknown: true as const,
+                    requestTimedOut: true as const,
+                })
+                : new DOMException('aborted', 'AbortError'));
+            controller.abort();
+        }, timeoutMs);
+    });
     try {
-        return await doFetch(url, { ...init, signal: controller.signal });
+        return await Promise.race([doFetch(url, { ...init, signal: controller.signal }), timedOut]);
     } finally {
-        globalThis.clearTimeout(timer);
+        globalThis.clearTimeout(timer!);
     }
 }
 
@@ -150,6 +162,7 @@ export async function apiPost<T>(
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }
+    const timedMutation = path === '/api/v1/order/place_order' || path === '/api/v1/order/cancel_order';
     const res = await doFetchWithTimeout(
         base() + path,
         {
@@ -157,9 +170,8 @@ export async function apiPost<T>(
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         },
-        // opt-in only — order paths must never abort an in-flight request
-        // (an aborted POST tells us nothing about whether it was executed)
-        opts?.timeoutMs,
+        opts?.timeoutMs ?? (timedMutation ? 3000 : undefined),
+        timedMutation,
     );
     if (!res.ok) await throwApiError(res);
     return res.json() as Promise<T>;

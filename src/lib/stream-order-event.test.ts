@@ -26,6 +26,7 @@ beforeEach(() => {
     vi.useFakeTimers();
     m.base = 'http://fixture.invalid'; m.simulation = true;
     vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal('BroadcastChannel', undefined);
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })));
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
