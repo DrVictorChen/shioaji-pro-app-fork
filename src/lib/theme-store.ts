@@ -6,9 +6,10 @@ import { useSyncExternalStore } from 'react';
 import { isTauri } from './runtime';
 import { themeClasses } from '../theme.css';
 
-export type ThemeMode = 'dark' | 'midnight' | 'light';
+export type ThemeMode = 'dark' | 'light';
 export type Convention = 'tw' | 'intl';
-export type FontScale = 0.85 | 1 | 1.15 | 1.3;
+// 小／標準／大（2026-09-29 起整體放大一級，原本的 0.85 小拿掉）
+export type FontScale = 1 | 1.15 | 1.3;
 
 export interface ThemeSettings {
     mode: ThemeMode;
@@ -17,32 +18,41 @@ export interface ThemeSettings {
 }
 
 const STORAGE_KEY = 'sj-pro-theme';
-const MODES: ThemeMode[] = ['dark', 'midnight', 'light'];
+const MODES: ThemeMode[] = ['dark', 'light'];
 const CONVENTIONS: Convention[] = ['tw', 'intl'];
-const SCALES: FontScale[] = [0.85, 1, 1.15, 1.3];
+const SCALES: FontScale[] = [1, 1.15, 1.3];
+const DEFAULT_SCALE: FontScale = 1.15;
+
+// 舊設定：純黑（midnight）即現在的深色；0.85 已移除，改為最小的 1
+function migrateMode(mode: unknown): unknown {
+    return mode === 'midnight' ? 'dark' : mode;
+}
+function migrateScale(scale: unknown): FontScale {
+    if (scale === 0.85) return 1;
+    return SCALES.includes(scale as FontScale) ? (scale as FontScale) : DEFAULT_SCALE;
+}
 
 function load(): ThemeSettings {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
-            const s = JSON.parse(raw) as Partial<ThemeSettings>;
+            const s = JSON.parse(raw) as Partial<Record<keyof ThemeSettings, unknown>>;
+            const mode = migrateMode(s.mode);
             if (
-                MODES.includes(s.mode as ThemeMode) &&
+                MODES.includes(mode as ThemeMode) &&
                 CONVENTIONS.includes(s.convention as Convention)
             ) {
                 return {
-                    mode: s.mode as ThemeMode,
+                    mode: mode as ThemeMode,
                     convention: s.convention as Convention,
-                    fontScale: SCALES.includes(s.fontScale as FontScale)
-                        ? (s.fontScale as FontScale)
-                        : 1,
+                    fontScale: migrateScale(s.fontScale),
                 };
             }
         }
     } catch {
         // corrupted settings — use defaults
     }
-    return { mode: 'dark', convention: 'tw', fontScale: 1 };
+    return { mode: 'dark', convention: 'tw', fontScale: DEFAULT_SCALE };
 }
 
 let settings: ThemeSettings = load();
@@ -63,7 +73,7 @@ function applyClass() {
 }
 
 // sync the native window chrome (macOS appearance / Windows titlebar)
-// with the in-app theme — dark/midnight → dark, light → light
+// with the in-app theme — dark → dark, light → light
 async function applyNativeTheme() {
     if (!isTauri) return;
     try {
@@ -118,13 +128,6 @@ const CHROME: Record<
     Pick<ChartColors, 'text' | 'grid' | 'crosshair' | 'border' | 'labelBg'>
 > = {
     dark: {
-        text: '#8b94a7',
-        grid: 'rgba(34, 43, 55, 0.6)',
-        crosshair: '#3d8bff',
-        border: '#222b37',
-        labelBg: '#181f2a',
-    },
-    midnight: {
         text: '#7e8798',
         grid: 'rgba(26, 31, 41, 0.7)',
         crosshair: '#3d8bff',
@@ -142,12 +145,6 @@ const CHROME: Record<
 
 const RG: Record<ThemeMode, { red: string; green: string; redVol: string; greenVol: string }> = {
     dark: {
-        red: '#f23645',
-        green: '#16b389',
-        redVol: 'rgba(242, 54, 69, 0.45)',
-        greenVol: 'rgba(22, 179, 137, 0.4)',
-    },
-    midnight: {
         red: '#f23645',
         green: '#16b389',
         redVol: 'rgba(242, 54, 69, 0.45)',
