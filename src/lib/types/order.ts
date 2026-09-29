@@ -96,7 +96,7 @@ export interface Trade {
 
 // POST /api/v1/order/trade_cache_health（Shioaji 1.7.6+）— 只讀 sidecar
 // process-local Trade cache，不呼叫券商；只有 refresh:true 的 update_status
-// 能對帳 Degraded。欄位與 enum 取自 1.7.6 /openapi.json。
+// 能對帳 Degraded。欄位與 enum 取自 1.7.6 /openapi.json，並以 1.7.7 確認。
 export type TradeCacheHealthState = 'Unknown' | 'Healthy' | 'Degraded';
 export type TradeCacheHealthReasonCode =
     | 'NotSubscribed'
