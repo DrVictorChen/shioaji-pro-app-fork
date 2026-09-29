@@ -6,10 +6,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock('./features', () => ({ agentModule: null }));
 vi.mock('./runtime', () => ({ EXPECTED_SERVER_VERSION: '', isTauri: false }));
 vi.mock('./shioaji', () => ({
-    fetchAccounts: mocks.accounts,
     fetchTradeCacheHealth: mocks.health,
     subscribeTradeEvents: mocks.subscribe,
 }));
+vi.mock('./account-store', () => ({ loadAccountsShared: mocks.accounts }));
+vi.mock('./trading-state', () => ({ startTradingState: vi.fn() }));
 vi.mock('./trade', () => ({ notify: mocks.notify }));
 vi.mock('./stream', () => ({}));
 vi.mock('./tauri', () => ({}));

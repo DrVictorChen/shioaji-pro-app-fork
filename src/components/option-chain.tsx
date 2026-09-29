@@ -35,8 +35,8 @@ import type { Snapshot } from '../lib/types/market';
 import { fmtPrice, fmtSigned } from '../lib/utils/format';
 import * as dock from './bottom-dock.css';
 import * as styles from './option-chain.css';
+import { AsyncStatus } from './async-status';
 import { OptionExpiryPicker } from './option-expiry-picker';
-import { Orb } from './orb';
 import * as panel from './panel.css';
 
 type OptContract = ChainContract;
@@ -466,8 +466,7 @@ export function OptionChain({
 
     if (loading) {
         return <div className={dock.emptyState}>
-                <Orb size={12} style={{ marginRight: 6, verticalAlign: '-2px' }} />
-                載入臺指選擇權合約…
+                <AsyncStatus phase='loading' text='載入臺指選擇權合約…' />
             </div>;
     }
     const reloadContracts = () => {
@@ -479,19 +478,18 @@ export function OptionChain({
         // 全部讀取失敗時也要留重試入口，不能讓使用者卡在空畫面
         return (
             <div className={dock.emptyState}>
-                <span role={complete ? undefined : 'alert'}>
-                    {complete
-                        ? '無可用合約'
-                        : '臺指選擇權合約載入失敗'}
-                </span>{' '}
-                <RefreshButton
-                    label="重新載入合約"
-                    loading={reloading}
-                    onClick={() => {
-                        // 已成功但真的沒有合約時，清掉當日快取重新查
-                        if (complete) resetChainContractsCache();
-                        reloadContracts();
-                    }}
+                <AsyncStatus
+                    phase={complete ? 'empty' : 'error'}
+                    text={complete ? '無可用合約' : '臺指選擇權合約載入失敗'}
+                    action={<RefreshButton
+                        label="重新載入合約"
+                        loading={reloading}
+                        onClick={() => {
+                            // 已成功但真的沒有合約時，清掉當日快取重新查
+                            if (complete) resetChainContractsCache();
+                            reloadContracts();
+                        }}
+                    />}
                 />
             </div>
         );

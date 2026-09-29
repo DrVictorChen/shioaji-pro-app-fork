@@ -50,7 +50,7 @@ import {
     wallClockToUtc,
 } from '../lib/utils/kbars';
 import * as styles from './intraday-chart.css';
-import { Orb } from './orb';
+import { AsyncStatus } from './async-status';
 import * as panel from './panel.css';
 
 interface MinBar {
@@ -297,6 +297,7 @@ export function IntradayChart({
 
     const [loading, setLoading] = useState(false);
     const [empty, setEmpty] = useState(false);
+    const [historyError, setHistoryError] = useState(false);
     const [reloadSeq, setReloadSeq] = useState(0);
     // 時段：自動（依資料）/ 手動鎖日盤或夜盤 — 只對有夜盤的期/選有意義
     // 存檔值只認 auto|day|night，其餘退回自動
@@ -818,6 +819,7 @@ export function IntradayChart({
         });
         setLoading(true);
         setEmpty(false);
+        setHistoryError(false);
         let cancelled = false;
         // 歷史拿不到（server 掛/上游未發布/冷門新掛牌）不能讓面板卡在
         // 空白＋spinner：直接把「空的時段框架」開好 — 參考價/停板/時段
@@ -1119,6 +1121,7 @@ export function IntradayChart({
                 // 讓 live tick 從現在開始畫，歷史由使用者手動更新
                 scaffoldEmptyFrame();
                 setEmpty(true);
+                setHistoryError(true);
             })
             .finally(() => {
                 if (!cancelled) setLoading(false);
@@ -1294,6 +1297,7 @@ export function IntradayChart({
         // 空時段框架（試搓切換後等開盤）收到第一筆成交 → 清空狀態
         // chip；同值 setState React 會 bail out，逐筆呼叫無代價
         setEmpty(false);
+        setHistoryError(false);
         bumpLegendRef.current();
         // NOTE: 依賴 liveQuote 物件本身而非 quote.seq — seq 在 bidask 更新
         // 也會跳，若當 dep 會把同一筆 tick 的量重複累加
@@ -1819,19 +1823,14 @@ export function IntradayChart({
                 )}
                 {loading && (
                     <div className={styles.emptyMsg}>
-                        <Orb
-                            size={12}
-                            style={{
-                                marginRight: 6,
-                                verticalAlign: '-2px',
-                            }}
-                        />
-                        <span className={panel.mono}>載入走勢中…</span>
+                        <AsyncStatus phase='loading' text='載入走勢中…' className={panel.mono} />
                     </div>
                 )}
                 {empty && !loading && (
                     <div className={styles.emptyMsg}>
-                        <span className={panel.mono}>本時段尚無成交資料</span>
+                        <AsyncStatus phase={historyError ? 'error' : 'empty'}
+                            text={historyError ? '走勢歷史無法取得，請更新歷史' : '本時段尚無成交資料'}
+                            className={panel.mono} />
                     </div>
                 )}
             </div>
