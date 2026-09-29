@@ -185,17 +185,33 @@ export const caPickBtn = style([
 export const importBtn = style([
     modeBtnBase,
     {
-        flex: 'none', // modeBtnBase's flex:1 is for the side-by-side 模擬/正式
-        // row — without this override the button stretches to fill the
-        // card's remaining column height when used standalone
+        flex: '1 1 0', // 「選擇 .env 檔案」「選擇資料夾」並排平分一列
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         gap: '6px',
         fontWeight: 500,
         borderStyle: 'dashed',
+        borderColor: vars.color.borderBright,
+        color: vars.color.foreground,
     },
 ]);
+
+export const importRow = style({ display: 'flex', flexWrap: 'wrap', gap: '6px' });
+export const importChoice = style({
+    padding: '5px 10px', borderRadius: vars.radius.md, cursor: 'pointer',
+    border: `1px solid ${vars.color.border}`, background: vars.color.inset,
+    color: vars.color.foreground, fontFamily: vars.font.mono, fontSize: '0.75rem',
+    selectors: {
+        '&:hover:not(:disabled)': { borderColor: vars.color.accent, color: vars.color.accent },
+        '&:disabled': { opacity: 0.5, cursor: 'default' },
+    },
+});
+const importMessageBase = style({ fontFamily: vars.font.body, fontSize: '0.7rem', overflowWrap: 'anywhere' });
+export const importMessage = styleVariants({
+    ok: [importMessageBase, { color: vars.color.accent }],
+    error: [importMessageBase, { color: vars.color.danger }],
+});
 
 export const hint = style({
     fontFamily: vars.font.body,
