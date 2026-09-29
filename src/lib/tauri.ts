@@ -1228,17 +1228,29 @@ export async function openPopout(
     code: string | null,
     // 面板設定帶進彈出視窗當初始值（例：session = 圖表時段選擇）
     extra: Record<string, string> = {},
+    onCreated?: () => void,
 ) {
     const qs = new URLSearchParams({ popout: type, code: code ?? '', ...extra });
     if (!isTauri) {
-        window.open(
-            `${window.location.pathname}?${qs}`,
+        const name = `sj-popout-${type}-${code ?? 'x'}${extra.win ? `-${extra.win}` : ''}`;
+        if (!onCreated) {
+            window.open(`${window.location.pathname}?${qs}`, name, 'width=900,height=620,menubar=no,toolbar=no');
+            return;
+        }
+        const opened = window.open(
+            '',
             // a flash popout carries its own window id (#139) — name the
             // browser window by it so a second popout of the same code opens
             // beside the first instead of replacing it
-            `sj-popout-${type}-${code ?? 'x'}${extra.win ? `-${extra.win}` : ''}`,
+            name,
             'width=900,height=620,menubar=no,toolbar=no',
         );
+        if (opened?.location.href === 'about:blank') {
+            onCreated?.();
+            opened.location.replace(`${window.location.pathname}?${qs}`);
+        } else {
+            opened?.focus();
+        }
         return;
     }
     const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
@@ -1251,6 +1263,7 @@ export async function openPopout(
         await existing.setFocus();
         return;
     }
+    onCreated?.();
     new WebviewWindow(label, {
         url: `index.html?${qs}`,
         // Tauri's drag-drop interception eats in-page HTML5 drag on
@@ -1279,6 +1292,7 @@ export async function openFlashTiles(
     layout: FlashTileLayout = { cols: 3, rows: 3, region: 'full' },
     // per-tile extra URL params (the pinned-account window id, #139)
     tileParams: (code: string) => Record<string, string> = () => ({ win: newPopoutWindowId() }),
+    onTileCreated?: (code: string, params: Record<string, string>) => void,
 ) {
     const count = Math.min(codes.length, layout.cols * layout.rows);
     if (count === 0) return;
@@ -1305,12 +1319,19 @@ export async function openFlashTiles(
     if (!isTauri) {
         use.forEach((code, i) => {
             const { x, y } = posOf(i);
-            const qs = new URLSearchParams({ popout: 'flash', code, ...tileParams(code) });
-            window.open(
-                `${window.location.pathname}?${qs}`,
+            const extra = tileParams(code);
+            const qs = new URLSearchParams({ popout: 'flash', code, ...extra });
+            const opened = window.open(
+                '',
                 `sj-flash-tile-${code}`,
                 `left=${x},top=${y},width=${w},height=${h},menubar=no,toolbar=no`,
             );
+            if (opened?.location.href === 'about:blank') {
+                onTileCreated?.(code, extra);
+                opened.location.replace(`${window.location.pathname}?${qs}`);
+            } else {
+                opened?.focus();
+            }
         });
         return;
     }
@@ -1326,6 +1347,7 @@ export async function openFlashTiles(
             await existing.setFocus();
             continue;
         }
+        onTileCreated?.(code, extra);
         new WebviewWindow(label, {
             url: `index.html?${qs}`,
             dragDropEnabled: false,

@@ -76,7 +76,7 @@ function selectedAccountLabel(unit: string): string | undefined {
     return account ? accountConfirmLabel(account) : undefined;
 }
 
-function primeSimulation(): Promise<void> {
+export function primeOrderConfirmSimulation(): Promise<void> {
     if (simulationCache !== null) return Promise.resolve();
     simulationInflight ??= fetchInfo()
         .then((info) => {
@@ -122,7 +122,7 @@ export function requestOrderConfirm(
         };
         // 環境資訊最多等 800ms — 拿不到就以未知呈現
         void Promise.race([
-            primeSimulation(),
+            primeOrderConfirmSimulation(),
             new Promise<void>((r) => setTimeout(r, 800)),
         ]).then(start);
     });

@@ -278,10 +278,14 @@ export function FlashOrder({
     const onOrdersChangedRef = useRef(onOrdersChanged);
     onOrdersChangedRef.current = onOrdersChanged;
 
-    // reset on symbol change
+    // Price navigation belongs to the symbol, not the trading account.
     useEffect(() => {
         setAnchor(null);
         setFollow(true);
+    }, [contract.code]);
+
+    // Account changes still disarm an active ladder.
+    useEffect(() => {
         setArmed(false);
     }, [contract.code, accountKey]);
 
@@ -566,10 +570,11 @@ export function FlashOrder({
             });
             onOrdersChangedRef.current?.();
         } catch (e) {
+            const accountChanged = e instanceof Error && e.message === '確認期間帳戶已變更，請重新確認';
             notify({
                 kind: 'err',
-                title: '⚡ 閃電下單失敗',
-                body: e instanceof Error ? e.message : String(e),
+                title: accountChanged ? '閃電下單未送出' : '⚡ 閃電下單失敗',
+                body: accountChanged ? '確認期間帳戶已變更，這筆沒有送出，請重新確認' : e instanceof Error ? e.message : String(e),
             });
         } finally {
             inflightRef.current.delete(key);

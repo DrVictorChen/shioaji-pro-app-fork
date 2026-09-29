@@ -34,6 +34,7 @@ import { OptPayoff } from './components/opt-payoff';
 import { OptionChain } from './components/option-chain';
 import { Orb } from './components/orb';
 import { OrderConfirmHost } from './components/order-confirm-dialog';
+import { primeOrderConfirmSimulation } from './lib/order-confirm';
 import { OrderTicket } from './components/order-ticket';
 import { PanelChrome } from './components/panel-chrome';
 import { PanelErrorBoundary } from './components/panel-error-boundary';
@@ -111,6 +112,7 @@ import {
 import { mainFlashSelection } from './lib/order-account';
 import {
     flashPopoutParams,
+    reseedPopoutFlashAccounts,
     loadPopoutFlashAccounts,
     savePopoutFlashAccounts,
     touchPopoutFlashAccounts,
@@ -495,7 +497,11 @@ function BlockView(props: BlockViewProps) {
                 onRemove={() => onRemove(block.id)}
                 onPopout={
                     POPOUT_TYPES.has(block.type)
-                        ? () =>
+                        ? () => {
+                              const global = mainFlashSelection();
+                              const flashParams = block.type === 'flash'
+                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`)
+                                  : undefined;
                               void openPopout(
                                   block.type,
                                   contract?.code ?? null,
@@ -503,11 +509,11 @@ function BlockView(props: BlockViewProps) {
                                   // 則取此刻主畫面的選擇（popout 不會即時跟隨）
                                   {
                                       ...popoutSessionParam(block),
-                                      ...(block.type === 'flash'
-                                          ? flashPopoutParams(block.flashAccounts, mainFlashSelection(), `panel:${block.id}:${contract?.code ?? ''}`)
-                                          : {}),
+                                      ...flashParams,
                                   },
-                              )
+                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global) : undefined,
+                              );
+                          }
                         : undefined
                 }
             />
@@ -533,6 +539,10 @@ function PopoutView({
         if (code) ensureContract(code).catch(() => undefined);
     }, [code]);
     const trading = useTradingState();
+    // Tiles have no HUD header to fetch /info before the first confirmation.
+    useEffect(() => {
+        if (type === 'flash') void primeOrderConfirmSimulation();
+    }, [type]);
     // popouts (incl. 閃電全開 tiles, web and desktop alike) have no dock or
     // settings dialog to trigger the account fetch — load it here (#139)
     useEffect(ensureAccounts, []);

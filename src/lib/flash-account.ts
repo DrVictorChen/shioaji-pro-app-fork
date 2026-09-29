@@ -153,7 +153,7 @@ export function pinnedFlashAccounts(panelKeys: FlashAccountKeys | undefined, glo
 
 /**
  * URL params for a flash popout. Each panel/tile is one stable popout source;
- * reopening it (including after an App restart) reuses its own saved account.
+ * reopening it (including after an App restart) reuses its window id.
  * Different panels of the same product remain independent. Only the opaque
  * window id goes into the URL.
  */
@@ -161,11 +161,15 @@ export function flashPopoutParams(panelKeys: FlashAccountKeys | undefined, globa
     if (source) {
         const old = Object.entries(readPopoutEntries()).find(([, entry]) => entry.source === source);
         if (old) {
-            writePopoutEntry(old[0], old[1].keys);
             return { win: old[0] };
         }
     }
     const win = newPopoutWindowId();
     writePopoutEntry(win, pinnedFlashAccounts(panelKeys, global), source);
     return { win };
+}
+
+/** Called only when the opener has confirmed that it created a window. */
+export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection): void {
+    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global));
 }
