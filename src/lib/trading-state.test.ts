@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     extraAccounts: [] as Account[],
     status: 'live', order: null as ((r: OrderEventReport) => void) | null,
     statusChanged: null as (() => void) | null,
+    tick: null as ((t: { code: string; close: string; simtrade?: boolean }) => void) | null,
     response: null as ((value: TradeObservation) => void) | null,
     ensure: vi.fn(), cached: vi.fn(),
     positions: vi.fn(), trades: vi.fn(), balance: vi.fn(), margin: vi.fn(), subscribe: vi.fn(), health: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock('./quote-ownership', () => ({ retainQuote: () => vi.fn() }));
 vi.mock('./shioaji', () => ({ fetchPositions: mocks.positions, fetchTrades: mocks.trades, fetchAccountBalance: mocks.balance, fetchMargin: mocks.margin, fetchTradeCacheHealth: mocks.health }));
 vi.mock('./stream', () => ({ ensureStream: vi.fn(), getStreamStatus: () => mocks.status, isStreamOwner: () => false,
     onOrderEvent: (cb: typeof mocks.order) => { mocks.order = cb; return vi.fn(); },
-    onAnyTick: () => vi.fn(), subscribeStatusStore: (cb: typeof mocks.statusChanged) => { mocks.statusChanged = cb; return vi.fn(); },
+    onAnyTick: (cb: typeof mocks.tick) => { mocks.tick = cb; return vi.fn(); }, subscribeStatusStore: (cb: typeof mocks.statusChanged) => { mocks.statusChanged = cb; return vi.fn(); },
 }));
 const epoch = 1789200000;
 const baseline = () => ({ id: 1, code: '2330', direction: 'Buy', quantity: 1000, price: 100, last_price: 100, pnl: 0, yd_quantity: 1000 });
@@ -51,7 +52,7 @@ beforeEach(async () => {
     vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers(); vi.setSystemTime(epoch * 1000);
     vi.stubGlobal('navigator', { locks: { request: (_name: string, _options: unknown, callback: (lock: object) => unknown) => callback({}) } });
     vi.stubGlobal('BroadcastChannel', undefined); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-    mocks.status = 'live'; mocks.order = null; mocks.statusChanged = null; mocks.response = null; mocks.account.account_type = 'S';
+    mocks.status = 'live'; mocks.order = null; mocks.statusChanged = null; mocks.tick = null; mocks.response = null; mocks.account.account_type = 'S';
     mocks.account.account_id = 'a'; mocks.account.broker_id = 'fixture';
     mocks.extraAccounts = [];
     mocks.positions.mockReset().mockImplementation(async () => [baseline()]);
@@ -932,4 +933,80 @@ describe('Shioaji 1.7.6 report identity and cache health', () => {
         await act(async () => { vi.advanceTimersByTime(120000); });
         expect(mocks.health).not.toHaveBeenCalled(); expect(mocks.trades).not.toHaveBeenCalled();
     });
+});
+
+// #85 review P1-2: a cached tick may mark a fill only while it is newer than
+// the row's mark source; snapshot refresh, reconnect and age retire it.
+describe('fill mark uses only a fresh cached tick', () => {
+    const tick = async (close: number) => { await act(async () => { mocks.tick!({ code: '2330', close: String(close) }); }); };
+    const buy = async () => { await emit(order()); await emit(deal()); };
+    const row = () => store.getTradingState().positions.find(p => p.code === '2330')!;
+
+    it('a newer snapshot mark wins over an older cached tick', async () => {
+        vi.advanceTimersByTime(500); await tick(105);
+        expect(row().last_price).toBe(105);
+        vi.advanceTimersByTime(1000);
+        await act(async () => { await store.refreshTradingState('positions'); }); // snapshot marks 100
+        await buy();
+        expect(row()).toMatchObject({ quantity: 2000, last_price: 100, pnl: -1000 });
+    });
+    it('a tick after the snapshot marks a new holding', async () => {
+        mocks.positions.mockReset().mockResolvedValue([]);
+        vi.advanceTimersByTime(1500);
+        await act(async () => { await store.refreshTradingState('positions'); });
+        vi.advanceTimersByTime(100); await tick(105);
+        await buy();
+        expect(row()).toMatchObject({ quantity: 1000, price: 101, last_price: 105, pnl: 4000 });
+    });
+    it('a reconnect retires the cached tick', async () => {
+        mocks.positions.mockReset().mockResolvedValue([]);
+        vi.advanceTimersByTime(1500);
+        await act(async () => { await store.refreshTradingState('positions'); });
+        vi.advanceTimersByTime(100); await tick(105);
+        await act(async () => { mocks.status = 'down'; mocks.statusChanged!(); mocks.status = 'live'; mocks.statusChanged!(); });
+        await buy();
+        expect(row()).toMatchObject({ last_price: 101, pnl: 0 });
+    });
+    it('an aged cached tick is not used', async () => {
+        mocks.positions.mockReset().mockResolvedValue([]);
+        vi.advanceTimersByTime(1500);
+        await act(async () => { await store.refreshTradingState('positions'); });
+        vi.advanceTimersByTime(100); await tick(105);
+        vi.advanceTimersByTime(61_000);
+        await buy();
+        expect(row()).toMatchObject({ last_price: 101, pnl: 0 });
+    });
+});
+
+// #85 review P1-1: position_unit rows are aggregates; a partial close cannot
+// know which lot's price FIFO consumed, so positions go 待對帳 (成本估算).
+it('flags a partial futures close of an aggregate snapshot row as a cost estimate', async () => {
+    mocks.account.account_type = 'F';
+    mocks.margin.mockResolvedValue({ equity: 1000 });
+    mocks.cached.mockReturnValue({ code: 'TXFI6', multiplier: 200 });
+    mocks.positions.mockReset().mockResolvedValue([{ id: 1, code: 'TXFI6', direction: 'Buy', quantity: 2, price: 110, last_price: 110, pnl: 0 }]);
+    vi.advanceTimersByTime(1500);
+    await act(async () => { await store.refreshTradingState(); });
+    expect(store.getTradingState().queries.positions.reasons ?? []).not.toContain('cost-estimate');
+    const raw = order().raw as { data: { StockOrder: { order: Record<string, unknown>; status: Record<string, unknown>; contract: Record<string, unknown>; operation: unknown } } };
+    const body = raw.data.StockOrder;
+    await emit(normalizeOrderEvent({ state: 'FuturesOrder', data: { FuturesOrder: { ...body,
+        order: { ...body.order, action: 'Sell', oc_type: 'Cover' },
+        contract: { code: 'TXF', full_code: 'TXFI6', security_type: 'FUT', exchange: 'TAIFEX' },
+    } } })!);
+    await emit(normalizeOrderEvent({ state: 'FuturesDeal', data: { FuturesDeal: {
+        trade_id: 'new', seqno: 'new', ordno: 'new', exchange_seq: 'c1', broker_id: 'fixture', account_id: 'a',
+        code: 'TXF', full_code: 'TXFI6', action: 'Sell', price: 110, quantity: 1, ts: epoch + 4,
+    } } })!);
+    const p = store.getTradingState().positions.find(r => r.code === 'TXFI6')!;
+    expect(p).toMatchObject({ quantity: 1, price: 110, costUncertain: true });
+    const q = store.getTradingState().queries.positions;
+    expect(q.needsReconcile).toBe(true);
+    expect(q.reasons).toContain('cost-estimate');
+    // The next authoritative snapshot replaces the row and clears the reason.
+    mocks.positions.mockResolvedValue([{ id: 1, code: 'TXFI6', direction: 'Buy', quantity: 1, price: 120, last_price: 110, pnl: -2000 }]);
+    vi.advanceTimersByTime(1500);
+    await act(async () => { await store.refreshTradingState('positions'); });
+    expect(store.getTradingState().queries.positions.reasons ?? []).not.toContain('cost-estimate');
+    expect(store.getTradingState().positions.find(r => r.code === 'TXFI6')).not.toHaveProperty('costUncertain');
 });

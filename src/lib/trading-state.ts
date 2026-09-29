@@ -56,7 +56,8 @@ export type ReconcileReason =
     | 'not-subscribed' // trade report subscription failed or was lost
     | 'mutation-outcome' // cancel/change HTTP result not confirmed by reports
     | 'query-failed' // the last read of this tab failed; data retained
-    | 'overflow'; // too many reports during a read to replay safely
+    | 'overflow' // too many reports during a read to replay safely
+    | 'cost-estimate'; // a close split an aggregate snapshot row: FIFO cost unknown
 
 export const RECONCILE_REASON_LABELS: Record<ReconcileReason, string> = {
     'metadata-missing': '資料暫缺',
@@ -71,6 +72,7 @@ export const RECONCILE_REASON_LABELS: Record<ReconcileReason, string> = {
     'mutation-outcome': '改刪待確認',
     'query-failed': '查詢失敗',
     overflow: '回報過多',
+    'cost-estimate': '成本估算',
 };
 
 export interface TradingQueryStatus {
@@ -155,7 +157,7 @@ function resolve(scope: TradingQueryScope, reasons: readonly ReconcileReason[], 
 // sidecar's report projection, so it cannot confirm an unknown mutation.
 const AUTHORITATIVE_RESOLVES: Record<TradingQueryScope, readonly ReconcileReason[]> = {
     orders: ['metadata-missing', 'disconnect', 'snapshot-boundary', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event', 'not-subscribed', 'mutation-outcome', 'query-failed', 'overflow'],
-    positions: ['metadata-missing', 'unknown-fill', 'disconnect', 'snapshot-boundary', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event', 'not-subscribed', 'mutation-outcome', 'query-failed'],
+    positions: ['cost-estimate', 'metadata-missing', 'unknown-fill', 'disconnect', 'snapshot-boundary', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event', 'not-subscribed', 'mutation-outcome', 'query-failed'],
     account: ['disconnect', 'query-failed'],
 };
 const CACHE_RESYNC_RESOLVES: readonly ReconcileReason[] = ['metadata-missing', 'disconnect', 'sequence-gap', 'pending-report', 'projection-failed', 'untrackable-event'];
@@ -226,11 +228,23 @@ const accountKey = (a: { broker_id: string; account_id: string; account_type: st
 const reportKey = (report: OrderEventReport) => report.eventId ? `event:${report.eventId}` : JSON.stringify(report.raw);
 
 const positionQuotes = new Map<string, { release?: () => void }>();
-// Latest non-simulated tick per code, so a fill never rewinds a newer quote (#85 B-4).
-const lastTicks = new Map<string, number>();
+// Latest non-simulated tick per code (price + receive time), so a fill never
+// rewinds a newer quote (#85 B-4). Only trusted while it is newer than the
+// row's mark source (the account snapshot); cleared on snapshot refresh,
+// stream reconnect, and when the code's position quote is released.
+const lastTicks = new Map<string, { price: number; at: number }>();
+const TICK_MARK_MAX_AGE_MS = 60_000;
+/** The cached tick for a fill, only when it is newer than the account's
+ *  snapshot mark; otherwise the rows' own last_price is kept. */
+function tickMark(code: string, account: Account): number | undefined {
+    const t = lastTicks.get(code);
+    const snapshot = snapshotEnds.get(accountKey(account));
+    return t && snapshot !== undefined && t.at > snapshot * 1000 && Date.now() - t.at <= TICK_MARK_MAX_AGE_MS
+        ? t.price : undefined;
+}
 function prepareQuotes() {
     const codes = new Set(state.positions.map(p => p.code));
-    for (const [code, entry] of positionQuotes) if (!codes.has(code)) { entry.release?.(); positionQuotes.delete(code); }
+    for (const [code, entry] of positionQuotes) if (!codes.has(code)) { entry.release?.(); positionQuotes.delete(code); lastTicks.delete(code); }
     for (const code of codes) if (!positionQuotes.has(code)) {
         const entry: { release?: () => void } = {};
         positionQuotes.set(code, entry);
@@ -350,6 +364,8 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         const positions = await timedRead(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', account));
                         if (positionStart === eventSequence || !hadSnapshot) {
                             snapshotEnds.set(accountKey(account), Date.now() / 1000);
+                            // The snapshot is now the freshest mark source.
+                            lastTicks.clear();
                             state = { ...state, positions: [...state.positions.filter(p => !matches(p.account)), ...positions.map(p => ({ ...p, account }))] };
                         }
                         // Without a server watermark, do not add a fill on top of
@@ -647,11 +663,16 @@ function applyDeal(report: OrderEventReport) {
     }
     const multiplier = fill?.account.account_type === 'S' ? 1 : c?.multiplier ?? c?.contract_size ?? 0;
     const next = fill && cutoff && fill.ts > cutoff
-        ? applyPositionFill(state.positions, fill, multiplier, lastTicks.get(fill.code)) : null;
+        ? applyPositionFill(state.positions, fill, multiplier, tickMark(fill.code, fill.account)) : null;
     if (next && fill && seenFills.size < 10000) {
         seenFills.add(fill.key);
         if (eventKey) seenFills.add(eventKey);
         state = { ...state, positions: next };
+        const split = next.find(p => 'costUncertain' in p && p.costUncertain && p.code === fill.code
+            && p.account && accountKey(p.account) === accountKey(fill.account));
+        if (split) raise('positions', 'cost-estimate',
+            `${fill.code} 部分平倉沖銷到券商彙總持倉（無逐筆明細），FIFO 成本與損益為估算；請按更新以券商持倉對帳`,
+            `cost-estimate:${accountKey(fill.account)}:${fill.code}`);
         prepareQuotes();
         releasePositionMeta(key);
     } else if (!fill && !knownOrder) {
@@ -858,7 +879,7 @@ function start() {
         const price = Number(tick.close);
         if (!Number.isFinite(price) || price <= 0 || tick.simtrade) return;
         if (lastTicks.size >= 2000 && !lastTicks.has(tick.code)) lastTicks.clear();
-        lastTicks.set(tick.code, price);
+        lastTicks.set(tick.code, { price, at: Date.now() });
         let changed = false;
         const positions = state.positions.map(p => {
             if (p.code !== tick.code) return p;
@@ -875,10 +896,12 @@ function start() {
         if (live && !hasConnected) { hasConnected = true; void refreshTradingState(); }
         else if (live && downSinceLive) {
             downSinceLive = false;
+            lastTicks.clear(); // a restarted stream may resume after a gap
             void checkTradeCacheHealth('reconnect');
         } else if (!live && hasConnected) {
             connectionEpoch++;
             downSinceLive = true;
+            lastTicks.clear();
             const message = getStreamStatus() === 'stale'
                 ? '串流逾時沒有心跳，期間可能漏收回報；重新連線後請手動對帳'
                 : '串流曾中斷；重新連線後請手動對帳';

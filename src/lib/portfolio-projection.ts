@@ -61,13 +61,15 @@ export function positionFill(report: OrderEventReport, accounts: Account[], trad
 const sameAccount = (p: AccountedPosition, fill: PositionFill) => p.account?.account_type === fill.account.account_type
     && p.account?.broker_id === fill.account.broker_id && p.account?.account_id === fill.account.account_id;
 
-type Lot = { price: number; quantity: number };
+type Lot = { price: number; quantity: number; aggregate?: boolean };
 
 /** Open lots of a futures/options row, oldest first. A snapshot row carries no
- * lot detail, so it is one lot at the broker's row cost. */
+ * lot detail: it is one lot at the broker's row cost, marked `aggregate` when
+ * it holds more than one contract (its real lots may have different prices). */
 function rowLots(p: AccountedPosition): Lot[] {
     const lots = 'lots' in p ? p.lots : undefined;
-    return lots?.length ? lots : [{ price: p.price, quantity: p.quantity }];
+    return lots?.length ? lots
+        : [{ price: p.price, quantity: p.quantity, ...(p.quantity > 1 ? { aggregate: true } : {}) }];
 }
 
 const lotCost = (lots: Lot[]) => lots.reduce((s, l) => s + l.price * l.quantity, 0);
@@ -82,6 +84,11 @@ const lotQty = (lots: Lot[]) => lots.reduce((s, l) => s + l.quantity, 0);
  *   prices and the closed lots' unrealized P&L leaves the row.
  * - Cash stock keeps the weighted average cost on a partial sale (the
  *   broker's 平均成本), shrinking P&L proportionally.
+ *   Position_unit rows are aggregates (no per-lot detail; position_detail
+ *   would cost one accounting query per row, outside #85's no-polling
+ *   rule), so partly closing a snapshot row with several contracts cannot
+ *   know which price closed: the row keeps the average and is flagged
+ *   `costUncertain` so the caller marks positions 待對帳 until a refresh.
  * `mark` is the latest known market price; the fill price is only a fallback
  * when no tick is known, so a fill never rewinds a newer quote.
  */
@@ -114,14 +121,16 @@ export function applyPositionFill(rows: AccountedPosition[], fill: PositionFill,
             const m = marked(p);
             const lots = rowLots(m);
             const { open } = consumeFifo(lots, closed);
+            // A partly consumed aggregate snapshot lot: its real FIFO split is unknown.
+            const uncertain = open[0]?.aggregate === true && open[0].quantity < lots[0]!.quantity;
             const sign = m.direction === 'Buy' ? 1 : -1;
             const theo = (l: Lot[]) => (m.last_price * lotQty(l) - lotCost(l)) * multiplier * sign;
             // Broker baseline adjustments (P&L not explained by the lots at
             // last_price) shrink with the quantity, as before.
             const pnl = theo(open) + (m.pnl - theo(lots)) * q / m.quantity;
-            const { lots: _drop, ...rest } = m as AccountedPosition & { lots?: Lot[] };
+            const { lots: _drop, costUncertain: _was, ...rest } = m as AccountedPosition & { lots?: Lot[]; costUncertain?: boolean };
             return [{ ...rest, quantity: q, price: lotCost(open) / q, pnl,
-                ...(open.length > 1 ? { lots: open } : {}) }];
+                ...(open.length > 1 ? { lots: open } : {}), ...(uncertain ? { costUncertain: true } : {}) }];
         });
     }
     if (remaining && fill.openClose === 'Cover') return null;

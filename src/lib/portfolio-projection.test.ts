@@ -83,12 +83,16 @@ describe('position projection', () => {
         expect(partial[0]).toMatchObject({ direction, quantity: 3, last_price: 125, pnl: sign * 7000,
             lots: [{ price: 100, quantity: 1 }, { price: 120, quantity: 2 }] });
         expect(partial[0]!.price).toBeCloseTo(340 / 3);
+        // The 2 @100 lot came from an aggregate snapshot row: its split is unknown.
+        expect(partial[0]).toHaveProperty('costUncertain', true);
         expect(partial[1]).toBe(other);
         const moved = markPosition(partial[0]!, 123, 200);
         expect(moved.pnl).toBe(sign * 5800);
         const second = applyPositionFill([moved, other], { ...cover, key: 'cover-2', price: 123 }, 200, 123)!;
         expect(second[0]).toMatchObject({ quantity: 2, price: 120, pnl: sign * 1200 });
         expect(second[0]).not.toHaveProperty('lots');
+        // The aggregate lot is gone; the rest are this session's own fills.
+        expect(second[0]).not.toHaveProperty('costUncertain');
         const closed = applyPositionFill([second[0]!, other], { ...cover, key: 'cover-rest', quantity: 2, price: 123 }, 200)!;
         expect(closed).toEqual([other]);
         expect(closed[0]).toBe(other);
@@ -126,7 +130,25 @@ describe('position projection', () => {
         // Snapshot row: no lot detail; P&L carries +100 the lots do not explain.
         const row: AccountedPosition = { id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2, price: 100, last_price: 110, pnl: 4100, account: owner };
         const cover: PositionFill = { ...fill, account: owner, code: 'TXFJ6', action: 'Sell', quantity: 1, price: 110, openClose: 'Cover' };
-        expect(applyPositionFill([row], cover, 200)![0]).toMatchObject({ quantity: 1, price: 100, pnl: 2050 });
+        expect(applyPositionFill([row], cover, 200)![0]).toMatchObject({ quantity: 1, price: 100, pnl: 2050, costUncertain: true });
+    });
+    // #85 review P1-1: buys 100 and 120 reported as one row 2 @110. FIFO would
+    // leave 1 @120; the row cannot know that, so it must not look confident.
+    it('flags a partial close of an aggregate snapshot row instead of a confident cost', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        const row: AccountedPosition = { id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2, price: 110, last_price: 110, pnl: 0, account: owner };
+        const cover: PositionFill = { ...fill, account: owner, code: 'TXFJ6', action: 'Sell', quantity: 1, price: 110, openClose: 'Cover' };
+        const [p] = applyPositionFill([row], cover, 200)!;
+        expect(p).toMatchObject({ quantity: 1, price: 110, costUncertain: true });
+        // Flag stays on while the aggregate remains, also through a new add.
+        const [added] = applyPositionFill([p!], { ...cover, key: 'b', action: 'Buy', openClose: 'New', price: 115 }, 200)!;
+        expect(added).toMatchObject({ quantity: 2, costUncertain: true });
+        // Not uncertain: a single-contract row, a full close, or known lots.
+        expect(applyPositionFill([{ ...row, quantity: 1 }], cover, 200)).toEqual([]);
+        expect(applyPositionFill([row], { ...cover, quantity: 2 }, 200)).toEqual([]);
+        const lots = [{ price: 100, quantity: 1 }, { price: 120, quantity: 1 }];
+        expect(applyPositionFill([{ ...row, lots }], cover, 200)![0]).toMatchObject({ quantity: 1, price: 120, pnl: -2000 });
+        expect(applyPositionFill([{ ...row, lots }], cover, 200)![0]).not.toHaveProperty('costUncertain');
     });
     it('retains stock average cost and remaining unrealized PnL after partial and full sale', () => {
         // Synthetic unit data: excludes fees and realized PnL, which are not computed here.
