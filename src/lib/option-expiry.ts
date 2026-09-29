@@ -51,13 +51,6 @@ export interface ExpiryClock {
     minutes: number; // 當日第幾分鐘
 }
 
-export const KIND_LABEL: Record<ExpiryKind, string> = {
-    monthly: '月',
-    wed: '週三',
-    fri: '週五',
-    weekly: '週',
-};
-
 export const KIND_TITLE: Record<ExpiryKind, string> = {
     monthly: '月選',
     wed: '週三週選',
@@ -375,7 +368,26 @@ export function groupByMonth(
 }
 
 export function daysLeftLabel(days: number): string {
-    return days <= 0 ? '今日' : `${days}天`;
+    return days <= 0 ? '今日到期' : `剩 ${days} 天`;
+}
+
+/** 到期日的實際星期（週一…週日）。 */
+export function weekdayLabel(e: OptionExpiry): string {
+    return `週${WEEKDAY_ZH[e.weekday]}`;
+}
+
+/** 下拉選單的種類標記：月選或週選（週三／週五由星期欄表達）。 */
+export function kindBadge(e: OptionExpiry): '月選' | '週選' {
+    return e.kind === 'monthly' ? '月選' : '週選';
+}
+
+/**
+ * 月份分組標題：9月、10月；與第一組不同年時加年份前綴（27年3月）。
+ * first 為列表第一組的 YYYYMM。
+ */
+export function monthGroupLabel(month: string, first: string): string {
+    const year = month.slice(0, 4) !== first.slice(0, 4) ? `${month.slice(2, 4)}年` : '';
+    return `${year}${Number(month.slice(4))}月`;
 }
 
 export function expiryTitle(e: OptionExpiry): string {
