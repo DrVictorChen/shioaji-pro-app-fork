@@ -1,15 +1,95 @@
 // src/components/flash-order.css.ts
 
-import { style, styleVariants } from '@vanilla-extract/css';
+import { createContainer, style, styleVariants } from '@vanilla-extract/css';
 import { vars } from '../theme.css';
 
 const COLS = '3rem 1fr 4.8rem 1fr 3rem';
+
+const flashContainer = createContainer();
 
 export const wrap = style({
     display: 'flex',
     flexDirection: 'column',
     minHeight: 0,
     height: '100%',
+    containerName: flashContainer,
+    containerType: 'inline-size',
+});
+
+// 商品名稱列（#176）：鎖定或窄面板時標題列放不下名稱，這一列一律顯示
+export const symbolRow = style({
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: vars.space.sm,
+    padding: `3px ${vars.space.sm}`,
+    borderBottom: `1px solid ${vars.color.border}`,
+    background: vars.color.panelRaised,
+    flexShrink: 0,
+    minWidth: 0,
+});
+
+export const symbolName = style({
+    fontFamily: vars.font.body,
+    fontSize: '0.74rem',
+    fontWeight: 600,
+    color: vars.color.foreground,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    minWidth: 0,
+});
+
+export const symbolMeta = style({
+    marginLeft: 'auto',
+    fontFamily: vars.font.mono,
+    fontSize: '0.62rem',
+    color: vars.color.mutedForeground,
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+});
+
+// 帳戶：顯示精簡標籤，透明的原生 select 疊在上面負責開選單
+export const accountPick = style({
+    position: 'relative',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 3,
+    maxWidth: '100%',
+    padding: '1px 5px',
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    color: vars.color.foreground,
+    cursor: 'pointer',
+    selectors: {
+        '&:focus-within': { outline: `2px solid ${vars.color.accent}`, outlineOffset: 1 },
+    },
+});
+
+export const accountText = style({
+    fontFamily: vars.font.mono,
+    fontSize: '0.66rem',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+});
+
+export const accountSelect = style({
+    position: 'absolute',
+    inset: 0,
+    width: '100%',
+    height: '100%',
+    opacity: 0,
+    cursor: 'pointer',
+    // 選單項目沿用系統字級，戶名不被截
+    fontSize: '0.8rem',
+});
+
+// 窄面板時「啟用閃電下單／跟隨／置中」換到第二列，帳戶與數量同一列
+export const rowBreak = style({
+    display: 'none',
+    '@container': {
+        [`${flashContainer} (max-width: 460px)`]: { display: 'block', flexBasis: '100%', height: 0 },
+    },
 });
 
 // wraps so an 8-strip tile (~240px wide) still shows every control
@@ -36,11 +116,6 @@ export const qtyInput = style({
     padding: '2px 4px',
     outline: 'none',
     ':focus': { borderColor: vars.color.accent },
-});
-
-export const qtyLabel = style({
-    fontSize: '0.64rem',
-    color: vars.color.mutedForeground,
 });
 
 export const stepBtn = style({

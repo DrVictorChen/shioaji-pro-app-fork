@@ -88,7 +88,7 @@ it('a panel without a saved account follows the app-wide selection and shows it 
     await act(async () => { view = create(render()); });
     const [p1, p2] = panels();
     expect(select(p1).props.value).toBe('__follow__');
-    expect(text(select(p1))).toContain('跟隨主畫面 BR-••••5A');
+    expect(text(select(p1))).toContain('跟隨主畫面 ••••5A');
     expect(text(select(p1))).not.toContain('12345A');
     expect(text(p1)).toContain('多 3');
     mocks.selected = 'B';
