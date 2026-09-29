@@ -194,6 +194,13 @@ describe('IntradayChart session toggle', () => {
         await switchTo(r, '日盤', rerender);
         expect(iso((price().last as any[]).at(-1).time)).toBe('2026-09-29T10:12');
         expect(fetchMock.mock.calls[2]?.[3]?.revision).not.toBe(fetchMock.mock.calls[0]?.[3]?.revision);
+        const settings = r.root.find((n) => n.type === 'button' && String(n.props.title ?? '').startsWith('顯示設定'));
+        act(() => settings.props.onClick());
+        const bars = r.root.find((n) => n.type === 'button' && n.props.title === '美國線 — 每分鐘開高低收，高低點不失真');
+        act(() => bars.props.onClick());
+        await flush();
+        expect(fetchMock.mock.calls[3]?.[3]?.revision).toBe(fetchMock.mock.calls[2]?.[3]?.revision);
+        expect(iso((price().last as any[]).at(-1).time)).toBe('2026-09-29T10:12');
     });
 
     it('evening 20:00, auto → night; locked day → today 08:46..13:45; night ticks ignored', async () => {

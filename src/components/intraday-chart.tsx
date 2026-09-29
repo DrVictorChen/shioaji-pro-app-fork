@@ -311,7 +311,12 @@ export function IntradayChart({
         : 'auto';
     const sessionModeRef = useRef(sessionMode);
     sessionModeRef.current = sessionMode;
-    const loadedSessionModeRef = useRef(sessionMode);
+    const historyLoadRef = useRef({
+        code: contract.code,
+        mode: sessionMode,
+        reloadSeq,
+        revision: reloadSeq,
+    });
     const [sessionPopOpen, setSessionPopOpen] = useState(false);
     const pickSessionMode = (m: IntradaySessionMode) => {
         setLocalSessionMode(m);
@@ -704,17 +709,28 @@ export function IntradayChart({
         const loadKey = `${contract.code}|${reloadSeq}|${optsKey}|${sessionMode}`;
         const now = nowWallClockUtc();
         const current = sessionWindowFor(contract.security_type, now);
+        const previousLoad = historyLoadRef.current;
+        const sameContractAndRefresh =
+            previousLoad.code === contract.code && previousLoad.reloadSeq === reloadSeq;
+        const switchedMode = sameContractAndRefresh && previousLoad.mode !== sessionMode;
         const switchedToActiveSession =
-            loadedSessionModeRef.current !== sessionMode &&
+            switchedMode &&
             now > current.start && now <= current.end &&
             (sessionMode === 'auto' || (sessionMode === 'night') === current.night);
-        loadedSessionModeRef.current = sessionMode;
         // A completed request may be minutes old when switching back to the
         // running session. Give that transition a new cache revision immediately;
-        // closed sessions still reuse their cached history.
+        // retain it for settings rebuilds. Closed sessions use the base revision.
         const historyRevision = switchedToActiveSession
             ? nextChartHistoryRevision()
-            : reloadSeq;
+            : sameContractAndRefresh && !switchedMode
+              ? previousLoad.revision
+              : reloadSeq;
+        historyLoadRef.current = {
+            code: contract.code,
+            mode: sessionMode,
+            reloadSeq,
+            revision: historyRevision,
+        };
         loadedKeyRef.current = '';
         sessionRef.current = null;
         liveRef.current = null;
