@@ -81,6 +81,7 @@ export function bootstrap() {
         const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
         motion.addEventListener('change', syncTray);
         syncTray();
+        setTrayStatus('cold');
     }
     // every order event lands in the 通知中心 log (toasts stay separate)
     onOrderEvent((ev) => {

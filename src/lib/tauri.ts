@@ -68,7 +68,7 @@ export function reloadWhenHealthy(timeoutMs = 90_000) {
     }, 2000);
 }
 
-export type TrayStatus = 'idle' | 'boot' | 'conn' | 'think' | 'order' | 'filled' | 'error';
+export type TrayStatus = 'idle' | 'cold' | 'boot' | 'ready' | 'conn' | 'think' | 'order' | 'filled' | 'error';
 
 export function setTrayStatus(status: TrayStatus): void {
     if (!isTauri || isChildWindow()) return;
@@ -159,6 +159,7 @@ async function spawnServer(
     while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
         if (await probeInfo(port, scheme)) {
+            setTrayStatus('ready');
             return { ok: true, output: await readServerLog(port) };
         }
         const alive = await invoke<boolean>('process_alive', { pid }).catch(
