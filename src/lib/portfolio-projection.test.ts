@@ -148,6 +148,23 @@ describe('position projection', () => {
         const cover: PositionFill = { ...fill, account: owner, code: 'TXFJ6', action: 'Sell', quantity: 1, price: 110, openClose: 'Cover' };
         expect(applyPositionFill([row], cover, 200)![0]).toMatchObject({ quantity: 1, price: 100, pnl: 2050, costUncertain: true });
     });
+    // #85 third review: the snapshot's P&L adjustment belongs to the snapshot
+    // lot, not to contracts opened later in-session.
+    it('keeps a snapshot P&L adjustment on the snapshot lot only', () => {
+        const owner: Account = { ...account, account_type: 'F' };
+        const row: AccountedPosition = { id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2, price: 100, last_price: 110, pnl: 4100, account: owner };
+        const add: PositionFill = { ...fill, account: owner, code: 'TXFJ6', quantity: 1, price: 110, openClose: 'New' };
+        const [added] = applyPositionFill([row], add, 200, 110)!;
+        expect(added).toMatchObject({ quantity: 3, pnl: 4100 });
+        const cover: PositionFill = { ...add, key: 'c', action: 'Sell', openClose: 'Cover' };
+        // Half the snapshot lot closes: half its +100 adjustment remains.
+        const [half] = applyPositionFill([added!], { ...cover, quantity: 1 }, 200, 110)!;
+        expect(half).toMatchObject({ quantity: 2, pnl: 2050 });
+        // The whole snapshot lot closes: the in-session lot has no adjustment.
+        const [rest] = applyPositionFill([added!], { ...cover, quantity: 2 }, 200, 110)!;
+        expect(rest).toMatchObject({ quantity: 1, price: 110, pnl: 0 });
+        expect(rest).not.toHaveProperty('costUncertain');
+    });
     // #85 review P1-1: buys 100 and 120 reported as one row 2 @110. FIFO would
     // leave 1 @120; the row cannot know that, so it must not look confident.
     it('flags a partial close of an aggregate snapshot row instead of a confident cost', () => {

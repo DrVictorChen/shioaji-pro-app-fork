@@ -61,7 +61,7 @@ export function positionFill(report: OrderEventReport, accounts: Account[], trad
 const sameAccount = (p: AccountedPosition, fill: PositionFill) => p.account?.account_type === fill.account.account_type
     && p.account?.broker_id === fill.account.broker_id && p.account?.account_id === fill.account.account_id;
 
-type Lot = { price: number; quantity: number; aggregate?: boolean };
+type Lot = { price: number; quantity: number; aggregate?: boolean; snapshot?: boolean };
 
 /** Open lots of a futures/options row, oldest first. Rows the projection built
  * always carry `lots`. A broker snapshot row carries none: it is one lot at
@@ -70,7 +70,7 @@ type Lot = { price: number; quantity: number; aggregate?: boolean };
 function rowLots(p: AccountedPosition): Lot[] {
     const lots = 'lots' in p ? p.lots : undefined;
     return lots?.length ? lots
-        : [{ price: p.price, quantity: p.quantity, ...(p.quantity > 1 ? { aggregate: true } : {}) }];
+        : [{ price: p.price, quantity: p.quantity, snapshot: true, ...(p.quantity > 1 ? { aggregate: true } : {}) }];
 }
 
 const lotCost = (lots: Lot[]) => lots.reduce((s, l) => s + l.price * l.quantity, 0);
@@ -129,8 +129,12 @@ export function applyPositionFill(rows: AccountedPosition[], fill: PositionFill,
             const sign = m.direction === 'Buy' ? 1 : -1;
             const theo = (l: Lot[]) => (m.last_price * lotQty(l) - lotCost(l)) * multiplier * sign;
             // Broker baseline adjustments (P&L not explained by the lots at
-            // last_price) shrink with the quantity, as before.
-            const pnl = theo(open) + (m.pnl - theo(lots)) * q / m.quantity;
+            // last_price) belong to the snapshot lot only: lots opened by
+            // in-session fills carry none. They shrink with that lot and are
+            // dropped once it is fully closed.
+            const snapQty = (l: Lot[]) => l[0]?.snapshot ? l[0].quantity : 0;
+            const adjust = snapQty(lots) > 0 ? (m.pnl - theo(lots)) * snapQty(open) / snapQty(lots) : 0;
+            const pnl = theo(open) + adjust;
             const { lots: _drop, costUncertain: _was, ...rest } = m as AccountedPosition & { lots?: Lot[]; costUncertain?: boolean };
             return [{ ...rest, quantity: q, price: lotCost(open) / q, pnl,
                 lots: open, ...(uncertain ? { costUncertain: true } : {}) }];
