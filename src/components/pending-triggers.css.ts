@@ -62,7 +62,7 @@ export const dot = style({
     height: '8px',
     borderRadius: '50%',
     background: vars.color.danger,
-    boxShadow: `0 0 0 3px color-mix(in srgb, ${vars.color.danger} 25%, transparent)`,
+    boxShadow: ['0 0 0 3px rgba(242, 54, 69, 0.25)', `0 0 0 3px color-mix(in srgb, ${vars.color.danger} 25%, transparent)`],
 });
 
 export const hint = style({
@@ -98,7 +98,7 @@ const tag = style({
     padding: '1px 6px',
     borderRadius: vars.radius.sm,
 });
-export const kindStop = style([tag, { color: vars.color.amber, background: `color-mix(in srgb, ${vars.color.amber} 14%, transparent)` }]);
+export const kindStop = style([tag, { color: vars.color.amber, background: ['rgba(224, 164, 60, 0.14)', `color-mix(in srgb, ${vars.color.amber} 14%, transparent)`] }]);
 export const kindTake = style([tag, { color: vars.color.accent, background: vars.color.accentDim }]);
 
 // 台股慣例：買進紅、賣出綠 — follows the user's up/down colour convention
@@ -164,6 +164,7 @@ export const button = style({
 export const primary = style([button, {
     borderColor: vars.color.danger,
     color: vars.color.danger,
-    background: `color-mix(in srgb, ${vars.color.danger} 12%, transparent)`,
-    ':hover': { borderColor: vars.color.danger, background: `color-mix(in srgb, ${vars.color.danger} 22%, transparent)` },
+    // color-mix needs Safari 16.2+; older WKWebView keeps the rgba fallback
+    background: ['rgba(242, 54, 69, 0.12)', `color-mix(in srgb, ${vars.color.danger} 12%, transparent)`],
+    ':hover': { borderColor: vars.color.danger, background: ['rgba(242, 54, 69, 0.22)', `color-mix(in srgb, ${vars.color.danger} 22%, transparent)`] },
 }]);

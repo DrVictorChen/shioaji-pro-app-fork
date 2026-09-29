@@ -15,6 +15,7 @@ describe('pending trigger wording', () => {
         expect(kindLabel({ kind: 'stop' })).toBe('停損');
         expect(kindLabel({ kind: 'take', bracketId: 'b1' })).toBe('括號單停利');
         expect(actionLabel({ action: 'Sell', quantity: 2 })).toBe('賣出 2 口');
+        expect(actionLabel({ action: 'Buy', quantity: 3, account: { account_type: 'S', broker_id: 'b', account_id: 'a' } })).toBe('買進 3 張');
         expect(conditionLabel({ condition: 'above', price: 48151 })).toBe('漲到 48,151 以上');
         expect(conditionLabel({ condition: 'below', price: 47800 })).toBe('跌到 47,800 以下');
     });

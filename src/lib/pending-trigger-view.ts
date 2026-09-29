@@ -18,8 +18,9 @@ export function kindLabel(t: Pick<TriggerOrder, 'kind' | 'bracketId'>): string {
     return t.bracketId ? `括號單${base}` : base;
 }
 
-export function actionLabel(t: Pick<TriggerOrder, 'action' | 'quantity'>): string {
-    return `${t.action === 'Buy' ? '買進' : '賣出'} ${t.quantity} 口`;
+/** 股票以「張」、期貨選擇權以「口」計 */
+export function actionLabel(t: Pick<TriggerOrder, 'action' | 'quantity' | 'account'>): string {
+    return `${t.action === 'Buy' ? '買進' : '賣出'} ${t.quantity} ${t.account?.account_type === 'S' ? '張' : '口'}`;
 }
 
 /** 「價格漲到 48,151 以上時觸發」 */
