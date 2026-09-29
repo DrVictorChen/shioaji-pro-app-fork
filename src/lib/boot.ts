@@ -16,6 +16,7 @@ import {
     fetchAccounts,
     fetchHealth,
     fetchInfo,
+    fetchTradeCacheHealth,
     subscribeTradeEvents,
 } from './shioaji';
 import { getStreamStatus, onOrderEvent, subscribeStatusStore } from './stream';
@@ -306,20 +307,32 @@ async function serverVersionOk(): Promise<boolean> {
     }
 }
 
-// The order_event SSE stream only emits heartbeats until each account is
-// explicitly subscribed. Shioaji 1.7.6 requires this in simulation as well
-// (verified on a 1.7.6 simulation sidecar: no report before subscribe_trade);
-// 1.7.5 simulation accepted it as a harmless no-op, so no version gate.
-export async function subscribeTradeReports() {
-    try {
-        const accounts = await fetchAccounts();
-        await Promise.all(
-            accounts
-                .filter((a) => a.signed)
-                .map((a) => subscribeTradeEvents(a)),
-        );
-    } catch (error) {
-        notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
-        throw error;
-    }
+// Shioaji 1.7.7 restores the token's original trade subscriptions on cached
+// login. Check each signed account before subscribing: a duplicate subscribe
+// can clear another account's relay record on the same session (sw#183).
+// A missing/failed health route falls back to subscribe for older servers.
+let tradeSubscriptionInFlight: Promise<void> | null = null;
+export function subscribeTradeReports(): Promise<void> {
+    if (tradeSubscriptionInFlight) return tradeSubscriptionInFlight;
+    const run = (async () => {
+        try {
+            const accounts = await fetchAccounts();
+            for (const account of accounts.filter(a => a.signed)) {
+                let subscribed = false;
+                try {
+                    const health = await fetchTradeCacheHealth(account.account_type as 'S' | 'F', account);
+                    subscribed = !health.reasons.some(r => r.reason === 'NotSubscribed');
+                } catch {
+                    // Pre-1.7.6 sidecar or a transient health read failure.
+                }
+                if (!subscribed) await subscribeTradeEvents(account);
+            }
+        } catch (error) {
+            notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
+            throw error;
+        }
+    })();
+    tradeSubscriptionInFlight = run;
+    void run.finally(() => { tradeSubscriptionInFlight = null; }).catch(() => undefined);
+    return run;
 }

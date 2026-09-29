@@ -13,8 +13,11 @@ update_status。ADR 0002 當時「cache-only Trade HTTP API 不是本次前提�
 
 ## 決策
 
-- **訂閱**：每個已簽署帳戶都呼叫 `subscribe_trade`，正式與模擬相同。1.7.6 模擬 sidecar 實測未訂閱時
+- **訂閱（1.7.6 舊行為）**：每個已簽署帳戶都呼叫 `subscribe_trade`，正式與模擬相同。1.7.6 模擬 sidecar 實測未訂閱時
   order_event 只有 heartbeat；1.7.5 模擬對此為 no-op，無需版本判斷。
+  1.7.7 修訂：cached login 會保留 token 原有訂閱。Pro 先逐一讀每個已簽署帳戶的 `trade_cache_health`，
+  只有 `reasons[].reason` 含 `NotSubscribed`，或 health 無法讀取（含舊版無路由）時，才依序呼叫
+  `subscribe_trade`。上游 sw#183 修正前，重複訂閱單一帳戶可能清掉同 session 其他帳戶的 relay 紀錄。
 - **去重**：SSE 分發前以完整、非空 `event_id` 依環境（API base＋已知 simulation 旗標）去重；重複送達不進
   toast、投影、策略或 Agent。空 ID（歷史紀錄或舊版）不參與；不支援的格式只去重、不推論序號並標示
   「回報無法追蹤」。成交另保留 exchange_seq＋委託的舊識別，兩者任一已套用即不重複計入。
@@ -35,7 +38,7 @@ update_status。ADR 0002 當時「cache-only Trade HTTP API 不是本次前提�
 - **cache-only 使用條件**：只用於重連／跳號後重建委託畫面。必須曾在同一 sidecar 做過權威委託查詢、SSE
   為 LIVE、且所有帳戶 health 皆 `Healthy`。重連時先讀 health 再訂閱：`NotSubscribed`、health 讀取失敗，或
   App 已權威對帳過卻出現 `NoBaseline`（update_status 會建立基準，故代表 sidecar 重啟且他端先訂閱），都視為
-  不連續：清除基準、重新訂閱、不信任 cache，直到下一次權威查詢。cache 重建只新增或更新列，**不刪除**本地
+  不連續：清除基準、執行上述 health 檢查與必要的訂閱、不信任 cache，直到下一次權威查詢。cache 重建只新增或更新列，**不刪除**本地
   委託；本地仍有效但 cache 沒有的委託會保留並標示待對帳，同時清除基準。
 - **心跳 watchdog**：sidecar 每 30 秒送 heartbeat。經 proxy 的 EventSource 在 sidecar 死亡後可能不會關閉，
   因此超過 2 個週期加 15 秒沒有 heartbeat 或任何事件時，狀態改為 `stale`（頁首與 Debug 顯示 STALE，非 LIVE），
