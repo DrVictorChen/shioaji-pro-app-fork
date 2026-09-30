@@ -255,7 +255,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         expect(e.defaultPrevented).toBe(false);
     });
 
-    it('繪製中按 Esc 取消繪製並吃掉這一下，不武裝全刪單', async () => {
+    it('繪製中按 Esc 取消繪製，同樣不吃掉這一下 — 照常算進 Esc×2 全刪單', async () => {
         const api = await mountChart();
         await act(async () => api().setTool('trend'));
         let e!: ReturnType<typeof press>;
@@ -263,7 +263,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
             e = press('Escape');
         });
         expect(api().tool).toBeNull();
-        expect(e.defaultPrevented).toBe(true);
+        expect(e.defaultPrevented).toBe(false);
     });
 
     it('兩張圖：後選取的那張接手鍵盤，Delete 只刪它的物件，前一張放掉選取', async () => {

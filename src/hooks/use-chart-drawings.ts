@@ -397,17 +397,14 @@ export function useChartDrawings(opts: {
             if (e.key === 'Escape') {
                 // 已被 modal 的 Esc 收走就不重複處理
                 if (e.defaultPrevented) return;
+                // 取消繪製／取消選取，但都不吃掉這一下（不 preventDefault）：
+                // use-hotkeys 靠 defaultPrevented 判斷要不要算進 Esc×2
+                // 全部刪單，圖上的畫圖狀態不能讓這個快捷鍵的第一下失效
                 if (draftRef.current || stateRef.current.tool) {
                     draftRef.current = null;
                     setTool(null);
                     pushState();
-                    // 吃掉這一下 — use-hotkeys 靠 defaultPrevented 判斷
-                    // 要不要武裝 Esc×2 全刪單，取消繪製不該武裝刪單
-                    e.preventDefault();
                 } else if (stateRef.current.selectedId) {
-                    // 只取消選取，不吃掉這一下：選取是被動狀態，使用者
-                    // 按 Esc×2 要的是全部刪單，第一下不能因為圖上剛好
-                    // 選著一條線就失效
                     setSelectedId(null);
                 }
                 return;
@@ -421,10 +418,8 @@ export function useChartDrawings(opts: {
             removeDrawing(stateRef.current.symbolKey, id);
             setSelectedId(null);
         };
-        // capture：use-hotkeys 的 Esc×2 全刪單是 window 上的 bubble
-        // listener，而且在 App 掛載時就註冊（早於任何 K 線面板）。用
-        // bubble 註冊的話它會先跑，我們的 preventDefault 來不及阻止
-        // 「取消繪製」那一下順便武裝刪單視窗。
+        // capture：先於其他面板的 bubble listener 處理 Delete（會
+        // preventDefault），不讓同一下再被別處當成別的快捷鍵
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
     }, [hasFocusState, pushState, token]);
