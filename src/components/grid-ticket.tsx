@@ -35,7 +35,7 @@ import {
     type Trade,
 } from '../lib/types/order';
 import { fmtPrice } from '../lib/utils/format';
-import { isOddLot, ODD_LOT_MAX_SHARES, orderQtyUnit } from '../lib/odd-lot';
+import { isOddLot, ODD_LOT_MAX_SHARES, oddLotReferencePrice, orderQtyUnit, type OddBaseQuote } from '../lib/odd-lot';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import * as styles from './order-ticket.css';
 import * as flash from './flash-order.css';
@@ -93,14 +93,10 @@ export function recordGridOwner(account: Pick<Account, 'account_type' | 'broker_
 
 let gridInstanceSeq = 0;
 
-export interface GridBaseQuote {
-    tick?: { close: string | number };
-    bidask?: { bid_price: (string | number)[]; ask_price: (string | number)[] };
-}
+export type GridBaseQuote = OddBaseQuote;
 
-/** 鋪單基準價：整股取整股成交價（沒有則參考價）；盤中零股只看零股行情 —
- * 零股成交價，沒有成交時取零股最佳買賣中價（只有一邊就用那一邊），
- * 都沒有回 null（等待零股行情），絕不退回整股價格。 */
+/** 鋪單基準價：整股取整股成交價（沒有則參考價）；盤中零股只看零股行情
+ * （oddLotReferencePrice），沒有零股行情回 null（等待零股行情）。 */
 export function gridBasePrice(
     odd: boolean,
     quote: GridBaseQuote | undefined,
@@ -109,15 +105,7 @@ export function gridBasePrice(
     round: (p: number) => number,
 ): number | null {
     if (!odd) return quote?.tick ? Number(quote.tick.close) : reference || null;
-    if (oddQuote?.tick && Number(oddQuote.tick.close) > 0) return Number(oddQuote.tick.close);
-    const bid = Number(oddQuote?.bidask?.bid_price?.[0]);
-    const ask = Number(oddQuote?.bidask?.ask_price?.[0]);
-    const okBid = Number.isFinite(bid) && bid > 0;
-    const okAsk = Number.isFinite(ask) && ask > 0;
-    if (okBid && okAsk) return round((bid + ask) / 2);
-    if (okBid) return bid;
-    if (okAsk) return ask;
-    return null;
+    return oddLotReferencePrice(oddQuote, round);
 }
 
 export function GridTicket({

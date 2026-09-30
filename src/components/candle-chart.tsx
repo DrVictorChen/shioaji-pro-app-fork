@@ -69,6 +69,7 @@ import { subscribeCustoms } from '../lib/custom-indicators';
 import type { IndicatorPoint } from '../lib/indicators';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
+import { canUpdateOrderPrice } from '../lib/odd-lot';
 import { getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
 import {
@@ -1274,6 +1275,8 @@ export function CandleChart({
             const series = candleSeriesRef.current;
             if (!series) return null;
             for (const t of workingOrdersRef.current) {
+                // 零股委託不能改價（#204）：委託線不可拖曳
+                if (!canUpdateOrderPrice(t.order)) continue;
                 const line = orderLinesRef.current.get(t.order.id);
                 if (!line) continue;
                 const coord = series.priceToCoordinate(line.options().price);
