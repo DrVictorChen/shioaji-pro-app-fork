@@ -376,6 +376,7 @@ function BlockBody({
         case 'grid':
             return contract ? (
                 <GridTicket
+                    panelId={block.id}
                     contract={contract}
                     trades={dockProps.trades}
                     onOrdersChanged={dockProps.onTradesChanged}
