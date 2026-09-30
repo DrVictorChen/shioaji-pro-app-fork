@@ -45,7 +45,12 @@ import {
     refreshHedgeOrders,
     spreadExecAction,
     startSpreadExecution,
-    useSpreadExecution,
+    useSpreadExecutions,
+    useClickLocks,
+    addClickLock,
+    updateClickLock,
+    clearClickLock,
+    type ClickLock,
     type SpreadExecRecord,
 } from '../lib/odd-spread-service';
 import { requestOrderConfirm, accountConfirmLabel } from '../lib/order-confirm';
@@ -64,6 +69,9 @@ import { stepPrice } from '../lib/utils/ticksize';
 import * as styles from './odd-spread.css';
 
 const DIRECTIONS: SpreadDirection[] = ['buyRoundSellOdd', 'buyOddSellRound'];
+const NO_EXECS: SpreadExecRecord[] = [];
+const NO_LOCKS: ClickLock[] = [];
+const NOT_PAUSED = () => false;
 const LADDER_ROWS = 15;
 
 const int = (v: number) => Math.round(v).toLocaleString('en-US');
@@ -82,12 +90,14 @@ export interface OddSpreadViewProps {
     reservedShares?: number;
     live: boolean;
     account: Account | undefined;
-    /** 此商品／帳戶最近一筆兩腳執行 */
-    exec?: SpreadExecRecord;
+    /** 此商品／帳戶每一筆未關閉的兩腳執行（新的在前） */
+    execs?: SpreadExecRecord[];
+    /** 此商品／帳戶的點價鎖（持久化） */
+    clickLocks?: ClickLock[];
     /** 兩腳送單不可用的原因（彈出視窗等）；null＝可用 */
     execUnavailable: string | null;
     /** 執行綁定的伺服器／模擬正式環境與目前連線不同 */
-    execPaused?: boolean;
+    isPaused?: (rec: SpreadExecRecord) => boolean;
     onOrdersChanged?: () => void;
     /** 測試與截圖用：初始張數 */
     initialLots?: number;
@@ -111,9 +121,10 @@ export function OddSpread(props: {
     const known = accountState.loaded && !!account;
     const inventoryShares = known ? sellableShares(scopedPositions as Parameters<typeof sellableShares>[0], scopedTrades, contract.code) : null;
     const held = known ? sellableShares(scopedPositions as Parameters<typeof sellableShares>[0], [], contract.code) : 0;
-    const exec = useSpreadExecution(contract.code, account);
+    const execs = useSpreadExecutions(contract.code, account);
+    const clickLocks = useClickLocks(contract.code, account);
     const info = useServerInfo();
-    const execPaused = !!exec && !envMatches(exec.env, { base: getApiBase(), simulation: info?.simulation });
+    const isPaused = (r: SpreadExecRecord) => !envMatches(r.env, { base: getApiBase(), simulation: info?.simulation });
     return (
         <OddSpreadView
             contract={contract}
@@ -122,9 +133,10 @@ export function OddSpread(props: {
             reservedShares={inventoryShares === null ? 0 : held - inventoryShares}
             live={live}
             account={account}
-            exec={exec}
+            execs={execs}
+            clickLocks={clickLocks}
             execUnavailable={oddSpreadExecUnavailable()}
-            execPaused={execPaused}
+            isPaused={isPaused}
             onOrdersChanged={onOrdersChanged}
         />
     );
@@ -150,7 +162,7 @@ function NumPref({ label, value, onChange, title, width = 'narrow' }: { label: s
 }
 
 export function OddSpreadView({
-    contract, feed, inventoryShares, reservedShares = 0, live, account, exec, execUnavailable, execPaused = false, onOrdersChanged, initialLots = 1,
+    contract, feed, inventoryShares, reservedShares = 0, live, account, execs = NO_EXECS, clickLocks = NO_LOCKS, execUnavailable, isPaused = NOT_PAUSED, onOrdersChanged, initialLots = 1,
 }: OddSpreadViewProps) {
     const privMoney = usePrivacyMoney();
     const [lots, setLots] = useState(initialLots);
@@ -161,8 +173,6 @@ export function OddSpreadView({
     const [discountText, setDiscountText] = useState(() => String(Math.round(prefs.discount * 100) / 10));
     const [taxText, setTaxText] = useState<string | null>(null);
     const [armed, setArmed] = useState(false);
-    // 點價單結果不明（可能已送出）：鎖住點價，直到使用者核對委託後解除
-    const [clickLock, setClickLock] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const inflight = useRef(new Set<string>());
 
@@ -200,14 +210,16 @@ export function OddSpreadView({
         [feed.round, feed.odd, feed.roundLast, feed.oddLast, contract],
     );
 
-    const running = !!exec && exec.state.started && !isTerminalPhase(exec.state.phase);
+    const liveExecs = execs.filter(r => r.state.started && !isTerminalPhase(r.state.phase));
+    const running = liveExecs.length > 0;
+    const execPaused = execs.some(isPaused);
 
     const blockText = (q: SpreadQuote): string | null => {
         if (!feed.oddAvailable && q.block === 'noQuote') return '等待零股行情';
         if (execUnavailable) return '請在主視窗執行';
         if (!live) return '行情或交易狀態未連線';
         if (!account) return '沒有可用的證券帳戶';
-        if (running) return execPaused ? '執行暫停（環境已切換）' : exec?.state.phase === 'unknown' ? '有委託結果未確認' : '價差單執行中';
+        if (running) return liveExecs.some(isPaused) ? '執行暫停（環境已切換）' : liveExecs.some(r => r.state.phase === 'unknown') ? '有委託結果未確認' : '價差單執行中';
         if (busy) return '確認中';
         if (q.block === 'inventory' && inventoryShares === null) return '庫存未知';
         return q.block ? BLOCK_LABEL[q.block] : null;
@@ -264,9 +276,11 @@ export function OddSpreadView({
         }
     }, [account, running, busy, execUnavailable, mode, contract, fees, prefs.maxSlipTicks]);
 
-    // 點量下單：同閃電下單，要先啟用點價；依設定跳委託確認
+    // 點量下單：同閃電下單，要先啟用點價；依設定跳委託確認。
+    // 送出前先加上持久化的點價鎖（重新整理或關閉面板也不遺失）：全部確定送出或
+    // 確定一筆都沒送才解除；結果不明或拆單只送出部分都保持鎖定，由使用者核對後解除。
     const placeAt = useCallback(async (market: 'round' | 'odd', action: Action, price: number) => {
-        if (!armed || !account || clickLock) return;
+        if (!armed || !account || clickLocks.length > 0) return;
         const key = `${market}:${action}:${price}`;
         if (inflight.current.has(key)) return;
         inflight.current.add(key);
@@ -274,8 +288,12 @@ export function OddSpreadView({
         const isAccountCurrent = () => accountMatches(latest.current.account, captured);
         const sent: string[] = [];
         let slices: { price: number; quantity: number }[] = [];
+        const side = action === 'Buy' ? '買' : '賣';
+        const total = market === 'odd' ? `零股 ${int(effOdd)} 股` : `整股 ${lots} 張`;
+        let lockId: string | null = null;
         try {
             if (market === 'round') {
+                lockId = addClickLock(contract.code, captured, `${contract.code} ${side} ${total} @ ${fmtPrice(price)} 送出中（若中斷請核對委託）`);
                 await placeQuickOrder(contract, action, price, lots, { account: captured, isAccountCurrent });
             } else {
                 slices = sliceOddOrders([{ price, shares: effOdd }]);
@@ -287,6 +305,7 @@ export function OddSpreadView({
                     });
                     if (!ok) return;
                 }
+                lockId = addClickLock(contract.code, captured, `${contract.code} ${side} ${total} @ ${fmtPrice(price)} 送出中（${slices.length} 筆；若中斷請核對委託）`);
                 for (const s of slices) {
                     await placeQuickOrder(contract, action, s.price, s.quantity, {
                         account: captured,
@@ -297,6 +316,7 @@ export function OddSpreadView({
                     sent.push(`${int(s.quantity)} 股`);
                 }
             }
+            if (lockId) clearClickLock(lockId);
             notify({
                 kind: 'ok',
                 title: `${market === 'odd' ? '零股' : '整股'}${action === 'Buy' ? '買進' : '賣出'}已送出`,
@@ -304,38 +324,33 @@ export function OddSpreadView({
             });
             onOrdersChanged?.();
         } catch (e) {
-            if (e instanceof Error && e.name === 'OrderConfirmCancelled') return;
             const msg = e instanceof Error ? e.message : String(e);
-            const notStarted = !!(e && typeof e === 'object' && 'mutationNotStarted' in e);
-            const what = market === 'odd'
-                ? `零股 ${slices.length > 1 ? `第 ${sent.length + 1}/${slices.length} 筆 ` : ''}${int(slices[sent.length]?.quantity ?? effOdd)} 股`
+            const notStarted = (e instanceof Error && e.name === 'OrderConfirmCancelled') || !!(e && typeof e === 'object' && 'mutationNotStarted' in e);
+            if (notStarted && sent.length === 0) {
+                // 確定一筆都沒送出：解除鎖定
+                if (lockId) clearClickLock(lockId);
+                if (!(e instanceof Error && e.name === 'OrderConfirmCancelled')) notify({ kind: 'err', title: '整零價差點價下單失敗', body: msg });
+                return;
+            }
+            setArmed(false);
+            const idx = sent.length + 1;
+            const failedPart = market === 'odd'
+                ? `零股 ${slices.length > 1 ? `第 ${idx}/${slices.length} 筆 ` : ''}${int(slices[idx - 1]?.quantity ?? effOdd)} 股`
                 : `整股 ${lots} 張`;
-            if (!notStarted) {
-                // 可能已送到券商：鎖定點價，核對前不可重送（含拆單第一筆逾時）
-                setArmed(false);
-                setClickLock(`${contract.code} ${action === 'Buy' ? '買' : '賣'} ${what} @ ${fmtPrice(price)} 結果未確認${sent.length > 0 ? `（已送出 ${sent.join('、')}）` : ''}`);
-            }
-            if (sent.length > 0) {
-                // 拆單只送出一部分：說清楚哪幾筆已送出，鎖定點價避免整筆重送
-                const idx = sent.length + 1;
-                setArmed(false);
-                notify({
-                    kind: 'err',
-                    title: '零股拆單只送出部分',
-                    body: `${contract.code} @ ${fmtPrice(price)}：已送出 ${sent.join('、')}；第 ${idx}/${slices.length} 筆（${int(slices[idx - 1]?.quantity ?? 0)} 股）${notStarted ? '未送出' : '結果未確認'}：${msg}。其餘未送。請先核對委託，勿重送整筆；點價已鎖定`,
-                });
-                onOrdersChanged?.();
-            } else {
-                notify({
-                    kind: 'err',
-                    title: notStarted ? '整零價差點價下單失敗' : '點價委託結果未確認',
-                    body: notStarted ? msg : `${what} @ ${fmtPrice(price)} 可能已送出：${msg}。點價已鎖定，請先核對委託，勿重送`,
-                });
-            }
+            const rest = slices.length > idx ? `；第 ${idx + 1}～${slices.length} 筆未送` : '';
+            const text = `${contract.code} ${side} @ ${fmtPrice(price)}：${sent.length > 0 ? `已送出 ${sent.join('、')}；` : ''}${failedPart}${notStarted ? '未送出' : '結果未確認（可能已送出）'}${rest}`;
+            if (lockId) updateClickLock(lockId, text);
+            else addClickLock(contract.code, captured, text);
+            notify({
+                kind: 'err',
+                title: sent.length > 0 ? '零股拆單只送出部分' : '點價委託結果未確認',
+                body: `${text}：${msg}。點價已鎖定，請先核對委託，勿重送整筆`,
+            });
+            if (sent.length > 0) onOrdersChanged?.();
         } finally {
             inflight.current.delete(key);
         }
-    }, [armed, clickLock, account, contract, lots, effOdd, onOrdersChanged]);
+    }, [armed, clickLocks.length, account, contract, lots, effOdd, onOrdersChanged]);
 
     const invLots = inventoryShares === null ? null : Math.floor(inventoryShares / SHARES_PER_LOT);
     const invOdd = inventoryShares === null ? null : inventoryShares % SHARES_PER_LOT;
@@ -366,12 +381,12 @@ export function OddSpreadView({
             )}
             {execUnavailable && <div className={styles.notice}>{execUnavailable}；點價單筆下單仍可使用</div>}
             {execPaused && <div className={styles.notice}>{ENV_PAUSED_TEXT}：此價差單在另一個伺服器／模擬正式環境開始，切回原環境後才會繼續送單與對帳</div>}
-            {clickLock && (
-                <div className={styles.notice} role='alert'>
-                    {clickLock}；點價已鎖定，請先在委託查詢核對
-                    <button className={styles.noticeBtn} onClick={() => setClickLock(null)}>已核對委託，解除鎖定</button>
+            {clickLocks.map(l => (
+                <div key={l.id} className={styles.notice} role='alert'>
+                    {l.text}；點價已鎖定，請先在委託查詢核對
+                    <button className={styles.noticeBtn} onClick={() => clearClickLock(l.id)}>已核對委託，解除鎖定</button>
                 </div>
-            )}
+            ))}
             <div className={styles.cards}>
                 {DIRECTIONS.map(d => (
                     <SpreadCard
@@ -387,8 +402,8 @@ export function OddSpreadView({
                 <span className={styles.groupCell}>整股（張）</span>
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
-                    disabled={!live || !account || !!clickLock}
-                    title={clickLock ? '有點價委託結果未確認，核對後解除鎖定' : armed ? '點價下單中 — 點擊或 Esc 鎖定' : '啟用後點左側量＝整股限價、右側量＝零股限價'}
+                    disabled={!live || !account || clickLocks.length > 0}
+                    title={clickLocks.length > 0 ? '有點價委託結果未確認，核對後解除鎖定' : armed ? '點價下單中 — 點擊或 Esc 鎖定' : '啟用後點左側量＝整股限價、右側量＝零股限價'}
                     onClick={() => setArmed(a => !a)}
                 >
                     {armed ? '點價中' : '啟用點價'}
@@ -527,7 +542,7 @@ export function OddSpreadView({
                         onChange={v => { if (Number.isInteger(v) && v >= 0 && v <= 50) updatePrefs({ ...prefs, maxSlipTicks: v }); }} />
                     <span>檔</span>
                 </div>
-                {exec && exec.state.started && <ExecStatus rec={exec} paused={execPaused} />}
+                {execs.map(r => <ExecStatus key={r.id} rec={r} paused={isPaused(r)} />)}
                 <div className={styles.btns}>
                     {DIRECTIONS.map(d => {
                         const q = quotes[d];
@@ -650,7 +665,7 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
     const sum = execSummary(s);
     const done = isTerminalPhase(s.phase);
     const unknown = s.slots.filter(x => x.status === 'unknown');
-    const cancelFailed = s.slots.filter(x => x.cancelState === 'failed' && x.status === 'working');
+    const cancelFailed = s.slots.filter(x => (x.cancelState === 'failed' || x.cancelState === 'unknown') && x.status === 'working');
     const p = s.pendingHedge;
     const slotText = (x: { leg: string; quantity: number; price: number }) => `${x.leg === 'odd' ? '零股' : '整股'} ${int(x.quantity)}${x.leg === 'odd' ? ' 股' : ' 張'} @ ${fmtPrice(x.price)}`;
     return (
@@ -690,7 +705,7 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
             })}
             {cancelFailed.length > 0 && (
                 <span className={styles.execDetail}>
-                    刪單失敗：{cancelFailed.map(x => `${slotText(x)}（${x.cancelError ?? '未知原因'}）`).join('、')}；原單可能仍會成交，請再按「取消剩餘」重試
+                    {cancelFailed.map(x => `${x.cancelState === 'unknown' ? '刪單結果未確認' : '刪單失敗'}：${slotText(x)}（${x.cancelState === 'unknown' ? '送出刪單後重新整理，未收到結果' : x.cancelError ?? '未知原因'}）`).join('、')}；仍在委託中，原單可能繼續成交，請再按「再次取消」重試
                 </span>
             )}
             {p && (

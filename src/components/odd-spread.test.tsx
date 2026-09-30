@@ -10,6 +10,7 @@ import type { SpreadExecRecord } from '../lib/odd-spread-service';
 const mocks = vi.hoisted(() => ({
     place: vi.fn(), notify: vi.fn(), confirm: vi.fn(), start: vi.fn(), action: vi.fn(), dismiss: vi.fn(), refresh: vi.fn(),
     candidates: vi.fn((): unknown[] => []), claim: vi.fn(),
+    addLock: vi.fn((..._a: unknown[]) => 'lk-1'), updateLock: vi.fn(), clearLock: vi.fn(),
     risk: { confirmManualOrders: false },
 }));
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts: [], selectedStock: undefined }) }));
@@ -29,7 +30,11 @@ vi.mock('../lib/odd-spread-service', () => ({
     ENV_PAUSED_TEXT: '環境已切換，執行暫停',
     envMatches: () => true,
     oddSpreadExecUnavailable: () => null,
-    useSpreadExecution: () => undefined,
+    useSpreadExecutions: () => [],
+    useClickLocks: () => [],
+    addClickLock: mocks.addLock,
+    updateClickLock: mocks.updateLock,
+    clearClickLock: mocks.clearLock,
     hedgeUnitLabel: (leg: string, q: number) => (leg === 'odd' ? `零股 ${q} 股` : `整股 ${q} 張`),
 }));
 
@@ -187,7 +192,8 @@ it('點價下單：未啟用不送；1,000 股拆 999＋1，後一筆失敗時�
     const n = mocks.notify.mock.calls.at(-1)![0];
     expect(n.title).toBe('零股拆單只送出部分');
     expect(n.body).toContain('已送出 999 股');
-    expect(n.body).toContain('第 2/2 筆（1 股）結果未確認');
+    expect(n.body).toContain('零股 第 2/2 筆 1 股結果未確認（可能已送出）');
+    expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', expect.stringContaining('已送出 999 股'));
     expect(n.body).toContain('勿重送整筆');
     // 點價已鎖定，不能直接再點一次
     expect(button('啟用點價')).toBeDefined();
@@ -236,7 +242,7 @@ it('未配對待處理：列出原因與最新價，可以最新價補單或取�
         ],
         pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '價格已偏離計畫價超過 2 檔（1,085 → 1,100）', orders: [{ price: 1100, quantity: 1 }] },
     });
-    await render({ exec });
+    await render({ execs: [exec] });
     const all = text(view.root);
     expect(all).toContain('未配對，待處理');
     expect(all).toContain('未配對 零股多 1,000 股');
@@ -256,7 +262,7 @@ it('結果不明：說明哪筆、禁止再執行，可在核對後標記未送�
             { key: 'odd:1', leg: 'odd', action: 'Sell', price: 1090, quantity: 620, status: 'unknown', filled: 0 },
         ],
     });
-    await render({ exec });
+    await render({ execs: [exec] });
     expect(text(view.root)).toContain('零股 620 股 @ 1,090：可能已送出但未收到回應');
     expect(button('有委託結果未確認').props.disabled).toBe(true);
     await act(async () => { button('已核對：未送出').props.onClick(); });
@@ -269,7 +275,7 @@ it('結果不明且委託列有同價量無標記的委託：列出候選由使�
         phase: 'unknown',
         slots: [{ key: 'odd:1', leg: 'odd', action: 'Sell', price: 1090, quantity: 620, status: 'unknown', filled: 0 }],
     });
-    await render({ exec });
+    await render({ execs: [exec] });
     expect(text(view.root)).toContain('沒有標記的委託，是否為這筆');
     await act(async () => { button('是 A0001').props.onClick(); });
     expect(mocks.claim).toHaveBeenCalledWith('os-1', 'odd:1', 'X1');
@@ -281,7 +287,7 @@ it('刪單失敗：列出失敗的委託與原因，按鈕改為「再次取消�
         cancelRequested: true,
         slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'working', filled: 0, orderId: 'A', cancelState: 'failed', cancelError: '伺服器忙碌' }],
     });
-    await render({ exec });
+    await render({ execs: [exec] });
     expect(text(view.root)).toContain('刪單失敗：零股 380 股 @ 1,095（伺服器忙碌）');
     await act(async () => { button('再次取消').props.onClick(); });
     expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'cancel' });
@@ -289,35 +295,73 @@ it('刪單失敗：列出失敗的委託與原因，按鈕改為「再次取消�
 
 it('環境已切換：顯示暫停並停用操作', async () => {
     const exec = rec({ phase: 'oddPending', slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'working', filled: 0, orderId: 'A' }] });
-    await render({ exec, execPaused: true });
+    await render({ execs: [exec], isPaused: () => true });
     expect(text(view.root)).toContain('環境已切換，執行暫停');
     expect(button('取消剩餘').props.disabled).toBe(true);
     expect(button('執行暫停（環境已切換）').props.disabled).toBe(true);
 });
 
-it('拆單第一筆就逾時（結果不明）：鎖定點價，核對前不可重送', async () => {
+it('拆單第一筆就逾時（結果不明）：送出前加持久化鎖、失敗後保持鎖定並說明', async () => {
     mocks.place.mockRejectedValueOnce(new Error('連線逾時'));
     await render();
     await act(async () => { button('啟用點價').props.onClick(); });
     const cell = () => view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0];
     await act(async () => { cell()!.props.onClick(); });
     expect(mocks.place).toHaveBeenCalledTimes(1);
+    expect(mocks.addLock).toHaveBeenCalledTimes(1);
+    expect(mocks.addLock.mock.calls[0]!.slice(0, 2)).toEqual(['2330', account]);
+    expect(mocks.clearLock).not.toHaveBeenCalled();
+    expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', '2330 買 @ 1,100：零股 第 1/2 筆 999 股結果未確認（可能已送出）；第 2～2 筆未送');
     expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('點價委託結果未確認');
-    expect(text(view.root)).toContain('零股 第 1/2 筆 999 股 @ 1,100 結果未確認');
-    expect(button('啟用點價').props.disabled).toBe(true);
-    // 仍無法點價
-    const locked = view.root.findAll(n => n.type === 'span' && n.props.title === '先啟用點價')[0]!;
-    await act(async () => { locked.props.onClick(); });
-    expect(mocks.place).toHaveBeenCalledTimes(1);
-    await act(async () => { button('已核對委託，解除鎖定').props.onClick(); });
-    expect(button('啟用點價').props.disabled).toBe(false);
+    expect(button('啟用點價')).toBeDefined();
 });
 
-it('拆單第一筆確定未送出：不鎖定（沒有任何委託送出）', async () => {
-    mocks.place.mockRejectedValueOnce(Object.assign(new Error('風控'), { mutationNotStarted: true }));
+it('拆單只送出部分、其餘確定未送：同樣鎖定，說明哪幾筆已送出', async () => {
+    mocks.place.mockResolvedValueOnce({ order: { id: 'X' }, status: { status: 'Submitted' } })
+        .mockRejectedValueOnce(Object.assign(new Error('風控'), { mutationNotStarted: true }));
     await render();
     await act(async () => { button('啟用點價').props.onClick(); });
     const cell = view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0]!;
     await act(async () => { cell.props.onClick(); });
-    expect(buttons().some(b => text(b) === '已核對委託，解除鎖定')).toBe(false);
+    expect(mocks.clearLock).not.toHaveBeenCalled();
+    expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', '2330 買 @ 1,100：已送出 999 股；零股 第 2/2 筆 1 股未送出');
+    expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('零股拆單只送出部分');
+});
+
+it('有點價鎖時：顯示原因、不能啟用點價；核對後解除', async () => {
+    await render({ clickLocks: [{ id: 'lk-9', code: '2330', account: 'S-BR-A', text: '2330 買 @ 1,100：已送出 999 股；零股 第 2/2 筆 1 股未送出', at: 0 }] });
+    expect(text(view.root)).toContain('已送出 999 股；零股 第 2/2 筆 1 股未送出；點價已鎖定');
+    expect(button('啟用點價').props.disabled).toBe(true);
+    await act(async () => { button('已核對委託，解除鎖定').props.onClick(); });
+    expect(mocks.clearLock).toHaveBeenCalledWith('lk-9');
+});
+
+it('全部送出或確定一筆都沒送：解除鎖', async () => {
+    mocks.place.mockRejectedValueOnce(Object.assign(new Error('風控'), { mutationNotStarted: true }))
+        .mockResolvedValue({ order: { id: 'X' }, status: { status: 'Submitted' } });
+    await render();
+    await act(async () => { button('啟用點價').props.onClick(); });
+    const cell = () => view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0]!;
+    await act(async () => { cell().props.onClick(); });
+    expect(mocks.clearLock).toHaveBeenCalledTimes(1);
+    expect(mocks.updateLock).not.toHaveBeenCalled();
+    await act(async () => { cell().props.onClick(); });
+    expect(mocks.clearLock).toHaveBeenCalledTimes(2);
+});
+
+it('同商品有多筆需要處理的執行：每筆各自顯示與操作', async () => {
+    const older = { ...rec({
+        phase: 'hedgeDecision',
+        slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status: 'filled', filled: 1000 }],
+        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '補單未成交（被拒或已刪除）', orders: [] },
+    }), id: 'os-old' };
+    const newer = { ...rec({ phase: 'failed', slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'cancelled', filled: 0 }] }), id: 'os-new' };
+    await render({ execs: [newer, older] });
+    const all = text(view.root);
+    expect(all).toContain('補單未成交（被拒或已刪除）');
+    expect(all).toContain('未完成');
+    await act(async () => { buttons().find(b => text(b) === '取消')!.props.onClick(); });
+    expect(mocks.action).toHaveBeenCalledWith('os-old', { type: 'hedgeDecline' });
+    await act(async () => { button('關閉').props.onClick(); });
+    expect(mocks.dismiss).toHaveBeenCalledWith('os-new');
 });

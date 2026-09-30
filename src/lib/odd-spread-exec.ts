@@ -58,8 +58,9 @@ export interface OrderSlot {
     orderId?: string;
     /** 累計成交（同 quantity 單位） */
     filled: number;
-    /** 刪單狀態：pending＝已發出等待結果、sent＝券商已受理、failed＝刪單失敗（可再按取消重試） */
-    cancelState?: 'pending' | 'sent' | 'failed';
+    /** 刪單狀態：pending＝已發出等待結果、sent＝券商已受理、failed＝刪單失敗、
+     * unknown＝等待結果時重新整理而遺失回應（委託仍在委託中就可再按取消重試） */
+    cancelState?: 'pending' | 'sent' | 'failed' | 'unknown';
     cancelError?: string;
     /** 送出途中／結果不明時按了取消：拿到委託編號就刪單 */
     cancelWanted?: boolean;

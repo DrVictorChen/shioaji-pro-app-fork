@@ -38,6 +38,12 @@ vi.mock('./main-window-commands', () => ({
 vi.mock('./utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, d: number) => p + d * 5 }));
 
 import {
+    addClickLock,
+    clearClickLock,
+    clickLocksFor,
+    executionsFor,
+    isSettled,
+    updateClickLock,
     candidateOrders,
     claimOrder,
     dismissSpreadExecution,
@@ -240,19 +246,90 @@ it('新執行不會刪掉同商品已結束的執行：晚到成交仍對帳並�
     expect(saved().find(r => r.id === first)!.dismissed).toBe(false);
 });
 
-it('本機保存：執行中與結果不明永不丟棄；已結束的只留當日、限量', () => {
+it('本機保存：未了結的永不丟棄；只有已了結的限當日、限量', () => {
     const now = Date.parse('2026-09-30T13:00:00+08:00');
     const yesterday = Date.parse('2026-09-29T10:00:00+08:00');
-    const mk = (i: number, phase: string, startedAt = now - i): SpreadExecRecord => ({
-        id: `r${i}`, tagBase: 'abc', env: { base: 'b', simulation: true }, contract, account, fees, maxSlipTicks: 2, startedAt,
-        state: { plan, phase, slots: [], started: true, cancelRequested: false, seq: 0, waived: { odd: 0, round: 0 }, pendingHedge: null } as unknown as SpreadExecRecord['state'],
+    const slot = (filled: number, status = 'cancelled') => ({ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status, filled });
+    const mk = (id: string, phase: string, startedAt: number, slots: unknown[] = [], extra: Partial<SpreadExecRecord> = {}): SpreadExecRecord => ({
+        id, tagBase: 'abc', env: { base: 'b', simulation: true }, contract, account, fees, maxSlipTicks: 2, startedAt,
+        state: { plan, phase, slots, started: true, cancelRequested: true, seq: 1, waived: { odd: 0, round: 0 }, pendingHedge: null } as unknown as SpreadExecRecord['state'],
+        ...extra,
     });
-    const list = [mk(0, 'unknown', yesterday), mk(1, 'oddPending', yesterday), mk(2, 'done', yesterday), ...Array.from({ length: 60 }, (_, i) => mk(10 + i, 'done'))];
+    const list = [
+        mk('unknown', 'unknown', yesterday, [slot(0, 'unknown')]),
+        mk('live', 'oddPending', yesterday, [slot(0, 'working')]),
+        // 昨天取消、有 400 股未配對且使用者沒關閉 → 保留
+        mk('unhedged', 'failed', yesterday, [slot(400)]),
+        // 刪單結果不明 → 保留
+        mk('cancelUnknown', 'cancelled', yesterday, [{ ...slot(0), cancelState: 'unknown' }]),
+        // 環境切換期間保留的回報 → 保留
+        mk('held', 'cancelled', yesterday, [slot(0)], { held: [{ type: 'report', key: 'odd:0', filled: 0, status: 'cancelled' }] }),
+        // 使用者已關閉的未配對 → 視為了結
+        mk('dismissed', 'failed', yesterday, [slot(400)], { dismissed: true }),
+        mk('settledOld', 'cancelled', yesterday, [slot(0)]),
+        ...Array.from({ length: 60 }, (_, i) => mk(`s${i}`, 'cancelled', now - 60 + i, [slot(0)])),
+    ];
+    expect(isSettled(list[2]!)).toBe(false);
+    expect(isSettled(list[5]!)).toBe(true);
     const kept = pruneRecords(list, now).map(r => r.id);
-    expect(kept).toContain('r0');
-    expect(kept).toContain('r1');
-    expect(kept).not.toContain('r2');
-    expect(kept.filter(id => Number(id.slice(1)) >= 10)).toHaveLength(50);
+    for (const id of ['unknown', 'live', 'unhedged', 'cancelUnknown', 'held']) expect(kept).toContain(id);
+    expect(kept).not.toContain('dismissed');
+    expect(kept).not.toContain('settledOld');
+    expect(kept.filter(id => /^s\d+$/.test(id))).toHaveLength(50);
+    expect(kept).toContain('s59');
+    expect(kept).not.toContain('s0');
+});
+
+it('重新整理時刪單等待結果 → 刪單結果不明；委託仍在委託中可再取消', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, _a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined));
+    const id = startSpreadExecution(req());
+    await flush();
+    mocks.cancel.mockImplementation(() => new Promise(() => undefined)); // 刪單回應永遠不到
+    spreadExecAction(id, { type: 'cancel' });
+    expect(record().state.slots.map(s => s.cancelState)).toEqual(['pending', 'pending']);
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    resetOddSpreadServiceForTest(); // 重新整理
+    mocks.cancel.mockReset();
+    mocks.cancel.mockResolvedValue([{ status: 'fulfilled', value: {} }]);
+    // T1 已刪除、T2 仍在委託中
+    mocks.trades = [trade('T1', 1095, 380, 0, 'Cancelled', tags[0]), trade('T2', 1090, 620, 0, 'Submitted', tags[1])];
+    startOddSpreadService();
+    const s = record().state;
+    expect(s.slots[0]).toMatchObject({ status: 'cancelled', cancelState: 'unknown' });
+    expect(s.slots[1]).toMatchObject({ status: 'working', cancelState: 'unknown' });
+    spreadExecAction(id, { type: 'cancel' });
+    expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual([['T2']]);
+});
+
+it('點價鎖持久化：重新整理（或重開面板）後仍在，核對後才解除；只影響同商品同帳戶', () => {
+    const id = addClickLock('2330', account, '送出中');
+    updateClickLock(id, '已送出 999 股；第 2/2 筆 1 股未送出');
+    resetOddSpreadServiceForTest(); // 重新整理：記憶體清空
+    expect(clickLocksFor('2330', account).map(l => l.text)).toEqual(['已送出 999 股；第 2/2 筆 1 股未送出']);
+    expect(clickLocksFor('2317', account)).toEqual([]);
+    expect(clickLocksFor('2330', { ...account, account_id: 'B' })).toEqual([]);
+    clearClickLock(id);
+    resetOddSpreadServiceForTest();
+    expect(clickLocksFor('2330', account)).toEqual([]);
+});
+
+it('新執行不會蓋掉較早仍需處理的執行：兩筆都列出', async () => {
+    mocks.place.mockImplementationOnce(async () => trade('T1', 1095, 380, 380, 'Filled', undefined))
+        .mockImplementationOnce(async () => trade('T2', 1090, 620, 620, 'Filled', undefined))
+        .mockImplementationOnce(async () => { throw Object.assign(new Error('整股被拒'), { mutationNotStarted: true }); })
+        .mockImplementation(() => new Promise(() => undefined));
+    const first = startSpreadExecution(req());
+    await flush();
+    await flush();
+    expect(record().state.phase).toBe('hedgeDecision');
+    // 未配對待處理仍未結束 → 同商品同帳戶不可再開
+    expect(() => startSpreadExecution(req())).toThrow('已有執行中的價差單');
+    spreadExecAction(first, { type: 'hedgeDecline' });
+    expect(saved().find(r => r.id === first)!.state.phase).toBe('failed');
+    const second = startSpreadExecution(req());
+    const list = executionsFor(saved(), '2330', account).map(r => r.id);
+    expect(list).toEqual([second, first]);
 });
 
 it('刪單失敗：記錄並通知，可再按取消重試', async () => {

@@ -17,9 +17,9 @@
 // 彈出視窗沒有這個服務：關掉視窗就無法追蹤第二腳，所以彈出視窗停用兩腳送單
 // （面板顯示原因）；點價單筆下單不受影響。
 
-import { useSyncExternalStore } from 'react';
+import { useMemo, useSyncExternalStore } from 'react';
 import { displayBook } from './display-book';
-import { accountMatches } from './flash-account';
+import { accountMatches, flashAccountKey } from './flash-account';
 import { claimExecutor, isExecutor, isMainWindow } from './main-window-commands';
 import { getApiBase } from './runtime';
 import { knownServerInfo, subscribeServerInfo } from './server-info-store';
@@ -50,7 +50,7 @@ import { stepPrice } from './utils/ticksize';
 
 const STORE_KEY = 'sj-pro-odd-spread-exec-v1';
 const TAG_KEY = 'sj-pro-odd-spread-tags-v1';
-/** 已結束紀錄最多保存幾筆（當日內）；執行中／結果不明的永不丟棄 */
+/** 已了結紀錄最多保存幾筆（當日內）；未了結的永不丟棄 */
 const MAX_TERMINAL = 50;
 
 /** 送單環境：API base＋模擬／正式 */
@@ -92,12 +92,22 @@ function taipeiDayStart(now: number): number {
     return tw - (tw % 86_400_000) - 8 * 3600_000;
 }
 
-/** 保存規則：執行中／結果不明全留；已結束的只留當日、最多 MAX_TERMINAL 筆 */
+/**
+ * 已完全了結：已結束、沒有保留中的回報、沒有結果不明的刪單，且兩腳已配對
+ * （或使用者已關閉、自行處理未配對部位）。只有了結的紀錄可以被丟棄。
+ */
+export function isSettled(r: SpreadExecRecord): boolean {
+    if (!isTerminalPhase(r.state.phase) || (r.held?.length ?? 0) > 0) return false;
+    if (r.state.slots.some(s => s.status === 'unknown' || s.status === 'sending' || s.status === 'working' || s.cancelState === 'pending' || s.cancelState === 'unknown')) return false;
+    return execSummary(r.state).unhedgedShares === 0 || !!r.dismissed;
+}
+
+/** 保存規則：未了結（執行中、結果不明、未配對未處理…）全留；了結的只留當日、最多 MAX_TERMINAL 筆 */
 export function pruneRecords(list: SpreadExecRecord[], now = Date.now()): SpreadExecRecord[] {
     const day = taipeiDayStart(now);
-    const terminal = list.filter(r => isTerminalPhase(r.state.phase) && r.startedAt >= day);
-    const keepTerminal = new Set(terminal.slice(-MAX_TERMINAL).map(r => r.id));
-    return list.filter(r => !isTerminalPhase(r.state.phase) || keepTerminal.has(r.id));
+    const settled = list.filter(r => isSettled(r) && r.startedAt >= day);
+    const keepSettled = new Set(settled.slice(-MAX_TERMINAL).map(r => r.id));
+    return list.filter(r => !isSettled(r) || keepSettled.has(r.id));
 }
 
 function persist() {
@@ -395,7 +405,12 @@ export function startOddSpreadService() {
         records = Array.isArray(parsed)
             ? pruneRecords(parsed.filter(r => r && r.tagBase && r.env).map(r => ({
                 ...r,
-                state: { ...r.state, slots: r.state.slots.map(s => (s.status === 'sending' ? { ...s, status: 'unknown' as const } : s)) },
+                // 送出中 → 結果不明；刪單等待中 → 刪單結果不明（仍在委託中可再取消）
+                state: { ...r.state, slots: r.state.slots.map(s => ({
+                    ...s,
+                    ...(s.status === 'sending' ? { status: 'unknown' as const } : {}),
+                    ...(s.cancelState === 'pending' ? { cancelState: 'unknown' as const } : {}),
+                })) },
             })))
             : [];
     } catch {
@@ -484,14 +499,95 @@ function subscribe(l: () => void) {
 
 const getRecords = () => records;
 
-/** 面板顯示：此商品／帳戶最近一筆未關閉（或重新需要處理）的執行 */
-export function useSpreadExecution(code: string, account: Account | undefined): SpreadExecRecord | undefined {
+/** 此商品／帳戶所有未關閉（或重新需要處理）的執行，新的在前 */
+export function executionsFor(all: SpreadExecRecord[], code: string, account: Account | undefined): SpreadExecRecord[] {
+    return all.filter(r => r.contract.code === code && accountMatches(r.account, account) && r.state.started && !r.dismissed).reverse();
+}
+
+/** 面板顯示：此商品／帳戶每一筆需要看／處理的執行（含較早的） */
+export function useSpreadExecutions(code: string, account: Account | undefined): SpreadExecRecord[] {
     const all = useSyncExternalStore(subscribe, getRecords);
-    for (let i = all.length - 1; i >= 0; i--) {
-        const r = all[i]!;
-        if (r.contract.code === code && accountMatches(r.account, account) && !r.dismissed) return r;
+    return useMemo(() => executionsFor(all, code, account), [all, code, account]);
+}
+
+// ---- 點價鎖（持久化；彈出視窗與主視窗共用本機儲存） ----
+
+export interface ClickLock {
+    id: string;
+    code: string;
+    /** flashAccountKey */
+    account: string;
+    text: string;
+    at: number;
+}
+
+const LOCK_KEY = 'sj-pro-odd-spread-click-locks-v1';
+let locks: ClickLock[] | null = null;
+const lockListeners = new Set<() => void>();
+
+function readLocks(): ClickLock[] {
+    try {
+        const v = JSON.parse(localStorage.getItem(LOCK_KEY) ?? '[]') as ClickLock[];
+        return Array.isArray(v) ? v.filter(l => l && typeof l.id === 'string') : [];
+    } catch {
+        return [];
     }
-    return undefined;
+}
+
+function getLocks(): ClickLock[] {
+    if (locks === null) {
+        locks = readLocks();
+        // 其他視窗改了鎖 → 重新讀
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('storage', e => {
+                if (e.key !== LOCK_KEY) return;
+                locks = readLocks();
+                for (const l of lockListeners) l();
+            });
+        }
+    }
+    return locks;
+}
+
+function setLocks(next: ClickLock[]) {
+    locks = next;
+    try {
+        localStorage.setItem(LOCK_KEY, JSON.stringify(next));
+    } catch {
+        // 本機儲存不可用：只在本次有效
+    }
+    for (const l of lockListeners) l();
+}
+
+/** 加上點價鎖（送出前就加，送出途中重新整理也不會遺失） */
+export function addClickLock(code: string, account: Account, text: string): string {
+    const id = `lk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    setLocks([...getLocks(), { id, code, account: flashAccountKey(account), text, at: Date.now() }]);
+    return id;
+}
+
+export function updateClickLock(id: string, text: string) {
+    setLocks(getLocks().map(l => (l.id === id ? { ...l, text } : l)));
+}
+
+export function clearClickLock(id: string) {
+    setLocks(getLocks().filter(l => l.id !== id));
+}
+
+function subscribeLocks(l: () => void) {
+    lockListeners.add(l);
+    return () => { lockListeners.delete(l); };
+}
+
+export function clickLocksFor(code: string, account: Account | undefined): ClickLock[] {
+    const key = account ? flashAccountKey(account) : '';
+    return getLocks().filter(l => l.code === code && l.account === key);
+}
+
+export function useClickLocks(code: string, account: Account | undefined): ClickLock[] {
+    const all = useSyncExternalStore(subscribeLocks, getLocks);
+    const key = account ? flashAccountKey(account) : '';
+    return useMemo(() => all.filter(l => l.code === code && l.account === key), [all, code, key]);
 }
 
 /** 已成交股數換算（面板顯示用） */
@@ -505,4 +601,6 @@ export function resetOddSpreadServiceForTest() {
     records = [];
     started = false;
     listeners.clear();
+    locks = null;
+    lockListeners.clear();
 }
