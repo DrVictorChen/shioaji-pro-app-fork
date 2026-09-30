@@ -162,21 +162,50 @@ describe('各工具的形狀', () => {
         expect(shapeOf('trend', [a, b], SIZE)).toEqual({ kind: 'line', a, b });
     });
 
-    it('射線起點固定，只往第二點的方向延伸出畫面', () => {
+    // 線端落在 pane 外擴 2px 的邊界上
+    const onBorder = (p: Point) =>
+        Math.abs(p.x + 2) < 1e-9 ||
+        Math.abs(p.x - SIZE.width - 2) < 1e-9 ||
+        Math.abs(p.y + 2) < 1e-9 ||
+        Math.abs(p.y - SIZE.height - 2) < 1e-9;
+
+    it('射線起點固定，只往第二點的方向延伸到畫面邊界', () => {
         const s = shapeOf('ray', [a, b], SIZE);
         expect(s!.kind).toBe('line');
         const line = s as { a: Point; b: Point };
         expect(line.a).toEqual(a); // 起點不動
-        expect(line.b.x).toBeGreaterThan(SIZE.width);
+        expect(line.b.x).toBeGreaterThan(b.x);
+        expect(onBorder(line.b)).toBe(true);
         // 仍在同一條直線上（斜率 0.5）
         expect((line.b.y - a.y) / (line.b.x - a.x)).toBeCloseTo(0.5, 10);
     });
 
-    it('延伸線兩端都伸出畫面，且反向端在起點的另一側', () => {
+    it('延伸線兩端都延伸到畫面邊界，且反向端在起點的另一側', () => {
         const s = shapeOf('extended', [a, b], SIZE) as { a: Point; b: Point };
         expect(s.a.x).toBeLessThan(0);
-        expect(s.b.x).toBeGreaterThan(SIZE.width);
+        expect(onBorder(s.a) && onBorder(s.b)).toBe(true);
+        expect(s.b.x).toBeGreaterThan(b.x);
         expect((s.b.y - s.a.y) / (s.b.x - s.a.x)).toBeCloseTo(0.5, 10);
+    });
+
+    it('控制點捲到很遠的畫面外，穿過畫面的射線仍畫得出來也點得到', () => {
+        // 起點在左邊 10 萬像素外、水平往右 — 固定長度延伸到不了可視區
+        const far: Point = { x: -100000, y: 200 };
+        const next: Point = { x: -99990, y: 200 };
+        const s = shapeOf('ray', [far, next], SIZE) as { a: Point; b: Point };
+        expect(s).not.toBeNull();
+        expect(s.a.x).toBeCloseTo(-2, 6);
+        expect(s.b.x).toBeCloseTo(SIZE.width + 2, 6);
+        expect(hitTest('ray', [far, next], SIZE, { x: 400, y: 202 })).toEqual({ kind: 'body' });
+        // 延伸線同理：兩個控制點都在右邊很遠處
+        const e = shapeOf('extended', [{ x: 90000, y: 100 }, { x: 90010, y: 100 }], SIZE);
+        expect(e).not.toBeNull();
+    });
+
+    it('射線往畫面外的方向延伸、與畫面不相交時不畫也點不到', () => {
+        const s = shapeOf('ray', [{ x: 900, y: 100 }, { x: 950, y: 100 }], SIZE);
+        expect(s).toBeNull();
+        expect(hitTest('ray', [{ x: 900, y: 100 }, { x: 950, y: 100 }], SIZE, { x: 700, y: 100 })).toBeNull();
     });
 
     it('兩點重合的退化情況不產生 NaN 座標', () => {

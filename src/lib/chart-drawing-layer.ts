@@ -64,7 +64,7 @@ const EMPTY_STATE: DrawingLayerState = {
 type DrawTarget = Parameters<IPrimitivePaneRenderer['draw']>[0];
 
 function withAlpha(hex: string, alpha: number): string {
-    const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+    const m = typeof hex === 'string' ? /^#([0-9a-f]{6})$/i.exec(hex.trim()) : null;
     if (!m) return hex;
     const n = parseInt(m[1]!, 16);
     return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
@@ -222,6 +222,10 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
     private readonly _views: DrawingPaneView[];
     private _axisViews: DrawingAxisView[] = [];
     private _axisKey = '';
+    // 棒距估計要排序全部 K 棒間距 — 依時間陣列（資料變更才換新陣列）
+    // 快取，滑鼠事件與每幀重繪都不重算
+    private _barTimes: number[] | null = null;
+    private _barSeconds = 60;
 
     // getTimes：目前圖上 K 棒的時間陣列（遞增）。切換週期／載入更舊的
     // 歷史都會換一份，所以用 callback 每次重讀，不快照。
@@ -300,6 +304,14 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
         this.paneSize = size;
     }
 
+    barSecondsOf(times: number[]): number {
+        if (times !== this._barTimes) {
+            this._barTimes = times;
+            this._barSeconds = estimateBarSeconds(times);
+        }
+        return this._barSeconds;
+    }
+
     // 把滑鼠事件換算成 pane 內座標；pane 畫布尚未建立時回 null
     pointOf(ev: { clientX: number; clientY: number }): Point | null {
         const canvas = this._canvas;
@@ -319,7 +331,7 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
         if (!series || !chart) return null;
         const timeScale = chart.timeScale();
         const times = this._getTimes();
-        const bar = estimateBarSeconds(times);
+        const bar = this.barSecondsOf(times);
         // 一幀內時間軸不會動 — 量一次給下面兩個方向共用
         const axis = measureXAxis((logical) => timeScale.logicalToCoordinate(logical as Logical));
         return {

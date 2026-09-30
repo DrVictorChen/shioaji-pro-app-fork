@@ -35,7 +35,8 @@ import {
     X,
 } from 'lucide-react';
 import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { useChartDrawings } from '../hooks/use-chart-drawings';
+import { orderLineMayTakePointer, useChartDrawings } from '../hooks/use-chart-drawings';
+import { takeDrawingSaveErrorNotice, useDrawingsSaveFailed } from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
 import {
     colorWithOpacity,
@@ -71,7 +72,7 @@ import type { IndicatorPoint } from '../lib/indicators';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
 import { canUpdateOrderPrice } from '../lib/odd-lot';
-import { getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
+import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
 import {
     chartModeHint,
@@ -1269,6 +1270,10 @@ export function CandleChart({
         };
     }, [orderKey, themeKey, contract.code]);
 
+    // 畫圖工具武裝中（下方 useChartDrawings 每次 render 更新）。委託線的
+    // 拖曳 effect 宣告在畫圖 hook 之前，靠這個 ref 讀最新狀態
+    const drawingArmedRef = useRef(false);
+
     // drag an order line to modify its price
     useEffect(() => {
         const host = hostRef.current;
@@ -1300,14 +1305,27 @@ export function CandleChart({
 
         const hover = (e: MouseEvent) => {
             if (dragging) return;
+            // 武裝畫圖工具時委託線不接手，游標交給畫圖（十字）
+            if (drawingArmedRef.current) {
+                if (host.style.cursor === 'ns-resize') host.style.cursor = '';
+                return;
+            }
             host.style.cursor = findNear(yOf(e)) ? 'ns-resize' : '';
         };
 
         const down = (e: MouseEvent) => {
             if (e.button !== 0) return;
-            // 別的 handler（畫圖物件）已經接手這一下 — 同一下不能同時拖
-            // 畫圖又送出改價
-            if (e.defaultPrevented) return;
+            // 「委託線優先」只在瀏覽模式：武裝畫圖工具時這一下屬於畫圖，
+            // 在委託價附近畫線不能變成改價；別的 handler 已經接手的一下
+            // 也不能同時拖畫圖又送出改價
+            if (
+                !orderLineMayTakePointer({
+                    drawingArmed: drawingArmedRef.current,
+                    defaultPrevented: e.defaultPrevented,
+                })
+            ) {
+                return;
+            }
             const hit = findNear(yOf(e));
             if (!hit) return;
             e.preventDefault();
@@ -1403,7 +1421,21 @@ export function CandleChart({
         getTimes: () => barTimesRef.current,
         tradeArmed: mode !== 'observe',
         onEnterDrawingMode: () => setMode('observe'),
+        themeMode: baseMode(themeSettings),
     });
+    drawingArmedRef.current = drawings.tool !== null;
+
+    // 畫圖存不進 localStorage（配額滿）— 畫面上的物件還在，但關掉就沒了。
+    // 多張圖同時訂閱，notice 只由第一張拿到的圖發出
+    const drawingsSaveFailed = useDrawingsSaveFailed();
+    useEffect(() => {
+        if (!drawingsSaveFailed || !takeDrawingSaveErrorNotice()) return;
+        notify({
+            kind: 'err',
+            title: '畫圖未能儲存',
+            body: '瀏覽器儲存空間已滿，新的畫圖只保留到關閉視窗為止。請刪除部分畫圖後再試。',
+        });
+    }, [drawingsSaveFailed]);
 
     // draw trigger price lines on the candle series
     useEffect(() => {

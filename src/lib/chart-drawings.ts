@@ -71,7 +71,7 @@ export const DRAWING_PALETTE = [
 // （NTSC 灰階加權、門檻 160），我們的標籤才會跟現價、委託單價格線那些
 // 內建標籤長得一模一樣；自己另訂一套門檻會出現同色系標籤字色不同的怪畫面。
 export function contrastTextColor(hex: string): string {
-    const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+    const m = typeof hex === 'string' ? /^#([0-9a-f]{6})$/i.exec(hex.trim()) : null;
     if (!m) return '#ffffff';
     const n = parseInt(m[1]!, 16);
     const gray = 0.199 * ((n >> 16) & 255) + 0.687 * ((n >> 8) & 255) + 0.114 * (n & 255);
@@ -82,8 +82,35 @@ export const DEFAULT_DRAWING_STYLE: DrawingStyle = {
     color: DRAWING_PALETTE[0],
     width: 2,
     dash: 'solid',
-    fillOpacity: 0.12,
+    fillOpacity: 0.08,
 };
+
+export type DrawingThemeMode = 'dark' | 'light';
+
+// 各工具的預設色（使用者沒挑過顏色時）。刻意避開圖上已有語意的顏色：
+// 委託線的紅／綠（買賣）、停損觸價線與 MA 的琥珀 #e0a43c、警示線的灰
+// #8b94a7、MACD／KD 的藍 #3d8bff。水平線用偏紅的橘（讀價位用，要醒目），
+// 斜線類用紫，方框用中性灰描邊＋淡填色（框的是區域，不該搶 K 棒）。
+// 深／淺主題各一組：淺色底上同一個色相要更深才看得清楚。
+export const TOOL_DEFAULT_COLORS: Record<DrawingThemeMode, Record<DrawingTool, string>> = {
+    dark: {
+        horizontal: '#ff7a2f',
+        trend: '#9b87f5',
+        ray: '#9b87f5',
+        extended: '#9b87f5',
+        box: '#9aa3b5',
+    },
+    light: {
+        horizontal: '#e8590c',
+        trend: '#6741d9',
+        ray: '#6741d9',
+        extended: '#6741d9',
+        box: '#6b7280',
+    },
+};
+
+// 新物件除了顏色以外的預設（線寬、線型、方框填色）
+export type DrawingBaseStyle = Omit<DrawingStyle, 'color'>;
 
 export interface DrawingSettings {
     // 期貨連續月（TXFR1）與月份合約（TXFI6）共用同一份畫圖。
@@ -91,13 +118,29 @@ export interface DrawingSettings {
     // 關掉則每個合約代碼各自獨立（TradingView 式）。
     shareContinuousMonth: boolean;
     // 下一個新物件的樣式（改樣式時記住，跟 TradingView 一樣）
-    defaultStyle: DrawingStyle;
+    defaultStyle: DrawingBaseStyle;
+    // 使用者挑過的顏色，依工具記住；沒挑過的工具用 TOOL_DEFAULT_COLORS
+    toolColors: Partial<Record<DrawingTool, string>>;
 }
 
 const DEFAULT_SETTINGS: DrawingSettings = {
     shareContinuousMonth: true,
-    defaultStyle: DEFAULT_DRAWING_STYLE,
+    defaultStyle: {
+        width: DEFAULT_DRAWING_STYLE.width,
+        dash: DEFAULT_DRAWING_STYLE.dash,
+        fillOpacity: DEFAULT_DRAWING_STYLE.fillOpacity,
+    },
+    toolColors: {},
 };
+
+// 某個工具的下一個新物件樣式：使用者挑過的顏色優先，否則依主題取預設色
+export function defaultStyleFor(
+    s: DrawingSettings,
+    tool: DrawingTool,
+    mode: DrawingThemeMode,
+): DrawingStyle {
+    return { ...s.defaultStyle, color: s.toolColors[tool] ?? TOOL_DEFAULT_COLORS[mode][tool] };
+}
 
 const STORAGE_KEY = 'sj-pro-chart-drawings';
 const SETTINGS_KEY = 'sj-pro-chart-drawing-settings';
@@ -119,6 +162,93 @@ export function drawingSymbolKey(
     return m ? m[1]! : code;
 }
 
+// ── 驗證 ─────────────────────────────────────────────────────────────
+//
+// 舊版本或手改過的 localStorage 都可能餵進形狀不對的資料 — 投影時 NaN
+// 會整張圖畫不出來、非字串的顏色會讓價格軸標籤 .trim() 拋錯，所以每個
+// 欄位都在入口驗過；看不懂的樣式欄位退回預設，而不是整筆丟掉。
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+export function isDrawingColor(v: unknown): v is string {
+    return typeof v === 'string' && HEX_COLOR.test(v);
+}
+
+function sanitizeBaseStyle(v: unknown, fallback: DrawingBaseStyle): DrawingBaseStyle {
+    const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+    const width =
+        typeof o.width === 'number' && Number.isFinite(o.width)
+            ? Math.min(4, Math.max(1, Math.round(o.width)))
+            : fallback.width;
+    const dash = o.dash === 'solid' || o.dash === 'dashed' ? o.dash : fallback.dash;
+    const fillOpacity =
+        typeof o.fillOpacity === 'number' && Number.isFinite(o.fillOpacity)
+            ? Math.min(1, Math.max(0, o.fillOpacity))
+            : fallback.fillOpacity;
+    return { width, dash, fillOpacity };
+}
+
+export function sanitizeStyle(v: unknown, fallbackColor: string): DrawingStyle {
+    const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+    return {
+        color: isDrawingColor(o.color) ? o.color : fallbackColor,
+        ...sanitizeBaseStyle(o, DEFAULT_SETTINGS.defaultStyle),
+    };
+}
+
+// 形狀不對（工具、控制點）就整筆丟掉；樣式與旗標則修成合法值
+export function sanitizeDrawing(v: unknown): Drawing | null {
+    if (!v || typeof v !== 'object') return null;
+    const d = v as Record<string, unknown>;
+    if (typeof d.id !== 'string' || !d.id || typeof d.tool !== 'string') return null;
+    const tool = DRAWING_TOOLS.find((t) => t.tool === d.tool)?.tool;
+    if (!tool) return null;
+    if (!Array.isArray(d.anchors) || d.anchors.length !== anchorCount(tool)) return null;
+    const anchors: DrawingAnchor[] = [];
+    for (const a of d.anchors as unknown[]) {
+        const o = (a && typeof a === 'object' ? a : null) as Record<string, unknown> | null;
+        if (
+            !o ||
+            typeof o.time !== 'number' ||
+            !Number.isFinite(o.time) ||
+            typeof o.price !== 'number' ||
+            !Number.isFinite(o.price)
+        ) {
+            return null;
+        }
+        anchors.push({ time: o.time, price: o.price });
+    }
+    return {
+        id: d.id,
+        tool,
+        anchors,
+        style: sanitizeStyle(d.style, TOOL_DEFAULT_COLORS.dark[tool]),
+        locked: d.locked === true,
+        hidden: d.hidden === true,
+        createdAt: typeof d.createdAt === 'number' && Number.isFinite(d.createdAt) ? d.createdAt : 0,
+    };
+}
+
+export function sanitizeSettings(v: unknown): DrawingSettings {
+    const o = (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
+    const toolColors: Partial<Record<DrawingTool, string>> = {};
+    const rawColors = o.toolColors;
+    if (rawColors && typeof rawColors === 'object') {
+        for (const { tool } of DRAWING_TOOLS) {
+            const c = (rawColors as Record<string, unknown>)[tool];
+            if (isDrawingColor(c)) toolColors[tool] = c;
+        }
+    }
+    return {
+        shareContinuousMonth:
+            typeof o.shareContinuousMonth === 'boolean'
+                ? o.shareContinuousMonth
+                : DEFAULT_SETTINGS.shareContinuousMonth,
+        defaultStyle: sanitizeBaseStyle(o.defaultStyle, DEFAULT_SETTINGS.defaultStyle),
+        toolColors,
+    };
+}
+
 // ── 儲存 ─────────────────────────────────────────────────────────────
 
 type Store = Record<string, Drawing[]>;
@@ -131,10 +261,13 @@ function loadStore(): Store {
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
         const out: Store = {};
         for (const [key, list] of Object.entries(parsed as Record<string, unknown>)) {
-            if (Array.isArray(list)) {
-                const clean = list.filter(isDrawing);
-                if (clean.length) out[key] = clean;
+            if (!Array.isArray(list)) continue;
+            const clean: Drawing[] = [];
+            for (const item of list) {
+                const d = sanitizeDrawing(item);
+                if (d) clean.push(d);
             }
+            if (clean.length) out[key] = clean;
         }
         return out;
     } catch {
@@ -142,41 +275,11 @@ function loadStore(): Store {
     }
 }
 
-// 舊版本或手改過的 localStorage 都可能餵進形狀不對的物件 — 投影時
-// NaN 會整張圖畫不出來，所以在入口就擋掉
-function isDrawing(v: unknown): v is Drawing {
-    if (!v || typeof v !== 'object') return false;
-    const d = v as Partial<Drawing>;
-    if (typeof d.id !== 'string' || typeof d.tool !== 'string') return false;
-    if (!DRAWING_TOOLS.some((t) => t.tool === d.tool)) return false;
-    if (!Array.isArray(d.anchors) || d.anchors.length !== anchorCount(d.tool)) return false;
-    if (
-        !d.anchors.every(
-            (a) =>
-                a &&
-                typeof a.time === 'number' &&
-                Number.isFinite(a.time) &&
-                typeof a.price === 'number' &&
-                Number.isFinite(a.price),
-        )
-    ) {
-        return false;
-    }
-    return !!d.style && typeof d.style.color === 'string';
-}
-
 function loadSettings(): DrawingSettings {
     try {
         const raw = localStorage.getItem(SETTINGS_KEY);
         if (!raw) return DEFAULT_SETTINGS;
-        const s = JSON.parse(raw) as Partial<DrawingSettings>;
-        return {
-            shareContinuousMonth:
-                typeof s.shareContinuousMonth === 'boolean'
-                    ? s.shareContinuousMonth
-                    : DEFAULT_SETTINGS.shareContinuousMonth,
-            defaultStyle: { ...DEFAULT_DRAWING_STYLE, ...(s.defaultStyle ?? {}) },
-        };
+        return sanitizeSettings(JSON.parse(raw));
     } catch {
         return DEFAULT_SETTINGS;
     }
@@ -190,15 +293,60 @@ function emit() {
     for (const l of listeners) l();
 }
 
-// cross-window sync — popout 與主視窗共用 localStorage 但不共用 module
-// state；沒有這段，在主視窗畫的線不會出現在已開啟的彈出視窗
+// ── 待寫入的改動（依物件 id）──────────────────────────────────────────
+//
+// popout 是另一個 window，module state 不共用，靠同一個 localStorage 項目
+// 與 storage 事件同步。本視窗的改動先記成「每個物件 id 的最新版本」，
+// 刪除記成墓碑（null）。寫出時一律「讀最新的 localStorage → 疊上本視窗
+// 的改動 → 寫回」，收到別的視窗寫入時也是「對方版本 → 疊上本視窗還沒
+// 寫出去的改動」。兩個視窗在節流窗內各改同一商品的不同物件，兩邊的
+// 改動都會留下；只有同一個物件兩邊都改時，較晚寫出的那一方勝出。
+const pending = new Map<string, Map<string, Drawing | null>>();
+
+function record(key: string, id: string, d: Drawing | null) {
+    let ops = pending.get(key);
+    if (!ops) {
+        ops = new Map();
+        pending.set(key, ops);
+    }
+    ops.set(id, d);
+}
+
+function applyPending(base: Store): Store {
+    if (!pending.size) return base;
+    const out: Store = { ...base };
+    for (const [key, ops] of pending) {
+        const list = [...(out[key] ?? [])];
+        for (const [id, d] of ops) {
+            const i = list.findIndex((x) => x.id === id);
+            if (d === null) {
+                if (i >= 0) list.splice(i, 1);
+            } else if (i >= 0) {
+                list[i] = d;
+            } else {
+                list.push(d);
+            }
+        }
+        if (list.length) out[key] = list;
+        else delete out[key];
+    }
+    return out;
+}
+
+// 儲存失敗（多半是配額滿）— 畫面上的物件還在，但關掉就沒了，要讓
+// 使用者知道。saveError 給 UI 顯示；notice 每一段連續失敗只發一次。
+let saveError = false;
+let saveErrorNoticePending = false;
+
+// cross-window sync — 沒有這段，在主視窗畫的線不會出現在已開啟的彈出視窗
 if (typeof window !== 'undefined') {
     window.addEventListener('storage', (e) => {
         if (e.key === STORAGE_KEY) {
             reloadDrawingsFromStorage();
         } else if (e.key === SETTINGS_KEY) {
-            settings = loadSettings();
-            emit();
+            // 本視窗還有沒寫出去的設定就保留自己的，稍後的寫入會覆蓋
+            if (settingsTimer !== null) return;
+            reloadDrawingSettingsFromStorage();
         }
     });
 }
@@ -208,54 +356,87 @@ if (typeof window !== 'undefined') {
 // 一次其他視窗就要重新解析整份 JSON。
 const WRITE_THROTTLE_MS = 300;
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
-// 節流窗內本視窗改過、還沒寫出去的商品鍵
-const dirtyKeys = new Set<string>();
+let settingsTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function flushDrawingWrites() {
-    if (writeTimer === null) return;
-    clearTimeout(writeTimer);
-    writeTimer = null;
-    dirtyKeys.clear();
+    if (writeTimer !== null) {
+        clearTimeout(writeTimer);
+        writeTimer = null;
+    }
+    if (!pending.size) return;
+    // 讀最新版本再疊上本視窗的改動 — 別的視窗剛寫入、storage 事件還沒
+    // 送到這裡時，也不會把對方的物件蓋掉
+    const next = applyPending(loadStore());
     try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     } catch {
-        // 配額滿或隱私模式 — 本次 session 仍然可用，只是不落地
+        // 配額滿或隱私模式：改動留在 pending（跨視窗同步不會把它們蓋掉，
+        // 下一次改動會再試著寫出），並讓 UI 提示使用者
+        if (!saveError) {
+            saveError = true;
+            saveErrorNoticePending = true;
+            emit();
+        }
+        return;
+    }
+    pending.clear();
+    if (saveError) {
+        saveError = false;
+        emit();
+    }
+}
+
+export function flushDrawingSettings() {
+    if (settingsTimer === null) return;
+    clearTimeout(settingsTimer);
+    settingsTimer = null;
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch {
+        // 設定寫不進去只影響下次開啟的預設樣式，不另外提示
     }
 }
 
 if (typeof window !== 'undefined') {
     // 還在節流窗內就關視窗 — 最後一筆不能丟
-    window.addEventListener('pagehide', flushDrawingWrites);
+    window.addEventListener('pagehide', () => {
+        flushDrawingWrites();
+        flushDrawingSettings();
+    });
 }
 
-function persist(key: string) {
-    dirtyKeys.add(key);
+function persist() {
     writeTimer ??= setTimeout(flushDrawingWrites, WRITE_THROTTLE_MS);
     emit();
 }
 
-// 別的視窗寫入了 — 以它的版本為準，但本視窗還沒寫出去的商品鍵保留自己
-// 的版本；整份換掉的話，節流窗內的改動會被蓋掉，稍後的寫入再把別的視窗
-// 的版本寫回去，這一筆就兩邊都消失了。
-// ponytail: 以商品鍵為單位合併，兩個視窗在 300ms 內改同一商品時本視窗勝出；
-// 真的需要再細到物件 id。
+// 別的視窗寫入了 — 以它的版本為準，再疊上本視窗還沒寫出去的改動
 export function reloadDrawingsFromStorage() {
-    const incoming = loadStore();
-    for (const key of dirtyKeys) {
-        const mine = store[key];
-        if (mine?.length) incoming[key] = mine;
-        else delete incoming[key];
-    }
-    store = incoming;
+    store = applyPending(loadStore());
     emit();
 }
 
+export function reloadDrawingSettingsFromStorage() {
+    settings = loadSettings();
+    emit();
+}
+
+// 儲存是否失敗中（UI 顯示警示）
+export function drawingsSaveFailed(): boolean {
+    return saveError;
+}
+
+// 本段連續失敗還沒提示過就回 true（只回一次）— 多張圖同時訂閱時只會
+// 有一張圖發出通知
+export function takeDrawingSaveErrorNotice(): boolean {
+    if (!saveErrorNoticePending) return false;
+    saveErrorNoticePending = false;
+    return true;
+}
+
+// 設定變動（改預設樣式、拉填色滑桿）同樣節流落地，畫面即時更新
 function persistSettings() {
-    try {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    } catch {
-        // 同上
-    }
+    settingsTimer ??= setTimeout(flushDrawingSettings, WRITE_THROTTLE_MS);
     emit();
 }
 
@@ -297,6 +478,10 @@ export function useDrawingSettings(): DrawingSettings {
     );
 }
 
+export function useDrawingsSaveFailed(): boolean {
+    return useSyncExternalStore(subscribe, drawingsSaveFailed, () => false);
+}
+
 function newId(): string {
     return `dw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -323,24 +508,38 @@ export function addDrawing(
         createdAt: Date.now(),
     };
     store = { ...store, [key]: [...(store[key] ?? []), drawing] };
-    persist(key);
+    record(key, drawing.id, drawing);
+    persist();
     return drawing;
+}
+
+// 把 key 的清單換成 next，並把有變動的物件記進待寫入（依 id）
+function commit(key: string, next: Drawing[]) {
+    const before = store[key] ?? EMPTY;
+    const ids = new Set(next.map((d) => d.id));
+    for (const d of before) if (!ids.has(d.id)) record(key, d.id, null);
+    const prev = new Map(before.map((d) => [d.id, d]));
+    for (const d of next) if (prev.get(d.id) !== d) record(key, d.id, d);
+    store = { ...store, [key]: next };
+    persist();
 }
 
 export function updateDrawing(key: string, id: string, patch: Partial<Omit<Drawing, 'id'>>) {
     const list = store[key];
-    if (!list) return;
-    const next = list.map((d) => (d.id === id ? { ...d, ...patch } : d));
-    store = { ...store, [key]: next };
-    persist(key);
+    if (!list?.some((d) => d.id === id)) return;
+    commit(
+        key,
+        list.map((d) => (d.id === id ? { ...d, ...patch } : d)),
+    );
 }
 
 export function removeDrawing(key: string, id: string) {
     const list = store[key];
-    if (!list) return;
-    const next = list.filter((d) => d.id !== id);
-    store = { ...store, [key]: next };
-    persist(key);
+    if (!list?.some((d) => d.id === id)) return;
+    commit(
+        key,
+        list.filter((d) => d.id !== id),
+    );
 }
 
 // 複製：偏移交給呼叫端決定。用畫面像素位移再換回時間／價格，水平線這種
@@ -359,24 +558,31 @@ export function duplicateDrawing(
 export function showAllDrawings(key: string) {
     const list = store[key];
     if (!list?.some((d) => d.hidden)) return;
-    store = { ...store, [key]: list.map((d) => (d.hidden ? { ...d, hidden: false } : d)) };
-    persist(key);
+    commit(
+        key,
+        list.map((d) => (d.hidden ? { ...d, hidden: false } : d)),
+    );
 }
 
 // 一鍵清除目前商品所有畫圖 — 鎖定的物件保留（鎖定的用意就是防誤刪）
 export function clearDrawings(key: string) {
     const list = store[key];
     if (!list?.length) return;
-    const kept = list.filter((d) => d.locked);
-    store = { ...store, [key]: kept };
-    persist(key);
+    commit(
+        key,
+        list.filter((d) => d.locked),
+    );
 }
 
 // 測試用 — 清乾淨 module state 與 localStorage
 export function __resetDrawingsForTest() {
     if (writeTimer !== null) clearTimeout(writeTimer);
+    if (settingsTimer !== null) clearTimeout(settingsTimer);
     writeTimer = null;
-    dirtyKeys.clear();
+    settingsTimer = null;
+    pending.clear();
+    saveError = false;
+    saveErrorNoticePending = false;
     store = {};
     settings = DEFAULT_SETTINGS;
     try {

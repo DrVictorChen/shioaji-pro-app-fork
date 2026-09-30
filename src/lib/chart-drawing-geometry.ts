@@ -118,19 +118,55 @@ export type Shape =
     | { kind: 'line'; a: Point; b: Point }
     | { kind: 'rect'; left: number; top: number; right: number; bottom: number };
 
-// 射線／延伸線往畫面外延伸的長度：夠長到一定穿出 pane，剩下的交給
-// canvas 自己裁切（比逐邊做線段裁切少掉一堆退化情況）
-function extentOf(size: PaneSize): number {
-    return (Math.abs(size.width) + Math.abs(size.height) + 1) * 4;
-}
-
-// 從 from 沿著 origin→toward 的方向再走 length 像素
-function extend(from: Point, origin: Point, toward: Point, length: number): Point {
+// 射線／延伸線依畫面邊界裁切（Liang–Barsky）。直線參數式
+// P(t) = origin + t·(toward − origin)，t 的範圍 [tMin, tMax]（射線 [0, ∞)，
+// 延伸線 (−∞, ∞)），與 pane 矩形（外擴 margin，讓線端穿出邊界）求交。
+// 不用「固定長度往外延伸」：控制點捲到很遠的畫面外時，固定長度到不了
+// 可視區，本該穿過畫面的線就消失、也點不到。
+// 與畫面不相交時回 null（整條線都在畫面外）。
+export function clipLine(
+    origin: Point,
+    toward: Point,
+    size: PaneSize,
+    tMin: number,
+    tMax: number,
+    margin = 2,
+): { a: Point; b: Point } | null {
     const dx = toward.x - origin.x;
     const dy = toward.y - origin.y;
-    const len = Math.hypot(dx, dy);
-    if (len === 0) return { ...from }; // 兩點重合 — 沒有方向可延伸
-    return { x: from.x + (dx / len) * length, y: from.y + (dy / len) * length };
+    if (dx === 0 && dy === 0) return null; // 兩點重合 — 沒有方向
+    let t0 = tMin;
+    let t1 = tMax;
+    const left = -margin;
+    const top = -margin;
+    const right = Math.max(0, size.width) + margin;
+    const bottom = Math.max(0, size.height) + margin;
+    // p·t <= q 的四個半平面
+    const edges: [number, number][] = [
+        [-dx, origin.x - left],
+        [dx, right - origin.x],
+        [-dy, origin.y - top],
+        [dy, bottom - origin.y],
+    ];
+    for (const [p, q] of edges) {
+        if (p === 0) {
+            if (q < 0) return null; // 平行且在這條邊外側
+            continue;
+        }
+        const r = q / p;
+        if (p < 0) {
+            if (r > t1) return null;
+            if (r > t0) t0 = r;
+        } else {
+            if (r < t0) return null;
+            if (r < t1) t1 = r;
+        }
+    }
+    if (!Number.isFinite(t0) || !Number.isFinite(t1) || t0 > t1) return null;
+    return {
+        a: { x: origin.x + t0 * dx, y: origin.y + t0 * dy },
+        b: { x: origin.x + t1 * dx, y: origin.y + t1 * dy },
+    };
 }
 
 // 把控制點換成實際要畫的形狀。pts 已是畫面座標。
@@ -145,13 +181,17 @@ export function shapeOf(tool: DrawingTool, pts: Point[], size: PaneSize): Shape 
     switch (tool) {
         case 'trend':
             return { kind: 'line', a, b };
-        case 'ray':
-            // 起點固定，經第二點往外無限延伸
-            return { kind: 'line', a, b: extend(b, a, b, extentOf(size)) };
+        case 'ray': {
+            // 起點固定，經第二點往外無限延伸；兩點重合時沒有方向，退回一點
+            if (a.x === b.x && a.y === b.y) return { kind: 'line', a, b };
+            const seg = clipLine(a, b, size, 0, Infinity);
+            return seg ? { kind: 'line', ...seg } : null;
+        }
         case 'extended': {
-            const len = extentOf(size);
-            // 兩端各自往外延伸 — 斜率由兩點決定，向左右無限延伸
-            return { kind: 'line', a: extend(a, b, a, len), b: extend(b, a, b, len) };
+            // 斜率由兩點決定，向左右無限延伸
+            if (a.x === b.x && a.y === b.y) return { kind: 'line', a, b };
+            const seg = clipLine(a, b, size, -Infinity, Infinity);
+            return seg ? { kind: 'line', ...seg } : null;
         }
         case 'box':
             return {

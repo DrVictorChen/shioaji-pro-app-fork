@@ -200,6 +200,9 @@ export const chartHost = style({
     minHeight: 0,
     minWidth: 0,
     position: 'relative',
+    // 點圖表時取得鍵盤焦點（畫圖的 Delete 只在焦點在圖上時作用），
+    // 不畫焦點框
+    outline: 'none',
 });
 
 // ---- indicator legend（TradingView 式，圖上左上角，一列一個實例）----

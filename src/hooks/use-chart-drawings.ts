@@ -9,6 +9,7 @@ import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 import {
     addDrawing,
     clearDrawings,
+    defaultStyleFor,
     drawingSymbolKey,
     duplicateDrawing,
     removeDrawing,
@@ -20,6 +21,9 @@ import {
     type Drawing,
     type DrawingAnchor,
     type DrawingStyle,
+    DRAWING_TOOLS,
+    type DrawingSettings,
+    type DrawingThemeMode,
     type DrawingTool,
 } from '../lib/chart-drawings';
 import {
@@ -28,6 +32,7 @@ import {
     unprojectPoint,
     type DragPlan,
     type Point,
+    type Projector,
 } from '../lib/chart-drawing-geometry';
 import { DrawingLayer, type DrawingDraft } from '../lib/chart-drawing-layer';
 import { escStackDepth } from './use-esc-close';
@@ -50,6 +55,25 @@ function claimKeyboard(token: object) {
     for (const l of keyOwnerListeners) l();
 }
 
+// 委託線（改價拖曳）可不可以接手這一下滑鼠。只有瀏覽模式才讓委託線
+// 優先：武裝畫圖工具時，使用者要的是在那個價位畫線，按住稍微移動就
+// 送出改價會直接動到真實委託。
+export function orderLineMayTakePointer(opts: {
+    drawingArmed: boolean;
+    defaultPrevented: boolean;
+}): boolean {
+    return !opts.drawingArmed && !opts.defaultPrevented;
+}
+
+// 鍵盤焦點是否在這張圖（圖表本體或它的左側工具列）上。Delete／Backspace
+// 只在這時作用 — 「最後操作的圖表」不夠：選取物件後點了別的面板的按鈕，
+// 按 Delete 不該刪掉圖上的物件。
+export function chartHasFocus(scope: { contains(n: Node | null): boolean } | null): boolean {
+    if (!scope || typeof document === 'undefined') return false;
+    const active = document.activeElement;
+    return !!active && scope.contains(active);
+}
+
 export interface ChartDrawingsApi {
     tool: DrawingTool | null;
     setTool: (t: DrawingTool | null) => void;
@@ -69,6 +93,8 @@ export interface ChartDrawingsApi {
     symbolKey: string;
     shareContinuousMonth: boolean;
     setShareContinuousMonth: (v: boolean) => void;
+    // 點工具列時把鍵盤焦點交回圖表（WebKit 點按鈕不會給它焦點）
+    focusChart: () => void;
 }
 
 export function useChartDrawings(opts: {
@@ -83,8 +109,11 @@ export function useChartDrawings(opts: {
     // 使用者動了左側工具列 = 要回畫圖／瀏覽模式，請頂端解除交易模式。
     // 兩種模式一次只能有一種生效。
     onEnterDrawingMode: () => void;
+    // 新物件的預設色依主題挑（深色底與淺色底同一色相的深淺不同）
+    themeMode?: DrawingThemeMode;
 }): ChartDrawingsApi {
     const { contract, hostRef, chartRef, seriesRef, getTimes, tradeArmed } = opts;
+    const themeMode = opts.themeMode ?? 'dark';
 
     const settings = useDrawingSettings();
     const symbolKey = drawingSymbolKey(contract, settings.shareContinuousMonth);
@@ -99,8 +128,8 @@ export function useChartDrawings(opts: {
     const layerRef = useRef<DrawingLayer | null>(null);
 
     // 事件處理器裡要讀的最新值
-    const stateRef = useRef({ tool, selectedId, drawings, symbolKey, settings, tradeArmed, contract });
-    stateRef.current = { tool, selectedId, drawings, symbolKey, settings, tradeArmed, contract };
+    const stateRef = useRef({ tool, selectedId, drawings, symbolKey, settings, tradeArmed, contract, themeMode });
+    stateRef.current = { tool, selectedId, drawings, symbolKey, settings, tradeArmed, contract, themeMode };
 
     const getTimesRef = useRef(getTimes);
     getTimesRef.current = getTimes;
@@ -139,12 +168,15 @@ export function useChartDrawings(opts: {
     // 資料／選取變動時重繪；draft 變動時由事件處理器自己呼叫 pushState
     useEffect(pushState, [pushState, drawings, selectedId]);
 
-    // 切換商品時清掉選取與繪製中的物件 — 殘留的 draft 會被畫到新商品上
+    // 切換商品時清掉選取與繪製中的物件 — 殘留的 draft 會被畫到新商品上。
+    // 立刻重繪：選取／工具本來就是 null 時 state 不變，不會再觸發上面的
+    // 重繪 effect，畫到一半的草稿就會留在新商品的圖上
     useEffect(() => {
         draftRef.current = null;
         setSelectedId(null);
         setTool(null);
-    }, [symbolKey]);
+        pushState();
+    }, [symbolKey, pushState]);
 
     // ── 滑鼠 ─────────────────────────────────────────────────────────
     useEffect(() => {
@@ -158,25 +190,47 @@ export function useChartDrawings(opts: {
         const snapPrice = (which: DrawingTool, price: number) =>
             which === 'horizontal' ? roundToTick(stateRef.current.contract, price) : price;
 
-        const anchorAt = (pt: Point, t: DrawingTool): DrawingAnchor | null => {
-            const layer = layerOf();
-            const projector = layer?.projector();
-            if (!projector) return null;
+        // 每個事件只建一次 projector（呼叫端傳進來），不在每個小函式裡重建
+        const anchorAt = (projector: Projector, pt: Point, t: DrawingTool): DrawingAnchor | null => {
             const anchor = unprojectPoint(projector, pt);
             if (!anchor) return null;
             return { time: anchor.time, price: snapPrice(t, anchor.price) };
         };
 
-        const pick = (pt: Point) => {
+        const pick = (projector: Projector, pt: Point) => {
             const layer = layerOf();
-            const projector = layer?.projector();
-            if (!layer || !projector) return null;
+            if (!layer) return null;
             return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt);
         };
 
         let drag: { id: string; tool: DrawingTool; plan: DragPlan } | null = null;
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
+        // 拖曳中的 mousemove 合併到下一個 animation frame 才寫進 store —
+        // 每寫一次所有訂閱的圖都要重繪，滑鼠事件頻率遠高於畫面更新率
+        let pendingPt: Point | null = null;
+        let frame: number | null = null;
+        const raf =
+            typeof requestAnimationFrame === 'function'
+                ? requestAnimationFrame
+                : (cb: FrameRequestCallback) => (cb(0), 0);
+        const cancelRaf = (id: number) => {
+            if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
+        };
+
+        // 只收回自己設的游標（委託線的 ns-resize 由它自己管）
+        const resetHoverCursor = () => {
+            const c = host.style.cursor;
+            if (c === 'grab' || c === 'move' || c === 'pointer' || c === 'crosshair') {
+                host.style.cursor = '';
+            }
+        };
+
+        const focusHost = () => {
+            if (typeof host.focus !== 'function') return;
+            if (host.tabIndex < 0 && !host.hasAttribute?.('tabindex')) host.tabIndex = -1;
+            host.focus({ preventScroll: true });
+        };
 
         const setChartInteractive = (on: boolean) =>
             chartRef.current?.applyOptions({ handleScroll: on, handleScale: on });
@@ -189,7 +243,7 @@ export function useChartDrawings(opts: {
             const moved = dragPoints(drag.plan, pt);
             const anchors: DrawingAnchor[] = [];
             for (const p of moved) {
-                const a = anchorAt(p, drag.tool);
+                const a = anchorAt(projector, p, drag.tool);
                 if (!a) return; // 投影不出來就整筆放棄，不寫半套座標
                 anchors.push(a);
             }
@@ -199,6 +253,8 @@ export function useChartDrawings(opts: {
         const down = (e: MouseEvent) => {
             if (e.button !== 0) return;
             claimKeyboard(token);
+            // 圖表本體取得鍵盤焦點 — Delete 只在焦點還在這張圖時作用
+            focusHost();
             // 交易模式武裝中：這一下是點價下單，畫圖物件不能攔（選取、拖曳
             // 都會吃掉事件，圖表的 click 就不會觸發）
             if (stateRef.current.tradeArmed) return;
@@ -206,22 +262,23 @@ export function useChartDrawings(opts: {
             if (e.defaultPrevented) return;
             const layer = layerOf();
             const pt = layer?.pointOf(e);
-            if (!layer || !pt) return;
+            const projector = layer?.projector();
+            if (!layer || !pt || !projector) return;
             const armed = stateRef.current.tool;
 
             if (armed) {
                 e.preventDefault();
                 e.stopPropagation(); // 這一下屬於畫圖，不要變成平移或點價
-                const anchor = anchorAt(pt, armed);
+                const anchor = anchorAt(projector, pt, armed);
                 if (!anchor) return;
                 const draft = draftRef.current;
+                const style = defaultStyleFor(
+                    stateRef.current.settings,
+                    armed,
+                    stateRef.current.themeMode,
+                );
                 if (armed === 'horizontal') {
-                    const created = addDrawing(
-                        stateRef.current.symbolKey,
-                        armed,
-                        [anchor],
-                        stateRef.current.settings.defaultStyle,
-                    );
+                    const created = addDrawing(stateRef.current.symbolKey, armed, [anchor], style);
                     draftRef.current = null;
                     setTool(null); // 與圖表既有的交易模式一樣是一次性
                     if (created) setSelectedId(created.id);
@@ -232,7 +289,7 @@ export function useChartDrawings(opts: {
                     draftRef.current = {
                         tool: armed,
                         anchors: [anchor, { ...anchor }],
-                        style: stateRef.current.settings.defaultStyle,
+                        style,
                     };
                     pushState();
                     return;
@@ -249,7 +306,7 @@ export function useChartDrawings(opts: {
                 return;
             }
 
-            const picked = pick(pt);
+            const picked = pick(projector, pt);
             if (!picked) {
                 // 空白處按下 = 取消選取，但不攔截 — 圖表照常可以平移
                 if (stateRef.current.selectedId) setSelectedId(null);
@@ -273,13 +330,23 @@ export function useChartDrawings(opts: {
 
             const move = (ev: MouseEvent) => {
                 const p = layerOf()?.pointOf(ev);
-                if (p) commitDrag(p);
+                if (!p) return;
+                pendingPt = p;
+                frame ??= raf(() => {
+                    frame = null;
+                    const at = pendingPt;
+                    pendingPt = null;
+                    if (at) commitDrag(at);
+                });
             };
             const up = (ev: MouseEvent) => {
                 document.removeEventListener('mousemove', move, true);
                 document.removeEventListener('mouseup', up, true);
                 activeMove = null;
                 activeUp = null;
+                if (frame !== null) cancelRaf(frame);
+                frame = null;
+                pendingPt = null;
                 const p = layerOf()?.pointOf(ev);
                 if (p) commitDrag(p);
                 drag = null;
@@ -293,20 +360,28 @@ export function useChartDrawings(opts: {
 
         const hover = (e: MouseEvent) => {
             if (drag || stateRef.current.tradeArmed) return;
+            const draft = draftRef.current;
+            const armed = stateRef.current.tool;
+            // 熱路徑：沒有草稿、沒武裝工具、也沒有看得到的物件時什麼都
+            // 不用算（hover 游標只跟物件有關）
+            if (!draft && !armed && !stateRef.current.drawings.some((d) => !d.hidden)) {
+                resetHoverCursor();
+                return;
+            }
             const layer = layerOf();
             const pt = layer?.pointOf(e);
-            if (!layer || !pt) return;
-            const draft = draftRef.current;
+            const projector = layer?.projector();
+            if (!layer || !pt || !projector) return;
             if (draft) {
                 // 繪製中：第二點跟著游標
-                const anchor = anchorAt(pt, draft.tool);
+                const anchor = anchorAt(projector, pt, draft.tool);
                 if (anchor) {
                     draftRef.current = { ...draft, anchors: [draft.anchors[0]!, anchor] };
                     pushState();
                 }
                 return;
             }
-            if (stateRef.current.tool) {
+            if (armed) {
                 host.style.cursor = 'crosshair';
                 return;
             }
@@ -314,7 +389,7 @@ export function useChartDrawings(opts: {
             // preventDefault）。它把游標設成 ns-resize 時就別蓋掉，不然
             // 游標顯示的是畫圖、按下去卻是改價
             if (host.style.cursor === 'ns-resize') return;
-            const picked = pick(pt);
+            const picked = pick(projector, pt);
             if (picked) {
                 // 鎖定的物件點得到但拖不動 — 游標用 pointer 表示「可選取」，
                 // 不要用 move／grab 暗示可以拖
@@ -323,12 +398,8 @@ export function useChartDrawings(opts: {
                     : picked.hit.kind === 'anchor'
                       ? 'grab'
                       : 'move';
-            } else if (
-                host.style.cursor === 'grab' ||
-                host.style.cursor === 'move' ||
-                host.style.cursor === 'pointer'
-            ) {
-                host.style.cursor = '';
+            } else {
+                resetHoverCursor();
             }
         };
 
@@ -339,18 +410,22 @@ export function useChartDrawings(opts: {
             host.removeEventListener('mousemove', hover, true);
             if (activeMove) document.removeEventListener('mousemove', activeMove, true);
             if (activeUp) document.removeEventListener('mouseup', activeUp, true);
+            if (frame !== null) cancelRaf(frame);
             if (drag) setChartInteractive(true); // 拖曳中被卸載 — 別讓圖表卡住
         };
     }, [hostRef, chartRef, pushState, token]);
 
-    // 交易模式武裝時收起畫圖工具，兩者不會同時吃同一下點擊
+    // 交易模式武裝時收起畫圖工具並取消選取：兩者不會同時吃同一下點擊，
+    // 武裝點價買賣時按 Delete 也不會刪到剛才選著的畫圖物件
     useEffect(() => {
-        if (tradeArmed && (tool || draftRef.current)) {
+        if (!tradeArmed) return;
+        if (tool || draftRef.current) {
             draftRef.current = null;
             setTool(null);
             pushState();
         }
-    }, [tradeArmed, tool, pushState]);
+        if (selectedId) setSelectedId(null);
+    }, [tradeArmed, tool, selectedId, pushState]);
 
     // ── 鍵盤 ─────────────────────────────────────────────────────────
     const hasFocusState = !!(tool || selectedId);
@@ -397,19 +472,27 @@ export function useChartDrawings(opts: {
             if (e.key === 'Escape') {
                 // 已被 modal 的 Esc 收走就不重複處理
                 if (e.defaultPrevented) return;
-                // 取消繪製／取消選取，但都不吃掉這一下（不 preventDefault）：
-                // use-hotkeys 靠 defaultPrevented 判斷要不要算進 Esc×2
-                // 全部刪單，圖上的畫圖狀態不能讓這個快捷鍵的第一下失效
                 if (draftRef.current || stateRef.current.tool) {
+                    // 取消繪製／退出畫圖工具：吃掉這一下（preventDefault），
+                    // use-hotkeys 看到 defaultPrevented 就不算進 Esc×2 全部
+                    // 刪單。連按兩下 Esc 確保取消畫圖是很自然的習慣，這兩下
+                    // 絕不能變成撤掉全部委託。
                     draftRef.current = null;
                     setTool(null);
                     pushState();
+                    e.preventDefault();
                 } else if (stateRef.current.selectedId) {
+                    // 只取消選取：選取是被動狀態，不吃掉這一下 — 使用者按
+                    // Esc×2 要的是全部刪單，第一下不能因為圖上剛好選著
+                    // 一條線就失效
                     setSelectedId(null);
                 }
                 return;
             }
             if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+            // 焦點必須真的在這張圖上（圖表本體或它的工具列）
+            const host = hostRef.current;
+            if (!chartHasFocus(host?.parentElement ?? host)) return;
             const id = stateRef.current.selectedId;
             if (!id) return;
             const d = stateRef.current.drawings.find((x) => x.id === id);
@@ -418,11 +501,13 @@ export function useChartDrawings(opts: {
             removeDrawing(stateRef.current.symbolKey, id);
             setSelectedId(null);
         };
-        // capture：先於其他面板的 bubble listener 處理 Delete（會
-        // preventDefault），不讓同一下再被別處當成別的快捷鍵
+        // capture：use-hotkeys 的 Esc×2 全刪單是 window 上的 bubble
+        // listener，而且在 App 掛載時就註冊（早於任何 K 線面板）。用
+        // bubble 註冊的話它會先跑，取消畫圖的 preventDefault 來不及阻止
+        // 它武裝刪單視窗；Delete 也要先於其他面板處理
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-    }, [hasFocusState, pushState, token]);
+    }, [hasFocusState, pushState, token, hostRef]);
 
     // ── 對外操作 ─────────────────────────────────────────────────────
     const selected = useMemo(
@@ -430,7 +515,7 @@ export function useChartDrawings(opts: {
         [drawings, selectedId],
     );
 
-    const style = selected?.style ?? settings.defaultStyle;
+    const style = selected?.style ?? defaultStyleFor(settings, tool ?? 'trend', themeMode);
 
     const applyStyle = useCallback(
         (patch: Partial<DrawingStyle>) => {
@@ -444,10 +529,23 @@ export function useChartDrawings(opts: {
                 });
             }
             // 沒選取就是在設定「下一個物件」的樣式；有選取時也一併記住，
-            // 跟 TradingView 一樣接著畫的物件沿用剛剛挑的顏色
-            setDrawingSettings({
-                defaultStyle: { ...current.settings.defaultStyle, ...patch },
-            });
+            // 跟 TradingView 一樣接著畫的物件沿用剛剛挑的顏色。顏色依工具
+            // 記：選取中／武裝中的那種工具；兩者皆無時套用到所有工具
+            const { color, ...base } = patch;
+            const next: Partial<DrawingSettings> = {
+                defaultStyle: { ...current.settings.defaultStyle, ...base },
+            };
+            if (color !== undefined) {
+                const tools: DrawingTool[] = target
+                    ? [target.tool]
+                    : current.tool
+                      ? [current.tool]
+                      : DRAWING_TOOLS.map((t) => t.tool);
+                const toolColors = { ...current.settings.toolColors };
+                for (const t of tools) toolColors[t] = color;
+                next.toolColors = toolColors;
+            }
+            setDrawingSettings(next);
         },
         [],
     );
@@ -532,9 +630,17 @@ export function useChartDrawings(opts: {
         if (t) setSelectedId(null);
     }, []);
 
+    const focusChart = useCallback(() => {
+        const host = hostRef.current;
+        if (!host || typeof host.focus !== 'function') return;
+        if (!host.hasAttribute('tabindex')) host.tabIndex = -1;
+        host.focus({ preventScroll: true });
+    }, [hostRef]);
+
     return {
         tool,
         setTool: setToolChecked,
+        focusChart,
         drawings,
         selected,
         select,

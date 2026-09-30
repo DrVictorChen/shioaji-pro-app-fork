@@ -1,9 +1,26 @@
 import { createElement, createRef } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChartDrawings, type ChartDrawingsApi } from './use-chart-drawings';
-import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE } from '../lib/chart-drawings';
+import {
+    chartHasFocus,
+    orderLineMayTakePointer,
+    useChartDrawings,
+    type ChartDrawingsApi,
+} from './use-chart-drawings';
+import {
+    __resetDrawingsForTest,
+    addDrawing,
+    DEFAULT_DRAWING_STYLE,
+    getDrawingSettings,
+    TOOL_DEFAULT_COLORS,
+} from '../lib/chart-drawings';
 import type { ContractBase } from '../lib/types/contract';
+import { useHotkeys } from './use-hotkeys';
+
+// Esc×2 全部刪單的整合測試：開啟風控設定、攔下刪單
+const hk = vi.hoisted(() => ({ cancelAll: vi.fn(async () => {}), notify: vi.fn() }));
+vi.mock('../lib/trade', () => ({ cancelAllOrders: hk.cancelAll, notify: hk.notify }));
+vi.mock('../lib/risk', () => ({ getRiskSettings: () => ({ escCancelAll: true }) }));
 
 // 圖表相關的 ref 一律給 null：本檔只驗模式互斥與對外操作，不碰 canvas。
 // hook 的滑鼠 effect 在 hostRef 為 null 時直接跳出，鍵盤 effect 需要
@@ -17,15 +34,19 @@ function Probe({
     receive,
     tradeArmed,
     onEnterDrawingMode,
+    host,
 }: {
     receive: (v: ChartDrawingsApi) => void;
     tradeArmed: boolean;
     onEnterDrawingMode: () => void;
+    host?: unknown;
 }) {
+    const hostRef = createRef<HTMLDivElement>();
+    (hostRef as { current: unknown }).current = host ?? null;
     receive(
         useChartDrawings({
             contract,
-            hostRef: createRef<HTMLDivElement>(),
+            hostRef,
             chartRef: createRef(),
             seriesRef: createRef(),
             getTimes: () => [],
@@ -203,30 +224,61 @@ describe('商品鍵隨設定切換', () => {
 
 describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
     // 這組需要真的派送 keydown：把 window 換成記錄 listener 的替身
-    const keyListeners = new Set<(e: KeyboardEvent) => void>();
+    // capture listener 先於 bubble listener — 與瀏覽器派送 window 事件的順序一致
+    const keyListeners = new Map<(e: KeyboardEvent) => void, boolean>();
     beforeEach(() => {
         keyListeners.clear();
+        hk.cancelAll.mockClear();
+        hk.notify.mockClear();
         vi.stubGlobal('window', {
-            addEventListener: (type: string, l: (e: KeyboardEvent) => void) => {
-                if (type === 'keydown') keyListeners.add(l);
+            addEventListener: (type: string, l: (e: KeyboardEvent) => void, capture?: boolean) => {
+                if (type === 'keydown') keyListeners.set(l, !!capture);
             },
             removeEventListener: (type: string, l: (e: KeyboardEvent) => void) => {
                 if (type === 'keydown') keyListeners.delete(l);
             },
         });
+        vi.stubGlobal('performance', { now: () => 1000 });
+        vi.stubGlobal('document', { activeElement: null });
     });
 
     function press(key: string) {
         const e = {
             key,
             target: null,
+            repeat: false,
+            metaKey: false,
+            ctrlKey: false,
             defaultPrevented: false,
             preventDefault() {
                 this.defaultPrevented = true;
             },
         };
-        for (const l of [...keyListeners]) l(e as unknown as KeyboardEvent);
+        const all = [...keyListeners];
+        for (const [l, capture] of all) if (capture) l(e as unknown as KeyboardEvent);
+        for (const [l, capture] of all) if (!capture) l(e as unknown as KeyboardEvent);
         return e;
+    }
+
+    // 圖表 host 的替身：scope（host 的父元素＝圖表列）含有哪些「元素」
+    function fakeHost() {
+        const inside = { tagName: 'DIV' };
+        const scope = { contains: (n: unknown) => n === inside || n === host };
+        const host: Record<string, unknown> = {
+            parentElement: scope,
+            style: { cursor: '' },
+            addEventListener() {},
+            removeEventListener() {},
+        };
+        return { host, inside };
+    }
+    function focus(el: unknown) {
+        vi.stubGlobal('document', { activeElement: el });
+    }
+
+    function HotkeysProbe() {
+        useHotkeys({ onOpenPalette: () => {}, onAfterCancelAll: () => {} });
+        return null;
     }
 
     const line = (price: number) =>
@@ -255,7 +307,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         expect(e.defaultPrevented).toBe(false);
     });
 
-    it('繪製中按 Esc 取消繪製，同樣不吃掉這一下 — 照常算進 Esc×2 全刪單', async () => {
+    it('武裝畫圖工具時按 Esc 退出工具並吃掉這一下 — 不算進 Esc×2 全刪單', async () => {
         const api = await mountChart();
         await act(async () => api().setTool('trend'));
         let e!: ReturnType<typeof press>;
@@ -263,22 +315,95 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
             e = press('Escape');
         });
         expect(api().tool).toBeNull();
-        expect(e.defaultPrevented).toBe(false);
+        expect(e.defaultPrevented).toBe(true);
+    });
+
+    it('開啟 Esc×2 全部刪單時：畫圖中連按兩下 Esc 不會撤掉委託', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        const api = await mountChart();
+        await act(async () => api().setTool('ray'));
+        await act(async () => {
+            press('Escape'); // 退出畫圖（被吃掉）
+        });
+        await act(async () => {
+            press('Escape'); // 0.6 秒內第二下 — 只當成全刪單的第一下
+        });
+        expect(api().tool).toBeNull();
+        expect(hk.cancelAll).not.toHaveBeenCalled();
+        // 沒有畫圖狀態時，Esc×2 照常作用（快捷鍵本身沒被弄壞）
+        await act(async () => {
+            press('Escape');
+        });
+        expect(hk.cancelAll).toHaveBeenCalledTimes(1);
     });
 
     it('兩張圖：後選取的那張接手鍵盤，Delete 只刪它的物件，前一張放掉選取', async () => {
-        const a = await mountChart();
-        const b = await mountChart();
+        const ha = fakeHost();
+        const hb = fakeHost();
+        let a!: ChartDrawingsApi;
+        let b!: ChartDrawingsApi;
+        await mount({ receive: (v) => (a = v), tradeArmed: false, onEnterDrawingMode: vi.fn(), host: ha.host });
+        await mount({ receive: (v) => (b = v), tradeArmed: false, onEnterDrawingMode: vi.fn(), host: hb.host });
         const la = line(25000);
         const lb = line(25100);
-        await act(async () => a().select(la.id));
-        await act(async () => b().select(lb.id));
-        expect(a().selected).toBeNull();
-        expect(b().selected?.id).toBe(lb.id);
+        await act(async () => a.select(la.id));
+        await act(async () => b.select(lb.id));
+        expect(a.selected).toBeNull();
+        expect(b.selected?.id).toBe(lb.id);
+        focus(hb.inside);
         await act(async () => {
             press('Delete');
         });
-        expect(b().drawings.map((d) => d.id)).toEqual([la.id]);
+        expect(b.drawings.map((d) => d.id)).toEqual([la.id]);
+    });
+
+    it('焦點已移到別的面板（按鈕）時，Delete 不刪圖上選取的物件', async () => {
+        const h = fakeHost();
+        let api!: ChartDrawingsApi;
+        await mount({ receive: (v) => (api = v), tradeArmed: false, onEnterDrawingMode: vi.fn(), host: h.host });
+        const d = line(25000);
+        await act(async () => api.select(d.id));
+        focus({ tagName: 'BUTTON' }); // 別的面板的按鈕
+        let e!: ReturnType<typeof press>;
+        await act(async () => {
+            e = press('Delete');
+        });
+        expect(api.drawings.map((x) => x.id)).toEqual([d.id]);
+        expect(e.defaultPrevented).toBe(false);
+        // 焦點回到圖上才刪
+        focus(h.inside);
+        await act(async () => {
+            press('Backspace');
+        });
+        expect(api.drawings).toEqual([]);
+    });
+
+    it('chartHasFocus：沒有 scope 或焦點在外面都算沒有焦點', () => {
+        const h = fakeHost();
+        focus(h.inside);
+        expect(chartHasFocus(h.host.parentElement as never)).toBe(true);
+        expect(chartHasFocus(null)).toBe(false);
+        focus(null);
+        expect(chartHasFocus(h.host.parentElement as never)).toBe(false);
+    });
+
+    it('武裝點價買賣時清掉畫圖選取 — Delete 不會刪到剛才選著的物件', async () => {
+        const h = fakeHost();
+        let api!: ChartDrawingsApi;
+        const props = { receive: (v: ChartDrawingsApi) => (api = v), onEnterDrawingMode: vi.fn(), host: h.host };
+        const root = await mount({ ...props, tradeArmed: false });
+        const d = line(25000);
+        await act(async () => api.select(d.id));
+        expect(api.selected?.id).toBe(d.id);
+        await act(async () => root.update(createElement(Probe, { ...props, tradeArmed: true })));
+        expect(api.selected).toBeNull();
+        focus(h.inside);
+        await act(async () => {
+            press('Delete');
+        });
+        expect(api.drawings.map((x) => x.id)).toEqual([d.id]);
     });
 });
 
@@ -286,6 +411,8 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
     // 最小的圖表替身：y = 25200 - price，時間軸每根 10px
     type L = (e: MouseEvent) => void;
     const hostListeners = new Map<string, L>();
+    let axisCalls = 0;
+    let attachedLayer: { state: { draft: unknown } } | null = null;
     const host = {
         style: { cursor: '' },
         dataset: {},
@@ -299,10 +426,16 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         attachPrimitive(layer: {
             attached: (p: unknown) => void;
             noteCanvas: (c: unknown, s: unknown) => void;
+            state: { draft: unknown };
         }) {
+            attachedLayer = layer;
             layer.attached({
                 series,
-                chart: { timeScale: () => ({ logicalToCoordinate: (l: number) => l * 10 }) },
+                chart: {
+                    timeScale: () => ({
+                        logicalToCoordinate: (l: number) => (axisCalls++, l * 10),
+                    }),
+                },
                 requestUpdate() {},
             });
             layer.noteCanvas(
@@ -313,10 +446,21 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         detachPrimitive() {},
     };
 
-    function DrawProbe({ tradeArmed, receive }: { tradeArmed: boolean; receive: (v: ChartDrawingsApi) => void }) {
+    function DrawProbe({
+        tradeArmed,
+        receive,
+        code = 'TXFR1',
+        themeMode = 'dark',
+    }: {
+        tradeArmed: boolean;
+        receive: (v: ChartDrawingsApi) => void;
+        code?: string;
+        themeMode?: 'dark' | 'light';
+    }) {
         receive(
             useChartDrawings({
-                contract,
+                contract: { code, security_type: code === '2330' ? 'STK' : 'FUT' } as ContractBase,
+                themeMode,
                 hostRef: { current: host as unknown as HTMLDivElement },
                 chartRef: { current: { applyOptions() {} } as never },
                 seriesRef: { current: series as never },
@@ -334,11 +478,11 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
     });
 
     // 在水平線（25000 → y=200）上按下
-    function pressOnLine(prevented = false) {
+    function pressOnLine(prevented = false, x = 20, y = 200) {
         const e = {
             button: 0,
-            clientX: 20,
-            clientY: 200,
+            clientX: x,
+            clientY: y,
             defaultPrevented: prevented,
             preventDefault: vi.fn(),
             stopPropagation: vi.fn(),
@@ -347,17 +491,87 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         return e;
     }
 
-    async function setup(tradeArmed: boolean) {
+    async function setup(tradeArmed: boolean, withLine = true, themeMode: 'dark' | 'light' = 'dark') {
         let api!: ChartDrawingsApi;
         let root!: ReactTestRenderer;
         await act(async () => {
-            root = create(createElement(DrawProbe, { tradeArmed, receive: (v) => (api = v) }));
+            root = create(
+                createElement(DrawProbe, { tradeArmed, themeMode, receive: (v) => (api = v) }),
+            );
         });
         roots.push(root);
-        addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
+        if (withLine) {
+            addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
+        }
         await act(async () => {});
-        return () => api;
+        return Object.assign(() => api, { root });
     }
+
+    it('委託線只在瀏覽模式接手滑鼠 — 武裝畫圖工具時不接手，不會誤改委託價', () => {
+        expect(orderLineMayTakePointer({ drawingArmed: false, defaultPrevented: false })).toBe(true);
+        expect(orderLineMayTakePointer({ drawingArmed: true, defaultPrevented: false })).toBe(false);
+        expect(orderLineMayTakePointer({ drawingArmed: false, defaultPrevented: true })).toBe(false);
+    });
+
+    it('武裝趨勢線時在委託線附近按下：這一下由畫圖接手（開始繪製），不是改價', async () => {
+        const api = await setup(false, false);
+        await act(async () => api().setTool('trend'));
+        let e!: ReturnType<typeof pressOnLine>;
+        await act(async () => {
+            e = pressOnLine(false, 40, 200);
+        });
+        expect(e.preventDefault).toHaveBeenCalled();
+        expect(attachedLayer?.state.draft).not.toBeNull();
+    });
+
+    it('換商品時立刻清掉畫到一半的草稿（不等下一次重繪）', async () => {
+        const api = await setup(false, false);
+        await act(async () => api().setTool('trend'));
+        await act(async () => {
+            pressOnLine(false, 40, 200);
+        });
+        expect(attachedLayer?.state.draft).not.toBeNull();
+        await act(async () =>
+            api.root.update(
+                createElement(DrawProbe, {
+                    tradeArmed: false,
+                    code: '2330',
+                    receive: () => {},
+                }),
+            ),
+        );
+        expect(attachedLayer?.state.draft).toBeNull();
+    });
+
+    it('沒有任何畫圖物件時，hover 不建 projector、不做任何投影', async () => {
+        await setup(false, false);
+        axisCalls = 0;
+        hostListeners.get('mousemove')!({ clientX: 50, clientY: 50 } as MouseEvent);
+        expect(axisCalls).toBe(0);
+    });
+
+    it('新物件的預設色依工具與主題；使用者挑過的顏色只覆蓋那種工具', async () => {
+        const dark = await setup(false, false, 'dark');
+        await act(async () => dark().setTool('horizontal'));
+        await act(async () => {
+            pressOnLine(false, 40, 150);
+        });
+        expect(dark().selected?.style.color).toBe(TOOL_DEFAULT_COLORS.dark.horizontal);
+        // 選著水平線改色 → 只記住水平線的顏色
+        await act(async () => dark().applyStyle({ color: '#26a69a' }));
+        expect(getDrawingSettings().toolColors).toEqual({ horizontal: '#26a69a' });
+        await act(async () => dark().setTool('box'));
+        expect(dark().style.color).toBe(TOOL_DEFAULT_COLORS.dark.box);
+        await act(async () => dark().setTool('horizontal'));
+        expect(dark().style.color).toBe('#26a69a');
+    });
+
+    it('淺色主題用較深的預設色', async () => {
+        const light = await setup(false, false, 'light');
+        await act(async () => light().setTool('trend'));
+        expect(light().style.color).toBe(TOOL_DEFAULT_COLORS.light.trend);
+        expect(TOOL_DEFAULT_COLORS.light.trend).not.toBe(TOOL_DEFAULT_COLORS.dark.trend);
+    });
 
     it('沒武裝交易時，按在畫圖物件上會選取並接手這一下', async () => {
         const api = await setup(false);

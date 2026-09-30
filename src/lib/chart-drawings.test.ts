@@ -5,12 +5,21 @@ import {
     clearDrawings,
     contrastTextColor,
     DEFAULT_DRAWING_STYLE,
+    defaultStyleFor,
     drawingSymbolKey,
     DRAWING_PALETTE,
+    drawingsSaveFailed,
     duplicateDrawing,
+    flushDrawingSettings,
     flushDrawingWrites,
+    getDrawingSettings,
     getDrawings,
+    sanitizeDrawing,
+    sanitizeSettings,
+    setDrawingSettings,
+    takeDrawingSaveErrorNotice,
     MAX_DRAWINGS_PER_SYMBOL,
+    reloadDrawingSettingsFromStorage,
     reloadDrawingsFromStorage,
     removeDrawing,
     showAllDrawings,
@@ -216,6 +225,85 @@ describe('跨視窗同步', () => {
         }
     });
 
+    const KEY = 'sj-pro-chart-drawings';
+    const saved = () => JSON.parse(store.get(KEY)!) as Record<string, { id: string }[]>;
+    const other = (id: string, price = 25000) => ({
+        id,
+        tool: 'horizontal',
+        anchors: [{ time: 1000, price }],
+        style: DEFAULT_DRAWING_STYLE,
+        locked: false,
+        hidden: false,
+        createdAt: 1,
+    });
+
+    it('同商品兩個視窗在節流窗內各自新增：依物件合併，兩邊的物件都留下', () => {
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        // 另一個視窗在同一商品寫入了自己的物件（它看不到本視窗還沒落地的）
+        store.set(KEY, JSON.stringify({ TXF: [other('theirs')] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id).sort()).toEqual([mine.id, 'theirs'].sort());
+        flushDrawingWrites();
+        expect(saved().TXF!.map((d) => d.id).sort()).toEqual([mine.id, 'theirs'].sort());
+    });
+
+    it('寫出前才讀最新版本 — storage 事件還沒送到時也不會蓋掉對方剛寫的物件', () => {
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        store.set(KEY, JSON.stringify({ TXF: [other('theirs')] })); // 事件尚未送達
+        flushDrawingWrites();
+        expect(saved().TXF!.map((d) => d.id).sort()).toEqual([mine.id, 'theirs'].sort());
+    });
+
+    it('本視窗刪除的物件（墓碑）不會被對方較舊的版本帶回來，對方新增的照留', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        removeDrawing('TXF', a.id);
+        // 對方還看得到 a，又新增了 c
+        store.set(KEY, JSON.stringify({ TXF: [...saved().TXF!, other('c')] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([b.id, 'c']);
+        flushDrawingWrites();
+        expect(saved().TXF!.map((d) => d.id)).toEqual([b.id, 'c']);
+    });
+
+    it('對方刪掉的物件，本視窗沒動過就跟著消失', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        updateDrawing('TXF', b.id, { hidden: true });
+        store.set(KEY, JSON.stringify({ TXF: saved().TXF!.filter((d) => d.id !== a.id) }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => [d.id, d.hidden])).toEqual([[b.id, true]]);
+    });
+
+    it('寫入失敗（配額滿）：待寫改動保留、同步不會蓋掉、提示一次，之後寫得進去就補寫', () => {
+        let fail = true;
+        vi.stubGlobal('localStorage', {
+            getItem: (k: string) => store.get(k) ?? null,
+            setItem: (k: string, v: string) => {
+                if (fail) throw new Error('QuotaExceededError');
+                store.set(k, v);
+            },
+            removeItem: (k: string) => void store.delete(k),
+        });
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        expect(drawingsSaveFailed()).toBe(true);
+        expect(takeDrawingSaveErrorNotice()).toBe(true);
+        expect(takeDrawingSaveErrorNotice()).toBe(false); // 只提示一次
+        // 另一個視窗寫入 — 本視窗還沒存成功的物件不能被蓋掉
+        store.set(KEY, JSON.stringify({ TXF: [other('theirs')] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id).sort()).toEqual([mine.id, 'theirs'].sort());
+        // 空間回來了：下一次寫出補上
+        fail = false;
+        updateDrawing('TXF', mine.id, { locked: true });
+        flushDrawingWrites();
+        expect(drawingsSaveFailed()).toBe(false);
+        expect(saved().TXF!.map((d) => d.id).sort()).toEqual([mine.id, 'theirs'].sort());
+    });
+
     it('本視窗沒有待寫入的改動時，整份採用對方版本', () => {
         addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
         flushDrawingWrites();
@@ -231,5 +319,103 @@ describe('顯示全部', () => {
         updateDrawing('TXF', a.id, { hidden: true, locked: true });
         showAllDrawings('TXF');
         expect(getDrawings('TXF')[0]).toMatchObject({ id: a.id, hidden: false, locked: true });
+    });
+});
+
+describe('載入資料的驗證', () => {
+    it('設定裡的顏色是 null、線寬是字串等壞值都退回預設，不丟例外', () => {
+        const s = sanitizeSettings({
+            defaultStyle: { color: null, width: 'x', dash: 'dotted', fillOpacity: 9 },
+            toolColors: { horizontal: null, trend: '#ABCDEF', box: 'red' },
+            shareContinuousMonth: 'yes',
+        });
+        expect(s.defaultStyle).toEqual({ width: 2, dash: 'solid', fillOpacity: 1 });
+        expect(s.toolColors).toEqual({ trend: '#ABCDEF' });
+        expect(s.shareContinuousMonth).toBe(true);
+        expect(sanitizeSettings(null).defaultStyle.width).toBe(2);
+        expect(sanitizeSettings([1, 2]).toolColors).toEqual({});
+    });
+
+    it('localStorage 裡的 {"defaultStyle":{"color":null}} 不會讓讀取或價格軸標籤出錯', () => {
+        store.set('sj-pro-chart-drawing-settings', JSON.stringify({ defaultStyle: { color: null } }));
+        expect(() => reloadDrawingSettingsFromStorage()).not.toThrow();
+        const style = defaultStyleFor(getDrawingSettings(), 'horizontal', 'dark');
+        expect(typeof style.color).toBe('string');
+        expect(() => contrastTextColor(style.color)).not.toThrow();
+        expect(() => contrastTextColor(null as unknown as string)).not.toThrow();
+        store.set('sj-pro-chart-drawing-settings', 'null');
+        expect(() => reloadDrawingSettingsFromStorage()).not.toThrow();
+    });
+
+    it('物件的樣式與旗標逐欄修正：顏色格式、線寬範圍、透明度、布林值', () => {
+        const d = sanitizeDrawing({
+            id: 'x',
+            tool: 'box',
+            anchors: [
+                { time: 1, price: 2 },
+                { time: 3, price: 4 },
+            ],
+            style: { color: 'rgb(1,2,3)', width: 99, dash: 1, fillOpacity: -1 },
+            locked: 'true',
+            hidden: 1,
+        })!;
+        expect(d.style.color).toMatch(/^#[0-9a-f]{6}$/i);
+        expect(d.style.width).toBe(4);
+        expect(d.style.dash).toBe('solid');
+        expect(d.style.fillOpacity).toBe(0);
+        expect(d.locked).toBe(false);
+        expect(d.hidden).toBe(false);
+        expect(d.createdAt).toBe(0);
+    });
+
+    it('形狀不對的物件整筆丟掉', () => {
+        expect(sanitizeDrawing({ id: 'x', tool: 'trend', anchors: [{ time: 1, price: 2 }], style: {} })).toBeNull();
+        expect(sanitizeDrawing({ id: 'x', tool: 'fib', anchors: [], style: {} })).toBeNull();
+        expect(sanitizeDrawing({ id: 'x', tool: 'horizontal', anchors: [{ time: NaN, price: 2 }] })).toBeNull();
+        expect(sanitizeDrawing({ id: 'x', tool: 'horizontal', anchors: [null] })).toBeNull();
+        expect(sanitizeDrawing(null)).toBeNull();
+        // 沒有 style 的物件修成預設樣式，不丟掉
+        expect(sanitizeDrawing({ id: 'x', tool: 'horizontal', anchors: [{ time: 1, price: 2 }] })).not.toBeNull();
+    });
+
+    it('載入時把壞物件濾掉、其餘修正後保留', () => {
+        store.set(
+            'sj-pro-chart-drawings',
+            JSON.stringify({
+                TXF: [
+                    { id: 'ok', tool: 'horizontal', anchors: [{ time: 1, price: 2 }], style: { color: null } },
+                    { id: 'bad', tool: 'trend', anchors: [] },
+                ],
+                X: 'not-a-list',
+            }),
+        );
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual(['ok']);
+        expect(typeof getDrawings('TXF')[0]!.style.color).toBe('string');
+        expect(getDrawings('X')).toEqual([]);
+    });
+});
+
+describe('設定寫入節流', () => {
+    it('拉填色滑桿連續改預設樣式，只在節流窗結束寫一次 localStorage', () => {
+        vi.useFakeTimers();
+        try {
+            const setItem = vi.fn((k: string, v: string) => void store.set(k, v));
+            vi.stubGlobal('localStorage', { getItem: () => null, setItem, removeItem: () => {} });
+            for (let i = 0; i <= 50; i += 2) {
+                setDrawingSettings({
+                    defaultStyle: { ...getDrawingSettings().defaultStyle, fillOpacity: i / 100 },
+                });
+            }
+            expect(getDrawingSettings().defaultStyle.fillOpacity).toBe(0.5); // 畫面即時
+            expect(setItem).not.toHaveBeenCalled();
+            vi.runAllTimers();
+            expect(setItem).toHaveBeenCalledTimes(1);
+            expect(JSON.parse(store.get('sj-pro-chart-drawing-settings')!).defaultStyle.fillOpacity).toBe(0.5);
+            flushDrawingSettings(); // 沒有待寫入時不重寫
+            expect(setItem).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
