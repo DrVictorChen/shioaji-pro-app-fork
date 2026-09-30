@@ -246,7 +246,9 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         vi.stubGlobal('document', { activeElement: null });
     });
 
-    function press(key: string) {
+    // stopAtTarget：目標元件（例如價格輸入框）在 Esc 上 stopPropagation —
+    // window 的 capture listener 照樣收到，bubble listener 收不到
+    function press(key: string, opts: { stopAtTarget?: boolean } = {}) {
         const e = {
             key,
             target: null,
@@ -260,6 +262,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         };
         const all = [...keyListeners];
         for (const [l, capture] of all) if (capture) l(e as unknown as KeyboardEvent);
+        if (opts.stopAtTarget) return e;
         for (const [l, capture] of all) if (!capture) l(e as unknown as KeyboardEvent);
         return e;
     }
@@ -382,6 +385,68 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         });
         expect(hk.cancelAll).not.toHaveBeenCalled();
         expect(hk.notify).toHaveBeenCalledTimes(2);
+    });
+
+    // 讓 use-hotkeys 在派送結束後排的 setTimeout 跑完
+    const settle = () => new Promise((r) => setTimeout(r, 5));
+
+    it('任何元件在 Esc 上 stopPropagation（全域 handler 收不到）也會清除武裝', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        await act(async () => {
+            press('Escape'); // 第一下：武裝
+            await settle();
+        });
+        expect(hk.notify).toHaveBeenCalledTimes(1);
+        await act(async () => {
+            press('Escape', { stopAtTarget: true }); // 某個元件吃掉並擋下傳遞
+            await settle();
+        });
+        await act(async () => {
+            press('Escape'); // 0.6 秒內 — 只能算新的第一下
+            await settle();
+        });
+        expect(hk.cancelAll).not.toHaveBeenCalled();
+        expect(hk.notify).toHaveBeenCalledTimes(2);
+    });
+
+    it('Esc（武裝）→ 價格輸入框 Esc（還原並 stopPropagation）→ 點圖取消選取 → Esc：不會全部刪單', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        const api = await mountChart();
+        const d = line(25000);
+        await act(async () => {
+            press('Escape');
+            await settle();
+        });
+        await act(async () => api().select(d.id));
+        await act(async () => {
+            press('Escape', { stopAtTarget: true }); // PriceInput 的 onKeyDown 會 stopPropagation
+            await settle();
+        });
+        await act(async () => api().select(null)); // 點圖取消選取
+        await act(async () => {
+            press('Escape');
+            await settle();
+        });
+        expect(hk.cancelAll).not.toHaveBeenCalled();
+    });
+
+    it('被算成第一下的 Esc 不會被自己的保險計時器清掉：Esc、Esc 照常全部刪單', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        await act(async () => {
+            press('Escape');
+            await settle();
+        });
+        await act(async () => {
+            press('Escape');
+            await settle();
+        });
+        expect(hk.cancelAll).toHaveBeenCalledTimes(1);
     });
 
     it('兩張圖：後選取的那張接手鍵盤，Delete 只刪它的物件，前一張放掉選取', async () => {
