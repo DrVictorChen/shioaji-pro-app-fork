@@ -240,6 +240,10 @@ function BlockBody({
                         onSessionModeChange={(chartSession) =>
                             onSessionConfigChange(block.id, { chartSession })
                         }
+                        orderSettings={block.chartOrder}
+                        onOrderSettingsChange={(chartOrder) =>
+                            onSessionConfigChange(block.id, { chartOrder })
+                        }
                     />
                 </>
             ) : (

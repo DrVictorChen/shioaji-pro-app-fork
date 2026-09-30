@@ -106,3 +106,14 @@ it('odd lots: a limit order goes out as IntradayOdd LMT ROD in shares; risk sees
     expect(m.confirm.mock.calls[0]![0]).toMatchObject({ unit: '股', quantity: 300, note: expect.stringContaining('盤中零股') });
     expect(m.stock.mock.calls[0]![1]).toMatchObject({ quantity: 300, price: 100, price_type: 'LMT', order_type: 'ROD', order_lot: 'IntradayOdd' });
 });
+it('sends the chosen order type on limit orders, keeps ROD by default and IOC for market orders (#204 chart settings)', async () => {
+    await placeQuickOrder(contract,'Buy',100,2,{orderType:'FOK'});
+    await placeQuickOrder(contract,'Buy',100,2);
+    await placeQuickOrder(contract,'Buy',null,2,{orderType:'FOK'});
+    expect(m.stock.mock.calls.map(c => [c[1].price_type, c[1].order_type])).toEqual([['LMT','FOK'],['LMT','ROD'],['MKT','IOC']]);
+    expect(m.confirm.mock.calls[0]![0].note).toBe('限價 FOK');
+    const future = {...contract,security_type:'FUT',exchange:'TAIFEX'} as ContractBase;
+    m.selected = {...account, account_type:'F'}; m.accounts=[m.selected];
+    await placeQuickOrder(future,'Sell',100,1,{orderType:'IOC',ocType:'New'});
+    expect(m.future.mock.calls[0]![1]).toMatchObject({order_type:'IOC',price_type:'LMT',octype:'New'});
+});

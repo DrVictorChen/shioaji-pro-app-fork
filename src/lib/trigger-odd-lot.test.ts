@@ -181,6 +181,20 @@ describe('odd-lot triggers (#204)', () => {
     });
 });
 
+describe('panel account (#204 chart order settings)', () => {
+    it('pins a trigger to the panel account when given, and refuses an account that is not available', async () => {
+        const S2 = { ...S1, account_id: 'fixture-account-S2' };
+        m.accounts = [S1, F1, S2];
+        await boot();
+        const t = await engine.addTrigger({ code: '2330', condition: 'below', price: 950, action: 'Sell', quantity: 1, kind: 'stop' }, STK as never, { account: S2 });
+        expect(t?.account).toMatchObject({ account_type: 'S', account_id: 'fixture-account-S2' });
+        const gone = await engine.addTrigger({ code: '2330', condition: 'below', price: 940, action: 'Sell', quantity: 1, kind: 'stop' }, STK as never,
+            { account: { ...S1, account_id: 'gone' } });
+        expect(gone).toBeNull();
+        expect(bodies().join('\n')).toContain('指定的下單帳戶已不可用');
+    });
+});
+
 describe('planExitQuantity units', () => {
     it('reports odd-lot shortfalls in 股 and whole lots in 張', async () => {
         const { planExitQuantity } = await import('./trigger-engine');

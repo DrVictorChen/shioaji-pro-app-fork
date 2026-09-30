@@ -22,6 +22,7 @@ import {
     type Action,
     type StockOrderLot,
     type FuturesOCType,
+    type OrderType,
     type Trade,
 } from './types/order';
 
@@ -155,6 +156,8 @@ export async function placeQuickOrder(
         orderLot?: StockOrderLot;
         account?: Account;
         ocType?: FuturesOCType;
+        // 限價單的委託條件（圖表下單設定，#204）；缺省 ROD。市價單一律 IOC
+        orderType?: OrderType;
         // 'auto' = 系統觸發（停損/停利等），永不彈手動確認
         source?: 'manual' | 'auto' | 'agent';
         agentCallId?: string;
@@ -194,7 +197,8 @@ export async function placeQuickOrder(
             price,
             quantity,
             opts?.orderLot,
-            odd ? `${lotLabel(opts?.orderLot)}・限價 ROD` : undefined,
+            odd ? `${lotLabel(opts?.orderLot)}・限價 ROD`
+                : price !== null && opts?.orderType && opts.orderType !== 'ROD' ? `限價 ${opts.orderType}` : undefined,
             capturedAccount,
             opts?.confirmLivePriceCode,
         );
@@ -230,6 +234,7 @@ export async function placeQuickOrder(
             ? { agentCallId: opts.agentCallId, agentAuto: opts.agentAuto }
             : undefined,
         opts?.ocType,
+        opts?.orderType,
     );
 }
 
@@ -244,6 +249,7 @@ async function sendOrder(
     account?: Account,
     agentContext?: { agentCallId?: string; agentAuto?: boolean },
     ocType: FuturesOCType = 'Auto',
+    orderType: OrderType = 'ROD',
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -254,7 +260,7 @@ async function sendOrder(
               price: price ?? 0,
               quantity,
               price_type: market ? 'MKT' : 'LMT',
-              order_type: market ? 'IOC' : 'ROD',
+              order_type: market ? 'IOC' : orderType,
               octype: ocType,
           }, account, { agentInitiated, ...agentContext })
         : await placeStockOrder(contract, {
@@ -262,7 +268,7 @@ async function sendOrder(
               price: price ?? 0,
               quantity,
               price_type: market ? 'MKT' : 'LMT',
-              order_type: market ? 'IOC' : 'ROD',
+              order_type: market ? 'IOC' : orderType,
               order_lot: orderLot ?? 'Common',
           }, account, { agentInitiated, ...agentContext });
     return trade;

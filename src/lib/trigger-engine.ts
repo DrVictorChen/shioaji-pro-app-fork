@@ -332,14 +332,20 @@ function handleCommand(cmd: Command): unknown {
 }
 
 /** Capture the fixed execution context for a manual stop/take trigger. */
-function withContext(t: NewTrigger, contract?: ContractBase): NewTrigger | string {
+/** `account`: a panel's own account (chart order settings, #204) instead of
+ * the app-wide selection — it must still be a signed account of the market. */
+function withContext(t: NewTrigger, contract?: ContractBase, account?: Account): NewTrigger | string {
     if (t.kind === 'alert' || (t.env && t.account && t.orderCode)) return t;
     if (!contract) return '缺少商品資訊，無法固定下單帳戶';
     const futures = contract.security_type === 'FUT' || contract.security_type === 'OPT';
     if (!futures && contract.security_type !== 'STK') return '此商品不支援觸價下單';
     if (futures && t.orderLot && t.orderLot !== 'Common') return '期貨選擇權沒有零股，觸價單未建立';
     const s = getAccountState();
-    const selected = futures ? s.selectedFutures : s.selectedStock;
+    const selected = account
+        ? s.accounts.find(a => a.signed && a.account_type === account.account_type
+            && a.broker_id === account.broker_id && a.account_id === account.account_id)
+        : futures ? s.selectedFutures : s.selectedStock;
+    if (account && !selected) return '指定的下單帳戶已不可用，觸價單未建立';
     if (!selected?.signed || selected.account_type !== (futures ? 'F' : 'S')) return '沒有可用的已簽署帳戶，觸價單未建立';
     const env = currentProtectionEnv();
     if (!env) return '伺服器模式（模擬／正式）尚未確認，觸價單未建立';
@@ -350,8 +356,8 @@ function withContext(t: NewTrigger, contract?: ContractBase): NewTrigger | strin
 
 /** Add a trigger from any window. Stop/take bind the currently selected
  * account for the contract's market; the main window executes it. */
-export async function addTrigger(t: NewTrigger, contract?: ContractBase): Promise<TriggerOrder | null> {
-    const prepared = withContext(t, contract);
+export async function addTrigger(t: NewTrigger, contract?: ContractBase, opts?: { account?: Account }): Promise<TriggerOrder | null> {
+    const prepared = withContext(t, contract, opts?.account);
     if (typeof prepared === 'string') {
         notify({ kind: 'err', title: '觸價單未建立', body: prepared });
         return null;
