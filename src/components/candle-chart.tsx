@@ -214,10 +214,12 @@ export function CandleChart({
             : contract.security_type === 'FUT' || contract.security_type === 'OPT' ? 'F' : null;
     const [localOrder, setLocalOrder] = useState<ChartOrderPanelState>(() => orderSettingsProp ?? {});
     const panelOrder = onOrderSettingsChange ? (orderSettingsProp ?? {}) : localOrder;
-    // 沒有自訂過的市場用「設為預設」的值 — 在這張圖第一次用到該市場時取一次
-    // 快照，之後別的圖按「設為預設」不會改到這張圖（#204）
-    const defaultSnapshot = useRef<Partial<Record<ChartOrderMarket, ChartOrderSettings>>>({});
-    const defaultFor = (m: ChartOrderMarket) => (defaultSnapshot.current[m] ??= loadChartOrderDefault(m));
+    // 沒有自訂過的市場用「設為預設」的值 — 圖表建立時就對股票與期貨兩種
+    // 市場各取一份快照，之後別的圖按「設為預設」不會改到這張圖（包括它之後
+    // 才切到的市場）；這張圖自己的「設為預設」才更新快照（#204）
+    const defaultSnapshot = useRef<Record<ChartOrderMarket, ChartOrderSettings> | null>(null);
+    defaultSnapshot.current ??= { S: loadChartOrderDefault('S'), F: loadChartOrderDefault('F') };
+    const defaultFor = (m: ChartOrderMarket) => defaultSnapshot.current![m];
     const savedOrder = panelOrder[orderMarket ?? 'S'];
     const orderSettings: ChartOrderSettings = useMemo(() => {
         const m = orderMarket ?? 'S';
@@ -1695,6 +1697,7 @@ export function CandleChart({
                         onChange={setOrderSettings}
                         onSaveDefault={() => {
                             saveChartOrderDefault(orderMarket, orderSettings);
+                            defaultSnapshot.current![orderMarket] = orderSettings;
                             notify({ kind: 'info', title: '已設為圖表下單預設', body: `新開的${orderMarket === 'F' ? '期貨' : '股票'}圖表使用這組設定（不含帳號）；其他現有圖表維持原設定。` });
                         }}
                         account={orderAccountView}

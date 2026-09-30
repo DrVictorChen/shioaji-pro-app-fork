@@ -269,10 +269,12 @@ export function FlashOrder({
     accountRef.current = activeAccount;
     const privMoney = usePrivacyMoney();
     // 單位與數量的起始值來自「設為預設」（依股票／期貨）
-    // 預設在這個面板第一次用到該商品類別時取快照（#204）：別的面板按
-    // 「設為預設」不會改到現有面板，換商品也用這個面板自己的快照
-    const defaultSnapshot = useRef<Partial<Record<FlashMarket, ReturnType<typeof loadFlashOrderDefault>>>>({});
-    const defaultFor = (m: FlashMarket) => (defaultSnapshot.current[m] ??= loadFlashOrderDefault(m));
+    // 預設在面板建立時就對股票與期貨「兩種」類別各取一份快照（#204）：之後
+    // 別的面板按「設為預設」不會改到這個面板（包括它之後才切到的類別），
+    // 只有這個面板自己的「設為預設」會更新它的快照
+    const defaultSnapshot = useRef<Record<FlashMarket, ReturnType<typeof loadFlashOrderDefault>> | null>(null);
+    defaultSnapshot.current ??= { S: loadFlashOrderDefault('S'), F: loadFlashOrderDefault('F') };
+    const defaultFor = (m: FlashMarket) => defaultSnapshot.current![m];
     const [qty, setQty] = useState(() => defaultFor(market).qty);
     // 股票：整股（張）或盤中零股（股）（#204）— 每個面板自己的 state
     const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(() => defaultFor(market).lot);
@@ -875,7 +877,7 @@ export function FlashOrder({
                     }}
                     onSaveDefault={() => {
                         saveFlashOrderDefault(market, flashSettings);
-                        defaultSnapshot.current[market] = flashSettings;
+                        defaultSnapshot.current![market] = flashSettings;
                         notify({ kind: 'info', title: '已設為閃電下單預設', body: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量（這個面板換商品時也是）；其他現有面板維持原設定，帳號不變。` });
                     }}
                     layout={{
