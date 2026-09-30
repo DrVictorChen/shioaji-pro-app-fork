@@ -11,6 +11,7 @@ import {
     flushDrawingWrites,
     getDrawings,
     MAX_DRAWINGS_PER_SYMBOL,
+    reloadDrawingsFromStorage,
     removeDrawing,
     updateDrawing,
     type DrawingAnchor,
@@ -192,5 +193,33 @@ describe('價格軸標籤的字色', () => {
     it('看不懂的色值退回白字，不丟例外', () => {
         expect(contrastTextColor('rgba(0,0,0,.5)')).toBe('#ffffff');
         expect(contrastTextColor('')).toBe('#ffffff');
+    });
+});
+
+describe('跨視窗同步', () => {
+    it('節流窗內收到別的視窗寫入：本視窗未寫出的商品保留，其他商品採用對方版本', () => {
+        vi.useFakeTimers();
+        try {
+            const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+            // 另一個視窗寫入了 2330（它看不到本視窗還沒落地的 TXF）
+            const theirs = { ...mine, id: 'other', tool: 'horizontal' as const, anchors: [anchors[0]!] };
+            store.set('sj-pro-chart-drawings', JSON.stringify({ '2330': [theirs] }));
+            reloadDrawingsFromStorage();
+            expect(getDrawings('TXF').map((d) => d.id)).toEqual([mine.id]);
+            expect(getDrawings('2330').map((d) => d.id)).toEqual(['other']);
+            vi.runAllTimers();
+            const saved = JSON.parse(store.get('sj-pro-chart-drawings')!);
+            expect(Object.keys(saved).sort()).toEqual(['2330', 'TXF']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('本視窗沒有待寫入的改動時，整份採用對方版本', () => {
+        addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        flushDrawingWrites();
+        store.set('sj-pro-chart-drawings', JSON.stringify({}));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')).toEqual([]);
     });
 });

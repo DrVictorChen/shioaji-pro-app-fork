@@ -195,8 +195,7 @@ function emit() {
 if (typeof window !== 'undefined') {
     window.addEventListener('storage', (e) => {
         if (e.key === STORAGE_KEY) {
-            store = loadStore();
-            emit();
+            reloadDrawingsFromStorage();
         } else if (e.key === SETTINGS_KEY) {
             settings = loadSettings();
             emit();
@@ -209,11 +208,14 @@ if (typeof window !== 'undefined') {
 // 一次其他視窗就要重新解析整份 JSON。
 const WRITE_THROTTLE_MS = 300;
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
+// 節流窗內本視窗改過、還沒寫出去的商品鍵
+const dirtyKeys = new Set<string>();
 
 export function flushDrawingWrites() {
     if (writeTimer === null) return;
     clearTimeout(writeTimer);
     writeTimer = null;
+    dirtyKeys.clear();
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
     } catch {
@@ -226,8 +228,25 @@ if (typeof window !== 'undefined') {
     window.addEventListener('pagehide', flushDrawingWrites);
 }
 
-function persist() {
+function persist(key: string) {
+    dirtyKeys.add(key);
     writeTimer ??= setTimeout(flushDrawingWrites, WRITE_THROTTLE_MS);
+    emit();
+}
+
+// 別的視窗寫入了 — 以它的版本為準，但本視窗還沒寫出去的商品鍵保留自己
+// 的版本；整份換掉的話，節流窗內的改動會被蓋掉，稍後的寫入再把別的視窗
+// 的版本寫回去，這一筆就兩邊都消失了。
+// ponytail: 以商品鍵為單位合併，兩個視窗在 300ms 內改同一商品時本視窗勝出；
+// 真的需要再細到物件 id。
+export function reloadDrawingsFromStorage() {
+    const incoming = loadStore();
+    for (const key of dirtyKeys) {
+        const mine = store[key];
+        if (mine?.length) incoming[key] = mine;
+        else delete incoming[key];
+    }
+    store = incoming;
     emit();
 }
 
@@ -304,7 +323,7 @@ export function addDrawing(
         createdAt: Date.now(),
     };
     store = { ...store, [key]: [...(store[key] ?? []), drawing] };
-    persist();
+    persist(key);
     return drawing;
 }
 
@@ -313,7 +332,7 @@ export function updateDrawing(key: string, id: string, patch: Partial<Omit<Drawi
     if (!list) return;
     const next = list.map((d) => (d.id === id ? { ...d, ...patch } : d));
     store = { ...store, [key]: next };
-    persist();
+    persist(key);
 }
 
 export function removeDrawing(key: string, id: string) {
@@ -321,7 +340,7 @@ export function removeDrawing(key: string, id: string) {
     if (!list) return;
     const next = list.filter((d) => d.id !== id);
     store = { ...store, [key]: next };
-    persist();
+    persist(key);
 }
 
 // 複製：偏移交給呼叫端決定。用畫面像素位移再換回時間／價格，水平線這種
@@ -342,13 +361,14 @@ export function clearDrawings(key: string) {
     if (!list?.length) return;
     const kept = list.filter((d) => d.locked);
     store = { ...store, [key]: kept };
-    persist();
+    persist(key);
 }
 
 // 測試用 — 清乾淨 module state 與 localStorage
 export function __resetDrawingsForTest() {
     if (writeTimer !== null) clearTimeout(writeTimer);
     writeTimer = null;
+    dirtyKeys.clear();
     store = {};
     settings = DEFAULT_SETTINGS;
     try {
