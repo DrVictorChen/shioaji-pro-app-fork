@@ -36,6 +36,19 @@ import { roundToTick } from '../lib/utils/ticksize';
 // 複製出來的物件往右下偏這麼多像素 — 一眼看得出是兩個物件
 const DUPLICATE_OFFSET_PX = 24;
 
+// 鍵盤（Delete／Esc）同一時間只歸一張圖：最後被點、或最後選取／武裝工具
+// 的那張。每個 K 線面板都在 window 上聽 keydown，不這樣做的話按一下
+// Delete，每張圖都會刪掉自己選取中的物件。失去鍵盤的圖同時放掉選取與
+// 工具，畫面上不會出現「看起來選著、按鍵卻不歸它」的物件。
+let keyOwner: object | null = null;
+const keyOwnerListeners = new Set<() => void>();
+
+function claimKeyboard(token: object) {
+    if (keyOwner === token) return;
+    keyOwner = token;
+    for (const l of keyOwnerListeners) l();
+}
+
 export interface ChartDrawingsApi {
     tool: DrawingTool | null;
     setTool: (t: DrawingTool | null) => void;
@@ -76,6 +89,7 @@ export function useChartDrawings(opts: {
     const drawings = useDrawings(symbolKey);
     const [tool, setTool] = useState<DrawingTool | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [token] = useState(() => ({}));
 
     // 高頻狀態（繪製中的第二點跟著游標跑）走 ref 直接推給 layer，
     // 不經過 React state — 每次 mousemove 重繪整棵樹太貴
@@ -182,6 +196,7 @@ export function useChartDrawings(opts: {
 
         const down = (e: MouseEvent) => {
             if (e.button !== 0) return;
+            claimKeyboard(token);
             // 委託線拖曳（同一個 host 上先註冊的 handler）已經吃掉這一下
             if (e.defaultPrevented) return;
             const layer = layerOf();
@@ -204,7 +219,7 @@ export function useChartDrawings(opts: {
                     );
                     draftRef.current = null;
                     setTool(null); // 與圖表既有的交易模式一樣是一次性
-                    setSelectedId(created.id);
+                    if (created) setSelectedId(created.id);
                     return;
                 }
                 if (!draft) {
@@ -225,7 +240,7 @@ export function useChartDrawings(opts: {
                 );
                 draftRef.current = null;
                 setTool(null);
-                setSelectedId(created.id);
+                if (created) setSelectedId(created.id);
                 return;
             }
 
@@ -321,7 +336,7 @@ export function useChartDrawings(opts: {
             if (activeUp) document.removeEventListener('mouseup', activeUp, true);
             if (drag) setChartInteractive(true); // 拖曳中被卸載 — 別讓圖表卡住
         };
-    }, [hostRef, chartRef, pushState]);
+    }, [hostRef, chartRef, pushState, token]);
 
     // 交易模式武裝時收起畫圖工具，兩者不會同時吃同一下點擊
     useEffect(() => {
@@ -333,8 +348,34 @@ export function useChartDrawings(opts: {
     }, [tradeArmed, tool, pushState]);
 
     // ── 鍵盤 ─────────────────────────────────────────────────────────
+    const hasFocusState = !!(tool || selectedId);
+
+    // 選取或武裝工具（含從左側工具列）就接手鍵盤
     useEffect(() => {
+        if (hasFocusState) claimKeyboard(token);
+    }, [hasFocusState, token]);
+
+    // 別張圖接手時放掉自己的選取與工具
+    useEffect(() => {
+        const onOwnerChange = () => {
+            if (keyOwner === token) return;
+            draftRef.current = null;
+            setTool(null);
+            setSelectedId(null);
+            pushState();
+        };
+        keyOwnerListeners.add(onOwnerChange);
+        return () => {
+            keyOwnerListeners.delete(onOwnerChange);
+            if (keyOwner === token) keyOwner = null;
+        };
+    }, [token, pushState]);
+
+    // 沒有選取也沒有工具時不掛 listener — 鍵盤完全不經過這張圖
+    useEffect(() => {
+        if (!hasFocusState) return;
         const onKey = (e: KeyboardEvent) => {
+            if (keyOwner !== token) return;
             // modal 開著時鍵盤歸 modal — Esc 關視窗、Delete 不該穿透到
             // 後面圖上的畫圖物件
             if (escStackDepth() > 0) return;
@@ -359,8 +400,10 @@ export function useChartDrawings(opts: {
                     // 要不要武裝 Esc×2 全刪單，取消繪製不該武裝刪單
                     e.preventDefault();
                 } else if (stateRef.current.selectedId) {
+                    // 只取消選取，不吃掉這一下：選取是被動狀態，使用者
+                    // 按 Esc×2 要的是全部刪單，第一下不能因為圖上剛好
+                    // 選著一條線就失效
                     setSelectedId(null);
-                    e.preventDefault();
                 }
                 return;
             }
@@ -379,7 +422,7 @@ export function useChartDrawings(opts: {
         // 「取消繪製」那一下順便武裝刪單視窗。
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-    }, [pushState]);
+    }, [hasFocusState, pushState, token]);
 
     // ── 對外操作 ─────────────────────────────────────────────────────
     const selected = useMemo(

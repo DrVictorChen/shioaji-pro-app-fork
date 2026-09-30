@@ -145,7 +145,7 @@ describe('鎖定只擋移動，不擋選取與編輯', () => {
                 { time: 2000, price: 25100 },
             ],
             DEFAULT_DRAWING_STYLE,
-        );
+        )!;
         await act(async () => api.select(created.id));
         await act(async () => api.toggleLock());
         return { api: () => api, id: created.id };
@@ -198,5 +198,86 @@ describe('商品鍵隨設定切換', () => {
         expect(api.symbolKey).toBe('TXF');
         await act(async () => api.setShareContinuousMonth(false));
         expect(api.symbolKey).toBe('TXFR1');
+    });
+});
+
+describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
+    // 這組需要真的派送 keydown：把 window 換成記錄 listener 的替身
+    const keyListeners = new Set<(e: KeyboardEvent) => void>();
+    beforeEach(() => {
+        keyListeners.clear();
+        vi.stubGlobal('window', {
+            addEventListener: (type: string, l: (e: KeyboardEvent) => void) => {
+                if (type === 'keydown') keyListeners.add(l);
+            },
+            removeEventListener: (type: string, l: (e: KeyboardEvent) => void) => {
+                if (type === 'keydown') keyListeners.delete(l);
+            },
+        });
+    });
+
+    function press(key: string) {
+        const e = {
+            key,
+            target: null,
+            defaultPrevented: false,
+            preventDefault() {
+                this.defaultPrevented = true;
+            },
+        };
+        for (const l of [...keyListeners]) l(e as unknown as KeyboardEvent);
+        return e;
+    }
+
+    const line = (price: number) =>
+        addDrawing('TXF', 'horizontal', [{ time: 1000, price }], DEFAULT_DRAWING_STYLE)!;
+
+    async function mountChart() {
+        let api!: ChartDrawingsApi;
+        await mount({ receive: (v) => (api = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+        return () => api;
+    }
+
+    it('沒有選取也沒有工具時不聽鍵盤', async () => {
+        await mountChart();
+        expect(keyListeners.size).toBe(0);
+    });
+
+    it('選取中按 Esc 只取消選取，不吃掉這一下 — Esc×2 全刪單第一下仍然算數', async () => {
+        const api = await mountChart();
+        const d = line(25000);
+        await act(async () => api().select(d.id));
+        let e!: ReturnType<typeof press>;
+        await act(async () => {
+            e = press('Escape');
+        });
+        expect(api().selected).toBeNull();
+        expect(e.defaultPrevented).toBe(false);
+    });
+
+    it('繪製中按 Esc 取消繪製並吃掉這一下，不武裝全刪單', async () => {
+        const api = await mountChart();
+        await act(async () => api().setTool('trend'));
+        let e!: ReturnType<typeof press>;
+        await act(async () => {
+            e = press('Escape');
+        });
+        expect(api().tool).toBeNull();
+        expect(e.defaultPrevented).toBe(true);
+    });
+
+    it('兩張圖：後選取的那張接手鍵盤，Delete 只刪它的物件，前一張放掉選取', async () => {
+        const a = await mountChart();
+        const b = await mountChart();
+        const la = line(25000);
+        const lb = line(25100);
+        await act(async () => a().select(la.id));
+        await act(async () => b().select(lb.id));
+        expect(a().selected).toBeNull();
+        expect(b().selected?.id).toBe(lb.id);
+        await act(async () => {
+            press('Delete');
+        });
+        expect(b().drawings.map((d) => d.id)).toEqual([la.id]);
     });
 });
