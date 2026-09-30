@@ -439,6 +439,16 @@ class DrawingPaneView implements IPrimitivePaneView {
 export const AXIS_LABEL_H = 18; // 標籤高度（px）
 const AXIS_LABEL_FONT_PX = 11;
 
+// 標籤色塊的範圍（CSS px，整數邊）。繪製與命中判定共用同一個矩形，
+// 畫出來的邊和保護範圍一致（不會畫在 22、保護卻從 22.49 開始）
+export function axisLabelBox(y: number): { top: number; bottom: number } {
+    return { top: Math.floor(y - AXIS_LABEL_H / 2), bottom: Math.ceil(y + AXIS_LABEL_H / 2) };
+}
+
+// 委託線拖曳時要排除的範圍：色塊再往外各多 1 CSS px（涵蓋高 DPR 的
+// 像素取整與邊緣抗鋸齒）
+export const AXIS_LABEL_GUARD_PX = 1;
+
 export interface AxisLabelRow {
     y: number; // pane 座標（與價格軸同一個垂直座標系）
     text: string;
@@ -458,9 +468,11 @@ class DrawingAxisRenderer implements IPrimitivePaneRenderer {
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'left';
             for (const r of this._rows) {
-                const top = Math.round((r.y - AXIS_LABEL_H / 2) * vr);
+                const box = axisLabelBox(r.y);
+                const top = Math.round(box.top * vr);
+                const bottom = Math.round(box.bottom * vr);
                 ctx.fillStyle = r.color;
-                ctx.fillRect(0, top, Math.round(width * hr), Math.round(AXIS_LABEL_H * vr));
+                ctx.fillRect(0, top, Math.round(width * hr), bottom - top);
                 ctx.fillStyle = contrastTextColor(r.color);
                 ctx.fillText(r.text, 5 * hr, r.y * vr);
             }
@@ -548,10 +560,10 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
 
     // 畫圖標籤在價格軸上的確切範圍（pane 座標）：委託線拖曳判斷要排除
     axisLabelRects(): { top: number; bottom: number }[] {
-        return this.axisLabelRows().map((r) => ({
-            top: r.y - AXIS_LABEL_H / 2,
-            bottom: r.y + AXIS_LABEL_H / 2,
-        }));
+        return this.axisLabelRows().map((r) => {
+            const box = axisLabelBox(r.y);
+            return { top: box.top - AXIS_LABEL_GUARD_PX, bottom: box.bottom + AXIS_LABEL_GUARD_PX };
+        });
     }
 
     priceAxisPaneViews(): readonly IPrimitivePaneView[] {
