@@ -39,7 +39,7 @@ import type { Snapshot } from '../lib/types/market';
 import type { Action, Trade } from '../lib/types/order';
 import type { Account, AccountedPosition } from '../lib/types/portfolio';
 import { stockTaxRate } from '../lib/utils/contract-cost';
-import { fmtPrice } from '../lib/utils/format';
+import { fmtCompactInt, fmtPrice } from '../lib/utils/format';
 import { stepPrice } from '../lib/utils/ticksize';
 import * as styles from './odd-spread.css';
 
@@ -145,7 +145,7 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
     const running = !!exec && exec.started && !isTerminalPhase(exec.phase);
 
     const blockText = (q: SpreadQuote): string | null => {
-        if (!feed.oddAvailable && q.block === 'noQuote') return '零股行情尚未接上';
+        if (!feed.oddAvailable && q.block === 'noQuote') return '等待零股行情';
         if (!live) return '行情或交易狀態未連線';
         if (!account) return '沒有可用的證券帳戶';
         if (running) return '價差單執行中';
@@ -250,7 +250,9 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                 </span>
             </div>
             {!feed.oddAvailable && (
-                <div className={styles.notice}>零股行情尚未接上：目前只顯示整股五檔，價差試算與送出暫停</div>
+                <div className={styles.notice} title='盤中零股約每 5 秒撮合一次；收到零股五檔後才試算價差'>
+                    等待零股行情：目前只顯示整股五檔，價差試算與送出暫停
+                </div>
             )}
             <div className={styles.cards}>
                 {DIRECTIONS.map(d => (
@@ -293,7 +295,9 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                                 title={armed ? `${market === 'odd' ? '零股' : '整股'}限價${action === 'Buy' ? '買' : '賣'} ${unit} @ ${fmtPrice(r.price)}` : '先啟用點價'}
                                 onClick={() => void placeAt(market, action, r.price)}
                             >
-                                {vol ? int(vol) : ''}
+                                <span title={market === 'odd' && vol && vol >= 10_000 ? `${int(vol)} 股` : undefined}>
+                                    {vol ? (market === 'odd' ? fmtCompactInt(vol) : int(vol)) : ''}
+                                </span>
                             </span>
                         );
                     };

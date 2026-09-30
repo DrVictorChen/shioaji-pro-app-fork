@@ -139,12 +139,6 @@ export const bigUnit = style({
     fontWeight: 400,
 });
 
-export const tone = styleVariants({
-    pos: { color: vars.color.success },
-    neg: { color: vars.color.danger },
-    flat: { color: vars.color.mutedForeground },
-});
-
 export const kv = style({
     display: 'grid',
     gridTemplateColumns: 'auto 1fr',
@@ -155,6 +149,13 @@ export const kv = style({
 export const kvKey = style({ color: vars.color.mutedForeground, whiteSpace: 'nowrap' });
 export const kvVal = style({ textAlign: 'right', fontFamily: vars.font.mono, color: vars.color.foreground, minWidth: 0 });
 export const kvSub = style({ fontFamily: vars.font.body, color: vars.color.mutedForeground });
+
+// 放在 kvVal 之後：同權重時後定義者勝，損益色才蓋得過預設前景色
+export const tone = styleVariants({
+    pos: { color: vars.color.success },
+    neg: { color: vars.color.danger },
+    flat: { color: vars.color.mutedForeground },
+});
 
 const goBase = style({
     marginTop: 'auto',
@@ -174,7 +175,7 @@ export const goBtn = styleVariants({
 
 // ---- 價格梯：左整股（張）· 價格 · 右零股（股） ----
 
-const COLS = '1fr 1fr 4.6rem 1fr 1fr';
+const COLS = '1fr 1fr 5.8rem 1fr 1fr';
 
 export const ladderHead = style({
     display: 'grid',

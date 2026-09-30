@@ -90,7 +90,7 @@ it('顯示設計稿的兩個方向與價格梯', async () => {
 it('未接上零股行情時兩個方向都停用', async () => {
     const fd = { ...feed, odd: { bids: [], asks: [] }, oddAvailable: false, oddLast: null, oddTime: null };
     await act(async () => { view = create(createElement(Harness, { trades: [], fd })); });
-    expect(text(view.root)).toContain('零股行情尚未接上');
+    expect(text(view.root)).toContain('等待零股行情');
     expect(button('買整賣零').props.disabled).toBe(true);
     expect(button('買零賣整').props.disabled).toBe(true);
 });
