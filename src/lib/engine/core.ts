@@ -336,6 +336,8 @@ export interface BacktestCore {
     readonly version: string;
     run(request: CoreRequest): Promise<CoreResponse>;
     selectCandidates(request: SelectionRequest): Promise<SelectionResult>;
+    /** L1 data preparation (spec §4); optional for cores that receive prepared bars only. */
+    prepare?(request: PrepareRequest): Promise<PrepareResponse>;
 }
 
 // ---------------------------------------------------------------------------
