@@ -192,7 +192,8 @@ function emitCancel(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot): bool
     if (!envMatches(ctx.s, p) || !slot.orderId) return false;
     const attempts = (slot.cancel?.attempts ?? 0) + 1;
     const key = `${slot.key}/cancel/${attempts}`;
-    slot.cancel = { key, status: 'pendingSubmit', attempts, detail: null, sentAt: ctx.ts };
+    slot.cancel = { key, status: 'pendingSubmit', attempts, detail: null, sentAt: ctx.ts,
+        outstanding: [...(slot.cancel?.outstanding ?? []), key] };
     const b = p.binding;
     ctx.intents.push({ kind: 'cancel', key, programId: p.id, levelId: lv.id, version: p.version,
         env: b.env, serverId: b.serverId, account: b.account, orderId: slot.orderId });
@@ -201,7 +202,7 @@ function emitCancel(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot): bool
 }
 
 /** Stopping program: cancel every working entry not yet asked to cancel;
- * with `retry`, also resend failed cancels, and unknown ones that stayed
+ * with `retry`, also resend failed cancels, and unknown / requested ones that stayed
  * unsettled for CANCEL_UNKNOWN_RETRY_MS (bounded by MAX_CANCEL_ATTEMPTS). */
 function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
     if (p.status !== 'stopping' || !envMatches(ctx.s, p)) return;
@@ -211,7 +212,8 @@ function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
             const c = slot.cancel;
             if (c === null) emitCancel(ctx, p, lv, slot);
             else if (retry && c.attempts < MAX_CANCEL_ATTEMPTS && (c.status === 'failed'
-                || (c.status === 'unknown' && ctx.ts - c.sentAt >= CANCEL_UNKNOWN_RETRY_MS))) {
+                || ((c.status === 'unknown' || c.status === 'requested')
+                    && ctx.ts - c.sentAt >= CANCEL_UNKNOWN_RETRY_MS))) {
                 emitCancel(ctx, p, lv, slot);
             }
         }
@@ -221,6 +223,7 @@ function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
 function cancelFailed(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, detail: string) {
     const c = slot.cancel!;
     c.status = 'failed';
+    c.outstanding = c.outstanding.filter(k => k !== c.key);
     c.detail = detail;
     notice(ctx, 'cancelFailed', p, lv.id, `${slot.key}: ${detail}`);
     if (c.attempts >= MAX_CANCEL_ATTEMPTS) addIssue(ctx, p, 'cancelGaveUp', `${slot.key}: ${c.attempts} cancel attempts failed`);
@@ -465,7 +468,7 @@ function findSlotByKey(s: EngineState, key: string, src: Source) {
         for (const lv of p.levels) {
             const slot = lv.orders.find(o => o.key === key);
             if (slot) return { p, lv, slot, cancel: false };
-            const c = lv.orders.find(o => o.cancel?.key === key);
+            const c = lv.orders.find(o => o.cancel !== null && (o.cancel.key === key || o.cancel.outstanding.includes(key)));
             if (c) return { p, lv, slot: c, cancel: true };
         }
     }
@@ -501,7 +504,12 @@ function onIntentResult(ctx: Ctx, e: IntentResultEvent) {
     const { p, lv, slot } = hit;
     if (hit.cancel) {
         const c = slot.cancel!;
-        if (c.key !== e.key || c.status !== 'pendingSubmit') return; // stale attempt / duplicate
+        if (c.key !== e.key) {
+            // an earlier attempt: a refusal settles it, nothing else changes the current one
+            if (e.outcome === 'notSent') c.outstanding = c.outstanding.filter(k => k !== e.key);
+            return;
+        }
+        if (c.status !== 'pendingSubmit') return; // duplicate
         if (e.outcome === 'accepted') c.status = 'requested';
         else if (e.outcome === 'notSent') cancelFailed(ctx, p, lv, slot, e.detail ?? 'notSent');
         else { c.status = 'unknown'; c.detail = e.detail ?? 'unknown'; }
@@ -533,16 +541,24 @@ function applyOrder(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, e: Or
         if (e.failed) {
             const c = slot.cancel;
             if (!c || c.status === 'confirmed' || c.status === 'failed' || !isActive(slot)) return;
-            if (!e.cancelKey) {
-                // cannot tell which attempt failed: never mark the current one
-                addIssue(ctx, p, 'cancelReportUnkeyed', `${slot.key}: Cancel failure without attempt key ignored`);
+            if (e.cancelKey) {
+                c.outstanding = c.outstanding.filter(k => k !== e.cancelKey); // that attempt is settled
+                if (e.cancelKey === c.key) cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
+                return; // else: a stale attempt's failure
+            }
+            if (c.outstanding.length === 1 && c.outstanding[0] === c.key) {
+                // only one attempt could have failed: the current one
+                cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
                 return;
             }
-            if (e.cancelKey !== c.key) return; // a stale attempt's failure
-            cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
+            // cannot tell which attempt failed: the current one's fate is unknown
+            // (never left `requested`; retried after the timeout unless settled)
+            c.status = 'unknown';
+            c.detail = e.detail ?? 'unkeyedCancelFailure';
+            addIssue(ctx, p, 'cancelReportUnkeyed', `${slot.key}: Cancel failure without attempt key, ${c.outstanding.length} attempts outstanding`);
             return;
         }
-        if (slot.cancel) slot.cancel.status = 'confirmed';
+        if (slot.cancel) { slot.cancel.status = 'confirmed'; slot.cancel.outstanding = []; }
     }
     const ended = (e.op === 'New' && e.failed) || (e.op === 'Cancel' && !e.failed);
     if (!ended || !isActive(slot)) return;
@@ -688,7 +704,7 @@ function onReconcile(ctx: Ctx, e: ReconcileEvent) {
                 if (isActive(slot) && row.status !== 'working') {
                     slot.status = slot.filled >= slot.qty ? 'filled' : 'ended';
                     if (slot.status === 'ended') slot.detail = 'reconciledEnded';
-                    if (slot.cancel) slot.cancel.status = 'confirmed';
+                    if (slot.cancel) { slot.cancel.status = 'confirmed'; slot.cancel.outstanding = []; }
                 }
                 touched = true;
             }

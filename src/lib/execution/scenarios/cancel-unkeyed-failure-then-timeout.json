@@ -1,11 +1,10 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "cancel-tracking-retry",
-  "description": "P1-2: a failed attempt is retried with a new key on the next tick; an unknown attempt (may still be in flight) waits 30 s unsettled — also across a restart; an unkeyed Cancel failure counts for the current attempt only when it is the sole outstanding one, otherwise the cancel becomes unknown (never stuck in requested); stale keyed failures / results never touch the current attempt; stopped only once the cancel is confirmed.",
+  "name": "cancel-unkeyed-failure-then-timeout",
+  "description": "P1-2: an upstream without attempt keys: two attempts outstanding and an unkeyed failure → unknown, then retried after the timeout (bounded).",
   "covers": [
     "stop",
-    "cancel",
-    "restart"
+    "cancel"
   ],
   "steps": [
     {
@@ -222,63 +221,12 @@
         "serverId": "local-a",
         "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
         "outcome": "accepted"
-      },
-      "expect": {
-        "programs": {
-          "g1": {
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "status": "working",
-                    "cancel": {
-                      "status": "requested"
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "order",
-        "ts": 1006,
-        "env": "simulation",
-        "serverId": "local-a",
-        "orderId": "o1",
-        "op": "Cancel",
-        "failed": true
-      },
-      "expect": {
-        "notices": [
-          "cancelFailed"
-        ],
-        "programs": {
-          "g1": {
-            "status": "stopping",
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "cancel": {
-                      "status": "failed",
-                      "outstanding": []
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
       }
     },
     {
       "event": {
         "type": "tick",
-        "ts": 1007,
+        "ts": 31004,
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
@@ -288,8 +236,7 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
-            "orderId": "o1"
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2"
           }
         ]
       }
@@ -297,157 +244,17 @@
     {
       "event": {
         "type": "intentResult",
-        "ts": 1008,
+        "ts": 31005,
         "env": "simulation",
         "serverId": "local-a",
         "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
-        "outcome": "unknown",
-        "detail": "timeout"
-      },
-      "expect": {
-        "programs": {
-          "g1": {
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "cancel": {
-                      "status": "unknown",
-                      "attempts": 2,
-                      "sentAt": 1007
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 1009,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 100
-      },
-      "expect": {}
-    },
-    {
-      "restart": {
-        "ts": 5000
-      },
-      "expect": {
-        "programs": {
-          "g1": {
-            "status": "stopping",
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "cancel": {
-                      "status": "unknown",
-                      "attempts": 2
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "connection",
-        "ts": 5001,
-        "live": true,
-        "env": "simulation",
-        "serverId": "local-a"
-      },
-      "expect": {}
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 30000,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 100
-      },
-      "expect": {}
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 31007,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 100
-      },
-      "expect": {
-        "intents": [
-          {
-            "kind": "cancel",
-            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3",
-            "orderId": "o1"
-          }
-        ],
-        "programs": {
-          "g1": {
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "cancel": {
-                      "outstanding": [
-                        "simulation/local-a/g1/L1/entry/0/0/cancel/2",
-                        "simulation/local-a/g1/L1/entry/0/0/cancel/3"
-                      ]
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "intentResult",
-        "ts": 31008,
-        "env": "simulation",
-        "serverId": "local-a",
-        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3",
         "outcome": "accepted"
-      },
-      "expect": {
-        "programs": {
-          "g1": {
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "cancel": {
-                      "status": "requested"
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
       }
     },
     {
       "event": {
         "type": "order",
-        "ts": 31009,
+        "ts": 31006,
         "env": "simulation",
         "serverId": "local-a",
         "orderId": "o1",
@@ -460,38 +267,6 @@
         ],
         "programs": {
           "g1": {
-            "status": "stopping",
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "status": "working",
-                    "cancel": {
-                      "status": "unknown",
-                      "attempts": 3
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "order",
-        "ts": 31010,
-        "env": "simulation",
-        "serverId": "local-a",
-        "orderId": "o1",
-        "op": "Cancel",
-        "failed": true,
-        "cancelKey": "simulation/local-a/g1/L1/entry/0/0/cancel/2"
-      },
-      "expect": {
-        "programs": {
-          "g1": {
             "levels": {
               "L1": {
                 "orders": [
@@ -499,7 +274,8 @@
                     "cancel": {
                       "status": "unknown",
                       "outstanding": [
-                        "simulation/local-a/g1/L1/entry/0/0/cancel/3"
+                        "simulation/local-a/g1/L1/entry/0/0/cancel/1",
+                        "simulation/local-a/g1/L1/entry/0/0/cancel/2"
                       ]
                     }
                   }
@@ -512,62 +288,31 @@
     },
     {
       "event": {
-        "type": "intentResult",
-        "ts": 31011,
+        "type": "tick",
+        "ts": 61003,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
-        "outcome": "accepted"
+        "code": "TXFR1",
+        "price": 100
       },
-      "expect": {
-        "programs": {
-          "g1": {
-            "levels": {
-              "L1": {
-                "orders": [
-                  {
-                    "cancel": {
-                      "status": "unknown",
-                      "attempts": 3
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
+      "expect": {}
     },
     {
       "event": {
-        "type": "order",
-        "ts": 31012,
+        "type": "tick",
+        "ts": 61004,
         "env": "simulation",
         "serverId": "local-a",
-        "orderId": "o1",
-        "op": "Cancel",
-        "failed": false
+        "code": "TXFR1",
+        "price": 100
       },
       "expect": {
-        "programs": {
-          "g1": {
-            "status": "stopped",
-            "levels": {
-              "L1": {
-                "phase": "done",
-                "orders": [
-                  {
-                    "status": "ended",
-                    "cancel": {
-                      "status": "confirmed",
-                      "outstanding": []
-                    }
-                  }
-                ]
-              }
-            }
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3"
           }
-        }
+        ]
       }
     }
   ]

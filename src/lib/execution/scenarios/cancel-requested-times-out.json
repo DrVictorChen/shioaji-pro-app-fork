@@ -1,0 +1,275 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "cancel-requested-times-out",
+  "description": "P1-2: an accepted cancel that is never confirmed nor rejected is retried after 30 s — a cancel never stays requested forever.",
+  "covers": [
+    "stop",
+    "cancel"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "g1",
+            "kind": "grid",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Buy",
+                "qty": 1,
+                "entry": {
+                  "type": "limit",
+                  "price": 99,
+                  "order": {
+                    "priceType": "LMT",
+                    "timeInForce": "ROD",
+                    "octype": "New"
+                  }
+                },
+                "exit": {
+                  "type": "takeProfit",
+                  "price": 100,
+                  "order": {
+                    "priceType": "LMT",
+                    "timeInForce": "ROD",
+                    "octype": "Cover"
+                  }
+                },
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": {
+              "type": "ladder",
+              "anchor": {
+                "type": "fixed",
+                "price": 99
+              },
+              "spacing": {
+                "type": "abs",
+                "value": 1
+              },
+              "count": 1,
+              "direction": "down",
+              "qty": 1,
+              "takeProfit": {
+                "type": "abs",
+                "value": 1
+              },
+              "order": {
+                "priceType": "LMT",
+                "timeInForce": "ROD",
+                "octype": "New"
+              },
+              "exitOrder": {
+                "priceType": "LMT",
+                "timeInForce": "ROD",
+                "octype": "Cover"
+              }
+            },
+            "cycle": {
+              "rearmAfterExit": true,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "simulation/local-a/g1/L1/entry/0/0",
+            "action": "Buy",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": 99
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1003,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "simulation/local-a/g1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "o1"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1004,
+        "id": "c1004",
+        "command": {
+          "op": "stop",
+          "programId": "g1",
+          "version": 1
+        }
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
+            "orderId": "o1"
+          }
+        ],
+        "programs": {
+          "g1": {
+            "status": "stopping",
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "pendingSubmit",
+                      "attempts": 1,
+                      "sentAt": 1004,
+                      "outstanding": [
+                        "simulation/local-a/g1/L1/entry/0/0/cancel/1"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1005,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
+        "outcome": "accepted"
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 31003,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {}
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 31004,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
+            "orderId": "o1"
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "order",
+        "ts": 31005,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o1",
+        "op": "Cancel",
+        "failed": false
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "status": "stopped"
+          }
+        }
+      }
+    }
+  ]
+}

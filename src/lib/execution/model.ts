@@ -105,10 +105,14 @@ export interface CancelState {
     status: 'pendingSubmit' | 'requested' | 'confirmed' | 'failed' | 'unknown';
     attempts: number;
     detail: string | null;
-    /** ts the current attempt was emitted. An `unknown` attempt may still be
-     * in flight: it is only retried after CANCEL_UNKNOWN_RETRY_MS, unless a
-     * report / reconcile settles it first. */
+    /** ts the current attempt was emitted. An `unknown` or `requested`
+     * attempt may still be in flight: it is only retried after
+     * CANCEL_UNKNOWN_RETRY_MS, unless a report / reconcile settles it first. */
     sentAt: number;
+    /** Attempt keys that may still be answered (sent, not yet settled by a
+     * notSent result or a keyed failure). An unkeyed Cancel failure is
+     * attributed to the current attempt only when it is the sole one here. */
+    outstanding: string[];
 }
 
 export type SlotStatus =
@@ -346,7 +350,9 @@ export interface OrderEvent extends Source {
     op: 'New' | 'Cancel' | 'UpdatePrice' | 'UpdateQty';
     failed: boolean; detail?: string;
     /** Cancel reports: the cancel intent key (attempt) this report answers.
-     * A Cancel failure without it is not applied (it may be a stale attempt). */
+     * Without it, a Cancel failure counts for the current attempt only when
+     * that is the only outstanding one; otherwise the cancel becomes
+     * `unknown` (retried after the timeout unless settled). */
     cancelKey?: string;
 }
 export interface DealEvent extends Source {
