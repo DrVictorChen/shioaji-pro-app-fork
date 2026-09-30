@@ -1,0 +1,223 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "unknown-outcome-live",
+  "description": "A submit with an unknown outcome freezes the level: no resend on later ticks; ack disables it.",
+  "covers": [
+    "unknown"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "t1",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1002,
+        "code": "TXFR1",
+        "price": 99
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "t1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1003,
+        "key": "t1/L1/entry/0/0",
+        "outcome": "unknown",
+        "detail": "timeout"
+      },
+      "expect": {
+        "notices": [
+          "unknown"
+        ],
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "unknown",
+                "orders": [
+                  {
+                    "status": "unknown"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1004,
+        "code": "TXFR1",
+        "price": 98
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1005,
+        "key": "t1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "late"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1006,
+        "id": "c1006",
+        "command": {
+          "op": "ackUnknown",
+          "programId": "t1",
+          "version": 1,
+          "levelId": "L1"
+        }
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "version": 2,
+            "levels": {
+              "L1": {
+                "phase": "disabled",
+                "detail": "unknownAcknowledged",
+                "orders": [
+                  {
+                    "status": "ended",
+                    "acknowledged": true
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1007,
+        "code": "TXFR1",
+        "price": 97
+      }
+    }
+  ]
+}

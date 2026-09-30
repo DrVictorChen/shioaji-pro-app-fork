@@ -1,0 +1,264 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "trigger-fire-once",
+  "description": "A stop trigger fires once when price touches, then completes on fill; later ticks send nothing.",
+  "covers": [
+    "trigger"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "t1",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      },
+      "expect": {
+        "notices": [
+          "created"
+        ],
+        "programs": {
+          "t1": {
+            "status": "running",
+            "hold": null,
+            "levels": {
+              "L1": {
+                "phase": "idle"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1002,
+        "code": "TXFR1",
+        "price": 101
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1003,
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "t1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null,
+            "env": "simulation",
+            "serverId": "local-a",
+            "orderCode": "TXFJ6",
+            "account": {
+              "accountType": "F",
+              "brokerId": "F002000",
+              "accountId": "1234567"
+            },
+            "version": 1
+          }
+        ],
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "working",
+                "orders": [
+                  {
+                    "status": "pendingSubmit",
+                    "key": "t1/L1/entry/0/0"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1004,
+        "code": "TXFR1",
+        "price": 99
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "working"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1005,
+        "key": "t1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "o1"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "working",
+                "orders": [
+                  {
+                    "status": "working",
+                    "orderId": "o1"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1006,
+        "orderId": "o1",
+        "eventId": null,
+        "seq": "s1",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Sell",
+        "qty": 1,
+        "price": 99
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "done",
+                "entryFilled": 0,
+                "cycles": 1,
+                "orders": [
+                  {
+                    "status": "filled",
+                    "filled": 1
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1007,
+        "code": "TXFR1",
+        "price": 90
+      }
+    }
+  ]
+}

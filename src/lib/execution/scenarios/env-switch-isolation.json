@@ -1,0 +1,464 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "env-switch-isolation",
+  "description": "Switching simulation → production holds every simulation program (no cross-env send); a production program runs; switching back resumes with the #144 first-tick check.",
+  "covers": [
+    "env",
+    "#144",
+    "isolation"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "t1",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1002,
+        "id": "c1002",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "p1",
+            "kind": "trigger",
+            "binding": {
+              "env": "production",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      },
+      "expect": {
+        "notices": [
+          "rejected.envMismatch"
+        ],
+        "programs": {
+          "p1": null
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 2000,
+        "live": true,
+        "env": "production",
+        "serverId": "local-a"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "hold": "envMismatch",
+            "status": "running"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 2001,
+        "code": "TXFR1",
+        "price": 90
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "idle"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 2002,
+        "id": "c2002",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "p1",
+            "kind": "trigger",
+            "binding": {
+              "env": "production",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 2003,
+        "code": "TXFR1",
+        "price": 90
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "p1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null,
+            "env": "production"
+          }
+        ],
+        "programs": {
+          "t1": {
+            "hold": "envMismatch",
+            "levels": {
+              "L1": {
+                "phase": "idle"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 3000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "hold": null,
+            "levels": {
+              "L1": {
+                "check": "env"
+              }
+            }
+          },
+          "p1": {
+            "hold": "envMismatch"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 3001,
+        "code": "TXFR1",
+        "price": 90
+      },
+      "expect": {
+        "notices": [
+          "needsConfirm"
+        ],
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "needsConfirm",
+                "pending": {
+                  "reason": "env"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 3002,
+        "key": "p1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "po1"
+      },
+      "expect": {
+        "programs": {
+          "p1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "status": "working",
+                    "orderId": "po1"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 3003,
+        "orderId": "po1",
+        "eventId": null,
+        "seq": "s1",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Sell",
+        "qty": 1,
+        "price": 90
+      },
+      "expect": {
+        "programs": {
+          "p1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "filled": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,266 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "commands-pause-resume-remove",
+  "description": "Pause stops firing, resume re-checks (#144), remove is refused while an order is active.",
+  "covers": [
+    "commands",
+    "#144",
+    "version"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "t1",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1002,
+        "id": "c1002",
+        "command": {
+          "op": "pause",
+          "programId": "t1",
+          "version": 1
+        }
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "status": "paused",
+            "pauseReason": "user",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1003,
+        "code": "TXFR1",
+        "price": 90
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1004,
+        "id": "c1004",
+        "command": {
+          "op": "resume",
+          "programId": "t1",
+          "version": 2
+        }
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "status": "running",
+            "version": 3,
+            "levels": {
+              "L1": {
+                "check": "resume"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1005,
+        "code": "TXFR1",
+        "price": 90
+      },
+      "expect": {
+        "notices": [
+          "needsConfirm"
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1006,
+        "id": "c1006",
+        "command": {
+          "op": "resolvePending",
+          "programId": "t1",
+          "version": 3,
+          "levelId": "L1",
+          "choice": "send"
+        }
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "t1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null,
+            "version": 4
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1007,
+        "id": "c1007",
+        "command": {
+          "op": "remove",
+          "programId": "t1",
+          "version": 4
+        }
+      },
+      "expect": {
+        "notices": [
+          "rejected.hasOrdersOrPosition"
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1008,
+        "key": "t1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "o1"
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1009,
+        "orderId": "o1",
+        "eventId": null,
+        "seq": "s1",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Sell",
+        "qty": 1,
+        "price": 90
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1010,
+        "id": "c1010",
+        "command": {
+          "op": "remove",
+          "programId": "t1",
+          "version": 4
+        }
+      },
+      "expect": {
+        "notices": [
+          "removed"
+        ],
+        "programs": {
+          "t1": null
+        }
+      }
+    }
+  ]
+}
