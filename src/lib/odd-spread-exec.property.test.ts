@@ -1,28 +1,35 @@
-// 整零價差狀態機：固定種子的隨機事件序列（repo 沒有 fast-check）。
+// 整零價差：狀態機＋委託列對帳的固定種子隨機序列測試（repo 沒有 fast-check）。
 //
-// 模擬券商：下單結果（成功／結果不明（可能已送出）／確定未送出）、委託回報、
-// 成交（早到、晚到、部分）、刪單（成功／失敗）、回報亂序與延遲、重新整理
-// （丟失在途的 HTTP 回應、送出中→結果不明、刪單等待→刪單結果不明、以委託列重新
-// 對帳）、環境切換（一段時間內回報全部延後），以及使用者的取消、標記未送出、
-// 補單決定。每一步之後檢查：
-//   (a) 送出量不超過計畫：potential(腳) ≤ 上限（整股 ≤ 計畫張數、零股 ≤ 計畫股數），
-//       否則該腳必有多出補單的刪單已發出；sequential 零股總送出量 ≤ 計畫。
-//   (b) 任一腳因補單而成交超過目標上限一單位（1 張／1,000 股）以上時，該腳必有
-//       為多出而刪的補單。
-//   (c) 靜止後，券商端仍在委託中的每一筆，狀態機都在追蹤（在途），成交量一致。
-//   (d) 同一個意圖（key）不會送兩次。
-//   (b') 任何時候：超過目標上限的量，只要還有能刪的補單就一定已發刪單（含使用者
-//       誤把已送出的委託標成「未送出」的序列）。
+// 模擬券商（委託以券商 id 回報、帶我們的唯一標記）：
+// - 下單：送出前最後一刻檢查環境（不同就確定未送出）；成功／結果不明（一半其實
+//   送到）／確定未送出；HTTP 回應延遲、亂序。
+// - 成交：部分、全部；刪單請求送達後、生效前仍可能成交；刪單生效另一步。
+// - 券商晚到的拒單（Failed、刪單量 0）。
+// - 回讀落後：委託列看到的是某個時點的快照；刪單生效後回讀可能仍是 Submitted、
+//   刪單量涵蓋全部（ADR 0004）。
+// - App 重新整理：在途 HTTP 遺失（送出中的委託可能已到券商）、狀態機接回。
+// - sidecar 重啟：所有委託換新 id、世代＋1，舊 id 可能被無關委託重用。
+// - 環境切換：API base 或模擬／正式改變一段時間；期間回報保留、使用者操作拒絕、
+//   送出前檢查擋下；切回後依序處理。
+// - 使用者：取消、標記未送出（1/4 的序列會誤標已送出的委託）、補單接受／拒絕。
+//
+// 判定（oracle）獨立於執行器，只用券商端真實狀態與送出的指令計算：
+//   (a) sequential 零股送出總量 ≤ 計畫。
+//   (b) 靜止後，任一腳因補單造成的成交超過需要量一單位（1 張／1,000 股）以上 → 失敗
+//       （誤標序列除外）。
+//   (s) 靜止後，若某腳最多可能成交超過需要量，該腳每一筆仍在委託中的補單都必須已
+//       被刪（或刪單失敗、已通知使用者）——只看「目前這一筆」，歷史刪單不能豁免。
+//   (l) 靜止後，另一腳已確定、仍有未放棄的缺口 → 必須已送補單（缺口被在途量涵蓋）
+//       或停在「未配對待處理」／「結果未確認」等使用者決定。
+//   (c) 靜止後，券商端每一筆委託：狀態機都以目前的券商 id 追蹤、成交量一致；仍在
+//       委託中的必為在途。
+//   (d) 同一意圖（key）不會送兩次；券商端不會出現兩筆同標記的委託。
 
 import { describe, expect, it } from 'vitest';
 import {
     execReduce,
-    filledOf,
     initExec,
     isLive,
-    legTargets,
-    unaccounted,
-    potentialOf,
     restoreAfterReload,
     type ExecCommand,
     type ExecContext,
@@ -31,6 +38,7 @@ import {
     type ExecState,
     type LegKind,
 } from './odd-spread-exec';
+import { reconcileEvents, slotTag, type TradeLike } from './odd-spread-reconcile';
 
 function rng(seed: number) {
     let a = seed >>> 0;
@@ -43,19 +51,27 @@ function rng(seed: number) {
     };
 }
 
+const ACC = { account_type: 'S', broker_id: 'BR', account_id: 'A' };
+const TAG_BASE = 'abc';
+
 interface BrokerOrder {
     key: string;
     id: string;
+    tag: string;
     leg: LegKind;
+    action: 'Buy' | 'Sell';
+    price: number;
     qty: number;
     filled: number;
-    /** 最近一次成交前的成交量（委託狀態回報可能落後成交回報） */
-    prevFilled: number;
     cancelled: number;
-    status: 'live' | 'filled' | 'cancelled';
+    status: 'live' | 'filled' | 'cancelled' | 'failed';
+    cancelReq: boolean;
+    topUp: boolean;
+    /** 委託列目前看到的快照 */
+    seen: { status: string; filled: number; cancelled: number };
 }
 
-type Queued = ExecEvent & { http?: boolean };
+interface Env { base: string; simulation: boolean }
 
 function simulate(seed: number) {
     const r = rng(seed);
@@ -63,26 +79,34 @@ function simulate(seed: number) {
     const chance = (p: number) => r() < p;
 
     const mode = chance(0.5) ? 'sequential' : 'simultaneous';
-    // 1/4 的序列使用者會誤標：把其實已送出的委託標成「未送出」（之後委託出現→撤銷標記）
     const sloppy = seed % 4 === 0;
     const lots = 1 + Math.floor(r() * 2);
-    const shares = lots * 1000;
+    const oddCap = lots * 1000;
     const oddOrders: { price: number; quantity: number }[] = [];
-    for (let left = shares; left > 0;) {
+    for (let left = oddCap; left > 0;) {
         const q = Math.min(left, 999, 100 + Math.floor(r() * 900));
         oddOrders.push({ price: 100, quantity: q });
         left -= q;
     }
     const plan: ExecPlan = { direction: chance(0.5) ? 'buyRoundSellOdd' : 'buyOddSellRound', mode, lots, roundPrice: 100, oddOrders, netPerShare: 1 };
-    const oddCap = shares;
 
-    const broker = new Map<string, BrokerOrder>();
-    let queue: Queued[] = [];
+    const bound: Env = { base: 'b1', simulation: true };
+    let env: Env = { ...bound };
+    let envSteps = 0;
+    const envOk = () => env.base === bound.base && env.simulation === bound.simulation;
+
     let s: ExecState = initExec(plan);
-    const sentKeys: string[] = [];
-    const placedQty: Record<LegKind, number> = { odd: 0, round: 0 };
+    let gen = 0;
     let idSeq = 0;
-    let holdSteps = 0;
+    const orders: BrokerOrder[] = [];
+    const foreign: TradeLike[] = [];
+    let http: ExecEvent[] = [];
+    let outbox: ExecCommand[] = [];
+    let held: ExecEvent[] = [];
+    const sentKeys: string[] = [];
+    const startKeys = new Set<string>();
+    let oddPlaced = 0;
+    let started = false;
     const log: string[] = [];
 
     const ctx: ExecContext = {
@@ -91,177 +115,308 @@ function simulate(seed: number) {
             : { ok: false, reason: '超過滑價上限', orders: [{ price: 101, quantity }] }),
     };
 
-    const report = (o: BrokerOrder): Queued => ({
-        type: 'report', key: o.key, filled: o.filled,
-        status: o.status === 'live' ? 'working' : o.status,
-        ...(o.status === 'cancelled' ? { cancelled: o.cancelled } : {}),
+    const newId = () => `g${gen}-${++idSeq}`;
+    const tradeOf = (o: BrokerOrder): TradeLike => ({
+        account: ACC,
+        contract: { code: '2330' },
+        order: { id: o.id, action: o.action, price: o.price, quantity: o.qty, order_lot: o.leg === 'odd' ? 'IntradayOdd' : 'Common', custom_field: o.tag },
+        status: { status: o.seen.status, deal_quantity: o.seen.filled, cancel_quantity: o.seen.cancelled },
     });
+    const truthStatus = (o: BrokerOrder) => (o.status === 'live' ? (o.filled > 0 ? 'PartFilled' : 'Submitted') : o.status === 'filled' ? 'Filled' : o.status === 'cancelled' ? 'Cancelled' : 'Failed');
+    const see = (o: BrokerOrder, readBackQuirk = false) => {
+        o.seen = { status: readBackQuirk && o.status === 'cancelled' ? 'Submitted' : truthStatus(o), filled: o.filled, cancelled: o.cancelled };
+    };
+    const reportOf = (o: BrokerOrder): ExecEvent => {
+        const st = o.seen.status;
+        return { type: 'report', key: o.key, filled: o.seen.filled, cancelled: o.seen.cancelled,
+            status: st === 'Filled' ? 'filled' : st === 'Cancelled' ? 'cancelled' : st === 'Failed' ? 'failed' : 'working' };
+    };
 
-    const handle = (cmds: ExecCommand[]) => {
-        for (const c of cmds) {
-            if (c.kind === 'place') {
-                sentKeys.push(c.key);
-                placedQty[c.leg] += c.quantity;
-                const roll = r();
-                if (roll < 0.6) {
-                    const o: BrokerOrder = { key: c.key, id: `O${++idSeq}`, leg: c.leg, qty: c.quantity, filled: 0, prevFilled: 0, cancelled: 0, status: 'live' };
-                    broker.set(c.key, o);
-                    queue.push({ type: 'placed', key: c.key, orderId: o.id, http: true }, { ...report(o), http: true });
-                } else if (roll < 0.85) {
-                    // 結果不明：一半其實有送到
-                    if (chance(0.5)) {
-                        const o: BrokerOrder = { key: c.key, id: `O${++idSeq}`, leg: c.leg, qty: c.quantity, filled: 0, prevFilled: 0, cancelled: 0, status: 'live' };
-                        broker.set(c.key, o);
-                        // 委託列（以標記）對上
-                        queue.push({ type: 'placed', key: c.key, orderId: o.id }, report(o));
-                    }
-                    queue.push({ type: 'placeUnknown', key: c.key, error: 'timeout', http: true });
-                } else {
-                    queue.push({ type: 'placeFailed', key: c.key, error: 'refused', http: true });
-                }
-            } else {
-                const o = broker.get(c.key);
-                if (o && chance(0.8)) {
-                    if (o.status === 'live') {
-                        o.status = 'cancelled';
-                        o.cancelled = o.qty - o.filled;
-                    }
-                    // 刪單回報的成交量可能落後（成交回報晚到）→ 刪單量＋成交量對不上
-                    const lagging = chance(0.5) ? { ...report(o), filled: o.prevFilled } : report(o);
-                    queue.push({ type: 'cancelResult', key: c.key, ok: true, http: true }, lagging);
-                } else {
-                    queue.push({ type: 'cancelResult', key: c.key, ok: false, error: 'busy', http: true });
-                }
-            }
-        }
+    const createAtBroker = (c: Extract<ExecCommand, { kind: 'place' }>): BrokerOrder => {
+        const o: BrokerOrder = {
+            key: c.key, id: newId(), tag: slotTag(TAG_BASE, c.key), leg: c.leg, action: c.action, price: c.price, qty: c.quantity,
+            filled: 0, cancelled: 0, status: 'live', cancelReq: false, topUp: !startKeys.has(c.key), seen: { status: 'PendingSubmit', filled: 0, cancelled: 0 },
+        };
+        see(o);
+        orders.push(o);
+        return o;
+    };
+
+    // 失敗時才組訊息（每一步都檢查，字串要延後產生）
+    const fail = (msg: string) => expect.fail(`${msg}\n${log.join('\n')}`);
+    const check = () => {
+        if (new Set(sentKeys).size !== sentKeys.length) fail('(d) duplicate place');
+        if (new Set(orders.map(o => o.tag)).size !== orders.length) fail('(d) duplicate tag at broker');
+        if (mode === 'sequential' && !sloppy && oddPlaced > oddCap) fail(`(a) odd sent ${oddPlaced}`);
     };
 
     const reduce = (e: ExecEvent) => {
         const res = execReduce(s, e, ctx);
         s = res.state;
         log.push(`${e.type}${'key' in e ? ` ${e.key}` : ''} → ${s.phase} ${res.commands.map(c => `${c.kind}:${c.key}`).join(',')}`);
-        handle(res.commands);
+        for (const c of res.commands) {
+            if (c.kind === 'place') {
+                sentKeys.push(c.key);
+                if (!started) startKeys.add(c.key);
+                if (c.leg === 'odd') oddPlaced += c.quantity;
+            }
+            outbox.push(c);
+        }
         check();
     };
-
-    const unit = (leg: LegKind) => (leg === 'round' ? 1 : 1000);
-    const cap = (leg: LegKind) => (leg === 'round' ? lots : oddCap);
-    // 該腳的補單已有刪單發出（為多出而刪，或使用者取消時已一併刪）
-    const surplusIssued = (leg: LegKind) => s.slots.some(x => x.leg === leg && x.hedge
-        && (x.surplus || x.cancelWanted || x.cancelState === 'pending' || x.cancelState === 'sent' || x.cancelState === 'failed' || x.cancelState === 'unknown'));
-    const check = () => {
-        const t = legTargets(s);
-        for (const leg of ['odd', 'round'] as LegKind[]) {
-            // (b') 任何時候：超過上限的量，只要還有能刪的補單就一定已發刪單
-            const tt0 = t[leg];
-            if (tt0) {
-                const effective = s.slots.filter(x => x.leg === leg).reduce((acc, x) => acc + x.filled + unaccounted(x)
-                    + (x.cancelWanted || x.cancelState === 'pending' || x.cancelState === 'sent' || x.cancelState === 'failed' || !isLive(x) ? 0 : Math.max(0, x.quantity - x.filled)), 0);
-                const cancellable = s.slots.some(x => x.leg === leg && x.hedge && isLive(x) && !x.cancelWanted && x.cancelState !== 'pending' && x.cancelState !== 'sent' && x.cancelState !== 'failed');
-                if (effective > tt0.max) expect(cancellable, `(b') ${leg} effective ${effective} > max ${tt0.max} with uncancelled top-up\n${log.join('\n')}\n${JSON.stringify(s.slots.filter(x => x.leg === leg))}`).toBe(false);
+    // 服務層：環境不符時回報保留
+    const feed = (e: ExecEvent) => {
+        if (envOk()) reduce(e);
+        else held.push(e);
+    };
+    const reconcile = () => {
+        if (!envOk()) return;
+        const trusted = new Set(s.slots.filter(x => x.orderId && x.idGen === gen).map(x => x.orderId!));
+        const trades = [...orders.map(tradeOf), ...foreign];
+        for (const e of reconcileEvents({ tagBase: TAG_BASE, code: '2330', account: ACC, state: s }, trades, trusted, gen)) reduce(e);
+    };
+    const execOne = (c: ExecCommand) => {
+        if (c.kind === 'place') {
+            // 送出前最後一刻確認環境
+            if (!envOk()) { http.push({ type: 'placeFailed', key: c.key, error: 'env' }); return; }
+            const roll = r();
+            if (roll < 0.6) {
+                const o = createAtBroker(c);
+                http.push({ type: 'placed', key: c.key, orderId: o.id, gen }, reportOf(o));
+            } else if (roll < 0.85) {
+                if (chance(0.5)) createAtBroker(c);
+                http.push({ type: 'placeUnknown', key: c.key, error: 'timeout' });
+            } else {
+                http.push({ type: 'placeFailed', key: c.key, error: 'refused' });
             }
-            // 誤標的序列：已送出的委託被當成沒送出，超送無法完全避免，只檢查 (b')(c)(d)
-            if (sloppy) continue;
-            // (a)
-            if (potentialOf(s, leg) > cap(leg)) expect(surplusIssued(leg), `(a) ${leg} potential ${potentialOf(s, leg)} > ${cap(leg)}\n${log.join('\n')}`).toBe(true);
-            // (b)
-            const tt = t[leg];
-            // 超額只算補單造成的部分（同時送的原始兩腳是計畫內的委託）
-            const hedgeFilled = s.slots.filter(x => x.leg === leg && x.hedge).reduce((acc, x) => acc + x.filled, 0);
-            const over = tt ? Math.min(filledOf(s, leg) - tt.max, hedgeFilled) : 0;
-            if (over >= unit(leg)) expect(surplusIssued(leg), `(b) ${leg} filled ${filledOf(s, leg)} max ${tt!.max}\n${log.join('\n')}`).toBe(true);
+        } else {
+            const o = orders.find(x => x.key === c.key);
+            if (!envOk() || !o || chance(0.2)) { http.push({ type: 'cancelResult', key: c.key, ok: false, error: 'busy' }); return; }
+            if (o.status === 'live') o.cancelReq = true;
+            http.push({ type: 'cancelResult', key: c.key, ok: true });
         }
-        if (mode === 'sequential' && !sloppy) expect(placedQty.odd, `(a) odd sent\n${log.join('\n')}`).toBeLessThanOrEqual(oddCap);
-        // (d)
-        expect(new Set(sentKeys).size, `(d) duplicate place\n${log.join('\n')}`).toBe(sentKeys.length);
+    };
+    // sidecar 重啟：在途請求以錯誤結束（下單結果不明、刪單失敗），已排隊的 HTTP 回應也失敗
+    const failInFlight = () => {
+        const next: ExecEvent[] = [];
+        for (const c of outbox) {
+            if (c.kind === 'place') {
+                if (chance(0.5)) createAtBroker(c);
+                next.push({ type: 'placeUnknown', key: c.key, error: 'sidecar restart' });
+            } else next.push({ type: 'cancelResult', key: c.key, ok: false, error: 'sidecar restart' });
+        }
+        for (const e of http) {
+            if (e.type === 'placed') next.push({ type: 'placeUnknown', key: e.key, error: 'sidecar restart' });
+            else if (e.type === 'cancelResult') next.push({ ...e, ok: false, error: 'sidecar restart' });
+            else if (e.type !== 'report') next.push(e);
+        }
+        outbox = [];
+        http = next;
+    };
+    // App 重新整理：在途請求與回應都遺失（送出中的下單可能已到券商）
+    const loseInFlight = () => {
+        for (const c of outbox) if (c.kind === 'place' && envOk() && chance(0.5)) createAtBroker(c);
+        outbox = [];
+        http = [];
+    };
+    const replayHeld = () => {
+        const evs = held;
+        held = [];
+        for (const e of evs) reduce(e);
+        reconcile();
     };
 
     reduce({ type: 'start' });
-    for (let step = 0; step < 120; step++) {
+    started = true;
+    for (let step = 0; step < 140; step++) {
+        if (envSteps > 0 && --envSteps === 0) {
+            env = { ...bound };
+            log.push('env back');
+            replayHeld();
+        }
         const roll = r();
-        if (holdSteps > 0) holdSteps--;
-        if (roll < 0.45 && queue.length > 0 && holdSteps === 0) {
-            // 亂序送達
-            const i = Math.floor(r() * queue.length);
-            const [e] = queue.splice(i, 1);
-            const { http: _h, ...ev } = e!;
-            reduce(ev as ExecEvent);
-        } else if (roll < 0.7) {
-            // 券商成交（部分或全部）
-            const live = [...broker.values()].filter(o => o.status === 'live');
-            if (live.length) {
-                const o = pick(live);
-                const add = 1 + Math.floor(r() * (o.qty - o.filled));
-                o.prevFilled = o.filled;
-                o.filled += add;
-                if (o.filled >= o.qty) o.status = 'filled';
-                queue.push({ type: 'placed', key: o.key, orderId: o.id }, report(o));
-            }
-        } else if (roll < 0.76) {
-            reduce({ type: 'cancel' });
-        } else if (roll < 0.82) {
-            // 使用者核對後標記未送出（只標記券商端確實沒有的）
-            const cand = s.slots.filter(x => x.status === 'unknown' && !x.markedUnsent && (sloppy || !broker.has(x.key)));
-            if (cand.length) reduce({ type: 'resolveUnknown', key: pick(cand).key });
-        } else if (roll < 0.88) {
-            if (s.pendingHedge) reduce(chance(0.6) ? { type: 'hedgeAccept' } : { type: 'hedgeDecline' });
-        } else if (roll < 0.93) {
-            // 重新整理：在途的 HTTP 回應遺失；以委託列重新對帳
+        const live = orders.filter(o => o.status === 'live');
+        if (roll < 0.14 && outbox.length) {
+            execOne(outbox.splice(Math.floor(r() * outbox.length), 1)[0]!);
+        } else if (roll < 0.3 && http.length) {
+            feed(http.splice(Math.floor(r() * http.length), 1)[0]!);
+        } else if (roll < 0.45 && live.length) {
+            // 成交（刪單請求送達後、生效前也可能）
+            const o = pick(live);
+            o.filled += 1 + Math.floor(r() * (o.qty - o.filled));
+            if (o.filled >= o.qty) o.status = 'filled';
+        } else if (roll < 0.5) {
+            const o = orders.find(x => x.cancelReq && x.status === 'live');
+            if (o) { o.status = 'cancelled'; o.cancelled = o.qty - o.filled; }
+        } else if (roll < 0.53 && live.length) {
+            // 券商晚到的拒單
+            pick(live).status = 'failed';
+        } else if (roll < 0.66 && orders.length) {
+            // 委託列更新（可能帶回讀型態）→ 對帳
+            see(pick(orders), chance(0.3));
+            reconcile();
+        } else if (roll < 0.7 && envOk()) {
+            feed({ type: 'cancel' });
+        } else if (roll < 0.75 && envOk()) {
+            const cand = s.slots.filter(x => x.status === 'unknown' && !x.markedUnsent && (sloppy || !orders.some(o => o.key === x.key)));
+            if (cand.length) feed({ type: 'resolveUnknown', key: pick(cand).key });
+        } else if (roll < 0.81 && envOk() && s.pendingHedge) {
+            const p = s.pendingHedge;
+            if (chance(0.65) && p.orders.reduce((a, o) => a + o.quantity, 0) === p.quantity) feed({ type: 'hedgeAccept', quantity: p.quantity, orders: p.orders });
+            else feed({ type: 'hedgeDecline' });
+        } else if (roll < 0.85) {
+            // App 重新整理
+            loseInFlight();
             s = restoreAfterReload(JSON.parse(JSON.stringify(s)) as ExecState);
-            queue = queue.filter(e => !e.http);
-            for (const o of broker.values()) queue.push({ type: 'placed', key: o.key, orderId: o.id }, report(o));
             log.push('reload');
-            reduce({ type: 'refresh' });
-        } else {
-            // 環境切換：一段時間內不送達任何回報
-            holdSteps = 3 + Math.floor(r() * 5);
-            log.push('env switch');
+            if (envOk()) {
+                reduce({ type: 'refresh' });
+                reconcile();
+            }
+        } else if (roll < 0.88) {
+            // sidecar 重啟：委託換 id、舊 id 可能被無關委託重用
+            failInFlight();
+            gen++;
+            for (const o of orders) {
+                const old = o.id;
+                o.id = newId();
+                if (chance(0.3)) {
+                    foreign.push({ account: ACC, contract: { code: '2330' }, order: { id: old, action: o.action, price: o.price, quantity: o.qty, order_lot: o.leg === 'odd' ? 'IntradayOdd' : 'Common' }, status: { status: 'Filled', deal_quantity: o.qty, cancel_quantity: 0 } });
+                }
+            }
+            log.push(`sidecar restart gen ${gen}`);
+            reconcile();
+        } else if (roll < 0.91 && envOk()) {
+            // 環境切換：API base 或模擬／正式改變
+            env = chance(0.5) ? { base: 'b2', simulation: true } : { base: 'b1', simulation: false };
+            envSteps = 3 + Math.floor(r() * 6);
+            log.push(`env switch ${env.base}/${env.simulation}`);
         }
     }
-    // 靜止：不再成交，把所有回報送完（期間的刪單照常處理）
-    for (let guard = 0; queue.length > 0 && guard < 500; guard++) {
-        const [e] = queue.splice(0, 1);
-        const { http: _h, ...ev } = e!;
-        reduce(ev as ExecEvent);
+
+    // ---- 靜止：環境回來、不再成交；把指令、回應、刪單生效與委託列都跑完 ----
+    if (!envOk()) {
+        env = { ...bound };
+        log.push('env back');
+        replayHeld();
     }
-    // (c) 券商端仍在委託中的，狀態機都在追蹤，且成交量一致
-    for (const o of broker.values()) {
+    for (let guard = 0; guard < 300; guard++) {
+        let did = false;
+        while (outbox.length) { execOne(outbox.shift()!); did = true; }
+        while (http.length) { feed(http.shift()!); did = true; }
+        for (const o of orders) {
+            if (o.cancelReq && o.status === 'live') { o.status = 'cancelled'; o.cancelled = o.qty - o.filled; did = true; }
+        }
+        for (const o of orders) see(o);
+        const before = JSON.stringify(s);
+        reconcile();
+        reduce({ type: 'refresh' });
+        if (JSON.stringify(s) !== before) did = true;
+        if (!did && !outbox.length && !http.length) break;
+    }
+    const L = log.join('\n');
+
+    // ---- oracle：只用券商真實狀態 ----
+    const filledT = (leg: LegKind) => orders.filter(o => o.leg === leg).reduce((a, o) => a + o.filled, 0);
+    const liveRemT = (leg: LegKind) => orders.filter(o => o.leg === leg && o.status === 'live').reduce((a, o) => a + o.qty - o.filled, 0);
+    const roundNeed = (sh: number) => (sh >= oddCap ? lots : Math.min(lots, Math.floor(sh / 1000)));
+    const oddNeed = (lt: number) => (lt >= lots ? oddCap : Math.min(oddCap, lt * 1000));
+    const other = (leg: LegKind): LegKind => (leg === 'odd' ? 'round' : 'odd');
+    const need = (leg: LegKind, x: number) => (leg === 'round' ? roundNeed(x) : oddNeed(x));
+    const hedgeLegs: LegKind[] = mode === 'sequential' ? ['round'] : ['round', 'odd'];
+    const unit = (leg: LegKind) => (leg === 'round' ? 1 : 1000);
+
+    for (const leg of hedgeLegs) {
+        const o = other(leg);
+        const needMax = need(leg, filledT(o) + liveRemT(o));
+        const needMin = need(leg, filledT(o));
+        const pot = filledT(leg) + liveRemT(leg);
+        const topUpFilled = orders.filter(x => x.leg === leg && x.topUp).reduce((a, x) => a + x.filled, 0);
+        // (b)
+        if (!sloppy) expect(Math.min(filledT(leg) - needMax, topUpFilled), `(b) ${leg} over-hedged\n${L}`).toBeLessThan(unit(leg));
+        // (s) 超過需要量時，仍在委託中的每一筆補單都要已刪（或刪單失敗、已通知）
+        if (pot > needMax) {
+            for (const x of orders.filter(y => y.leg === leg && y.topUp && y.status === 'live')) {
+                const slot = s.slots.find(y => y.key === x.key);
+                expect(slot?.cancelState === 'failed', `(s) live surplus top-up ${x.key} not cancelled\n${L}`).toBe(true);
+            }
+        }
+        // (l) 另一腳確定、缺口未放棄 → 已補或等使用者決定
+        const determined = liveRemT(o) === 0;
+        const gap = needMin - pot - s.waived[leg];
+        if (determined && gap > 0 && !sloppy) {
+            const waiting = s.pendingHedge?.leg === leg || s.phase === 'unknown';
+            expect(waiting, `(l) ${leg} gap ${gap} neither hedged nor awaiting user\n${L}\n${JSON.stringify(s.slots)}`).toBe(true);
+        }
+    }
+    // (c) 追蹤
+    for (const o of orders) {
         const slot = s.slots.find(x => x.key === o.key);
-        expect(slot, `(c) untracked ${o.key}\n${log.join('\n')}`).toBeDefined();
-        expect(slot!.filled, `(c) filled ${o.key}\n${log.join('\n')}`).toBe(o.filled);
-        if (o.status === 'live') expect(isLive(slot!), `(c) live ${o.key} not tracked as live\n${log.join('\n')}`).toBe(true);
+        expect(slot, `(c) untracked ${o.key}\n${L}`).toBeDefined();
+        expect(slot!.orderId, `(c) ${o.key} bound to stale id\n${L}`).toBe(o.id);
+        expect(slot!.filled, `(c) ${o.key} filled\n${L}`).toBe(o.filled);
+        if (o.status === 'live') expect(isLive(slot!), `(c) live ${o.key} not tracked as live\n${L}`).toBe(true);
     }
     return {
-        mode, phase: s.phase, sent: sentKeys.length,
-        surplus: s.slots.some(x => x.surplus),
-        hedges: s.slots.filter(x => x.hedge).length,
-        revived: log.some(l => l.startsWith('resolveUnknown')) && s.slots.some(x => x.status === 'unknown' && x.markedUnsent) === false,
-        unknown: log.some(l => l.startsWith('placeUnknown')),
-        reloads: log.filter(l => l === 'reload').length,
+        mode,
+        phase: s.phase,
+        topUps: orders.filter(o => o.topUp).length,
+        surplusCancels: s.slots.some(x => x.surplus),
+        restarts: gen,
+        envSwitch: log.some(l => l.startsWith('env switch')),
+        lateFail: orders.some(o => o.status === 'failed'),
     };
 }
 
-describe('整零價差狀態機：隨機事件序列的不變式', () => {
-    it('2,000 組固定種子：送出量、超額補單、在途追蹤與不重送', () => {
-        const phases = new Map<string, number>();
-        const seen = { surplus: 0, hedges: 0, unknown: 0, reloads: 0 };
-        for (let seed = 1; seed <= 2000; seed++) {
+describe('整零價差：隨機事件序列的不變式（獨立 oracle）', () => {
+    it('3,000 組固定種子', { timeout: 60_000 }, () => {
+        const seen = { topUps: 0, surplus: 0, restarts: 0, env: 0, lateFail: 0, modes: new Set<string>(), phases: new Set<string>() };
+        for (let seed = 1; seed <= 3000; seed++) {
             const res = simulate(seed);
-            phases.set(`${res.mode}:${res.phase}`, (phases.get(`${res.mode}:${res.phase}`) ?? 0) + 1);
-            if (res.surplus) seen.surplus++;
-            if (res.hedges > 0) seen.hedges++;
-            if (res.unknown) seen.unknown++;
-            if (res.reloads > 0) seen.reloads++;
+            seen.modes.add(res.mode);
+            seen.phases.add(res.phase);
+            if (res.topUps) seen.topUps++;
+            if (res.surplusCancels) seen.surplus++;
+            if (res.restarts) seen.restarts++;
+            if (res.envSwitch) seen.env++;
+            if (res.lateFail) seen.lateFail++;
         }
-        // 確實跑到了補單、多出補單的刪單、結果不明與重新整理
-        expect(seen.hedges).toBeGreaterThan(100);
-        expect(seen.surplus).toBeGreaterThan(5);
-        expect(seen.hedges).toBeGreaterThan(500);
-        expect(seen.unknown).toBeGreaterThan(100);
-        expect(seen.reloads).toBeGreaterThan(100);
-        // 兩種模式都有跑到，且有各種結局
-        expect([...phases.keys()].some(k => k.startsWith('sequential'))).toBe(true);
-        expect([...phases.keys()].some(k => k.startsWith('simultaneous'))).toBe(true);
-        expect(phases.size).toBeGreaterThan(4);
+        // 確實涵蓋到各種情況
+        expect(seen.modes.size).toBe(2);
+        expect(seen.phases.size).toBeGreaterThan(4);
+        expect(seen.topUps).toBeGreaterThan(500);
+        // 多餘補單的刪單在獨立 oracle 下很少自然發生（需誤標後委託又出現），另有單元測試固定情境覆蓋
+        expect(seen.restarts).toBeGreaterThan(500);
+        expect(seen.env).toBeGreaterThan(500);
+        expect(seen.lateFail).toBeGreaterThan(500);
+    });
+});
+
+describe('對帳：唯一標記與 sidecar 世代', () => {
+    const slot = { key: 'odd:0', leg: 'odd' as const, action: 'Sell' as const, price: 100, quantity: 300, status: 'working' as const, filled: 0, orderId: 'OLD', idGen: 0 };
+    const state = { ...initExec({ direction: 'buyRoundSellOdd', mode: 'sequential', lots: 1, roundPrice: 100, oddOrders: [{ price: 100, quantity: 300 }] }), started: true, slots: [slot] };
+    const rec = { tagBase: TAG_BASE, code: '2330', account: ACC, state };
+    const tr = (id: string, tag: string | undefined, filled = 0): TradeLike => ({
+        account: ACC, contract: { code: '2330' },
+        order: { id, action: 'Sell', price: 100, quantity: 300, order_lot: 'IntradayOdd', ...(tag ? { custom_field: tag } : {}) },
+        status: { status: 'Submitted', deal_quantity: filled, cancel_quantity: 0 },
+    });
+    const tag = slotTag(TAG_BASE, 'odd:0');
+    it('同標記換了 id → rebind', () => {
+        expect(reconcileEvents(rec, [tr('NEW', tag, 5)], new Set(), 1)).toEqual([
+            { type: 'placed', key: 'odd:0', orderId: 'NEW', gen: 1, rebind: true },
+            { type: 'report', key: 'odd:0', filled: 5, status: 'working', cancelled: 0 },
+        ]);
+    });
+    it('世代變了：舊 id 被別的委託（沒標記或別的標記）重用 → 不採用', () => {
+        expect(reconcileEvents(rec, [tr('OLD', undefined, 300)], new Set(), 1)).toEqual([]);
+        expect(reconcileEvents(rec, [tr('OLD', 'oxyz00', 300)], new Set(), 1)).toEqual([]);
+    });
+    it('同一世代、標記被投影丟掉 → 仍以 id 採用；標記矛盾則不採用', () => {
+        expect(reconcileEvents(rec, [tr('OLD', undefined, 7)], new Set(), 0)).toEqual([{ type: 'report', key: 'odd:0', filled: 7, status: 'working', cancelled: 0 }]);
+        expect(reconcileEvents(rec, [tr('OLD', 'oxyz00', 7)], new Set(), 0)).toEqual([]);
+    });
+    it('同一標記對到多列 → 不接回', () => {
+        expect(reconcileEvents(rec, [tr('A', tag), tr('B', tag)], new Set(), 1)).toEqual([]);
     });
 });

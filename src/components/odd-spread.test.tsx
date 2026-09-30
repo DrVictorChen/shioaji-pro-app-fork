@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     place: vi.fn(), notify: vi.fn(), confirm: vi.fn(), start: vi.fn(), action: vi.fn(), dismiss: vi.fn(), refresh: vi.fn(),
     candidates: vi.fn((): unknown[] => []), claim: vi.fn(),
     addLock: vi.fn((..._a: unknown[]) => 'lk-1'), updateLock: vi.fn(), clearLock: vi.fn(),
+    accept: vi.fn((..._a: unknown[]) => true), env: { base: 'http://127.0.0.1:21322', simulation: true as boolean | undefined }, envOk: { value: true },
     risk: { confirmManualOrders: false },
 }));
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts: [], selectedStock: undefined }) }));
@@ -28,7 +29,9 @@ vi.mock('../lib/odd-spread-service', () => ({
     candidateOrders: mocks.candidates,
     claimOrder: mocks.claim,
     ENV_PAUSED_TEXT: '環境已切換，執行暫停',
-    envMatches: () => true,
+    envMatches: () => mocks.envOk.value,
+    currentEnv: () => mocks.env,
+    acceptHedge: mocks.accept,
     oddSpreadExecUnavailable: () => null,
     useSpreadExecutions: () => [],
     useClickLocks: () => [],
@@ -71,6 +74,8 @@ const rerender = async (p: Partial<OddSpreadViewProps>) => {
 beforeEach(() => {
     vi.clearAllMocks();
     mocks.risk.confirmManualOrders = false;
+    mocks.envOk.value = true;
+    mocks.env = { base: 'http://127.0.0.1:21322', simulation: true };
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ discount: 0.6, taxRate: null }), setItem: vi.fn() });
     vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
@@ -126,6 +131,7 @@ it('執行：把點擊當下的商品、帳戶與計畫交給主視窗服務', a
     });
     expect(req.fees).toMatchObject({ discount: 0.6, taxRate: 0.003, minFeeRound: 20, minFeeOdd: 1 });
     expect(req.maxSlipTicks).toBe(2);
+    expect(req.env).toEqual({ base: 'http://127.0.0.1:21322', simulation: true });
 });
 
 it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async () => {
@@ -249,7 +255,7 @@ it('未配對待處理：列出原因與最新價，可以最新價補單或取�
     expect(all).toContain('超過 2 檔');
     expect(button('買整賣零').props.disabled).toBe(true);
     await act(async () => { button('以最新價補單').props.onClick(); });
-    expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'hedgeAccept', orders: [{ price: 1100, quantity: 1 }] });
+    expect(mocks.accept).toHaveBeenCalledWith('os-1', 1, [{ price: 1100, quantity: 1 }]);
     await act(async () => { buttons().find(b => text(b) === '取消')!.props.onClick(); });
     expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'hedgeDecline' });
 });
@@ -364,4 +370,55 @@ it('同商品有多筆需要處理的執行：每筆各自顯示與操作', asyn
     expect(mocks.action).toHaveBeenCalledWith('os-old', { type: 'hedgeDecline' });
     await act(async () => { button('關閉').props.onClick(); });
     expect(mocks.dismiss).toHaveBeenCalledWith('os-new');
+});
+
+it('環境在按下時綁定：確認期間切換伺服器或模擬／正式 → 不送', async () => {
+    mocks.risk.confirmManualOrders = true;
+    let approve!: (v: boolean) => void;
+    mocks.confirm.mockImplementationOnce(() => new Promise(r => { approve = r; }));
+    await render();
+    await act(async () => { button('以 1 張執行').props.onClick(); });
+    mocks.envOk.value = false; // 確認視窗開著時切到正式
+    await act(async () => { approve(true); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間伺服器或模擬／正式環境已切換');
+});
+
+it('模擬／正式未知時不開始', async () => {
+    mocks.env = { base: 'http://127.0.0.1:21322', simulation: undefined };
+    await render();
+    await act(async () => { button('以 1 張執行').props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it('點價拆單整批固定環境：每一筆送出前檢查，切換後不送', async () => {
+    mocks.place.mockResolvedValue({ order: { id: 'X' }, status: { status: 'Submitted' } });
+    await render();
+    await act(async () => { button('啟用點價').props.onClick(); });
+    const cell = view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0]!;
+    await act(async () => { cell.props.onClick(); });
+    const hooks = mocks.place.mock.calls.map(c => c[4].beforeSend as () => void);
+    expect(hooks).toHaveLength(2);
+    for (const h of hooks) expect(() => h()).not.toThrow();
+    mocks.envOk.value = false;
+    for (const h of hooks) expect(() => h()).toThrow('環境已切換');
+});
+
+it('補單確認：以確認當下的數量與價格送；缺口已變則不送並請重新確認', async () => {
+    mocks.refresh.mockReturnValue([{ price: 1100, quantity: 1 }]);
+    const exec = rec({
+        phase: 'hedgeDecision',
+        slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status: 'filled', filled: 1000 }],
+        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: 'x', orders: [{ price: 1100, quantity: 1 }] },
+    });
+    mocks.accept.mockReturnValueOnce(false);
+    await render({ execs: [exec] });
+    await act(async () => { button('以最新價補單').props.onClick(); });
+    expect(mocks.accept).toHaveBeenCalledWith('os-1', 1, [{ price: 1100, quantity: 1 }]);
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間缺口或環境已變更');
+    // 建議委託總量與缺口不符 → 不送
+    mocks.refresh.mockReturnValue([{ price: 1100, quantity: 2 }]);
+    mocks.accept.mockClear();
+    await act(async () => { button('以最新價補單').props.onClick(); });
+    expect(mocks.accept).not.toHaveBeenCalled();
 });

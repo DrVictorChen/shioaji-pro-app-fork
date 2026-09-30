@@ -57,6 +57,9 @@ export interface OrderSlot {
     quantity: number;
     status: SlotStatus;
     orderId?: string;
+    /** 取得 orderId 時的 sidecar 世代（trade_id 只在該 sidecar 程序內有效）；世代變了
+     * 舊 id 不可信，只能以唯一標記重新接回 */
+    idGen?: number;
     /** 累計成交（同 quantity 單位） */
     filled: number;
     /** 券商回報的刪單量（判斷終態數量是否對得上） */
@@ -126,7 +129,8 @@ export type ReportStatus = 'working' | 'filled' | 'cancelled' | 'failed';
 
 export type ExecEvent =
     | { type: 'start' }
-    | { type: 'placed'; key: string; orderId: string }
+    /** 取得委託編號；rebind=true 表示以唯一標記在權威更新中找到同一筆、換成新 id */
+    | { type: 'placed'; key: string; orderId: string; gen?: number; rebind?: boolean }
     /** 送出失敗但可能已到券商 */
     | { type: 'placeUnknown'; key: string; error: string }
     /** 確定沒有送出 */
@@ -137,7 +141,8 @@ export type ExecEvent =
     | { type: 'cancelResult'; key: string; ok: boolean; error?: string }
     /** 使用者核對後認為 unknown 那筆沒有送出（暫定） */
     | { type: 'resolveUnknown'; key: string }
-    | { type: 'hedgeAccept'; orders?: LegOrder[] }
+    /** 使用者確認補單：數量與委託（價格）都是確認當下凍結的；缺口已變就拒絕 */
+    | { type: 'hedgeAccept'; quantity: number; orders: LegOrder[] }
     | { type: 'hedgeDecline' }
     /** 重新整理接回後重算一次（例如重新發出遺失回應的多餘補單刪單） */
     | { type: 'refresh' };
@@ -165,12 +170,21 @@ export function isBrokerFinal(s: OrderSlot): boolean {
     return s.cancelledQty !== undefined && s.filled + s.cancelledQty >= s.quantity;
 }
 
+/** 成交＋刪單量已涵蓋委託量 → 不論回讀狀態（可能仍是 Submitted，見 ADR 0004）都是終態 */
+function coveredStatus(filled: number, cancelled: number | undefined, quantity: number): SlotStatus | null {
+    if (filled >= quantity) return 'filled';
+    if (cancelled !== undefined && filled + cancelled >= quantity) return 'cancelled';
+    return null;
+}
+
 /** 已發刪單（刪單失敗的由使用者按「再次取消」重試，不自動連發） */
 const cancelIssued = (s: OrderSlot) => s.cancelState === 'pending' || s.cancelState === 'sent' || s.cancelState === 'failed' || !!s.cancelWanted;
-const remaining = (s: OrderSlot) => (isLive(s) ? Math.max(0, s.quantity - s.filled) : 0);
-/** 券商已回報刪單／失敗，但「成交＋刪單量」還對不上委託量：差額仍可能是尚未送達的成交 */
+/** 在途剩餘：委託量 − 成交 − 已刪（部分刪單後的回讀仍可能是 Submitted） */
+const remaining = (s: OrderSlot) => (isLive(s) ? Math.max(0, s.quantity - s.filled - (s.cancelledQty ?? 0)) : 0);
+/** 券商已回報「刪單」，但「成交＋刪單量」還對不上委託量：差額仍可能是尚未送達的成交。
+ * Failed（拒單）是終態：成交以回報為準，沒有剩餘可能成交量。 */
 export function unaccounted(s: OrderSlot): number {
-    if (s.local || (s.status !== 'cancelled' && s.status !== 'failed') || s.cancelledQty === undefined) return 0;
+    if (s.local || s.status !== 'cancelled' || s.cancelledQty === undefined) return 0;
     return Math.max(0, s.quantity - s.filled - s.cancelledQty);
 }
 /** 仍可能增加的成交量（在途剩餘＋對不上的差額） */
@@ -434,10 +448,13 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
         }
         case 'placed':
             return done(mapSlot(state, event.key, s => {
-                if (s.orderId || s.status === 'unsent' || s.local) return null;
-                // 回報可能比下單回應先到；標記「未送出」的委託出現了 → 撤銷標記
+                if (s.status === 'unsent' || s.local) return null;
+                if (s.orderId && !event.rebind) return null;
+                if (s.orderId === event.orderId && s.idGen === event.gen) return null;
+                // 回報可能比下單回應先到；標記「未送出」的委託出現了 → 撤銷標記；
+                // sidecar 重啟後同一筆委託換了 id → 以唯一標記接回的新 id 取代
                 const status: SlotStatus = s.status === 'sending' || s.status === 'unknown' ? 'working' : s.status;
-                const next: OrderSlot = { ...s, status, orderId: event.orderId, markedUnsent: false };
+                const next: OrderSlot = { ...s, status, orderId: event.orderId, idGen: event.gen, markedUnsent: false };
                 if (s.cancelWanted && status === 'working') {
                     commands.push({ kind: 'cancel', key: s.key, orderId: event.orderId });
                     next.cancelState = 'pending';
@@ -457,9 +474,11 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
                 const filled = Math.min(s.quantity, Math.max(s.filled, Math.trunc(event.filled) || 0));
                 const cancelledQty = event.cancelled !== undefined ? Math.max(s.cancelledQty ?? 0, event.cancelled) : s.cancelledQty;
                 let status: SlotStatus;
-                if (filled >= s.quantity) status = 'filled';
+                const covered = coveredStatus(filled, cancelledQty, s.quantity);
+                if (covered === 'filled') status = 'filled';
                 else if (FINAL.has(s.status)) status = s.status; // 券商終態不被較舊的回報蓋回
-                else status = event.status === 'cancelled' || event.status === 'failed' ? event.status : 'working';
+                else if (event.status === 'cancelled' || event.status === 'failed') status = event.status;
+                else status = covered ?? 'working'; // 回讀仍 Submitted，但刪單量已涵蓋全部 → 終態
                 const next: OrderSlot = { ...s, filled, status, cancelledQty, markedUnsent: false };
                 if (next.status === s.status && next.filled === s.filled && next.cancelledQty === s.cancelledQty && !s.markedUnsent) return null;
                 if (!isLive(next)) next.cancelWanted = false;
@@ -477,9 +496,10 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
         }
         case 'hedgeAccept': {
             const p = state.pendingHedge;
-            if (!p) return { state, commands };
-            const orders = fitOrders(event.orders ?? p.orders, p.quantity);
-            if (orders.length === 0) return { state, commands };
+            // 確認期間缺口變了（或已不需要）→ 不送，由呼叫端重新詢問；絕不送超過確認的量
+            const total = event.orders.reduce((a, o) => a + o.quantity, 0);
+            if (!p || event.quantity !== p.quantity || total !== event.quantity || event.orders.some(o => !(o.quantity > 0 && o.price > 0))) return { state, commands };
+            const orders = event.orders;
             const made = makeSlots(state, p.leg, orders, true);
             const s: ExecState = { ...state, pendingHedge: null, seq: made.seq, slots: sendUnsent([...state.slots, ...made.slots], commands) };
             return { state: { ...s, phase: phaseOf(s) }, commands };

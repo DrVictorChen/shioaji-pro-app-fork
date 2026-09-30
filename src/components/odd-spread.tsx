@@ -35,6 +35,8 @@ import {
 } from '../lib/odd-spread';
 import { execSummary, isTerminalPhase, PHASE_LABEL, type ExecMode, type ExecPlan } from '../lib/odd-spread-exec';
 import {
+    acceptHedge,
+    currentEnv,
     candidateOrders,
     claimOrder,
     dismissSpreadExecution,
@@ -227,8 +229,13 @@ export function OddSpreadView({
 
     const execute = useCallback(async (q: SpreadQuote) => {
         if (!q.canExecute || !q.buyLeg || !q.sellLeg || !account || running || busy || execUnavailable) return;
-        // 點擊當下綁定商品、帳戶與計畫；確認後只送這一份
-        const bound = { contract, account, fees, lots: q.lots, oddShares: q.oddShares, direction: q.direction };
+        // 點擊當下綁定商品、帳戶、環境（API base＋模擬／正式）與計畫；確認後只送這一份
+        const env = currentEnv();
+        if (env.simulation === undefined) {
+            notify({ kind: 'err', title: '整零價差未送出', body: '伺服器環境（模擬／正式）尚未確認，請稍後再試' });
+            return;
+        }
+        const bound = { contract, account, fees, lots: q.lots, oddShares: q.oddShares, direction: q.direction, env: { base: env.base, simulation: env.simulation } };
         const oddLeg = q.direction === 'buyOddSellRound' ? q.buyLeg : q.sellLeg;
         const roundLeg = q.direction === 'buyOddSellRound' ? q.sellLeg : q.buyLeg;
         const roundPrice = roundLeg.orders[0]?.price;
@@ -255,7 +262,8 @@ export function OddSpreadView({
             }
             // 確認後重新驗證：商品、帳戶、行情、庫存與淨價差
             const now = latest.current;
-            const problem = now.contract.code !== bound.contract.code ? '確認期間商品已切換'
+            const problem = !envMatches(bound.env) ? '確認期間伺服器或模擬／正式環境已切換'
+                : now.contract.code !== bound.contract.code ? '確認期間商品已切換'
                 : !accountMatches(now.account, bound.account) ? '確認期間帳戶已變更'
                     : (() => {
                         const fresh = quoteDirection(bound.direction, {
@@ -268,7 +276,7 @@ export function OddSpreadView({
                 notify({ kind: 'err', title: '整零價差未送出', body: `${problem}，這筆沒有送出，請重新確認` });
                 return;
             }
-            startSpreadExecution({ contract: bound.contract, account: bound.account, plan, fees: bound.fees, maxSlipTicks: prefs.maxSlipTicks });
+            startSpreadExecution({ contract: bound.contract, account: bound.account, plan, fees: bound.fees, maxSlipTicks: prefs.maxSlipTicks, env: bound.env });
         } catch (e) {
             notify({ kind: 'err', title: '整零價差未送出', body: e instanceof Error ? e.message : String(e) });
         } finally {
@@ -286,6 +294,15 @@ export function OddSpreadView({
         inflight.current.add(key);
         const captured = account;
         const isAccountCurrent = () => accountMatches(latest.current.account, captured);
+        // 整批固定在點擊當下的環境：每一筆送出前最後一刻都再確認，不同就不送
+        const env0 = currentEnv();
+        if (env0.simulation === undefined) {
+            notify({ kind: 'err', title: '點價未送出', body: '伺服器環境（模擬／正式）尚未確認，請稍後再試' });
+            inflight.current.delete(key);
+            return;
+        }
+        const pinned = { base: env0.base, simulation: env0.simulation };
+        const beforeSend = () => { if (!envMatches(pinned)) throw new Error('伺服器或模擬／正式環境已切換，未送出'); };
         const sent: string[] = [];
         let slices: { price: number; quantity: number }[] = [];
         const side = action === 'Buy' ? '買' : '賣';
@@ -294,7 +311,7 @@ export function OddSpreadView({
         try {
             if (market === 'round') {
                 lockId = addClickLock(contract.code, captured, `${contract.code} ${side} ${total} @ ${fmtPrice(price)} 送出中（若中斷請核對委託）`);
-                await placeQuickOrder(contract, action, price, lots, { account: captured, isAccountCurrent });
+                await placeQuickOrder(contract, action, price, lots, { account: captured, isAccountCurrent, beforeSend });
             } else {
                 slices = sliceOddOrders([{ price, shares: effOdd }]);
                 if (slices.length > 1 && getRiskSettings().confirmManualOrders) {
@@ -311,6 +328,7 @@ export function OddSpreadView({
                         account: captured,
                         orderLot: 'IntradayOdd',
                         isAccountCurrent,
+                        beforeSend,
                         source: slices.length > 1 ? 'auto' : 'manual',
                     });
                     sent.push(`${int(s.quantity)} 股`);
@@ -635,12 +653,14 @@ function SpreadCard({ q, blocked, privMoney, onExecute }: { q: SpreadQuote; bloc
     );
 }
 
-async function acceptHedge(rec: SpreadExecRecord) {
+async function confirmHedge(rec: SpreadExecRecord) {
     const p = rec.state.pendingHedge;
     if (!p) return;
-    const orders = refreshHedgeOrders(rec.id) ?? p.orders;
-    if (orders.length === 0) {
-        notify({ kind: 'err', title: '整零價差：無法補單', body: '目前沒有對手報價，請稍後再試或手動處理' });
+    // 凍結確認內容：數量與每筆價格；確認後缺口若變了就不送、請使用者重新確認
+    const quantity = p.quantity;
+    const orders = (refreshHedgeOrders(rec.id) ?? p.orders).map(o => ({ ...o }));
+    if (orders.length === 0 || orders.reduce((a, o) => a + o.quantity, 0) !== quantity) {
+        notify({ kind: 'err', title: '整零價差：無法補單', body: '目前沒有足夠的對手報價，請稍後再試或手動處理' });
         return;
     }
     if (getRiskSettings().confirmManualOrders) {
@@ -650,14 +670,16 @@ async function acceptHedge(rec: SpreadExecRecord) {
             action: p.action,
             price: orders[0]!.price,
             priceLabel: levelsText(orders),
-            quantity: p.quantity,
+            quantity,
             unit: p.leg === 'odd' ? '股' : '張',
             accountLabel: accountConfirmLabel(rec.account),
             note: `整零價差補單（${p.leg === 'odd' ? '盤中零股' : '整股'}・最新價限價 ROD）：${p.reason}`,
         }).catch(() => false);
         if (!ok) return;
     }
-    spreadExecAction(rec.id, { type: 'hedgeAccept', orders });
+    if (!acceptHedge(rec.id, quantity, orders)) {
+        notify({ kind: 'err', title: '整零價差：補單未送出', body: '確認期間缺口或環境已變更，這筆沒有送出，請依最新狀態重新確認' });
+    }
 }
 
 function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean }) {
@@ -722,7 +744,7 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
             <span className={styles.execActions}>
                 {p && (
                     <>
-                        <button className={styles.smallBtnPrimary} disabled={paused} onClick={() => void acceptHedge(rec)}>以最新價補單</button>
+                        <button className={styles.smallBtnPrimary} disabled={paused} onClick={() => void confirmHedge(rec)}>以最新價補單</button>
                         <button className={styles.smallBtn} disabled={paused} title='不補單，保留未配對部位自行處理' onClick={() => spreadExecAction(rec.id, { type: 'hedgeDecline' })}>取消</button>
                     </>
                 )}
