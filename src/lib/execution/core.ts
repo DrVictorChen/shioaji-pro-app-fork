@@ -1,0 +1,909 @@
+// src/lib/execution/core.ts — TypeScript reference executor for the order
+// program model (#201). Pure: `step(state, event)` returns the next state,
+// the order intents to send and user-facing notices. No I/O, no clock, no
+// randomness. The native Rust core implements the same rules and both are
+// checked against ./scenarios/*.json (see ./conformance.ts).
+//
+// Rules (shared with the Rust core — change both, and the scenarios):
+// - Environment isolation: a program only fires / submits while the
+//   connection is live AND its env + serverId equal the binding. Otherwise it
+//   is held ('disconnected' | 'unknownEnv' | 'envMismatch') and emits nothing.
+// - Every intent is recorded as a `pendingSubmit` slot BEFORE it is returned;
+//   the executor journals the state before sending (Rust: WAL + fsync).
+// - `restore` (executor restarted from persisted state) turns every
+//   `pendingSubmit` slot into `unknown`: never resent, only a reconcile
+//   (matched by idempotency key) or a user acknowledgement clears it.
+// - #144: after restore / env switch back / long disconnect / silent stall /
+//   user resume, the first tick decides for touch legs: already past →
+//   `needsConfirm` (send / cancel / keep); keep = fire only after recross.
+// - Fills are deduplicated by `<orderId>:<exchange_seq>`; an event-only fill
+//   (`event:<eventId>`) and a seq row with the same qty and exchange ts are
+//   the same fill. Fills whose account / code / side do not match are not
+//   counted (issue raised).
+// - Brackets: the OCO fires once per cycle for min(entryFilled, qty); entry
+//   fills after that are `unprotected`, never auto-covered.
+// - Grids: each entry fill places an equal take-profit exit at once
+//   (partial fills included); a cycle completes when the entry is terminal and
+//   the position is flat; `rearmAfterExit` returns the level to idle.
+// - Sources: tick / heartbeat / order / deal / intentResult events carry the
+//   env + serverId they came from. Ticks and heartbeats count only when that
+//   is the live connection; reports and results only ever match programs
+//   bound to that same env + serverId.
+// - Prices compare as fixed-point integers (PRICE_SCALE).
+// - Cancels are tracked per slot (CancelState); a stopping program becomes
+//   stopped only when no order is active any more.
+
+import {
+    EXECUTION_SCHEMA_VERSION,
+    type CommandEvent,
+    type ConnectionEvent,
+    type DealEvent,
+    type EngineState,
+    type ExecEvent,
+    type IntentResultEvent,
+    type LegName,
+    type Level,
+    type Notice,
+    type OrderEvent,
+    type OrderIntent,
+    type OrderProgram,
+    type OrderSlot,
+    type OrderSpec,
+    PRICE_SCALE,
+    type ReconcileEvent,
+    type RestoreReason,
+    type Side,
+    type Source,
+    type StepResult,
+    type TouchCondition,
+} from './model';
+
+export const ORPHAN_DEAL_LIMIT = 200;
+export const ORPHAN_ORDER_LIMIT = 200;
+export const ISSUE_LIMIT = 50;
+export const MAX_CANCEL_ATTEMPTS = 3;
+export const CANCEL_UNKNOWN_RETRY_MS = 30_000;
+
+/** Globally unique idempotency key: the partition (env + server identity) is
+ * part of the key itself, so a sender may dedupe across environments. */
+export function intentKey(p: OrderProgram, lv: Level, leg: LegName): string {
+    return `${p.binding.env}/${encodeURIComponent(p.binding.serverId)}/${p.id}/${lv.id}/${leg}/${lv.cycles}/${p.intentSeq}`;
+}
+
+export function initialState(): EngineState {
+    return {
+        schema: EXECUTION_SCHEMA_VERSION,
+        conn: { live: false, env: null, serverId: null, downSince: null, lastEvalEnv: null, lastEvalServerId: null },
+        lastActivity: null,
+        lastPrices: {},
+        orphanDeals: [],
+        orphanOrders: [],
+        programs: [],
+    };
+}
+
+interface Ctx {
+    s: EngineState;
+    intents: OrderIntent[];
+    notices: Notice[];
+    ts: number;
+}
+
+const opposite = (side: Side): Side => side === 'Buy' ? 'Sell' : 'Buy';
+
+/** Price → fixed-point integer (PRICE_SCALE units), the only form prices are compared in. */
+export const fixed = (price: number): number => Math.round(price * PRICE_SCALE);
+
+export const isPast = (condition: TouchCondition, trigger: number, price: number) =>
+    (condition === 'below' && fixed(price) <= fixed(trigger)) || (condition === 'above' && fixed(price) >= fixed(trigger));
+
+const isActive = (slot: OrderSlot) => slot.status === 'pendingSubmit' || slot.status === 'working';
+
+function canEvaluate(s: EngineState): boolean {
+    return s.conn.live && s.conn.env !== null && s.conn.serverId !== null;
+}
+
+function envMatches(s: EngineState, p: OrderProgram): boolean {
+    return canEvaluate(s) && s.conn.env === p.binding.env && s.conn.serverId === p.binding.serverId;
+}
+
+/** The event came from the environment that is live right now. */
+function fromLive(s: EngineState, e: Source): boolean {
+    return canEvaluate(s) && s.conn.env === e.env && s.conn.serverId === e.serverId;
+}
+
+const boundTo = (p: OrderProgram, e: Source) => p.binding.env === e.env && p.binding.serverId === e.serverId;
+
+function notice(ctx: Ctx, code: string, p: OrderProgram | null, levelId: string | null, detail: string) {
+    ctx.notices.push({ code, programId: p?.id ?? null, levelId, detail });
+}
+
+function addIssue(ctx: Ctx, p: OrderProgram, code: string, detail: string) {
+    p.issues.push({ code, detail, ts: ctx.ts });
+    if (p.issues.length > ISSUE_LIMIT) p.issues.splice(0, p.issues.length - ISSUE_LIMIT);
+    notice(ctx, `issue.${code}`, p, null, detail);
+}
+
+const HOLD_REASON = { disconnected: 'disconnected', unknownEnv: 'unknownEnv', envMismatch: 'envSwitched' } as const;
+
+function updateHolds(ctx: Ctx) {
+    const s = ctx.s;
+    for (const p of s.programs) {
+        const was = p.hold;
+        p.hold = !s.conn.live ? 'disconnected'
+            : s.conn.env === null || s.conn.serverId === null ? 'unknownEnv'
+                : envMatches(s, p) ? null : 'envMismatch';
+        if (p.hold !== was) {
+            if (p.hold !== null) notice(ctx, 'held', p, null, HOLD_REASON[p.hold]);
+            else notice(ctx, 'released', p, null, was ?? '');
+        }
+    }
+}
+
+// ---- legs ----
+
+interface Leg { name: LegName; condition: TouchCondition; price: number }
+
+/** Touch legs the level is watching right now. */
+export function touchLegs(lv: Level): Leg[] {
+    if (lv.phase === 'idle' && lv.entry.type === 'touch') {
+        return [{ name: 'entry', condition: lv.entry.condition, price: lv.entry.price }];
+    }
+    if (lv.phase === 'holding' && lv.exit?.type === 'oco' && !exitFired(lv)) {
+        const legs: Leg[] = [];
+        if (lv.exit.stop) legs.push({ name: 'stop', ...lv.exit.stop });
+        if (lv.exit.take) legs.push({ name: 'take', ...lv.exit.take });
+        return legs;
+    }
+    return [];
+}
+
+function legOf(lv: Level, name: LegName): Leg | null {
+    if (name === 'entry' && lv.entry.type === 'touch') return { name, condition: lv.entry.condition, price: lv.entry.price };
+    if ((name === 'stop' || name === 'take') && lv.exit?.type === 'oco') {
+        const l = lv.exit[name];
+        return l ? { name, ...l } : null;
+    }
+    return null;
+}
+
+const cycleSlots = (lv: Level, role: 'entry' | 'exit') => lv.orders.filter(o => o.role === role && o.cycle === lv.cycles);
+const exitFired = (lv: Level) => lv.exit?.type === 'oco' && cycleSlots(lv, 'exit').length > 0;
+
+// ---- emitting ----
+
+function emitPlace(ctx: Ctx, p: OrderProgram, lv: Level, role: 'entry' | 'exit', leg: LegName, qty: number,
+    price: number | null, order: OrderSpec): boolean {
+    if (!envMatches(ctx.s, p) || qty <= 0) return false; // isolation guard: never cross environments
+    const key = intentKey(p, lv, leg);
+    p.intentSeq += 1;
+    lv.orders.push({ key, role, leg, cycle: lv.cycles, qty, status: 'pendingSubmit', orderId: null, filled: 0,
+        fills: {}, fillTs: {}, detail: null, acknowledged: false, cancel: null });
+    const b = p.binding;
+    ctx.intents.push({ kind: 'place', key, programId: p.id, levelId: lv.id, version: p.version, role, leg,
+        env: b.env, serverId: b.serverId, account: b.account, orderCode: b.contract.orderCode,
+        action: role === 'entry' ? lv.side : opposite(lv.side), qty,
+        price: order.priceType === 'MKT' ? null : price, order });
+    p.updatedAt = ctx.ts;
+    return true;
+}
+
+function emitCancel(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot): boolean {
+    if (!envMatches(ctx.s, p) || !slot.orderId) return false;
+    const attempts = (slot.cancel?.attempts ?? 0) + 1;
+    const key = `${slot.key}/cancel/${attempts}`;
+    slot.cancel = { key, status: 'pendingSubmit', attempts, detail: null, sentAt: ctx.ts,
+        outstanding: [...(slot.cancel?.outstanding ?? []), key] };
+    const b = p.binding;
+    ctx.intents.push({ kind: 'cancel', key, programId: p.id, levelId: lv.id, version: p.version,
+        env: b.env, serverId: b.serverId, account: b.account, orderId: slot.orderId });
+    p.updatedAt = ctx.ts;
+    return true;
+}
+
+/** Stopping program: cancel every working entry not yet asked to cancel;
+ * with `retry`, also resend failed cancels, and unknown / requested ones that stayed
+ * unsettled for CANCEL_UNKNOWN_RETRY_MS (bounded by MAX_CANCEL_ATTEMPTS). */
+function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
+    if (p.status !== 'stopping' || !envMatches(ctx.s, p)) return;
+    for (const lv of p.levels) {
+        for (const slot of lv.orders) {
+            if (slot.role !== 'entry' || slot.status !== 'working' || !slot.orderId) continue;
+            const c = slot.cancel;
+            if (c === null) emitCancel(ctx, p, lv, slot);
+            else if (retry && c.attempts < MAX_CANCEL_ATTEMPTS && (c.status === 'failed'
+                || ((c.status === 'unknown' || c.status === 'requested')
+                    && ctx.ts - c.sentAt >= CANCEL_UNKNOWN_RETRY_MS))) {
+                emitCancel(ctx, p, lv, slot);
+            }
+        }
+    }
+}
+
+function cancelFailed(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, detail: string) {
+    const c = slot.cancel!;
+    c.status = 'failed';
+    c.outstanding = c.outstanding.filter(k => k !== c.key);
+    c.detail = detail;
+    notice(ctx, 'cancelFailed', p, lv.id, `${slot.key}: ${detail}`);
+    if (c.attempts >= MAX_CANCEL_ATTEMPTS) addIssue(ctx, p, 'cancelGaveUp', `${slot.key}: ${c.attempts} cancel attempts failed`);
+}
+
+/** Fire one touch leg (or a user 送出). */
+function fire(ctx: Ctx, p: OrderProgram, lv: Level, leg: LegName, price: number): boolean {
+    let sent = false;
+    if (leg === 'entry') {
+        if (lv.entry.type === 'touch') {
+            sent = emitPlace(ctx, p, lv, 'entry', 'entry', lv.qty, lv.entry.price, lv.entry.order);
+        } else if (lv.entry.type === 'limit') {
+            sent = emitPlace(ctx, p, lv, 'entry', 'entry', lv.qty, lv.entry.price, lv.entry.order);
+        }
+    } else if (leg === 'stop' || leg === 'take') {
+        if (lv.exit?.type !== 'oco') return false;
+        const qty = Math.min(lv.entryFilled, lv.qty);
+        const l = lv.exit[leg];
+        sent = emitPlace(ctx, p, lv, 'exit', leg, qty, l?.price ?? null, lv.exit.order);
+    }
+    if (!sent) return false;
+    notice(ctx, 'fired', p, lv.id, `${leg} @${price}`);
+    if (p.ocoLevels) {
+        for (const other of p.levels) {
+            if (other === lv) continue;
+            if (other.phase === 'idle' || other.phase === 'needsConfirm') {
+                other.phase = 'done';
+                other.pending = null;
+                other.check = null;
+                other.detail = 'ocoCancelled';
+            }
+        }
+    }
+    settle(ctx, p, lv);
+    return true;
+}
+
+/** Grid: place take-profit exits for any entry quantity not yet covered. */
+function ensureExits(ctx: Ctx, p: OrderProgram, lv: Level) {
+    if (lv.exit?.type !== 'takeProfit') return;
+    if (['unknown', 'needsConfirm', 'disabled'].includes(lv.phase)) return;
+    if (p.status !== 'running' && p.status !== 'stopping') return;
+    const covered = cycleSlots(lv, 'exit').filter(isActive).reduce((sum, o) => sum + Math.max(0, o.qty - o.filled), 0);
+    const uncovered = lv.position - covered;
+    if (uncovered > 0) emitPlace(ctx, p, lv, 'exit', 'tp', uncovered, lv.exit.price, lv.exit.order);
+}
+
+// ---- phase ----
+
+function completeCycle(p: OrderProgram, lv: Level) {
+    lv.cycles += 1;
+    lv.entryFilled = 0;
+    lv.position = 0;
+    // keep the just-finished cycle (display, duplicate-deal dedupe); drop older ones
+    lv.orders = lv.orders.filter(o => o.cycle >= lv.cycles - 1 || isActive(o) || o.status === 'unknown');
+    const again = p.cycle.rearmAfterExit && (p.cycle.maxCycles === null || lv.cycles < p.cycle.maxCycles)
+        && p.status === 'running';
+    lv.phase = again ? 'idle' : 'done';
+}
+
+/** Recompute a level's phase from its slots; sticky phases stay. */
+function settle(ctx: Ctx, p: OrderProgram, lv: Level) {
+    if (lv.phase === 'needsConfirm' || lv.phase === 'disabled' || lv.phase === 'done') return;
+    if (lv.orders.some(o => o.status === 'unknown' && !o.acknowledged)) { lv.phase = 'unknown'; return; }
+    const entries = cycleSlots(lv, 'entry');
+    const exits = cycleSlots(lv, 'exit');
+    const refused = [...entries, ...exits].find(o => o.status === 'notSent');
+    if (refused) {
+        lv.phase = 'disabled';
+        lv.detail = refused.detail ?? 'notSent';
+        return;
+    }
+    const entryActive = entries.some(isActive);
+    const exitActive = exits.some(isActive);
+    if (lv.exit?.type === 'oco' && exits.length > 0) {
+        if (exitActive) lv.phase = 'exiting';
+        else if (exits.every(o => o.status === 'filled')) lv.phase = 'done';
+        else { lv.phase = 'disabled'; lv.detail = 'exitIncomplete'; }
+        return;
+    }
+    if (exitActive) lv.phase = 'exiting';
+    else if (lv.position > 0) lv.phase = 'holding';
+    else if (entryActive) lv.phase = 'working';
+    else if (lv.entryFilled > 0) completeCycle(p, lv);
+    else if (entries.length > 0) {
+        // entry ended with nothing filled
+        if (p.status === 'stopping' || p.status === 'stopped' || lv.entry.type === 'touch') {
+            lv.phase = 'done';
+            lv.detail = entries[entries.length - 1]?.detail ?? 'entryEnded';
+        } else if (lv.entry.type === 'external') {
+            lv.phase = 'done';
+            lv.detail = 'entryClosed';
+        } else {
+            // a grid entry cancelled from outside: freeze instead of resubmitting
+            lv.phase = 'disabled';
+            lv.detail = 'entryEnded';
+        }
+    } else lv.phase = 'idle';
+    void ctx;
+}
+
+function refreshStopping(p: OrderProgram) {
+    if (p.status !== 'stopping') return;
+    // an unacknowledged unknown submit may be live at the broker: not stopped yet
+    const busy = p.levels.some(lv => lv.orders.some(o => isActive(o) || (o.status === 'unknown' && !o.acknowledged))
+        || (lv.position > 0 && lv.phase !== 'disabled'));
+    if (!busy) p.status = 'stopped';
+}
+
+/** The next tick decides for touch legs (#144). */
+function markRestore(p: OrderProgram, reason: RestoreReason) {
+    for (const lv of p.levels) {
+        if (lv.phase === 'needsConfirm') continue;
+        const legs = touchLegs(lv).filter(l => !lv.recross.includes(l.name));
+        if (legs.length) lv.check = reason;
+    }
+}
+
+// ---- events ----
+
+function noteActivity(ctx: Ctx, e: Source) {
+    const s = ctx.s;
+    if (!fromLive(s, e)) return; // a late event of another environment says nothing about this one
+    if (s.lastActivity !== null) {
+        const gap = ctx.ts - s.lastActivity;
+        for (const p of s.programs) {
+            if (envMatches(s, p) && gap > p.session.silentStallMs) markRestore(p, 'disconnect');
+        }
+    }
+    s.lastActivity = ctx.ts;
+}
+
+function onTick(ctx: Ctx, e: Extract<ExecEvent, { type: 'tick' }>) {
+    const s = ctx.s;
+    noteActivity(ctx, e);
+    if (e.simtrade || !Number.isFinite(e.price) || e.price <= 0 || !fromLive(s, e)) return;
+    s.lastPrices[e.code] = e.price;
+    for (const p of s.programs) {
+        if (p.binding.contract.quoteCode !== e.code || p.hold !== null) continue;
+        if (p.status === 'running') checkBounds(ctx, p, e.price);
+        if (p.status !== 'running' && p.status !== 'stopping') continue;
+        const limitCandidates: Level[] = [];
+        for (const lv of p.levels) {
+            // entries only fire while running; protective exits also while stopping
+            const legs = touchLegs(lv).filter(l => p.status === 'running' || l.name !== 'entry');
+            if (legs.length) {
+                if (lv.check) {
+                    const reason = lv.check;
+                    lv.check = null;
+                    const past = legs.find(l => !lv.recross.includes(l.name) && isPast(l.condition, l.price, e.price));
+                    if (past) {
+                        lv.phase = 'needsConfirm';
+                        lv.pending = { leg: past.name, price: e.price, ts: ctx.ts, reason };
+                        notice(ctx, 'needsConfirm', p, lv.id, `${past.name} ${reason} @${e.price}`);
+                        continue;
+                    }
+                }
+                for (const leg of legs) {
+                    const past = isPast(leg.condition, leg.price, e.price);
+                    if (lv.recross.includes(leg.name)) {
+                        if (!past) lv.recross = lv.recross.filter(x => x !== leg.name);
+                        continue;
+                    }
+                    if (past && lv.phase !== 'done') { fire(ctx, p, lv, leg.name, e.price); break; }
+                }
+            } else if (p.status === 'running' && lv.phase === 'idle' && lv.entry.type === 'limit') {
+                const eligible = lv.side === 'Buy' ? fixed(e.price) > fixed(lv.entry.price) : fixed(e.price) < fixed(lv.entry.price);
+                if (eligible) limitCandidates.push(lv);
+            }
+        }
+        if (limitCandidates.length) {
+            const working = p.levels.filter(lv => cycleSlots(lv, 'entry').some(isActive)).length;
+            const cap = p.risk.maxWorkingEntries === null ? Infinity : Math.max(0, p.risk.maxWorkingEntries - working);
+            const dist = (lv: Level) => Math.abs(fixed(e.price) - fixed(lv.entry.type === 'limit' ? lv.entry.price : e.price));
+            const ordered = limitCandidates
+                .map((lv, i) => ({ lv, i }))
+                .sort((a, b) => dist(a.lv) - dist(b.lv) || a.i - b.i)
+                .slice(0, cap === Infinity ? undefined : cap);
+            for (const { lv } of ordered) fire(ctx, p, lv, 'entry', e.price);
+        }
+        for (const lv of p.levels) ensureExits(ctx, p, lv);
+        ensureCancels(ctx, p, true);
+    }
+}
+
+function checkBounds(ctx: Ctx, p: OrderProgram, price: number) {
+    const b = p.bounds;
+    const action = b.upper !== null && fixed(price) > fixed(b.upper) ? b.onBreakUpper
+        : b.lower !== null && fixed(price) < fixed(b.lower) ? b.onBreakLower : 'none';
+    if (action === 'pause') {
+        p.status = 'paused';
+        p.pauseReason = 'boundBreak';
+        notice(ctx, 'paused', p, null, `bound break @${price}`);
+    } else if (action === 'stop') {
+        startStop(ctx, p);
+        notice(ctx, 'stopping', p, null, `bound break @${price}`);
+    }
+}
+
+function onConnection(ctx: Ctx, e: ConnectionEvent) {
+    const s = ctx.s;
+    const before = canEvaluate(s);
+    const prevEnv = s.conn.env;
+    const prevServer = s.conn.serverId;
+    s.conn.live = e.live;
+    s.conn.env = e.live ? e.env : null;
+    s.conn.serverId = e.live ? e.serverId : null;
+    const now = canEvaluate(s);
+    if (!now) {
+        if (before || s.conn.downSince === null) s.conn.downSince = ctx.ts;
+        if (before) s.lastPrices = {};
+        updateHolds(ctx);
+        return;
+    }
+    const switched = s.conn.lastEvalEnv !== null
+        && (s.conn.lastEvalEnv !== s.conn.env || s.conn.lastEvalServerId !== s.conn.serverId);
+    if (switched || prevEnv !== s.conn.env || prevServer !== s.conn.serverId) s.lastPrices = {};
+    const downFor = s.conn.downSince === null ? 0 : ctx.ts - s.conn.downSince;
+    for (const p of s.programs) {
+        if (!envMatches(s, p)) continue;
+        if (switched) markRestore(p, 'env');
+        else if (!before && downFor > p.session.longDisconnectMs) markRestore(p, 'disconnect');
+    }
+    s.conn.downSince = null;
+    s.conn.lastEvalEnv = s.conn.env;
+    s.conn.lastEvalServerId = s.conn.serverId;
+    s.lastActivity = ctx.ts;
+    updateHolds(ctx);
+    // exits deferred while held (grid fills seen during a disconnect) go out now,
+    // and cancels a stopping program could not send / confirm are (re)sent
+    for (const p of s.programs) {
+        if (p.hold !== null) continue;
+        for (const lv of p.levels) { ensureExits(ctx, p, lv); settle(ctx, p, lv); }
+        ensureCancels(ctx, p, true);
+    }
+}
+
+/** Result of a place (slot key) or cancel (cancel key), within its source environment only. */
+function findSlotByKey(s: EngineState, key: string, src: Source) {
+    for (const p of s.programs) {
+        if (!boundTo(p, src)) continue;
+        for (const lv of p.levels) {
+            const slot = lv.orders.find(o => o.key === key);
+            if (slot) return { p, lv, slot, cancel: false };
+            const c = lv.orders.find(o => o.cancel !== null && (o.cancel.key === key || o.cancel.outstanding.includes(key)));
+            if (c) return { p, lv, slot: c, cancel: true };
+        }
+    }
+    return null;
+}
+
+function findSlotByOrderId(s: EngineState, orderId: string, src: Source) {
+    for (const p of s.programs) {
+        if (!boundTo(p, src)) continue; // a report only matches its own environment's programs
+        for (const lv of p.levels) {
+            const slot = lv.orders.find(o => o.orderId === orderId);
+            if (slot) return { p, lv, slot };
+        }
+    }
+    return null;
+}
+
+/** Apply reports that raced the order id becoming known (deals, then order events). */
+function drainOrphans(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot) {
+    const s = ctx.s;
+    const mine = (e: Source & { orderId: string }) => e.orderId === slot.orderId && boundTo(p, e);
+    const deals = s.orphanDeals.filter(d => mine(d.deal));
+    s.orphanDeals = s.orphanDeals.filter(d => !mine(d.deal));
+    for (const d of deals) applyDeal(ctx, p, lv, slot, d.deal);
+    const orders = s.orphanOrders.filter(o => mine(o.order));
+    s.orphanOrders = s.orphanOrders.filter(o => !mine(o.order));
+    for (const o of orders) applyOrder(ctx, p, lv, slot, o.order);
+}
+
+function onIntentResult(ctx: Ctx, e: IntentResultEvent) {
+    const hit = findSlotByKey(ctx.s, e.key, e);
+    if (!hit) return;
+    const { p, lv, slot } = hit;
+    if (hit.cancel) {
+        const c = slot.cancel!;
+        if (c.key !== e.key) {
+            // an earlier attempt: a refusal settles it, nothing else changes the current one
+            if (e.outcome === 'notSent') c.outstanding = c.outstanding.filter(k => k !== e.key);
+            return;
+        }
+        if (c.status !== 'pendingSubmit') return; // duplicate
+        if (e.outcome === 'accepted') c.status = 'requested';
+        else if (e.outcome === 'notSent') cancelFailed(ctx, p, lv, slot, e.detail ?? 'notSent');
+        else { c.status = 'unknown'; c.detail = e.detail ?? 'unknown'; }
+        refreshStopping(p);
+        return;
+    }
+    if (slot.status !== 'pendingSubmit') return; // duplicate or stale result
+    if (e.outcome === 'accepted' && e.orderId) {
+        slot.orderId = e.orderId;
+        slot.status = slot.filled >= slot.qty ? 'filled' : 'working';
+        drainOrphans(ctx, p, lv, slot);
+    } else if (e.outcome === 'notSent') {
+        slot.status = 'notSent';
+        slot.detail = e.detail ?? 'notSent';
+        notice(ctx, 'notSent', p, lv.id, slot.detail);
+    } else {
+        slot.status = 'unknown';
+        slot.detail = e.detail ?? 'unknown';
+        notice(ctx, 'unknown', p, lv.id, slot.detail);
+    }
+    ensureExits(ctx, p, lv);
+    settle(ctx, p, lv);
+    ensureCancels(ctx, p, false); // an entry accepted after stop must be cancelled too
+    refreshStopping(p);
+}
+
+function applyOrder(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, e: OrderEvent) {
+    if (e.op === 'Cancel') {
+        if (e.failed) {
+            const c = slot.cancel;
+            if (!c || c.status === 'confirmed' || c.status === 'failed' || !isActive(slot)) return;
+            if (e.cancelKey) {
+                c.outstanding = c.outstanding.filter(k => k !== e.cancelKey); // that attempt is settled
+                if (e.cancelKey === c.key) cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
+                return; // else: a stale attempt's failure
+            }
+            if (c.outstanding.length === 1 && c.outstanding[0] === c.key) {
+                // only one attempt could have failed: the current one
+                cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
+                return;
+            }
+            // cannot tell which attempt failed: the current one's fate is unknown
+            // (never left `requested`; retried after the timeout unless settled)
+            c.status = 'unknown';
+            c.detail = e.detail ?? 'unkeyedCancelFailure';
+            addIssue(ctx, p, 'cancelReportUnkeyed', `${slot.key}: Cancel failure without attempt key, ${c.outstanding.length} attempts outstanding`);
+            return;
+        }
+        if (slot.cancel) { slot.cancel.status = 'confirmed'; slot.cancel.outstanding = []; }
+    }
+    const ended = (e.op === 'New' && e.failed) || (e.op === 'Cancel' && !e.failed);
+    if (!ended || !isActive(slot)) return;
+    slot.status = slot.filled >= slot.qty ? 'filled' : 'ended';
+    if (slot.status === 'ended') slot.detail = e.detail ?? (e.failed ? 'failed' : 'cancelled');
+}
+
+function onOrder(ctx: Ctx, e: OrderEvent) {
+    const hit = findSlotByOrderId(ctx.s, e.orderId, e);
+    if (!hit) {
+        // e.g. a New failure reported before the submit result: keep it for the binding
+        ctx.s.orphanOrders.push({ order: e, ts: ctx.ts });
+        if (ctx.s.orphanOrders.length > ORPHAN_ORDER_LIMIT) ctx.s.orphanOrders.splice(0, ctx.s.orphanOrders.length - ORPHAN_ORDER_LIMIT);
+        return;
+    }
+    const { p, lv, slot } = hit;
+    applyOrder(ctx, p, lv, slot, e);
+    settle(ctx, p, lv);
+    refreshStopping(p);
+}
+
+const SAME_TS = 1e-6;
+/** Port of bracket-core `mergeFill`: one identity per real fill. */
+export function mergeFill(slot: OrderSlot, key: string, qty: number, ts: number | undefined):
+    { added: number; conflict: boolean } | null {
+    if (slot.fills[key] !== undefined) return null;
+    const isEvent = (k: string) => k.startsWith('event:');
+    const sameFill = (k: string) => slot.fills[k] === qty && ts !== undefined
+        && slot.fillTs[k] !== undefined && Math.abs(slot.fillTs[k]! - ts) < SAME_TS;
+    const counterpart = Object.keys(slot.fills).find(k => isEvent(k) !== isEvent(key) && sameFill(k));
+    if (counterpart) {
+        if (isEvent(key)) return null;
+        delete slot.fills[counterpart];
+        delete slot.fillTs[counterpart];
+        slot.fills[key] = qty;
+        if (ts !== undefined) slot.fillTs[key] = ts;
+        return { added: 0, conflict: false };
+    }
+    const conflict = Object.keys(slot.fills).some(k => isEvent(k) !== isEvent(key) && slot.fills[k] === qty);
+    slot.fills[key] = qty;
+    if (ts !== undefined) slot.fillTs[key] = ts;
+    return { added: qty, conflict };
+}
+
+function applyFill(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, key: string, qty: number, ts: number | undefined) {
+    const merged = mergeFill(slot, key, qty, ts);
+    if (!merged) return;
+    if (merged.conflict) addIssue(ctx, p, 'fillConflict', `${slot.key}: event-only fill may duplicate a seq fill`);
+    const added = merged.added;
+    if (added <= 0) return;
+    slot.filled += added;
+    if (slot.filled >= slot.qty && (slot.status === 'working' || slot.status === 'ended')) slot.status = 'filled';
+    if (slot.role === 'entry') {
+        if (slot.cycle !== lv.cycles) { addIssue(ctx, p, 'lateFill', `${slot.key}: fill after its cycle ended`); return; }
+        lv.entryFilled += added;
+        if (lv.entryFilled > lv.qty) addIssue(ctx, p, 'overfill', `${lv.id}: filled ${lv.entryFilled} > ${lv.qty}`);
+        if (exitFired(lv)) lv.unprotected += added;
+        else if (lv.exit !== null) {
+            const was = lv.position;
+            lv.position += added;
+            // protection armed while nobody evaluated yet: first tick decides (#144)
+            if (was === 0 && lv.exit.type === 'oco' && ctx.s.lastActivity === null) lv.check = 'restart';
+        }
+    } else {
+        lv.position -= added;
+    }
+    notice(ctx, 'fill', p, lv.id, `${slot.key} +${added}`);
+}
+
+function applyDeal(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, d: DealEvent) {
+    const b = p.binding;
+    if (d.account && (d.account.brokerId !== b.account.brokerId || d.account.accountId !== b.account.accountId)) return;
+    if (!d.account) { addIssue(ctx, p, 'reportMismatch', `${d.orderId}: deal without account`); return; }
+    if (d.code !== b.contract.orderCode) { addIssue(ctx, p, 'reportMismatch', `${d.orderId}: code ${d.code}`); return; }
+    const expected = slot.role === 'entry' ? lv.side : opposite(lv.side);
+    if (d.action !== expected) { addIssue(ctx, p, 'reportMismatch', `${d.orderId}: action ${d.action}`); return; }
+    if (!Number.isSafeInteger(d.qty) || d.qty <= 0) { addIssue(ctx, p, 'reportMismatch', `${d.orderId}: qty ${d.qty}`); return; }
+    let key: string;
+    if (d.seq) key = `${d.orderId}:${d.seq}`;
+    else if (d.eventId) {
+        key = `event:${d.eventId}`;
+        if (slot.fills[key] === undefined) addIssue(ctx, p, 'eventOnlyFill', `${d.orderId}: deal without exchange seq`);
+    } else { addIssue(ctx, p, 'reportMismatch', `${d.orderId}: deal without seq nor event id`); return; }
+    applyFill(ctx, p, lv, slot, key, d.qty, d.fillTs);
+}
+
+function onDeal(ctx: Ctx, e: DealEvent) {
+    const hit = findSlotByOrderId(ctx.s, e.orderId, e);
+    if (!hit) {
+        ctx.s.orphanDeals.push({ deal: e, ts: ctx.ts });
+        if (ctx.s.orphanDeals.length > ORPHAN_DEAL_LIMIT) ctx.s.orphanDeals.splice(0, ctx.s.orphanDeals.length - ORPHAN_DEAL_LIMIT);
+        return;
+    }
+    const { p, lv, slot } = hit;
+    applyDeal(ctx, p, lv, slot, e);
+    ensureExits(ctx, p, lv);
+    settle(ctx, p, lv);
+    refreshStopping(p);
+}
+
+function onReconcile(ctx: Ctx, e: ReconcileEvent) {
+    for (const p of ctx.s.programs) {
+        const b = p.binding;
+        if (b.env !== e.env || b.serverId !== e.serverId || b.account.accountType !== e.account.accountType
+            || b.account.brokerId !== e.account.brokerId || b.account.accountId !== e.account.accountId) continue;
+        for (const lv of p.levels) {
+            let touched = false;
+            for (const slot of lv.orders) {
+                const row = slot.orderId
+                    ? e.orders.find(o => o.orderId === slot.orderId)
+                    : e.orders.find(o => o.intentKey === slot.key);
+                if (slot.status === 'pendingSubmit' && !slot.orderId && row) {
+                    // the listing answered before the submit result did
+                    slot.orderId = row.orderId;
+                    slot.status = 'working';
+                    drainOrphans(ctx, p, lv, slot);
+                } else if (slot.status === 'unknown' && !slot.acknowledged) {
+                    if (row) {
+                        slot.orderId = row.orderId;
+                        slot.status = 'working';
+                        slot.detail = 'reconciled';
+                        drainOrphans(ctx, p, lv, slot);
+                    } else if (e.complete) {
+                        slot.status = 'notSent';
+                        slot.detail = 'reconciledNotSent';
+                        // confirmed never accepted: the user decides whether to send now
+                        lv.orders = lv.orders.filter(o => o !== slot);
+                        lv.phase = 'needsConfirm';
+                        lv.pending = { leg: slot.leg, price: ctx.s.lastPrices[b.contract.quoteCode] ?? null, ts: ctx.ts,
+                            reason: 'unknownNotSent' };
+                        notice(ctx, 'needsConfirm', p, lv.id, `${slot.leg} unknownNotSent`);
+                        touched = true;
+                        continue;
+                    } else continue;
+                    touched = true;
+                }
+                if (!row || !slot.orderId) continue;
+                for (const d of row.deals) {
+                    if (Number.isSafeInteger(d.qty) && d.qty > 0) {
+                        applyFill(ctx, p, lv, slot, `${row.orderId}:${d.seq}`, d.qty, d.ts);
+                    }
+                }
+                if (isActive(slot) && row.status !== 'working') {
+                    slot.status = slot.filled >= slot.qty ? 'filled' : 'ended';
+                    if (slot.status === 'ended') slot.detail = 'reconciledEnded';
+                    if (slot.cancel) { slot.cancel.status = 'confirmed'; slot.cancel.outstanding = []; }
+                }
+                touched = true;
+            }
+            if (touched) {
+                if (lv.phase === 'unknown') lv.phase = 'idle';
+                ensureExits(ctx, p, lv);
+                settle(ctx, p, lv);
+            }
+        }
+        ensureCancels(ctx, p, false);
+        refreshStopping(p);
+    }
+}
+
+function onRestore(ctx: Ctx) {
+    const s = ctx.s;
+    s.conn = { ...s.conn, live: false, env: null, serverId: null, downSince: ctx.ts };
+    s.lastActivity = null;
+    s.lastPrices = {};
+    for (const p of s.programs) {
+        for (const lv of p.levels) {
+            for (const slot of lv.orders) {
+                if (slot.status === 'pendingSubmit') {
+                    slot.status = 'unknown';
+                    slot.detail = 'restart: submit outcome unknown';
+                }
+                // a cancel may or may not have left: resend it once live again (cancels are safe to repeat)
+                if (slot.cancel?.status === 'pendingSubmit') slot.cancel.status = 'unknown';
+            }
+            settle(ctx, p, lv);
+        }
+        markRestore(p, 'restart');
+    }
+    updateHolds(ctx);
+}
+
+// ---- commands ----
+
+function reject(ctx: Ctx, p: OrderProgram | null, code: string, detail: string) {
+    notice(ctx, `rejected.${code}`, p, null, detail);
+}
+
+function validateProgram(p: OrderProgram): string | null {
+    if (!p.id || !p.binding?.serverId || !p.binding.account?.accountId || !p.binding.contract?.orderCode) return 'invalidBinding';
+    if (p.binding.env !== 'simulation' && p.binding.env !== 'production') return 'invalidBinding';
+    if (!Array.isArray(p.levels) || p.levels.length === 0) return 'noLevels';
+    if (p.hooks.length > 0) return 'hooksUnsupported';
+    const ids = new Set<string>();
+    for (const lv of p.levels) {
+        if (!lv.id || ids.has(lv.id)) return 'duplicateLevel';
+        ids.add(lv.id);
+        if (!Number.isSafeInteger(lv.qty) || lv.qty <= 0) return 'invalidQty';
+    }
+    return null;
+}
+
+function startStop(ctx: Ctx, p: OrderProgram) {
+    p.status = 'stopping';
+    for (const lv of p.levels) {
+        if (lv.phase === 'idle' || lv.phase === 'needsConfirm') {
+            lv.phase = 'done';
+            lv.pending = null;
+            lv.check = null;
+            lv.detail = 'stopped';
+            continue;
+        }
+    }
+    ensureCancels(ctx, p, false);
+    refreshStopping(p);
+}
+
+function onCommand(ctx: Ctx, e: CommandEvent) {
+    const s = ctx.s;
+    const c = e.command;
+    if (c.op === 'create') {
+        const p: OrderProgram = structuredClone(c.program);
+        if (s.programs.some(x => x.id === p.id)) { reject(ctx, null, 'duplicateProgram', p.id); return; }
+        const invalid = validateProgram(p);
+        if (invalid) { reject(ctx, null, invalid, p.id); return; }
+        if (!canEvaluate(s)) { reject(ctx, null, 'unknownEnv', p.id); return; }
+        if (s.conn.env !== p.binding.env || s.conn.serverId !== p.binding.serverId) { reject(ctx, null, 'envMismatch', p.id); return; }
+        p.version = 1;
+        p.status = 'running';
+        p.pauseReason = null;
+        p.createdAt = ctx.ts;
+        p.updatedAt = ctx.ts;
+        p.hold = null;
+        s.programs.push(p);
+        updateHolds(ctx);
+        notice(ctx, 'created', p, null, p.kind);
+        return;
+    }
+    const p = s.programs.find(x => x.id === c.programId);
+    if (!p) { reject(ctx, null, 'noProgram', c.programId); return; }
+    if (c.version !== p.version) { reject(ctx, p, 'staleVersion', `${c.version} != ${p.version}`); return; }
+    const accept = () => { p.version += 1; p.updatedAt = ctx.ts; };
+    switch (c.op) {
+        case 'pause':
+            if (p.status !== 'running') { reject(ctx, p, 'notRunning', p.status); return; }
+            p.status = 'paused';
+            p.pauseReason = 'user';
+            accept();
+            return;
+        case 'resume':
+            if (p.status !== 'paused') { reject(ctx, p, 'notPaused', p.status); return; }
+            p.status = 'running';
+            p.pauseReason = null;
+            markRestore(p, 'resume');
+            accept();
+            for (const lv of p.levels) ensureExits(ctx, p, lv);
+            return;
+        case 'stop':
+            if (p.status === 'stopping' || p.status === 'stopped') { reject(ctx, p, 'alreadyStopped', p.status); return; }
+            accept();
+            startStop(ctx, p);
+            return;
+        case 'remove': {
+            const busy = p.levels.some(lv => lv.orders.some(o => isActive(o) || (o.status === 'unknown' && !o.acknowledged))
+                || lv.position > 0);
+            if (busy) { reject(ctx, p, 'hasOrdersOrPosition', p.id); return; }
+            s.programs = s.programs.filter(x => x !== p);
+            notice(ctx, 'removed', p, null, p.id);
+            return;
+        }
+        case 'ackUnknown': {
+            const lv = p.levels.find(l => l.id === c.levelId);
+            if (!lv || lv.phase !== 'unknown') { reject(ctx, p, 'notUnknown', c.levelId); return; }
+            for (const slot of lv.orders) {
+                if (slot.status === 'unknown') { slot.acknowledged = true; slot.status = 'ended'; }
+            }
+            lv.phase = 'disabled';
+            lv.detail = 'unknownAcknowledged';
+            accept();
+            refreshStopping(p);
+            return;
+        }
+        case 'resolvePending': {
+            const lv = p.levels.find(l => l.id === c.levelId);
+            if (!lv || lv.phase !== 'needsConfirm' || !lv.pending) { reject(ctx, p, 'notPending', c.levelId); return; }
+            const leg = lv.pending.leg;
+            if (c.choice === 'keep') {
+                lv.pending = null;
+                lv.phase = restPhase(lv);
+                if (legOf(lv, leg)) lv.recross = [...lv.recross.filter(x => x !== leg), leg];
+                accept();
+                return;
+            }
+            if (c.choice === 'cancel') {
+                if (lv.exit?.type === 'oco' && leg !== 'entry') { reject(ctx, p, 'bracketCancel', lv.id); return; }
+                lv.pending = null;
+                lv.phase = 'done';
+                lv.detail = 'cancelled';
+                accept();
+                refreshStopping(p);
+                return;
+            }
+            if (!envMatches(s, p) || p.hold !== null) { reject(ctx, p, 'envMismatch', lv.id); return; }
+            const last = s.lastPrices[p.binding.contract.quoteCode];
+            if (last === undefined) { reject(ctx, p, 'noPrice', lv.id); return; }
+            const l = legOf(lv, leg);
+            if (l && !isPast(l.condition, l.price, last) && !c.allowUnpast) { reject(ctx, p, 'unpast', `${last}`); return; }
+            lv.pending = null;
+            lv.phase = restPhase(lv);
+            accept();
+            if (!fire(ctx, p, lv, leg, last)) reject(ctx, p, 'notFired', lv.id);
+            return;
+        }
+    }
+}
+
+/** Phase a level returns to when it leaves needsConfirm. */
+function restPhase(lv: Level): Level['phase'] {
+    if (lv.position > 0) return 'holding';
+    return 'idle';
+}
+
+// ---- entry point ----
+
+export function step(state: EngineState, event: ExecEvent): StepResult {
+    const s: EngineState = structuredClone(state);
+    const ctx: Ctx = { s, intents: [], notices: [], ts: event.ts };
+    switch (event.type) {
+        case 'tick': onTick(ctx, event); break;
+        case 'heartbeat': noteActivity(ctx, event); break;
+        case 'connection': onConnection(ctx, event); break;
+        case 'intentResult': onIntentResult(ctx, event); break;
+        case 'order': onOrder(ctx, event); break;
+        case 'deal': onDeal(ctx, event); break;
+        case 'reconcile': onReconcile(ctx, event); break;
+        case 'restore': onRestore(ctx); break;
+        case 'command': onCommand(ctx, event); break;
+    }
+    // time advanced on the live connection: cancel retries / timeouts run for
+    // every program, not only those whose symbol ticked (a halted or quiet
+    // symbol must not leave a working order uncancelled)
+    if ((event.type === 'tick' || event.type === 'heartbeat') && fromLive(s, event)) {
+        for (const p of s.programs) if (p.hold === null) ensureCancels(ctx, p, true);
+    }
+    for (const p of s.programs) refreshStopping(p);
+    updateHolds(ctx);
+    return { state: s, intents: ctx.intents, notices: ctx.notices };
+}

@@ -1,0 +1,173 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "env-server-id-isolation",
+  "description": "Same env on a different server identity is a different environment.",
+  "covers": [
+    "env",
+    "isolation"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "t1",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 2000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-b"
+      },
+      "expect": {
+        "notices": [
+          "held"
+        ],
+        "programs": {
+          "t1": {
+            "hold": "envMismatch"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 2001,
+        "env": "simulation",
+        "serverId": "local-b",
+        "code": "TXFR1",
+        "price": 90
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 3000,
+        "live": false,
+        "env": null,
+        "serverId": null
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "hold": "disconnected"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 3001,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "hold": null,
+            "levels": {
+              "L1": {
+                "check": "env"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

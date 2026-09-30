@@ -1,0 +1,264 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "restart-unknown-reconciled-not-sent",
+  "description": "A complete reconcile without the idempotency key proves the unknown submit never reached the broker: the level asks the user (never auto-resent); 送出 uses a NEW key.",
+  "covers": [
+    "restart",
+    "unknown",
+    "reconcile",
+    "idempotency",
+    "#144"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "t1",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Sell",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "below",
+                  "price": 100,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 99
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "simulation/local-a/t1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null
+          }
+        ]
+      }
+    },
+    {
+      "restart": {
+        "ts": 5000
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 5001,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 5002,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 98
+      }
+    },
+    {
+      "event": {
+        "type": "reconcile",
+        "ts": 5003,
+        "account": {
+          "accountType": "F",
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "env": "simulation",
+        "serverId": "local-a",
+        "orders": [],
+        "complete": false
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "reconcile",
+        "ts": 5004,
+        "account": {
+          "accountType": "F",
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "env": "simulation",
+        "serverId": "local-a",
+        "orders": [
+          {
+            "intentKey": "other",
+            "orderId": "zz",
+            "status": "working",
+            "qty": 1,
+            "deals": []
+          }
+        ],
+        "complete": true
+      },
+      "expect": {
+        "notices": [
+          "needsConfirm"
+        ],
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "phase": "needsConfirm",
+                "orders": [],
+                "pending": {
+                  "leg": "entry",
+                  "reason": "unknownNotSent",
+                  "price": 98
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 5005,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 97
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 5006,
+        "id": "c5006",
+        "command": {
+          "op": "resolvePending",
+          "programId": "t1",
+          "version": 1,
+          "levelId": "L1",
+          "choice": "send"
+        }
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "simulation/local-a/t1/L1/entry/0/1",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null,
+            "version": 2
+          }
+        ]
+      }
+    }
+  ]
+}
