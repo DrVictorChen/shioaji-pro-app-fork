@@ -136,6 +136,19 @@ function keepChartFocus(api: ChartDrawingsApi) {
     };
 }
 
+// 輸入法（注音、倉頡…）組字中的按鍵：確認候選字的 Enter、取消組字的
+// Esc 都屬於輸入法，不能當成「完成」或「取消」
+export function isImeKey(e: { nativeEvent?: { isComposing?: boolean }; keyCode?: number }): boolean {
+    return !!e.nativeEvent?.isComposing || e.keyCode === 229;
+}
+
+// 文字類輸入框（Esc 是還原輸入，不是關彈出層）；滑桿、勾選框不算
+function isTextInput(el: Element | null | undefined): boolean {
+    if (!el || el.tagName !== 'INPUT') return false;
+    const type = (el as HTMLInputElement).type;
+    return type !== 'range' && type !== 'checkbox';
+}
+
 // ── 通用彈出層：portal、依空間定位、Esc／點外面關閉 ─────────────────────
 
 export function Popover({
@@ -162,7 +175,7 @@ export function Popover({
     // 處理（還原輸入），不關彈出層。
     useEscClose(() => {
         const active = popRef.current?.ownerDocument?.activeElement;
-        if (active && active.tagName === 'INPUT' && popRef.current?.contains(active)) return;
+        if (isTextInput(active) && popRef.current?.contains(active!)) return;
         closeRef.current('esc');
     });
 
@@ -466,6 +479,42 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
     );
 }
 
+// 不透明度／填色滑桿（色盤彈出層與設定視窗共用）。value 0–1，
+// 顯示百分比；滑桿連續拖動在 applyStyle 裡合併成一步復原
+export function OpacitySlider({
+    label,
+    value,
+    min,
+    max,
+    onChange,
+}: {
+    label: string;
+    value: number;
+    min: number;
+    max: number;
+    onChange: (v: number) => void;
+}) {
+    const pct = Math.round(value * 100);
+    const fill = ((pct - min) / (max - min)) * 100;
+    return (
+        <span className={styles.row}>
+            <span className={styles.label}>{label}</span>
+            <input
+                type='range'
+                className={styles.slider}
+                min={min}
+                max={max}
+                step={max - min > 60 ? 5 : 2}
+                aria-label={label}
+                value={pct}
+                style={{ ['--sj-fill' as string]: `${fill}%` }}
+                onChange={(e) => onChange(Number(e.target.value) / 100)}
+            />
+            <span>{pct}%</span>
+        </span>
+    );
+}
+
 // ── 浮動物件工具列＋文字輸入框 ───────────────────────────────────────
 
 export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
@@ -601,6 +650,23 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
                             />
                         ))}
                     </span>
+                    {/* 透明度：蓋在 K 棒上時線條、填色都可以半透明，不把 K 棒擋住 */}
+                    <OpacitySlider
+                        label='不透明度'
+                        value={style.opacity ?? 1}
+                        min={10}
+                        max={100}
+                        onChange={(v) => api.applyStyle({ opacity: v })}
+                    />
+                    {sel.some((d) => d.tool === 'box' || d.tool === 'channel') && (
+                        <OpacitySlider
+                            label='填色'
+                            value={style.fillOpacity}
+                            min={0}
+                            max={50}
+                            onChange={(v) => api.applyStyle({ fillOpacity: v })}
+                        />
+                    )}
                 </Popover>
             )}
             {showBar && menu?.kind === 'width' && (
@@ -676,6 +742,7 @@ export function TextEditor({
             onChange={(e) => setValue(e.target.value)}
             onBlur={() => finish(value)}
             onKeyDown={(e) => {
+                if (isImeKey(e)) return;
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     finish(value);
@@ -735,7 +802,7 @@ export function DrawingSettingsDialog({
     // 輸入框裡的 Esc 是還原輸入（輸入框自己處理），不關視窗
     useEscClose(() => {
         const active = typeof document !== 'undefined' ? document.activeElement : null;
-        if (active && active.tagName === 'INPUT' && dialogRef.current?.contains(active)) return;
+        if (isTextInput(active) && dialogRef.current?.contains(active!)) return;
         closeRef.current();
     });
     const d = drawing;
@@ -801,22 +868,21 @@ export function DrawingSettingsDialog({
                                     虛線
                                 </button>
                             </span>
+                            <OpacitySlider
+                                label='不透明度'
+                                value={style.opacity ?? 1}
+                                min={10}
+                                max={100}
+                                onChange={(v) => api.applyStyle({ opacity: v })}
+                            />
                             {showsFill && (
-                                <span className={styles.row}>
-                                    <span className={styles.label}>填色</span>
-                                    <input
-                                        type='range'
-                                        className={styles.slider}
-                                        min={0}
-                                        max={50}
-                                        step={2}
-                                        aria-label='填色透明度'
-                                        value={Math.round(style.fillOpacity * 100)}
-                                        style={{ ['--sj-fill' as string]: `${style.fillOpacity * 200}%` }}
-                                        onChange={(e) => api.applyStyle({ fillOpacity: Number(e.target.value) / 100 })}
-                                    />
-                                    <span>{Math.round(style.fillOpacity * 100)}%</span>
-                                </span>
+                                <OpacitySlider
+                                    label='填色'
+                                    value={style.fillOpacity}
+                                    min={0}
+                                    max={50}
+                                    onChange={(v) => api.applyStyle({ fillOpacity: v })}
+                                />
                             )}
                             {d.tool === 'fib' && <FibSection api={api} drawing={d} />}
                             {d.tool === 'text' && (
@@ -855,6 +921,7 @@ export function DrawingSettingsDialog({
                                         <PriceInput
                                             key={`${d.id}-${i}-p-${a.price}`}
                                             price={a.price}
+                                            format={(p) => api.formatPrice(p, false)}
                                             disabled={d.locked}
                                             onCommit={(price) => api.setAnchor(d.id, i, { ...a, price })}
                                         />
@@ -1195,6 +1262,7 @@ export function ChartObjectList({ api }: { api: ChartDrawingsApi }) {
                                         setRenaming(null);
                                     }}
                                     onKeyDown={(e) => {
+                                        if (isImeKey(e)) return;
                                         if (e.key === 'Enter') {
                                             api.rename(d.id, e.currentTarget.value);
                                             setRenaming(null);
@@ -1271,10 +1339,13 @@ export function PriceInput({
     price,
     onCommit,
     disabled,
+    format,
 }: {
     price: number;
     onCommit: (p: number) => void;
     disabled?: boolean;
+    // 顯示用格式（依商品跳動價位）；存的原始值不變
+    format?: (p: number) => string;
 }) {
     const [draft, setDraft] = useState<string | null>(null);
     // Enter／Esc 之後的 blur() 會同步觸發 onBlur，而那時 draft 還是舊值
@@ -1294,7 +1365,7 @@ export function PriceInput({
     return (
         <input
             className={styles.priceInput}
-            value={draft ?? String(Number(price.toFixed(2)))}
+            value={draft ?? (format ? format(price) : String(Number(price.toFixed(2))))}
             inputMode='decimal'
             disabled={disabled}
             title='價格（Enter 套用）'
@@ -1303,6 +1374,7 @@ export function PriceInput({
             onBlur={commit}
             onFocus={() => (handled.current = false)}
             onKeyDown={(e) => {
+                if (isImeKey(e)) return;
                 if (e.key === 'Enter') {
                     commit();
                     handled.current = true;

@@ -188,7 +188,15 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
         ctx.lineWidth = (style.width + (selected ? 1 : 0)) * hr;
         // 鎖定的物件畫淡一些表示「不會被拖到」；但選取中要看得清楚
         // （選它通常就是為了解鎖或改樣式），所以選取時不淡化
-        ctx.globalAlpha = locked && !selected ? 0.55 : 1;
+        const baseAlpha = locked && !selected ? 0.55 : 1;
+        // 線條／文字再乘上物件的不透明度；填色有自己的透明度，不再疊乘
+        const lineAlpha = baseAlpha * (style.opacity ?? 1);
+        ctx.globalAlpha = lineAlpha;
+        const fillWith = (paint: () => void) => {
+            ctx.globalAlpha = baseAlpha;
+            paint();
+            ctx.globalAlpha = lineAlpha;
+        };
         const dash = style.dash === 'dashed' ? [6 * hr, 4 * hr] : [];
         ctx.setLineDash(dash);
         switch (shape.kind) {
@@ -201,21 +209,25 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 const w = (shape.right - shape.left) * hr;
                 const h = (shape.bottom - shape.top) * vr;
                 if (style.fillOpacity > 0) {
-                    ctx.fillStyle = withAlpha(style.color, style.fillOpacity);
-                    ctx.fillRect(x, y, w, h);
+                    fillWith(() => {
+                        ctx.fillStyle = withAlpha(style.color, style.fillOpacity);
+                        ctx.fillRect(x, y, w, h);
+                    });
                 }
                 ctx.strokeRect(x, y, w, h);
                 break;
             }
             case 'channel': {
                 if (style.fillOpacity > 0) {
-                    ctx.fillStyle = withAlpha(style.color, style.fillOpacity);
-                    ctx.beginPath();
-                    shape.fill.forEach((p, i) =>
-                        i ? ctx.lineTo(p.x * hr, p.y * vr) : ctx.moveTo(p.x * hr, p.y * vr),
-                    );
-                    ctx.closePath();
-                    ctx.fill();
+                    fillWith(() => {
+                        ctx.fillStyle = withAlpha(style.color, style.fillOpacity);
+                        ctx.beginPath();
+                        shape.fill.forEach((p, i) =>
+                            i ? ctx.lineTo(p.x * hr, p.y * vr) : ctx.moveTo(p.x * hr, p.y * vr),
+                        );
+                        ctx.closePath();
+                        ctx.fill();
+                    });
                 }
                 this._stroke(ctx, hr, vr, shape.base);
                 this._stroke(ctx, hr, vr, shape.parallel);
@@ -234,6 +246,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 // 相鄰兩條比例線之間的半透明色帶（TradingView 式）：顏色取
                 // 離 0 較遠的那一條
                 if (fib.bandOpacity > 0) {
+                    ctx.globalAlpha = baseAlpha;
                     const sorted = [...shape.levels].sort((p, q) => p.level - q.level);
                     for (let i = 0; i + 1 < sorted.length; i++) {
                         const lo = sorted[i]!;
@@ -246,6 +259,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                             Math.abs(hi.y - lo.y) * vr,
                         );
                     }
+                    ctx.globalAlpha = lineAlpha;
                 }
                 for (const l of shape.levels) {
                     ctx.strokeStyle = colorOf(l.index);
@@ -295,10 +309,12 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 ctx.setLineDash([]);
                 // 底色先鋪一層圖表背景色（半透明），再疊物件色：蓋在 K 棒上
                 // 的文字也讀得清楚
-                ctx.fillStyle = withAlpha(this._layer.background, 0.82);
-                ctx.fillRect(x, y, w, h);
-                ctx.fillStyle = withAlpha(style.color, 0.16);
-                ctx.fillRect(x, y, w, h);
+                fillWith(() => {
+                    ctx.fillStyle = withAlpha(this._layer.background, 0.82 * (style.opacity ?? 1));
+                    ctx.fillRect(x, y, w, h);
+                    ctx.fillStyle = withAlpha(style.color, 0.16);
+                    ctx.fillRect(x, y, w, h);
+                });
                 ctx.lineWidth = (selected ? 1.5 : 1) * hr;
                 ctx.strokeRect(x, y, w, h);
                 if (!editing) {
@@ -519,13 +535,12 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
             this._axisKey = key;
             this._axisViews = rows.map(() => new DrawingAxisView());
         }
-        const formatter = series.priceFormatter();
         rows.forEach((r, i) => {
             const view = this._axisViews[i]!;
             const y = series.priceToCoordinate(r.price);
             view.ok = y !== null;
             view.y = y ?? 0;
-            view.label = formatter.format(r.price);
+            view.label = this.formatAxis(r.price);
             view.color = r.color;
         });
         return this._axisViews;
@@ -551,10 +566,14 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
         });
     }
 
+    // 價格顯示（畫圖標籤）：由 hook 依商品跳動價位設定；還沒設定時退回
+    // series 的格式
     formatPrice = (price: number): string => {
         const series = this._series;
         return series ? series.priceFormatter().format(price) : String(price);
     };
+    // 價格軸標籤（水平線）：同樣依跳動價位，但不加千分位（與價格軸一致）
+    formatAxis = (price: number): string => this.formatPrice(price);
 
     barSecondsOf(times: number[]): number {
         if (times !== this._barTimes) {

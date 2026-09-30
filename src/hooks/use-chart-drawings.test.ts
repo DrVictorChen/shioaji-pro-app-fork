@@ -695,6 +695,12 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         chart: { current: { applyOptions() {} } as never },
         series: { current: series as never },
     };
+    const v2Bars = [
+        { time: 1000, open: 24990, high: 25010, low: 24980, close: 25005 },
+        { time: 1060, open: 25005, high: 25050, low: 25000, close: 25040 },
+        { time: 1120, open: 25090, high: 25110, low: 25080, close: 25100 },
+        { time: 1180, open: 25100, high: 25130, low: 25090, close: 25120 },
+    ];
     function V2Probe({ receive }: { receive: (v: ChartDrawingsApi) => void }) {
         receive(
             useChartDrawings({
@@ -706,6 +712,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
                 tradeArmed: false,
                 onEnterDrawingMode: () => {},
                 pnlPerPoint: 200,
+                getBars: () => v2Bars,
             }),
         );
         return null;
@@ -907,6 +914,69 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(api().drawings[0]!.fib!.labelH).toBe('right');
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
         expect(api().drawings[0]!.fib!.labelH).toBe('left');
+    });
+
+    it('磁吸只作用在被拖的那一點，其他控制點維持原本的時間與價格', async () => {
+        const api = await setup();
+        const t = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        await act(async () => api().setMagnet(true));
+        await down(30, 100); // 第二點（x=30, y=100）
+        await up(20, 95); // 拖到第三根 K 棒附近
+        const d = api().drawings.find((x) => x.id === t.id)!;
+        expect(d.anchors[0]).toEqual({ time: 1000, price: 25000 }); // 沒被吸走
+        expect(d.anchors[1]!.time).toBe(1120);
+        expect([25090, 25110, 25080, 25100]).toContain(d.anchors[1]!.price);
+    });
+
+    it('拖曳期間別的視窗的改動，復原拖曳時不會一起被復原', async () => {
+        const api = await setup();
+        addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => {});
+        await down(50, 200);
+        // 拖曳中另一個視窗新增了一條線（同步進來）
+        const theirs = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
+        await up(50, 150);
+        expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25050, 24800]);
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25000, 24800]);
+        expect(api().drawings.some((d) => d.id === theirs.id)).toBe(true);
+    });
+
+    it('量測結果顯示中算「畫圖佔用滑鼠」：委託線只能從把手區拖', async () => {
+        const api = await setup();
+        await act(async () => api().setTool('measure'));
+        await down(10, 200);
+        await down(30, 80);
+        expect(api().tool).toBeNull();
+        expect(api().drawingBusy()).toBe(true);
+        expect(orderLineMayTakePointer({ drawingArmed: false, defaultPrevented: false, drawingBusy: true })).toBe(false);
+        await key({ key: 'Escape' });
+        expect(api().drawingBusy()).toBe(false);
+    });
+
+    it('價格標籤依商品跳動價位顯示（TXF 1 點），存的仍是原始值', async () => {
+        const api = await setup();
+        expect(api().formatPrice(48692.46)).toBe('48,692');
+        expect(api().formatPrice(48692.46, false)).toBe('48692');
+        await act(async () => api().setTool('trend'));
+        await act(async () => api().setTool(null)); // 觸發一次 pushState
+        const l = layer as unknown as { formatPrice: (p: number) => string; formatAxis: (p: number) => string };
+        expect(l.formatPrice(48692.46)).toBe('48,692');
+        expect(l.formatAxis(48692.46)).toBe('48692');
+        const f = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000.4 }], DEFAULT_DRAWING_STYLE)!;
+        expect(f.anchors[0]!.price).toBe(25000.4);
+    });
+
+    it('不透明度：套到選取的物件、記成下一個物件的預設，連續拖動合併成一步復原', async () => {
+        const api = await setup();
+        await act(async () => api().setTool('horizontal'));
+        await down(50, 150);
+        expect(api().selected!.style.opacity).toBe(0.85); // 深色主題預設略透明
+        for (const o of [0.7, 0.6, 0.5]) await act(async () => api().applyStyle({ opacity: o }));
+        expect(api().selected!.style.opacity).toBe(0.5);
+        expect(getDrawingSettings().lineOpacity).toBe(0.5);
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings[0]!.style.opacity).toBe(0.85);
     });
 
     it('物件列表操作：改名、隱藏、鎖定、調整圖層都可復原', async () => {

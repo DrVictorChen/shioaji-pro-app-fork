@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseLevels, placeFloatingToolbar, placeStylePopover, Popover, PriceInput } from './chart-drawing-tools';
+import { isImeKey, parseLevels, placeFloatingToolbar, placeStylePopover, Popover, PriceInput, TextEditor } from './chart-drawing-tools';
 import { escStackDepth } from '../hooks/use-esc-close';
 
 // 瀏覽器裡 blur() 會同步觸發 onBlur — 替身照做，才重現得出「Esc 之後
@@ -205,5 +205,27 @@ describe('斐波那契比例輸入', () => {
     it('逗號、空白、全形逗號都能分隔，忽略看不懂的字', () => {
         expect(parseLevels('0, 0.236，0.382 0.5、abc, 1')).toEqual([0, 0.236, 0.382, 0.5, 1]);
         expect(parseLevels('')).toEqual([]);
+    });
+});
+
+describe('輸入法組字中的 Enter／Esc 不算完成或取消', () => {
+    it('isImeKey：isComposing 或 keyCode 229', () => {
+        expect(isImeKey({ nativeEvent: { isComposing: true } })).toBe(true);
+        expect(isImeKey({ keyCode: 229 })).toBe(true);
+        expect(isImeKey({ nativeEvent: { isComposing: false }, keyCode: 13 })).toBe(false);
+    });
+
+    it('文字註記：選字的 Enter 不提交，組字結束後的 Enter 才提交', async () => {
+        const onCommit = vi.fn();
+        await act(async () => {
+            view = create(createElement(TextEditor, { initial: '', box: { left: 0, top: 0 }, onCommit }));
+        });
+        const ta = () => view.root.findByType('textarea');
+        await act(async () => ta().props.onChange({ target: { value: '月線' } }));
+        const ev = (extra: object) => ({ key: 'Enter', shiftKey: false, preventDefault() {}, stopPropagation() {}, ...extra });
+        await act(async () => ta().props.onKeyDown(ev({ nativeEvent: { isComposing: true }, keyCode: 229 })));
+        expect(onCommit).not.toHaveBeenCalled();
+        await act(async () => ta().props.onKeyDown(ev({ nativeEvent: { isComposing: false }, keyCode: 13 })));
+        expect(onCommit).toHaveBeenCalledWith('月線');
     });
 });

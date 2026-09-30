@@ -57,13 +57,13 @@ import {
     type Point,
     type Projector,
 } from '../lib/chart-drawing-geometry';
-import { DrawingHistory, rebase } from '../lib/chart-drawing-history';
+import { applyChanges, DrawingHistory, type HistoryChange } from '../lib/chart-drawing-history';
 import { sanitizeFibOptions, type FibOptions } from '../lib/chart-drawing-fib';
 import { DrawingLayer, type DrawingDraft, type MeasureOverlay } from '../lib/chart-drawing-layer';
 import { escStackDepth } from './use-esc-close';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import type { ContractBase } from '../lib/types/contract';
-import { roundToTick } from '../lib/utils/ticksize';
+import { formatToTick, roundToTick } from '../lib/utils/ticksize';
 
 // 複製出來的物件往右下偏這麼多像素 — 一眼看得出是兩個物件
 const DUPLICATE_OFFSET_PX = 24;
@@ -218,6 +218,8 @@ export interface ChartDrawingsApi {
     setShareContinuousMonth: (v: boolean) => void;
     // 點工具列時把鍵盤焦點交回圖表（WebKit 點按鈕不會給它焦點）
     focusChart: () => void;
+    // 依商品跳動價位顯示價格（grouping：千分位，輸入框用 false）
+    formatPrice: (price: number, grouping?: boolean) => string;
     // 委託線拖曳判斷用：游標下有沒有畫圖物件（選取中／其他）、畫圖是否
     // 正在用滑鼠（有選取、量測顯示中）
     drawingAt: (ev: { clientX: number; clientY: number }) => DrawingHit;
@@ -324,9 +326,20 @@ export function useChartDrawings(opts: {
     );
 
     const applyHistory = useCallback(
-        (step: { key: string; from: Drawing[]; to: Drawing[] } | null) => {
+        (
+            step: {
+                key: string;
+                changes: HistoryChange[];
+                side: 'before' | 'after';
+                order: string[];
+            } | null,
+        ) => {
             if (!step) return;
-            replaceDrawings(step.key, rebase(getDrawings(step.key), step.from, step.to));
+            // 只動這一步記錄的物件；別的視窗、別的操作的改動維持現況
+            replaceDrawings(
+                step.key,
+                applyChanges(getDrawings(step.key), step.changes, step.side, step.order),
+            );
             // 選取裡已經不存在的物件拿掉
             const ids = new Set(getDrawings(step.key).map((d) => d.id));
             setSelectedIds((cur) =>
@@ -369,6 +382,10 @@ export function useChartDrawings(opts: {
         if (layer) {
             layer.themeMode = stateRef.current.themeMode;
             layer.background = stateRef.current.chartBackground;
+            // 標籤依商品的跳動價位與小數位數顯示（TXF 1 點 → 48,692）；存的
+            // 是原始值，只有顯示取整
+            layer.formatPrice = (p) => formatToTick(stateRef.current.contract, p);
+            layer.formatAxis = (p) => formatToTick(stateRef.current.contract, p, { grouping: false });
         }
         layerRef.current?.setState({
             drawings: stateRef.current.drawings,
@@ -526,7 +543,8 @@ export function useChartDrawings(opts: {
                 layer?.barSecondsOf(times) ?? 60,
                 stateRef.current.pnlPerPoint,
             );
-            const fmt = layer?.formatPrice ?? String;
+            // 點數依起點價位的跳動價位取整顯示
+            const fmt = (v: number) => formatToTick(stateRef.current.contract, v, { at: a.price });
             const sign = st.points > 0 ? '+' : st.points < 0 ? '−' : '';
             const parts = [
                 `${sign}${fmt(Math.abs(st.points))} 點 (${sign}${Math.abs(st.pct).toFixed(2)}%)`,
@@ -549,7 +567,8 @@ export function useChartDrawings(opts: {
             pushState();
         };
 
-        type DragItem = { id: string; tool: DrawingTool; plan: DragPlan };
+        // startAnchors：按下當下的時間／價格 — 拖單一控制點時，其他點原樣保留
+        type DragItem = { id: string; tool: DrawingTool; plan: DragPlan; startAnchors: DrawingAnchor[] };
         let drag: { items: DragItem[]; before: Drawing[]; key: string } | null = null;
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
@@ -597,12 +616,23 @@ export function useChartDrawings(opts: {
             for (const item of drag.items) {
                 const moved = dragPoints(item.plan, pt);
                 const anchors: DrawingAnchor[] = [];
-                // 整體平移不磁吸（會把形狀扭掉），拖單一控制點才磁吸
-                const single = item.plan.hit.kind === 'anchor';
-                for (const p of moved) {
-                    const a = single ? anchorAt(projector, p, item.tool) : unprojectPoint(projector, p);
+                const hit = item.plan.hit;
+                for (let i = 0; i < moved.length; i++) {
+                    // 拖單一控制點：只有被拖的那一點重算（含磁吸），其他點維持
+                    // 原本的時間／價格 — 不然磁吸會把沒動的點也吸到 OHLC
+                    if (hit.kind === 'anchor' && hit.index !== i) {
+                        anchors.push(item.startAnchors[i]!);
+                        continue;
+                    }
+                    // 整體平移不磁吸（會把形狀扭掉）
+                    const a =
+                        hit.kind === 'anchor'
+                            ? anchorAt(projector, moved[i]!, item.tool)
+                            : unprojectPoint(projector, moved[i]!);
                     if (!a) return; // 投影不出來就整筆放棄，不寫半套座標
-                    anchors.push(single ? a : { time: a.time, price: snapPrice(item.tool, a.price) });
+                    anchors.push(
+                        hit.kind === 'anchor' ? a : { time: a.time, price: snapPrice(item.tool, a.price) },
+                    );
                 }
                 changed.set(item.id, anchors);
             }
@@ -627,7 +657,7 @@ export function useChartDrawings(opts: {
                 return;
             }
             const key = stateRef.current.symbolKey;
-            historyRef.current.push(key, before, getDrawings(key));
+            historyRef.current.push(key, before, getDrawings(key), undefined, undefined, [created.id]);
             bumpHistory();
         };
 
@@ -747,6 +777,7 @@ export function useChartDrawings(opts: {
                 items.push({
                     id: sid,
                     tool: d.tool,
+                    startAnchors: d.anchors,
                     // 多選一律整體平移；單選時按在控制點上就只拖那一點
                     plan: {
                         hit: multi || sid !== id ? { kind: 'body' } : picked.hit,
@@ -782,7 +813,15 @@ export function useChartDrawings(opts: {
                 if (drag) {
                     const after = getDrawings(drag.key);
                     if (after !== drag.before) {
-                        historyRef.current.push(drag.key, drag.before, after);
+                        // 只記拖到的物件：拖曳期間別的視窗的改動不算這一步
+                        historyRef.current.push(
+                            drag.key,
+                            drag.before,
+                            after,
+                            undefined,
+                            undefined,
+                            drag.items.map((it) => it.id),
+                        );
                         bumpHistory();
                     }
                 }
@@ -1058,9 +1097,10 @@ export function useChartDrawings(opts: {
             }
             // 也記成下一個新物件的樣式（TradingView 式）。顏色依工具記：
             // 選取中／武裝中的那種工具；兩者皆無時套用到所有工具
-            const { color, ...base } = patch;
+            const { color, opacity, ...base } = patch;
             const next: Partial<DrawingSettings> = {
                 defaultStyle: { ...current.settings.defaultStyle, ...base },
+                ...(opacity !== undefined ? { lineOpacity: opacity } : {}),
             };
             if (color !== undefined) {
                 const tools: DrawingTool[] = targets.length
@@ -1246,7 +1286,8 @@ export function useChartDrawings(opts: {
             if (info) {
                 const after = getDrawings(key);
                 if (after !== info.before) {
-                    historyRef.current.push(key, info.before, after);
+                    // 只記這個文字物件：編輯期間別處的改動不算這一步
+                    historyRef.current.push(key, info.before, after, undefined, undefined, [id]);
                     bumpHistory();
                 }
             }
@@ -1296,6 +1337,12 @@ export function useChartDrawings(opts: {
             favorites: favs.includes(t) ? favs.filter((x) => x !== t) : [...favs, t],
         });
     }, []);
+
+    const formatPrice = useCallback(
+        (price: number, grouping = true) =>
+            formatToTick(stateRef.current.contract, price, { grouping }),
+        [],
+    );
 
     const drawingAt = useCallback((ev: { clientX: number; clientY: number }): DrawingHit => {
         const layer = layerRef.current;
@@ -1372,6 +1419,7 @@ export function useChartDrawings(opts: {
         shareContinuousMonth: settings.shareContinuousMonth,
         setShareContinuousMonth,
         focusChart,
+        formatPrice,
         drawingAt,
         drawingBusy,
     };

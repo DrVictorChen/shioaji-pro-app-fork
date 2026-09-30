@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+    DEFAULT_LINE_OPACITY,
     anchorCount,
     drawingLabel,
     fibOptionsOf,
@@ -646,5 +647,24 @@ describe('review 修正：跨視窗鎖、墓碑、上限、設定合併', () => 
         const s = JSON.parse(store.get('sj-pro-chart-drawing-settings')!);
         expect(s.shareContinuousMonth).toBe(false);
         expect(s.defaultStyle.width).toBe(4);
+    });
+});
+
+describe('線條不透明度', () => {
+    it('舊資料沒有 opacity → 1（外觀不變）；壞值夾在 0.1～1', () => {
+        const base = { id: 'x', tool: 'horizontal', anchors: [{ time: 1, price: 2 }] };
+        expect(sanitizeDrawing({ ...base, style: { color: '#123456' } })!.style.opacity).toBe(1);
+        expect(sanitizeDrawing({ ...base, style: { opacity: 0 } })!.style.opacity).toBe(0.1);
+        expect(sanitizeDrawing({ ...base, style: { opacity: 'x' } })!.style.opacity).toBe(1);
+    });
+
+    it('新物件預設略透明、依主題；使用者挑過的不透明度優先', () => {
+        const s = sanitizeSettings({});
+        expect(defaultStyleFor(s, 'trend', 'dark').opacity).toBe(DEFAULT_LINE_OPACITY.dark);
+        expect(defaultStyleFor(s, 'trend', 'light').opacity).toBe(DEFAULT_LINE_OPACITY.light);
+        expect(DEFAULT_LINE_OPACITY.dark).toBeLessThan(1);
+        const picked = sanitizeSettings({ lineOpacity: 0.5 });
+        expect(defaultStyleFor(picked, 'box', 'dark').opacity).toBe(0.5);
+        expect(sanitizeSettings({ lineOpacity: 7 }).lineOpacity).toBe(1);
     });
 });

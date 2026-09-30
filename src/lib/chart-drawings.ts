@@ -97,8 +97,20 @@ export interface DrawingStyle {
     color: string; // 線色（#rrggbb）
     width: number; // 線寬 1–4
     dash: 'solid' | 'dashed';
-    fillOpacity: number; // 方框／通道／斐波那契的填色透明度 0–1
+    fillOpacity: number; // 方框／通道的填色透明度 0–1
+    // 線條（與文字）的不透明度 0.1–1：蓋在 K 棒上時可以半透明，不把 K 棒
+    // 擋住。舊資料沒有這個欄位，載入時補 1（外觀不變）
+    opacity: number;
 }
+
+export const MIN_LINE_OPACITY = 0.1;
+
+// 新物件線條的預設不透明度：略透明，蓋在 K 棒上仍看得到 K 棒；淺色底上
+// 同樣的透明度看起來較淡，所以淺色主題稍微不透明一點
+export const DEFAULT_LINE_OPACITY: Record<'dark' | 'light', number> = {
+    dark: 0.85,
+    light: 0.9,
+};
 
 export interface Drawing {
     id: string;
@@ -156,6 +168,7 @@ export const DEFAULT_DRAWING_STYLE: DrawingStyle = {
     width: 2,
     dash: 'solid',
     fillOpacity: 0.08,
+    opacity: 1,
 };
 
 export type DrawingThemeMode = 'dark' | 'light';
@@ -196,8 +209,8 @@ export const MEASURE_COLORS: Record<DrawingThemeMode, string> = {
     light: '#1c64f2',
 };
 
-// 新物件除了顏色以外的預設（線寬、線型、方框填色）
-export type DrawingBaseStyle = Omit<DrawingStyle, 'color'>;
+// 新物件除了顏色、不透明度以外的預設（線寬、線型、方框填色）
+export type DrawingBaseStyle = Omit<DrawingStyle, 'color' | 'opacity'>;
 
 export interface DrawingSettings {
     // 期貨連續月（TXFR1）與月份合約（TXFI6）共用同一份畫圖。
@@ -216,6 +229,8 @@ export interface DrawingSettings {
     groupLast: Partial<Record<DrawingGroup, DrawingToolId>>;
     // 右側物件列表是否展開
     objectListOpen: boolean;
+    // 使用者挑過的線條不透明度；沒挑過依主題用 DEFAULT_LINE_OPACITY
+    lineOpacity?: number;
 }
 
 const DEFAULT_SETTINGS: DrawingSettings = {
@@ -239,7 +254,11 @@ export function defaultStyleFor(
     tool: DrawingTool,
     mode: DrawingThemeMode,
 ): DrawingStyle {
-    return { ...s.defaultStyle, color: s.toolColors[tool] ?? TOOL_DEFAULT_COLORS[mode][tool] };
+    return {
+        ...s.defaultStyle,
+        color: s.toolColors[tool] ?? TOOL_DEFAULT_COLORS[mode][tool],
+        opacity: s.lineOpacity ?? DEFAULT_LINE_OPACITY[mode],
+    };
 }
 
 const STORAGE_KEY = 'sj-pro-chart-drawings';
@@ -288,11 +307,18 @@ function sanitizeBaseStyle(v: unknown, fallback: DrawingBaseStyle): DrawingBaseS
     return { width, dash, fillOpacity };
 }
 
+export function clampOpacity(v: unknown, fallback: number): number {
+    return typeof v === 'number' && Number.isFinite(v)
+        ? Math.min(1, Math.max(MIN_LINE_OPACITY, v))
+        : fallback;
+}
+
 export function sanitizeStyle(v: unknown, fallbackColor: string): DrawingStyle {
     const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
     return {
         color: isDrawingColor(o.color) ? o.color : fallbackColor,
         ...sanitizeBaseStyle(o, DEFAULT_SETTINGS.defaultStyle),
+        opacity: clampOpacity(o.opacity, 1),
     };
 }
 
@@ -379,6 +405,9 @@ export function sanitizeSettings(v: unknown): DrawingSettings {
         favorites,
         groupLast,
         objectListOpen: o.objectListOpen === true,
+        ...(typeof o.lineOpacity === 'number' && Number.isFinite(o.lineOpacity)
+            ? { lineOpacity: clampOpacity(o.lineOpacity, 1) }
+            : {}),
     };
 }
 

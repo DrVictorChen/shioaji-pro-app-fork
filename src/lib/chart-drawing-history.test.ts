@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DrawingHistory, HISTORY_LIMIT, rebase } from './chart-drawing-history';
+import { applyChanges, DrawingHistory, HISTORY_LIMIT } from './chart-drawing-history';
 import { DEFAULT_DRAWING_STYLE, type Drawing } from './chart-drawings';
 
 const mk = (id: string, price = 100, extra: Partial<Drawing> = {}): Drawing => ({
@@ -14,34 +14,56 @@ const mk = (id: string, price = 100, extra: Partial<Drawing> = {}): Drawing => (
     ...extra,
 });
 
-describe('rebase：只把這一步動到的物件退回', () => {
+// 把 undo()/redo() 回傳的步驟套到 current
+const run = (current: Drawing[], step: ReturnType<DrawingHistory['undo']> | ReturnType<DrawingHistory['redo']>) =>
+    step ? applyChanges(current, step.changes, step.side, step.order) : current;
+const ids = (l: Drawing[]) => l.map((d) => d.id);
+
+describe('只退回這一步動到的物件', () => {
     it('復原新增＝移除那個物件，其他視窗同時加的物件保留', () => {
+        const h = new DrawingHistory();
         const a = mk('a');
         const b = mk('b');
-        const theirs = mk('z');
-        // 這一步：[a] → [a, b]；之後別的視窗加了 z
-        expect(rebase([a, b, theirs], [a, b], [a]).map((d) => d.id)).toEqual(['a', 'z']);
+        h.push('TXF', [a], [a, b]);
+        expect(ids(run([a, b, mk('z')], h.undo()))).toEqual(['a', 'z']);
     });
 
     it('復原修改＝換回修改前的版本，其他物件的後續修改不動', () => {
+        const h = new DrawingHistory();
         const a1 = mk('a', 100);
         const a2 = mk('a', 110);
         const c1 = mk('c', 1);
         const c2 = mk('c', 2); // 之後另一步改的
-        expect(rebase([a2, c2], [a2, c1], [a1, c1])).toEqual([a1, c2]);
+        h.push('TXF', [a1, c1], [a2, c1]);
+        expect(run([a2, c2], h.undo())).toEqual([a1, c2]);
     });
 
-    it('復原刪除＝把物件放回來', () => {
-        const a = mk('a');
-        const b = mk('b');
-        expect(rebase([a], [a], [a, b]).map((d) => d.id)).toEqual(['a', 'b']);
+    it('拖曳／文字這類跨時間的操作只記指定的物件：期間別的視窗的改動不會被復原', () => {
+        const h = new DrawingHistory();
+        const a1 = mk('a', 100);
+        const a2 = mk('a', 120);
+        const theirs = mk('z'); // 拖曳進行中另一個視窗新增的
+        h.push('TXF', [a1], [a2, theirs], undefined, 1000, ['a']);
+        expect(ids(run([a2, theirs], h.undo()))).toEqual(['a', 'z']);
+        expect(h.undo()).toBeNull(); // 只有一步
     });
 
-    it('圖層順序改過時依目標順序重排', () => {
-        const a = mk('a');
-        const b = mk('b');
-        const c = mk('c');
-        expect(rebase([b, a, c], [b, a, c], [a, b, c]).map((d) => d.id)).toEqual(['a', 'b', 'c']);
+    it('復原刪除放回原本的圖層位置', () => {
+        const h = new DrawingHistory();
+        const [a, b, c] = [mk('a'), mk('b'), mk('c')];
+        h.push('TXF', [a, b, c], [a, c]);
+        expect(ids(run([a, c], h.undo()))).toEqual(['a', 'b', 'c']);
+        // 最底層的物件刪掉再復原，仍在最底層
+        const h2 = new DrawingHistory();
+        h2.push('TXF', [a, b, c], [b, c]);
+        expect(ids(run([b, c], h2.undo()))).toEqual(['a', 'b', 'c']);
+    });
+
+    it('調整圖層可復原，別的視窗新增的物件位置不動', () => {
+        const h = new DrawingHistory();
+        const [a, b, c, z] = [mk('a'), mk('b'), mk('c'), mk('z')];
+        h.push('TXF', [a, b, c], [c, a, b]);
+        expect(ids(run([c, a, b, z], h.undo()))).toEqual(['a', 'b', 'c', 'z']);
     });
 });
 
@@ -52,9 +74,9 @@ describe('DrawingHistory', () => {
         const s1 = [mk('a')];
         h.push('TXF', s0, s1);
         expect(h.canUndo).toBe(true);
-        expect(h.undo()).toEqual({ key: 'TXF', from: s1, to: s0 });
+        expect(run(s1, h.undo())).toEqual([]);
         expect(h.canRedo).toBe(true);
-        expect(h.redo()).toEqual({ key: 'TXF', from: s0, to: s1 });
+        expect(run([], h.redo())).toEqual(s1);
         h.undo();
         h.push('TXF', s0, [mk('b')]);
         expect(h.canRedo).toBe(false);
@@ -67,7 +89,7 @@ describe('DrawingHistory', () => {
         const s2 = [mk('a', 3)];
         h.push('TXF', s0, s1, 'style:fillOpacity', 1000);
         h.push('TXF', s1, s2, 'style:fillOpacity', 1200);
-        expect(h.undo()).toEqual({ key: 'TXF', from: s2, to: s0 });
+        expect(run(s2, h.undo())).toEqual(s0);
         expect(h.canUndo).toBe(false);
         // 隔太久就不合併
         h.push('TXF', s0, s1, 'x', 1000);
