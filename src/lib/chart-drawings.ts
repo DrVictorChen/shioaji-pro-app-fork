@@ -306,17 +306,40 @@ export function stamp(): number {
     return lastStamp;
 }
 
-// 每個商品只留最新的 MAX_DRAWINGS_PER_SYMBOL 個（依建立時間），順序不變
-export function capDrawings(list: Drawing[]): Drawing[] {
-    if (list.length <= MAX_DRAWINGS_PER_SYMBOL) return list;
+// 載入時的硬上限：只擋損壞或異常巨大的資料（正常使用最多到軟上限
+// MAX_DRAWINGS_PER_SYMBOL 附近）。超過時保留最新的 HARD_MAX 個並通知
+export const HARD_MAX_DRAWINGS_PER_SYMBOL = 1000;
+
+export function capDrawings(list: Drawing[], max = HARD_MAX_DRAWINGS_PER_SYMBOL): Drawing[] {
+    if (list.length <= max) return list;
     const keep = new Set(
         [...list]
             .sort((x, y) => y.createdAt - x.createdAt)
-            .slice(0, MAX_DRAWINGS_PER_SYMBOL)
+            .slice(0, max)
             .map((d) => d.id),
     );
     return list.filter((d) => keep.has(d.id));
 }
+
+// 給 UI 顯示的通知（合併後超過上限、載入時截斷異常資料）
+let notices: string[] = [];
+const noticed = new Set<string>(); // 同一則只通知一次（載入／同步會重跑）
+function noteDrawings(msg: string) {
+    if (noticed.has(msg)) return;
+    noticed.add(msg);
+    notices = [...notices, msg];
+    // 在 module 初始化期間 listeners 還是空的，emit 無副作用
+    for (const l of listeners) l();
+}
+export function takeDrawingNotices(): string[] {
+    const out = notices;
+    if (out.length) notices = [];
+    return out;
+}
+export function useDrawingNotices(): readonly string[] {
+    return useSyncExternalStore(subscribe, () => notices, () => EMPTY_NOTICES);
+}
+const EMPTY_NOTICES: string[] = [];
 
 function loadStore(tombs: Tombs = loadTombs()): Store {
     try {
@@ -335,7 +358,12 @@ function loadStore(tombs: Tombs = loadTombs()): Store {
                 seen.add(d.id);
                 clean.push(d);
             }
-            // 上限在載入時也要守住 — 超量的舊資料每次重繪、命中判定都要掃
+            // 硬上限只擋損壞／異常巨大的資料；正常的軟上限超量不在這裡刪
+            if (clean.length > HARD_MAX_DRAWINGS_PER_SYMBOL) {
+                noteDrawings(
+                    `${key} 的畫圖資料有 ${clean.length} 筆，超過 ${HARD_MAX_DRAWINGS_PER_SYMBOL} 筆，已只載入最新的 ${HARD_MAX_DRAWINGS_PER_SYMBOL} 筆。`,
+                );
+            }
             if (clean.length) out[key] = capDrawings(clean);
         }
         return out;
@@ -477,15 +505,25 @@ function applyOps(base: Store, ops: Map<string, Map<string, Op>>, tombs: Tombs):
                 const t = (tombs[key] ??= {});
                 t[id] = Math.max(t[id] ?? 0, op);
             } else if (buried(tombs, key, op)) {
-                // 別的視窗在本視窗修改之後刪掉了它 — 維持刪除
-                if (i >= 0) list.splice(i, 1);
+                // 別的視窗在本視窗修改之後刪掉了它 — 這筆（較舊的）修改作廢。
+                // 主項目裡同 id 的版本只有「不比刪除新」時才跟著移除；比刪除
+                // 還新的版本是刪除之後重建／復原的，要保留
+                const at = tombs[key]![id]!;
+                if (i >= 0 && list[i]!.updatedAt <= at) list.splice(i, 1);
             } else if (i >= 0) {
                 if (list[i]!.updatedAt <= op.updatedAt) list[i] = op;
             } else {
                 list.push(op);
             }
         }
-        if (list.length) out[key] = capDrawings(list);
+        // 合併時不刪使用者的物件：兩個視窗各自在 199 個時再加一個，合併
+        // 後暫時超過上限（軟上限）— 通知使用者，新增在 UI 端擋住
+        if (list.length > MAX_DRAWINGS_PER_SYMBOL && (base[key]?.length ?? 0) <= MAX_DRAWINGS_PER_SYMBOL) {
+            noteDrawings(
+                `${key} 的畫圖物件合併後有 ${list.length} 個，超過 ${MAX_DRAWINGS_PER_SYMBOL} 個上限；刪除部分物件之前無法再新增。`,
+            );
+        }
+        if (list.length) out[key] = list;
         else delete out[key];
     }
     return out;
@@ -860,6 +898,8 @@ export function __resetDrawingsForTest() {
     settingsTimer = null;
     pending.clear();
     pendingSettingKeys.clear();
+    notices = [];
+    noticed.clear();
     lockOverride = null;
     saveError = false;
     saveErrorNoticePending = false;

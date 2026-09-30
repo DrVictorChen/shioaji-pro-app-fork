@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+    HARD_MAX_DRAWINGS_PER_SYMBOL,
+    takeDrawingNotices,
     writeDrawingJournal,
     __setDrawingLocksForTest,
     TOMBSTONE_TTL_MS,
@@ -490,18 +492,30 @@ describe('review 修正：跨視窗鎖、墓碑、上限、設定合併', () => 
         expect(Object.keys(JSON.parse(store.get(TKEY)!).TXF)).toEqual(['fresh']);
     });
 
-    it('載入時也守住每個商品的上限，保留最新的，順序不變', () => {
-        const list = Array.from({ length: MAX_DRAWINGS_PER_SYMBOL + 50 }, (_, i) => ({
+    it('載入時只有異常巨大的資料才截斷（硬上限 1000，保留最新的、順序不變），並通知', () => {
+        const list = Array.from({ length: HARD_MAX_DRAWINGS_PER_SYMBOL + 50 }, (_, i) => ({
             ...theirs(`d${i}`),
             createdAt: i,
             updatedAt: i,
         }));
         store.set(KEY, JSON.stringify({ TXF: list }));
+        takeDrawingNotices();
         reloadDrawingsFromStorage();
         const got = getDrawings('TXF');
-        expect(got).toHaveLength(MAX_DRAWINGS_PER_SYMBOL);
+        expect(got).toHaveLength(HARD_MAX_DRAWINGS_PER_SYMBOL);
         expect(got[0]!.id).toBe('d50');
-        expect(got.at(-1)!.id).toBe(`d${MAX_DRAWINGS_PER_SYMBOL + 49}`);
+        expect(got.at(-1)!.id).toBe(`d${HARD_MAX_DRAWINGS_PER_SYMBOL + 49}`);
+        expect(takeDrawingNotices()).toHaveLength(1);
+        // 同一則不重複通知
+        reloadDrawingsFromStorage();
+        expect(takeDrawingNotices()).toHaveLength(0);
+    });
+
+    it('軟上限（200）超量的正常資料載入時不刪', () => {
+        const list = Array.from({ length: MAX_DRAWINGS_PER_SYMBOL + 5 }, (_, i) => theirs(`d${i}`));
+        store.set(KEY, JSON.stringify({ TXF: list }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')).toHaveLength(MAX_DRAWINGS_PER_SYMBOL + 5);
     });
 
     it('設定依欄位合併：兩個視窗各改不同欄位，兩邊都留下', () => {
@@ -656,5 +670,49 @@ describe('round 4：初始化順序、日誌只刪合併過的那一版', () => 
         addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
         writeDrawingJournal();
         expect([...store.keys()].filter((k) => k.startsWith('sj-chart-drawings-pending:'))).toHaveLength(2);
+    });
+});
+
+describe('round 5：墓碑不刪較新的版本、合併不默默丟物件', () => {
+    const KEY = 'sj-pro-chart-drawings';
+    const TKEY = 'sj-pro-chart-drawing-tombstones';
+    const obj = (id: string, updatedAt: number) => ({
+        id,
+        tool: 'horizontal',
+        anchors: [{ time: 1000, price: 25000 }],
+        style: DEFAULT_DRAWING_STYLE,
+        locked: false,
+        hidden: false,
+        createdAt: 1,
+        updatedAt,
+    });
+
+    it('被墓碑否決的舊修改，不會連帶刪掉主項目裡比墓碑新的同 id 版本（刪除後重建）', () => {
+        const x = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!; // 本視窗待寫的修改（較舊）
+        const deletedAt = x.updatedAt + 10;
+        store.set(TKEY, JSON.stringify({ TXF: { [x.id]: deletedAt } }));
+        // 別的視窗在刪除之後又重建了同 id 的物件（例如復原）
+        store.set(KEY, JSON.stringify({ TXF: [obj(x.id, deletedAt + 10)] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.updatedAt)).toEqual([deletedAt + 10]);
+        flushDrawingWrites();
+        const saved = JSON.parse(store.get(KEY)!).TXF;
+        expect(saved).toHaveLength(1);
+        expect(saved[0].updatedAt).toBe(deletedAt + 10);
+    });
+
+    it('兩個視窗各自在上限附近新增：合併後全部保留（暫時超過上限）並通知，之後新增被擋', () => {
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        // 另一個視窗已有 200 個（它看不到本視窗這一個）
+        store.set(KEY, JSON.stringify({ TXF: Array.from({ length: MAX_DRAWINGS_PER_SYMBOL }, (_, i) => obj(`o${i}`, 1)) }));
+        takeDrawingNotices();
+        flushDrawingWrites();
+        const saved = JSON.parse(store.get(KEY)!).TXF;
+        expect(saved).toHaveLength(MAX_DRAWINGS_PER_SYMBOL + 1);
+        expect(saved.some((d: { id: string }) => d.id === mine.id)).toBe(true);
+        expect(takeDrawingNotices()).toHaveLength(1);
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')).toHaveLength(MAX_DRAWINGS_PER_SYMBOL + 1);
+        expect(addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)).toBeNull();
     });
 });

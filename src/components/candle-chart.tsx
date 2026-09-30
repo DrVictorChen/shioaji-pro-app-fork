@@ -41,7 +41,12 @@ import {
     useChartDrawings,
     type ChartDrawingsApi,
 } from '../hooks/use-chart-drawings';
-import { takeDrawingSaveErrorNotice, useDrawingsSaveFailed } from '../lib/chart-drawings';
+import {
+    takeDrawingNotices,
+    takeDrawingSaveErrorNotice,
+    useDrawingNotices,
+    useDrawingsSaveFailed,
+} from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
 import {
     colorWithOpacity,
@@ -1451,6 +1456,13 @@ export function CandleChart({
             body: '瀏覽器儲存空間已滿，新的畫圖只保留到關閉視窗為止。請刪除部分畫圖後再試。',
         });
     }, [drawingsSaveFailed]);
+
+    // 合併後超過上限、載入時截斷異常資料 — 不默默丟掉，告訴使用者
+    const drawingNotices = useDrawingNotices();
+    useEffect(() => {
+        if (!drawingNotices.length) return;
+        for (const body of takeDrawingNotices()) notify({ kind: 'err', title: '畫圖物件數量', body });
+    }, [drawingNotices]);
 
     // draw trigger price lines on the candle series
     useEffect(() => {

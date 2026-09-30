@@ -432,6 +432,19 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         expect(hk.cancelAll).not.toHaveBeenCalled();
     });
 
+    it('Esc（武裝）→ 被元件擋下的 Esc → 下一個 Esc 緊接著到（中間沒有計時器）：不會全部刪單', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        await act(async () => {
+            press('Escape'); // 第一下：武裝
+            press('Escape', { stopAtTarget: true }); // 被元件吃掉
+            press('Escape'); // 緊接著：在捕獲階段先結清上一下 → 只算新的第一下
+        });
+        expect(hk.cancelAll).not.toHaveBeenCalled();
+        expect(hk.notify).toHaveBeenCalledTimes(2);
+    });
+
     it('被算成第一下的 Esc 不會被自己的保險計時器清掉：Esc、Esc 照常全部刪單', async () => {
         await act(async () => {
             roots.push(create(createElement(HotkeysProbe)));
