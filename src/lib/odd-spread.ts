@@ -11,8 +11,11 @@
 // 費用規則與下單面板試算共用 lib/utils/contract-cost（stockTradeFee／
 // stockSellTax）。
 
-import { ODD_LOT_MAX_SHARES, SHARES_PER_LOT } from './odd-lot';
-import { priceCents, stockSellTax, stockTradeFee } from './utils/contract-cost';
+import { isOddLot, ODD_LOT_MAX_SHARES, SHARES_PER_LOT } from './odd-lot';
+import type { Trade } from './types/order';
+import type { StockPosition } from './types/portfolio';
+import { remainingWorkingOrderQuantity } from './working-order-quantity';
+import { priceCents, STOCK_MIN_FEE_ODD, STOCK_MIN_FEE_ROUND, stockSellTax, stockTradeFee } from './utils/contract-cost';
 
 /** 一檔報價。整股 vol 單位為「張」，零股為「股」。 */
 export interface BookLevel {
@@ -43,9 +46,14 @@ export interface FeeSettings {
     discount: number;
     /** 賣出證交稅率（0.003 = 0.3%） */
     taxRate: number;
+    /** 每筆最低手續費（券商訂定）；省略時整股 20 元、零股 1 元 */
+    minFeeRound?: number;
+    minFeeOdd?: number;
 }
 
 export const DEFAULT_FEE_SETTINGS: FeeSettings = { discount: 1, taxRate: 0.003 };
+
+const minFee = (fees: FeeSettings, odd: boolean) => (odd ? fees.minFeeOdd ?? STOCK_MIN_FEE_ODD : fees.minFeeRound ?? STOCK_MIN_FEE_ROUND);
 
 /** 一筆要送出的限價委託。整股 quantity 為張、零股為股。 */
 export interface LegOrder {
@@ -160,7 +168,7 @@ function legCosts(orders: LegOrder[], odd: boolean, action: 'Buy' | 'Sell', fees
         const shares = odd ? o.quantity : o.quantity * SHARES_PER_LOT;
         const cents = priceCents(o.price) * shares;
         notionalCents += cents;
-        fee += stockTradeFee(cents, { odd, discount: fees.discount });
+        fee += stockTradeFee(cents, { odd, discount: fees.discount, minFee: minFee(fees, odd) });
         if (action === 'Sell') tax += stockSellTax(cents, fees.taxRate);
     }
     return { notionalCents, fee, tax };
@@ -182,7 +190,7 @@ export function planLeg(book: SideBook, odd: boolean, action: 'Buy' | 'Sell', sh
     const orders = fills.length ? [{ price: fills[fills.length - 1]!.price, quantity: filled / SHARES_PER_LOT }] : [];
     return {
         odd, action, shares, orders, fills, notionalCents,
-        fee: stockTradeFee(notionalCents, { odd: false, discount: fees.discount }),
+        fee: stockTradeFee(notionalCents, { odd: false, discount: fees.discount, minFee: minFee(fees, false) }),
         tax: action === 'Sell' ? stockSellTax(notionalCents, fees.taxRate) : 0,
         short,
     };
@@ -380,11 +388,23 @@ export function buildSpreadLadder(
 
 export interface OddSpreadPrefs {
     discount: number;
-    /** null＝依商品預設（一般股票 0.3%、ETF 0.1%） */
+    /** null＝依商品預設（一般股票 0.3%、ETF 0.1%、債券 ETF 停徵期間 0） */
     taxRate: number | null;
+    /** 每筆最低手續費（元，券商訂定） */
+    minFeeRound: number;
+    minFeeOdd: number;
+    /** 第二腳補單最多容許偏離計畫價幾檔 */
+    maxSlipTicks: number;
 }
 
 export const ODD_SPREAD_PREFS_KEY = 'sj-pro-odd-spread-prefs-v1';
+export const DEFAULT_MAX_SLIP_TICKS = 2;
+
+function numIn(v: unknown, lo: number, hi: number, fallback: number, integer = false): number {
+    const n = Number(v);
+    if (v === null || v === undefined || v === '' || !Number.isFinite(n) || n < lo || n > hi) return fallback;
+    return integer ? Math.trunc(n) : n;
+}
 
 export function sanitizePrefs(v: unknown): OddSpreadPrefs {
     const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
@@ -393,6 +413,9 @@ export function sanitizePrefs(v: unknown): OddSpreadPrefs {
     return {
         discount: Number.isFinite(d) && d > 0 && d <= 1 ? d : 1,
         taxRate: t !== null && Number.isFinite(t) && t >= 0 && t <= 0.01 ? t : null,
+        minFeeRound: numIn(o.minFeeRound, 0, 1000, STOCK_MIN_FEE_ROUND),
+        minFeeOdd: numIn(o.minFeeOdd, 0, 1000, STOCK_MIN_FEE_ODD),
+        maxSlipTicks: numIn(o.maxSlipTicks, 0, 50, DEFAULT_MAX_SLIP_TICKS, true),
     };
 }
 
@@ -412,3 +435,76 @@ export function saveOddSpreadPrefs(p: OddSpreadPrefs): void {
         // 本機儲存不可用時只在本次有效
     }
 }
+
+// ---- 可賣庫存：現股多單 − 同帳戶同商品未成交的賣單 ----
+
+/** 可賣現股（股）。positions／trades 須已限定為同一帳戶；賣單不論整股或零股
+ * 都占用同一批庫存（整股 × 1,000 股）。 */
+export function sellableShares(
+    positions: Pick<StockPosition, 'code' | 'direction' | 'quantity' | 'cond'>[],
+    trades: Trade[],
+    code: string,
+): number {
+    const held = positions
+        .filter(p => p.code === code && p.direction === 'Buy' && (!p.cond || p.cond === 'Cash'))
+        .reduce((a, p) => a + p.quantity, 0);
+    const reserved = trades
+        .filter(t => t.contract.code === code && t.order.action === 'Sell')
+        .reduce((a, t) => {
+            const left = remainingWorkingOrderQuantity(t);
+            return left > 0 ? a + (isOddLot(t.order.order_lot) ? left : left * SHARES_PER_LOT) : a;
+        }, 0);
+    return Math.max(0, held - reserved);
+}
+
+// ---- 第二腳補單重新定價 ----
+
+export type HedgePricing = { ok: true; orders: LegOrder[] } | { ok: false; reason: string; orders: LegOrder[] };
+
+/**
+ * 以當下委託簿為第二腳（quantity：整股張、零股股）重新定價。可自動送出的條件：
+ * 最差成交價相對計畫價的不利偏離 ≤ maxSlipTicks 檔，且每股不利偏離小於計畫
+ * 時的加權淨價差（仍賺錢）。不符合時回 ok=false 與以最新價建議的委託，
+ * 交由使用者決定。
+ */
+export function repriceHedge(args: {
+    book: SideBook;
+    odd: boolean;
+    action: 'Buy' | 'Sell';
+    quantity: number;
+    plannedPrice: number;
+    netPerShare: number;
+    maxSlipTicks: number;
+    step: (price: number, dir: 1 | -1) => number;
+    fees: FeeSettings;
+}): HedgePricing {
+    const { book, odd, action, quantity, plannedPrice, netPerShare, maxSlipTicks, step, fees } = args;
+    const shares = odd ? quantity : quantity * SHARES_PER_LOT;
+    const leg = planLeg(book, odd, action, shares, fees);
+    if (leg.fills.length === 0) return { ok: false, reason: `${odd ? '零股' : '整股'}沒有對手報價`, orders: [] };
+    const orders = leg.orders.map(o => ({ ...o }));
+    if (leg.short) {
+        const got = orders.reduce((a, o) => a + o.quantity, 0);
+        const last = orders[orders.length - 1]!;
+        orders[orders.length - 1] = { ...last, quantity: last.quantity + quantity - got };
+        return { ok: false, reason: `${odd ? '零股' : '整股'}對手量不足`, orders: odd ? sliceOddOrders(orders.map(o => ({ price: o.price, shares: o.quantity }))) : orders };
+    }
+    const worst = leg.fills[leg.fills.length - 1]!.price;
+    const adverse = action === 'Buy' ? worst - plannedPrice : plannedPrice - worst;
+    if (adverse <= 0) return { ok: true, orders };
+    // 數不利方向的跳動檔數（依升降單位）
+    let ticks = 0;
+    let p = plannedPrice;
+    const dir: 1 | -1 = action === 'Buy' ? 1 : -1;
+    while (ticks <= maxSlipTicks && (dir === 1 ? priceCents(p) < priceCents(worst) : priceCents(p) > priceCents(worst))) {
+        const n = step(p, dir);
+        if (n === p) break;
+        p = n;
+        ticks++;
+    }
+    if (ticks > maxSlipTicks) return { ok: false, reason: `價格已偏離計畫價超過 ${maxSlipTicks} 檔（${fmt(plannedPrice)} → ${fmt(worst)}）`, orders };
+    if (adverse >= netPerShare) return { ok: false, reason: `以最新價 ${fmt(worst)} 補單已不足成本`, orders };
+    return { ok: true, orders };
+}
+
+const fmt = (p: number) => p.toLocaleString('en-US', { maximumFractionDigits: 2 });

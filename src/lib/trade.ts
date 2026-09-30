@@ -169,6 +169,8 @@ export async function placeQuickOrder(
         beforeSend?: () => void;
         // 待確認觸價單在人工確認視窗顯示持續更新的目前成交價。
         confirmLivePriceCode?: string;
+        // 股票委託的 custom_field 標記（整零價差用來對回自己送出的委託）
+        customField?: string;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
@@ -235,6 +237,7 @@ export async function placeQuickOrder(
             : undefined,
         opts?.ocType,
         opts?.orderType,
+        opts?.customField,
     );
 }
 
@@ -250,6 +253,7 @@ async function sendOrder(
     agentContext?: { agentCallId?: string; agentAuto?: boolean },
     ocType: FuturesOCType = 'Auto',
     orderType: OrderType = 'ROD',
+    customField?: string,
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -270,6 +274,7 @@ async function sendOrder(
               price_type: market ? 'MKT' : 'LMT',
               order_type: market ? 'IOC' : orderType,
               order_lot: orderLot ?? 'Common',
+              ...(customField ? { custom_field: customField } : {}),
           }, account, { agentInitiated, ...agentContext });
     return trade;
 }

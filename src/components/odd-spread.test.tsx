@@ -1,30 +1,37 @@
-// 整零價差面板：設計稿數字、按鈕啟用規則、點價下單與兩腳送單接線
-import { createElement, useState } from 'react';
+// 整零價差面板：設計稿數字、按鈕啟用規則、確認後重新驗證、點價拆單、執行狀態列
+import { createElement } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
-import type { Trade } from '../lib/types/order';
 import type { ContractInfo } from '../lib/types/contract';
+import type { OddSpreadFeed } from '../hooks/use-odd-spread-feed';
+import type { SpreadExecRecord } from '../lib/odd-spread-service';
 
-const mocks = vi.hoisted(() => ({ place: vi.fn(), cancel: vi.fn(), notify: vi.fn(), confirm: vi.fn(), risk: { confirmManualOrders: false } }));
-vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts: [], selectedStock: undefined }) }));
-vi.mock('../hooks/use-stream', () => ({ useTradingLive: () => true }));
-vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: undefined, snapshot: undefined, book: undefined }) }));
-vi.mock('../lib/shioaji', () => ({ cancelOrders: (ids: string[]) => Promise.allSettled(ids.map(id => mocks.cancel(id))) }));
-vi.mock('../lib/trade', () => ({
-    notify: mocks.notify,
-    placeQuickOrder: mocks.place,
-    OrderConfirmCancelled: class extends Error {},
+const mocks = vi.hoisted(() => ({
+    place: vi.fn(), notify: vi.fn(), confirm: vi.fn(), start: vi.fn(), action: vi.fn(), dismiss: vi.fn(), refresh: vi.fn(),
+    risk: { confirmManualOrders: false },
 }));
+vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts: [], selectedStock: undefined }) }));
+vi.mock('../hooks/use-stream', () => ({ useTradingLive: () => true, useQuote: () => undefined }));
+vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: undefined, snapshot: undefined, book: undefined }) }));
+vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place }));
 vi.mock('../lib/risk', () => ({ getRiskSettings: () => mocks.risk }));
 vi.mock('../lib/order-confirm', () => ({ requestOrderConfirm: mocks.confirm, accountConfirmLabel: () => 'BR-***A' }));
 vi.mock('../lib/utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, d: number) => p + d * 5 }));
+vi.mock('../lib/odd-spread-service', () => ({
+    startSpreadExecution: mocks.start,
+    spreadExecAction: mocks.action,
+    dismissSpreadExecution: mocks.dismiss,
+    refreshHedgeOrders: mocks.refresh,
+    oddSpreadExecUnavailable: () => null,
+    useSpreadExecution: () => undefined,
+    hedgeUnitLabel: (leg: string, q: number) => (leg === 'odd' ? `零股 ${q} 股` : `整股 ${q} 張`),
+}));
 
-import { OddSpreadView } from './odd-spread';
-import { useOddSpreadExec, type SpreadExecution } from '../hooks/use-odd-spread-exec';
-import type { OddSpreadFeed } from '../hooks/use-odd-spread-feed';
+import { OddSpreadView, type OddSpreadViewProps } from './odd-spread';
 
 const account: Account = { account_type: 'S', broker_id: 'BR', account_id: 'A', signed: true, person_id: '', username: '' };
+const otherAccount: Account = { ...account, account_id: 'B' };
 const contract = { code: '2330', name: '台積電', security_type: 'STK', reference: 1080, limit_up: 1185, limit_down: 975 } as unknown as ContractInfo;
 const feed: OddSpreadFeed = {
     round: {
@@ -43,15 +50,13 @@ let view!: ReactTestRenderer;
 const buttons = () => view.root.findAllByType('button');
 const button = (label: string) => buttons().find(b => text(b).includes(label))!;
 const input = (label: string) => view.root.findAll(n => n.type === 'input' && n.props['aria-label'] === label)[0]!;
-
-// 以真的 useOddSpreadExec 接線，trades 由測試控制
-let setTrades: (t: Trade[]) => void = () => undefined;
-function Harness({ trades: initial, fd = feed }: { trades: Trade[]; fd?: OddSpreadFeed }) {
-    const [trades, set] = useState(initial);
-    setTrades = set;
-    const execution: SpreadExecution = useOddSpreadExec({ contract, account, trades });
-    return createElement(OddSpreadView, { contract, feed: fd, inventoryShares: 3420, live: true, account, execution });
-}
+const base: OddSpreadViewProps = { contract, feed, inventoryShares: 3420, live: true, account, execUnavailable: null };
+const render = async (p: Partial<OddSpreadViewProps> = {}) => {
+    await act(async () => { view = create(createElement(OddSpreadView, { ...base, ...p })); });
+};
+const rerender = async (p: Partial<OddSpreadViewProps>) => {
+    await act(async () => { view.update(createElement(OddSpreadView, { ...base, ...p })); });
+};
 
 beforeEach(() => {
     vi.clearAllMocks();
@@ -63,110 +68,191 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
 
 it('顯示設計稿的兩個方向與價格梯', async () => {
-    await act(async () => { view = create(createElement(Harness, { trades: [] })); });
+    await render();
     const all = text(view.root);
-    expect(all).toContain('台積電');
-    expect(all).toContain('零股撮合');
-    expect(all).toContain('10:52:57');
-    expect(all).toContain('+10.00');
-    expect(all).toContain('92 bps');
-    expect(all).toContain('+4.85 元/股');
-    expect(all).toContain('1,095×380、1,090×620');
-    expect(all).toContain('+1.76 元/股');
-    expect(all).toContain('+1,763 元');
-    expect(all).toContain('−20.00');
-    expect(all).toContain('−182 bps');
-    expect(all).toContain('−25.10 元/股');
-    expect(all).toContain('整 3 張／零 420 股');
+    for (const s of ['台積電', '零股撮合', '10:52:57', '+10.00', '92 bps', '+4.85 元/股', '1,095×380、1,090×620', '+1.76 元/股', '+1,763 元', '−20.00', '−182 bps', '−25.10 元/股', '可賣 整 3 張／零 420 股']) {
+        expect(all).toContain(s);
+    }
     expect(button('以 1 張執行').props.disabled).toBe(false);
     expect(button('價差未達成本').props.disabled).toBe(true);
     expect(button('買整賣零').props.disabled).toBe(false);
     expect(button('買零賣整').props.disabled).toBe(true);
-    // 可套利價位 1,095、1,090 以琥珀色標出；整／零最後成交標記
     const rows = view.root.findAll(n => n.type === 'div' && typeof n.props.className === 'string' && n.props.className.includes('ladderRow'));
     expect(rows.length).toBe(7);
 });
 
 it('未接上零股行情時兩個方向都停用', async () => {
-    const fd = { ...feed, odd: { bids: [], asks: [] }, oddAvailable: false, oddLast: null, oddTime: null };
-    await act(async () => { view = create(createElement(Harness, { trades: [], fd })); });
+    await render({ feed: { ...feed, odd: { bids: [], asks: [] }, oddAvailable: false, oddLast: null, oddTime: null } });
     expect(text(view.root)).toContain('等待零股行情');
     expect(button('買整賣零').props.disabled).toBe(true);
     expect(button('買零賣整').props.disabled).toBe(true);
 });
 
+it('彈出視窗：兩腳送單停用並說明原因', async () => {
+    await render({ execUnavailable: '兩腳價差單只能在主視窗執行（彈出視窗關閉後無法繼續追蹤第二腳）' });
+    expect(text(view.root)).toContain('只能在主視窗執行');
+    expect(button('買整賣零').props.disabled).toBe(true);
+    expect(button('請在主視窗執行').props.disabled).toBe(true);
+});
+
 it('張數改 2 → 加權後不賺，停用並說明', async () => {
-    await act(async () => { view = create(createElement(Harness, { trades: [] })); });
+    await render();
     await act(async () => { input('整股張數').props.onChange({ target: { value: '2' } }); });
     expect(input('零股股數').props.value).toBe('2,000');
     expect(button('買整賣零').props.disabled).toBe(true);
     expect(buttons().filter(b => text(b) === '價差未達成本')).toHaveLength(2);
 });
 
-it('執行：先送零股（每檔一筆 IntradayOdd），全部成交後才送整股 1 張', async () => {
-    let n = 0;
-    mocks.place.mockImplementation(async (_c: unknown, action: string, price: number, quantity: number, opts: { orderLot?: string }) => ({
-        order: { id: `T${++n}`, action, price, quantity, order_lot: opts.orderLot ?? 'Common' },
-        status: { status: 'Submitted', deal_quantity: 0, deals: [] },
-    }));
-    await act(async () => { view = create(createElement(Harness, { trades: [] })); });
+it('執行：把點擊當下的商品、帳戶與計畫交給主視窗服務', async () => {
+    await render();
     await act(async () => { button('以 1 張執行').props.onClick(); });
-    expect(mocks.place).toHaveBeenCalledTimes(2);
-    expect(mocks.place.mock.calls.map(c => [c[1], c[2], c[3], c[4].orderLot, c[4].source])).toEqual([
-        ['Sell', 1095, 380, 'IntradayOdd', 'auto'],
-        ['Sell', 1090, 620, 'IntradayOdd', 'auto'],
-    ]);
-    expect(text(view.root)).toContain('零股委託中');
-    const filled = (id: string, q: number) => ({ order: { id }, status: { status: 'Filled', deal_quantity: q, deals: [] } }) as unknown as Trade;
-    await act(async () => { setTrades([filled('T1', 380)]); });
-    expect(mocks.place).toHaveBeenCalledTimes(2);
-    expect(text(view.root)).toContain('零股部分成交');
-    await act(async () => { setTrades([filled('T1', 380), filled('T2', 620)]); });
-    expect(mocks.place).toHaveBeenCalledTimes(3);
-    expect(mocks.place.mock.calls[2]!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
-    expect(mocks.place.mock.calls[2]![4].orderLot).toBeUndefined();
-    await act(async () => { setTrades([filled('T1', 380), filled('T2', 620), filled('T3', 1)]); });
-    expect(text(view.root)).toContain('完成');
-    // 再點一次不會重送
-    expect(mocks.place).toHaveBeenCalledTimes(3);
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    const req = mocks.start.mock.calls[0]![0];
+    expect(req.contract).toBe(contract);
+    expect(req.account).toBe(account);
+    expect(req.plan).toEqual({
+        direction: 'buyRoundSellOdd', mode: 'sequential', lots: 1, roundPrice: 1085,
+        oddOrders: [{ price: 1095, quantity: 380 }, { price: 1090, quantity: 620 }], netPerShare: 1.76,
+    });
+    expect(req.fees).toMatchObject({ discount: 0.6, taxRate: 0.003, minFeeRound: 20, minFeeOdd: 1 });
+    expect(req.maxSlipTicks).toBe(2);
 });
 
-it('開啟委託確認時整筆價差確認一次，取消就不送', async () => {
+it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async () => {
     mocks.risk.confirmManualOrders = true;
-    mocks.confirm.mockResolvedValue(false);
-    await act(async () => { view = create(createElement(Harness, { trades: [] })); });
+    let approve!: (v: boolean) => void;
+    const pending = () => { mocks.confirm.mockImplementationOnce(() => new Promise(r => { approve = r; })); };
+
+    pending();
+    await render();
     await act(async () => { button('以 1 張執行').props.onClick(); });
-    expect(mocks.confirm).toHaveBeenCalledTimes(1);
     expect(mocks.confirm.mock.calls[0]![0].note).toContain('整零價差');
-    expect(mocks.place).not.toHaveBeenCalled();
+    await rerender({ account: otherAccount });
+    await act(async () => { approve(true); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間帳戶已變更');
+
+    pending();
+    await rerender({ account });
+    await act(async () => { button('以 1 張執行').props.onClick(); });
+    await rerender({ contract: { ...contract, code: '2317' } as ContractInfo });
+    await act(async () => { approve(true); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間商品已切換');
+
+    pending();
+    await rerender({ contract });
+    await act(async () => { button('以 1 張執行').props.onClick(); });
+    // 零股買一被吃掉，價差不再成立
+    await rerender({ feed: { ...feed, odd: { ...feed.odd, bids: [{ price: 1080, vol: 5000 }] } } });
+    await act(async () => { approve(true); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間行情或庫存已變動');
+
+    pending();
+    await rerender({ feed });
+    await act(async () => { button('以 1 張執行').props.onClick(); });
+    await rerender({ inventoryShares: 500 });
+    await act(async () => { approve(true); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('庫存不足');
+
+    // 都沒變 → 送出確認過的那一份
+    pending();
+    await rerender({ inventoryShares: 3420 });
+    await act(async () => { button('以 1 張執行').props.onClick(); });
+    await act(async () => { approve(true); });
+    expect(mocks.start).toHaveBeenCalledTimes(1);
 });
 
-it('點價下單：未啟用不送；啟用後點零股買量＝零股限價，1,000 股拆 999＋1', async () => {
-    mocks.place.mockResolvedValue({ order: { id: 'X' }, status: { status: 'Submitted', deal_quantity: 0, deals: [] } });
-    await act(async () => { view = create(createElement(Harness, { trades: [] })); });
-    const cell = () => view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0];
+it('點價下單：未啟用不送；1,000 股拆 999＋1，後一筆失敗時說明哪筆已送出並鎖定點價', async () => {
+    mocks.place.mockResolvedValueOnce({ order: { id: 'X' }, status: { status: 'Submitted' } })
+        .mockRejectedValueOnce(new Error('連線逾時'));
+    await render();
     const locked = view.root.findAll(n => n.type === 'span' && n.props.title === '先啟用點價')[0]!;
     await act(async () => { locked.props.onClick(); });
     expect(mocks.place).not.toHaveBeenCalled();
     await act(async () => { button('啟用點價').props.onClick(); });
-    await act(async () => { cell()!.props.onClick(); });
+    const cell = view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0]!;
+    await act(async () => { cell.props.onClick(); });
     expect(mocks.place.mock.calls.map(c => [c[1], c[3], c[4].orderLot])).toEqual([
         ['Buy', 999, 'IntradayOdd'],
         ['Buy', 1, 'IntradayOdd'],
     ]);
-    const roundAsk = view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('整股限價賣'))[0]!;
-    await act(async () => { roundAsk.props.onClick(); });
-    expect(mocks.place.mock.calls[2]!.slice(1, 4)).toEqual(['Sell', expect.any(Number), 1]);
-    expect(mocks.place.mock.calls[2]![4].orderLot).toBeUndefined();
-    expect(mocks.place.mock.calls[2]![4].source).toBeUndefined(); // 手動：依設定跳確認
+    const n = mocks.notify.mock.calls.at(-1)![0];
+    expect(n.title).toBe('零股拆單只送出部分');
+    expect(n.body).toContain('已送出 999 股');
+    expect(n.body).toContain('第 2/2 筆（1 股）結果未確認');
+    expect(n.body).toContain('勿重送整筆');
+    // 點價已鎖定，不能直接再點一次
+    expect(button('啟用點價')).toBeDefined();
 });
 
-it('手續費折數與稅率存本機', async () => {
+it('整股點價：手動來源（依設定跳確認）', async () => {
+    mocks.place.mockResolvedValue({ order: { id: 'X' }, status: { status: 'Submitted' } });
+    await render();
+    await act(async () => { button('啟用點價').props.onClick(); });
+    const roundAsk = view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('整股限價賣'))[0]!;
+    await act(async () => { roundAsk.props.onClick(); });
+    expect(mocks.place.mock.calls[0]!.slice(1, 4)).toEqual(['Sell', expect.any(Number), 1]);
+    expect(mocks.place.mock.calls[0]![4].orderLot).toBeUndefined();
+    expect(mocks.place.mock.calls[0]![4].source).toBeUndefined();
+});
+
+it('手續費折數、最低手續費、稅率與補單滑價存本機，並反映在試算', async () => {
     const setItem = vi.fn();
-    vi.stubGlobal('localStorage', { getItem: () => null, setItem });
-    await act(async () => { view = create(createElement(Harness, { trades: [] })); });
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ discount: 0.6 }), setItem });
+    await render();
     await act(async () => { input('手續費折數').props.onChange({ target: { value: '2.8' } }); });
     await act(async () => { input('證交稅率（%）').props.onChange({ target: { value: '0.15' } }); });
-    const last = JSON.parse(setItem.mock.calls.at(-1)![1]);
-    expect(last).toEqual({ discount: 0.28, taxRate: 0.0015 });
+    await act(async () => { input('零股每筆最低手續費（元）').props.onChange({ target: { value: '5' } }); });
+    await act(async () => { input('整股每筆最低手續費（元）').props.onChange({ target: { value: '1' } }); });
+    await act(async () => { input('補單滑價上限（檔）').props.onChange({ target: { value: '3' } }); });
+    expect(JSON.parse(setItem.mock.calls.at(-1)![1])).toEqual({ discount: 0.28, taxRate: 0.0015, minFeeRound: 1, minFeeOdd: 5, maxSlipTicks: 3 });
+});
+
+const rec = (state: Partial<SpreadExecRecord['state']>): SpreadExecRecord => ({
+    id: 'os-1', contract, account, fees: { discount: 0.6, taxRate: 0.003 }, maxSlipTicks: 2, startedAt: 0,
+    state: {
+        plan: { direction: 'buyRoundSellOdd', mode: 'sequential', lots: 1, roundPrice: 1085, oddOrders: [{ price: 1095, quantity: 380 }, { price: 1090, quantity: 620 }] },
+        phase: 'oddPending', slots: [], started: true, cancelRequested: false, seq: 2, waived: { odd: 0, round: 0 }, pendingHedge: null,
+        ...state,
+    },
+});
+
+it('未配對待處理：列出原因與最新價，可以最新價補單或取消', async () => {
+    mocks.refresh.mockReturnValue([{ price: 1100, quantity: 1 }]);
+    const exec = rec({
+        phase: 'hedgeDecision',
+        slots: [
+            { key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'filled', filled: 380 },
+            { key: 'odd:1', leg: 'odd', action: 'Sell', price: 1090, quantity: 620, status: 'filled', filled: 620 },
+        ],
+        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '價格已偏離計畫價超過 2 檔（1,085 → 1,100）', orders: [{ price: 1100, quantity: 1 }] },
+    });
+    await render({ exec });
+    const all = text(view.root);
+    expect(all).toContain('未配對，待處理');
+    expect(all).toContain('未配對 零股多 1,000 股');
+    expect(all).toContain('超過 2 檔');
+    expect(button('買整賣零').props.disabled).toBe(true);
+    await act(async () => { button('以最新價補單').props.onClick(); });
+    expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'hedgeAccept', orders: [{ price: 1100, quantity: 1 }] });
+    await act(async () => { buttons().find(b => text(b) === '取消')!.props.onClick(); });
+    expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'hedgeDecline' });
+});
+
+it('結果不明：說明哪筆、禁止再執行，可在核對後標記未送出', async () => {
+    const exec = rec({
+        phase: 'unknown',
+        slots: [
+            { key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'filled', filled: 380 },
+            { key: 'odd:1', leg: 'odd', action: 'Sell', price: 1090, quantity: 620, status: 'unknown', filled: 0 },
+        ],
+    });
+    await render({ exec });
+    expect(text(view.root)).toContain('零股 620 股 @ 1,090：可能已送出但未收到回應');
+    expect(button('有委託結果未確認').props.disabled).toBe(true);
+    await act(async () => { button('已核對：未送出').props.onClick(); });
+    expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'resolveUnknown', key: 'odd:1' });
 });

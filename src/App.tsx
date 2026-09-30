@@ -25,6 +25,7 @@ import { FeatureGate } from './components/feature-gate';
 import { FlashOrder } from './components/flash-order';
 import { GridTicket } from './components/grid-ticket';
 import { OddSpread } from './components/odd-spread';
+import { hasLiveSpreadExecution } from './lib/odd-spread-service';
 import { HudHeader } from './components/hud-header';
 import { IntradayChart } from './components/intraday-chart';
 import { IntradayWallPanel } from './components/intraday-wall';
@@ -537,7 +538,12 @@ function BlockView(props: BlockViewProps) {
                 pin={block.pin}
                 currentCode={selected?.code ?? null}
                 onPinChange={(pin) => onPinChange(block.id, pin)}
-                onRemove={() => onRemove(block.id)}
+                onRemove={() => {
+                    // 整零價差執行在主視窗服務背景追蹤，關閉面板不會中斷；仍先提醒
+                    if (block.type === 'oddspread' && hasLiveSpreadExecution()
+                        && !window.confirm('整零價差單仍在執行中。關閉面板後仍會在背景追蹤並送出第二腳、完成或需要處理時通知；重新開啟面板可查看。確定關閉？')) return;
+                    onRemove(block.id);
+                }}
                 onPopout={
                     POPOUT_TYPES.has(block.type)
                         ? () => {

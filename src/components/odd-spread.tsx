@@ -3,10 +3,12 @@
 // 上方兩張卡各算一個方向（買整→賣零、買零→賣整）的毛價差、扣費後淨價差、
 // 往下吃檔的加權淨價差與預估損益；中間是共用價格欄的兩市場五檔，點量＝
 // 在該市場下限價（同閃電下單：要先啟用點價、依設定跳委託確認）；下方設定
-// 張數／股數、送單方式、手續費折數與證交稅率，送出兩腳價差單。
+// 張數／股數、送單方式、手續費（折數、每筆最低）、證交稅率與補單滑價上限，
+// 送出兩腳價差單。
 //
-// 試算：lib/odd-spread；兩腳送單狀態機：lib/odd-spread-exec；
-// 行情轉接：hooks/use-odd-spread-feed（零股行情接上前見該檔 TODO）。
+// 試算：lib/odd-spread；兩腳送單狀態機：lib/odd-spread-exec；執行與追蹤在
+// 主視窗服務 lib/odd-spread-service（面板移除後仍繼續，重新開啟面板可看到）；
+// 行情：hooks/use-odd-spread-feed。
 
 import { Link2, Link2Off } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -14,7 +16,6 @@ import { useAccounts, ensureAccounts } from '../lib/account-store';
 import { scopedFlashRows, accountMatches } from '../lib/flash-account';
 import { useTradingLive } from '../hooks/use-stream';
 import { useOddSpreadFeed, type OddSpreadFeed } from '../hooks/use-odd-spread-feed';
-import { useOddSpreadExec, type SpreadExecution } from '../hooks/use-odd-spread-exec';
 import { ODD_LOT_MAX_SHARES, SHARES_PER_LOT } from '../lib/odd-lot';
 import {
     BLOCK_LABEL,
@@ -23,22 +24,35 @@ import {
     DIRECTION_PATH_LABEL,
     loadOddSpreadPrefs,
     quoteBoth,
+    quoteDirection,
     saveOddSpreadPrefs,
+    sellableShares,
     sliceOddOrders,
+    type FeeSettings,
     type OddSpreadPrefs,
     type SpreadDirection,
     type SpreadQuote,
 } from '../lib/odd-spread';
 import { execSummary, isTerminalPhase, PHASE_LABEL, type ExecMode, type ExecPlan } from '../lib/odd-spread-exec';
+import {
+    dismissSpreadExecution,
+    hedgeUnitLabel,
+    oddSpreadExecUnavailable,
+    refreshHedgeOrders,
+    spreadExecAction,
+    startSpreadExecution,
+    useSpreadExecution,
+    type SpreadExecRecord,
+} from '../lib/odd-spread-service';
 import { requestOrderConfirm, accountConfirmLabel } from '../lib/order-confirm';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
 import { getRiskSettings } from '../lib/risk';
-import { notify, OrderConfirmCancelled, placeQuickOrder } from '../lib/trade';
+import { notify, placeQuickOrder } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
 import type { Snapshot } from '../lib/types/market';
 import type { Action, Trade } from '../lib/types/order';
 import type { Account, AccountedPosition } from '../lib/types/portfolio';
-import { stockTaxRate } from '../lib/utils/contract-cost';
+import { isBondEtfCode, stockTaxRate } from '../lib/utils/contract-cost';
 import { fmtCompactInt, fmtPrice } from '../lib/utils/format';
 import { stepPrice } from '../lib/utils/ticksize';
 import * as styles from './odd-spread.css';
@@ -51,22 +65,21 @@ const signed = (v: number, digits = 2) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${
 const toneOf = (v: number | null) => (v === null || v === 0 ? 'flat' : v > 0 ? 'pos' : 'neg');
 const chgTone = (v: number | null) => (v === null || v === 0 ? 'flat' : v > 0 ? 'up' : 'down');
 const chgText = (v: number | null) => (v === null ? '' : `${v > 0 ? '▲' : v < 0 ? '▼' : ''}${fmtPrice(Math.abs(v), 0)}`);
-
-/** 可賣現股庫存（股）：此帳戶、此商品、現股多單 */
-export function cashInventoryShares(positions: AccountedPosition[], code: string): number {
-    return positions
-        .filter(p => p.code === code && p.direction === 'Buy' && (!('cond' in p) || !p.cond || p.cond === 'Cash'))
-        .reduce((a, p) => a + p.quantity, 0);
-}
+const levelsText = (orders: { price: number; quantity: number }[]) => orders.map(o => `${fmtPrice(o.price)}×${int(o.quantity)}`).join('、');
 
 export interface OddSpreadViewProps {
     contract: ContractInfo;
     feed: OddSpreadFeed;
-    /** 可賣現股庫存（股）；null＝未知 */
+    /** 可賣現股（股，已扣未成交賣單）；null＝未知 */
     inventoryShares: number | null;
+    /** 未成交賣單占用的股數（顯示用） */
+    reservedShares?: number;
     live: boolean;
     account: Account | undefined;
-    execution: SpreadExecution;
+    /** 此商品／帳戶最近一筆兩腳執行 */
+    exec?: SpreadExecRecord;
+    /** 兩腳送單不可用的原因（彈出視窗等）；null＝可用 */
+    execUnavailable: string | null;
     onOrdersChanged?: () => void;
     /** 測試與截圖用：初始張數 */
     initialLots?: number;
@@ -86,23 +99,48 @@ export function OddSpread(props: {
     useEffect(ensureAccounts, []);
     const account = accountState.selectedStock ?? undefined;
     const scopedTrades = scopedFlashRows(trades, account);
-    const scopedPositions = scopedFlashRows(positions, account);
-    const inventoryShares = accountState.loaded && account ? cashInventoryShares(scopedPositions, contract.code) : null;
-    const execution = useOddSpreadExec({ contract, account, trades: scopedTrades, onOrdersChanged });
+    const scopedPositions = scopedFlashRows(positions, account) as AccountedPosition[];
+    const known = accountState.loaded && !!account;
+    const inventoryShares = known ? sellableShares(scopedPositions as Parameters<typeof sellableShares>[0], scopedTrades, contract.code) : null;
+    const held = known ? sellableShares(scopedPositions as Parameters<typeof sellableShares>[0], [], contract.code) : 0;
+    const exec = useSpreadExecution(contract.code, account);
     return (
         <OddSpreadView
             contract={contract}
             feed={feed}
             inventoryShares={inventoryShares}
+            reservedShares={inventoryShares === null ? 0 : held - inventoryShares}
             live={live}
             account={account}
-            execution={execution}
+            exec={exec}
+            execUnavailable={oddSpreadExecUnavailable()}
             onOrdersChanged={onOrdersChanged}
         />
     );
 }
 
-export function OddSpreadView({ contract, feed, inventoryShares, live, account, execution, onOrdersChanged, initialLots = 1 }: OddSpreadViewProps) {
+function NumPref({ label, value, onChange, title, width = 'narrow' }: { label: string; value: number; onChange: (v: number) => void; title?: string; width?: 'narrow' | 'tiny' }) {
+    const [text, setText] = useState<string | null>(null);
+    return (
+        <input
+            className={width === 'tiny' ? styles.inputTiny : styles.inputNarrow}
+            aria-label={label}
+            title={title}
+            inputMode='decimal'
+            value={text ?? String(value)}
+            onChange={e => {
+                setText(e.target.value);
+                const n = Number(e.target.value);
+                if (e.target.value !== '' && Number.isFinite(n)) onChange(n);
+            }}
+            onBlur={() => setText(null)}
+        />
+    );
+}
+
+export function OddSpreadView({
+    contract, feed, inventoryShares, reservedShares = 0, live, account, exec, execUnavailable, onOrdersChanged, initialLots = 1,
+}: OddSpreadViewProps) {
     const privMoney = usePrivacyMoney();
     const [lots, setLots] = useState(initialLots);
     const [oddShares, setOddShares] = useState(initialLots * SHARES_PER_LOT);
@@ -112,11 +150,19 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
     const [discountText, setDiscountText] = useState(() => String(Math.round(prefs.discount * 100) / 10));
     const [taxText, setTaxText] = useState<string | null>(null);
     const [armed, setArmed] = useState(false);
+    const [busy, setBusy] = useState(false);
     const inflight = useRef(new Set<string>());
 
     const taxRate = prefs.taxRate ?? stockTaxRate(contract);
-    const fees = useMemo(() => ({ discount: prefs.discount, taxRate }), [prefs.discount, taxRate]);
+    const fees: FeeSettings = useMemo(
+        () => ({ discount: prefs.discount, taxRate, minFeeRound: prefs.minFeeRound, minFeeOdd: prefs.minFeeOdd }),
+        [prefs.discount, taxRate, prefs.minFeeRound, prefs.minFeeOdd],
+    );
     const effOdd = paired ? lots * SHARES_PER_LOT : oddShares;
+
+    // 送出前重新驗證用的最新值（確認視窗期間可能改變）
+    const latest = useRef({ contract, account, feed, inventoryShares, fees });
+    latest.current = { contract, account, feed, inventoryShares, fees };
 
     useEffect(() => { setArmed(false); }, [contract.code, account?.account_id]);
     useEffect(() => { if (!live) setArmed(false); }, [live]);
@@ -141,47 +187,69 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
         [feed.round, feed.odd, feed.roundLast, feed.oddLast, contract],
     );
 
-    const exec = execution.exec;
-    const running = !!exec && exec.started && !isTerminalPhase(exec.phase);
+    const running = !!exec && exec.state.started && !isTerminalPhase(exec.state.phase);
 
     const blockText = (q: SpreadQuote): string | null => {
         if (!feed.oddAvailable && q.block === 'noQuote') return '等待零股行情';
+        if (execUnavailable) return '請在主視窗執行';
         if (!live) return '行情或交易狀態未連線';
         if (!account) return '沒有可用的證券帳戶';
-        if (running) return '價差單執行中';
+        if (running) return exec?.state.phase === 'unknown' ? '有委託結果未確認' : '價差單執行中';
+        if (busy) return '確認中';
         if (q.block === 'inventory' && inventoryShares === null) return '庫存未知';
         return q.block ? BLOCK_LABEL[q.block] : null;
     };
 
     const execute = useCallback(async (q: SpreadQuote) => {
-        if (!q.canExecute || !q.buyLeg || !q.sellLeg || !account || running) return;
+        if (!q.canExecute || !q.buyLeg || !q.sellLeg || !account || running || busy || execUnavailable) return;
+        // 點擊當下綁定商品、帳戶與計畫；確認後只送這一份
+        const bound = { contract, account, fees, lots: q.lots, oddShares: q.oddShares, direction: q.direction };
         const oddLeg = q.direction === 'buyOddSellRound' ? q.buyLeg : q.sellLeg;
         const roundLeg = q.direction === 'buyOddSellRound' ? q.sellLeg : q.buyLeg;
         const roundPrice = roundLeg.orders[0]?.price;
         if (roundPrice === undefined) return;
-        const plan: ExecPlan = { direction: q.direction, mode, lots: q.lots, roundPrice, oddOrders: oddLeg.orders };
-        const levels = oddLeg.fills.map(f => `${fmtPrice(f.price)}×${int(f.shares)}`).join('、');
-        if (getRiskSettings().confirmManualOrders) {
-            try {
+        const plan: ExecPlan = {
+            direction: q.direction, mode, lots: q.lots, roundPrice, oddOrders: oddLeg.orders,
+            netPerShare: q.weightedNetPerShare ?? 0,
+        };
+        setBusy(true);
+        try {
+            if (getRiskSettings().confirmManualOrders) {
                 const ok = await requestOrderConfirm({
                     code: contract.code,
                     name: contract.name,
                     action: q.direction === 'buyRoundSellOdd' ? 'Buy' : 'Sell',
                     price: roundPrice,
-                    priceLabel: `整股 ${fmtPrice(roundPrice)}／零股 ${levels}`,
+                    priceLabel: `整股 ${fmtPrice(roundPrice)}／零股 ${levelsText(oddLeg.orders)}`,
                     quantity: q.lots,
                     unit: '張',
                     accountLabel: accountConfirmLabel(account),
                     note: `整零價差 ${DIRECTION_LABEL[q.direction]}：整股 ${q.lots} 張 ↔ 零股 ${int(q.oddShares)} 股（${oddLeg.orders.length} 筆）；${mode === 'sequential' ? '零股全部成交後再送整股' : '兩腳同時送'}`,
                 });
                 if (!ok) return;
-            } catch (e) {
-                notify({ kind: 'err', title: '整零價差未送出', body: e instanceof Error ? e.message : String(e) });
+            }
+            // 確認後重新驗證：商品、帳戶、行情、庫存與淨價差
+            const now = latest.current;
+            const problem = now.contract.code !== bound.contract.code ? '確認期間商品已切換'
+                : !accountMatches(now.account, bound.account) ? '確認期間帳戶已變更'
+                    : (() => {
+                        const fresh = quoteDirection(bound.direction, {
+                            round: now.feed.round, odd: now.feed.odd, lots: bound.lots, oddShares: bound.oddShares,
+                            fees: bound.fees, inventoryShares: now.inventoryShares,
+                        });
+                        return fresh.canExecute ? null : `確認期間行情或庫存已變動：${fresh.block ? BLOCK_LABEL[fresh.block] : '無法執行'}`;
+                    })();
+            if (problem) {
+                notify({ kind: 'err', title: '整零價差未送出', body: `${problem}，這筆沒有送出，請重新確認` });
                 return;
             }
+            startSpreadExecution({ contract: bound.contract, account: bound.account, plan, fees: bound.fees, maxSlipTicks: prefs.maxSlipTicks });
+        } catch (e) {
+            notify({ kind: 'err', title: '整零價差未送出', body: e instanceof Error ? e.message : String(e) });
+        } finally {
+            setBusy(false);
         }
-        execution.start(plan);
-    }, [account, running, mode, contract, execution]);
+    }, [account, running, busy, execUnavailable, mode, contract, fees, prefs.maxSlipTicks]);
 
     // 點量下單：同閃電下單，要先啟用點價；依設定跳委託確認
     const placeAt = useCallback(async (market: 'round' | 'odd', action: Action, price: number) => {
@@ -190,19 +258,21 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
         if (inflight.current.has(key)) return;
         inflight.current.add(key);
         const captured = account;
-        const isAccountCurrent = () => accountMatches(account, captured);
+        const isAccountCurrent = () => accountMatches(latest.current.account, captured);
+        const sent: string[] = [];
+        let slices: { price: number; quantity: number }[] = [];
         try {
             if (market === 'round') {
                 await placeQuickOrder(contract, action, price, lots, { account: captured, isAccountCurrent });
             } else {
-                const slices = sliceOddOrders([{ price, shares: effOdd }]);
+                slices = sliceOddOrders([{ price, shares: effOdd }]);
                 if (slices.length > 1 && getRiskSettings().confirmManualOrders) {
                     const ok = await requestOrderConfirm({
                         code: contract.code, name: contract.name, action, price, quantity: effOdd, unit: '股',
                         accountLabel: accountConfirmLabel(captured),
                         note: `盤中零股・限價 ROD；每筆上限 ${ODD_LOT_MAX_SHARES} 股，拆為 ${slices.length} 筆`,
                     });
-                    if (!ok) throw new OrderConfirmCancelled();
+                    if (!ok) return;
                 }
                 for (const s of slices) {
                     await placeQuickOrder(contract, action, s.price, s.quantity, {
@@ -211,17 +281,31 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                         isAccountCurrent,
                         source: slices.length > 1 ? 'auto' : 'manual',
                     });
+                    sent.push(`${int(s.quantity)} 股`);
                 }
             }
             notify({
                 kind: 'ok',
                 title: `${market === 'odd' ? '零股' : '整股'}${action === 'Buy' ? '買進' : '賣出'}已送出`,
-                body: `${contract.code} ${market === 'odd' ? `${int(effOdd)} 股` : `${lots} 張`} @ ${fmtPrice(price)}`,
+                body: `${contract.code} ${market === 'odd' ? `${int(effOdd)} 股${slices.length > 1 ? `（${slices.length} 筆）` : ''}` : `${lots} 張`} @ ${fmtPrice(price)}`,
             });
             onOrdersChanged?.();
         } catch (e) {
-            if (!(e instanceof OrderConfirmCancelled)) {
-                notify({ kind: 'err', title: '整零價差點價下單失敗', body: e instanceof Error ? e.message : String(e) });
+            if (e instanceof Error && e.name === 'OrderConfirmCancelled') return;
+            const msg = e instanceof Error ? e.message : String(e);
+            const notStarted = !!(e && typeof e === 'object' && 'mutationNotStarted' in e);
+            if (sent.length > 0) {
+                // 拆單只送出一部分：說清楚哪幾筆已送出，鎖定點價避免整筆重送
+                const idx = sent.length + 1;
+                setArmed(false);
+                notify({
+                    kind: 'err',
+                    title: '零股拆單只送出部分',
+                    body: `${contract.code} @ ${fmtPrice(price)}：已送出 ${sent.join('、')}；第 ${idx}/${slices.length} 筆（${int(slices[idx - 1]?.quantity ?? 0)} 股）${notStarted ? '未送出' : '結果未確認'}：${msg}。其餘未送。請先核對委託，勿重送整筆；點價已鎖定`,
+                });
+                onOrdersChanged?.();
+            } else {
+                notify({ kind: 'err', title: '整零價差點價下單失敗', body: `${notStarted ? '' : '結果未確認，請核對委託：'}${msg}` });
             }
         } finally {
             inflight.current.delete(key);
@@ -230,6 +314,7 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
 
     const invLots = inventoryShares === null ? null : Math.floor(inventoryShares / SHARES_PER_LOT);
     const invOdd = inventoryShares === null ? null : inventoryShares % SHARES_PER_LOT;
+    const bondEtf = isBondEtfCode(contract.code);
 
     return (
         <div className={styles.wrap}>
@@ -254,6 +339,7 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                     等待零股行情：目前只顯示整股五檔，價差試算與送出暫停
                 </div>
             )}
+            {execUnavailable && <div className={styles.notice}>{execUnavailable}；點價單筆下單仍可使用</div>}
             <div className={styles.cards}>
                 {DIRECTIONS.map(d => (
                     <SpreadCard
@@ -354,8 +440,11 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                         }}
                     />
                     <span>股</span>
-                    <span className={styles.inventory} title='可賣現股庫存（此帳戶）'>
-                        庫存 {invLots === null ? '—' : `整 ${int(invLots)} 張／零 ${int(invOdd ?? 0)} 股`}
+                    <span
+                        className={styles.inventory}
+                        title={`可賣現股（此帳戶）${reservedShares > 0 ? `，已扣未成交賣單 ${int(reservedShares)} 股` : ''}`}
+                    >
+                        可賣 {invLots === null ? '—' : `整 ${int(invLots)} 張／零 ${int(invOdd ?? 0)} 股`}
                     </span>
                 </div>
                 <div className={styles.fRow}>
@@ -366,7 +455,7 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                     </select>
                     <span className={styles.fLabel}>手續費</span>
                     <input
-                        className={styles.inputNarrow}
+                        className={styles.inputTiny}
                         aria-label='手續費折數'
                         title='券商手續費折數（6 折填 6、2.8 折填 2.8、無折扣填 10）'
                         value={discountText}
@@ -379,9 +468,9 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                     <span>折</span>
                     <span className={styles.fLabel}>證交稅</span>
                     <input
-                        className={styles.inputNarrow}
+                        className={styles.inputTiny}
                         aria-label='證交稅率（%）'
-                        title='賣出證交稅率（%）：一般股票 0.3、當沖 0.15、ETF 0.1'
+                        title={`賣出證交稅率（%）：一般股票 0.3、當沖 0.15、ETF 0.1；債券 ETF（代號 B 結尾）停徵至 2026-12-31 自動帶 0。其他免稅或減半的例外請自行修改${bondEtf ? '（此檔為債券 ETF）' : ''}`}
                         value={taxText ?? String(Math.round(taxRate * 100_000) / 1000)}
                         onChange={e => {
                             setTaxText(e.target.value);
@@ -392,7 +481,21 @@ export function OddSpreadView({ contract, feed, inventoryShares, live, account, 
                     />
                     <span>%</span>
                 </div>
-                {exec && exec.started && <ExecStatus execution={execution} />}
+                <div className={styles.fRow}>
+                    <span className={styles.fLabel} title='每筆委託最低手續費由券商訂定'>最低手續費</span>
+                    <span className={styles.fLabel}>整</span>
+                    <NumPref label='整股每筆最低手續費（元）' width='tiny' value={prefs.minFeeRound} title='整股每筆最低手續費（元），券商訂定，常見 20'
+                        onChange={v => { if (v >= 0 && v <= 1000) updatePrefs({ ...prefs, minFeeRound: v }); }} />
+                    <span className={styles.fLabel}>零</span>
+                    <NumPref label='零股每筆最低手續費（元）' width='tiny' value={prefs.minFeeOdd} title='零股每筆最低手續費（元），券商訂定，常見 1；零股拆成多筆時每筆都收'
+                        onChange={v => { if (v >= 0 && v <= 1000) updatePrefs({ ...prefs, minFeeOdd: v }); }} />
+                    <span>元</span>
+                    <span className={styles.fLabel} title='第二腳（補單）以當下價格送出時，最多容許比計畫價差幾檔；超過或已不足成本就不自動送，改由你決定'>補單滑價上限</span>
+                    <NumPref label='補單滑價上限（檔）' width='tiny' value={prefs.maxSlipTicks}
+                        onChange={v => { if (Number.isInteger(v) && v >= 0 && v <= 50) updatePrefs({ ...prefs, maxSlipTicks: v }); }} />
+                    <span>檔</span>
+                </div>
+                {exec && exec.state.started && <ExecStatus rec={exec} />}
                 <div className={styles.btns}>
                     {DIRECTIONS.map(d => {
                         const q = quotes[d];
@@ -485,33 +588,86 @@ function SpreadCard({ q, blocked, privMoney, onExecute }: { q: SpreadQuote; bloc
     );
 }
 
-function ExecStatus({ execution }: { execution: SpreadExecution }) {
-    const exec = execution.exec;
-    if (!exec) return null;
-    const sum = execSummary(exec);
-    const done = isTerminalPhase(exec.phase);
+async function acceptHedge(rec: SpreadExecRecord) {
+    const p = rec.state.pendingHedge;
+    if (!p) return;
+    const orders = refreshHedgeOrders(rec.id) ?? p.orders;
+    if (orders.length === 0) {
+        notify({ kind: 'err', title: '整零價差：無法補單', body: '目前沒有對手報價，請稍後再試或手動處理' });
+        return;
+    }
+    if (getRiskSettings().confirmManualOrders) {
+        const ok = await requestOrderConfirm({
+            code: rec.contract.code,
+            name: rec.contract.name,
+            action: p.action,
+            price: orders[0]!.price,
+            priceLabel: levelsText(orders),
+            quantity: p.quantity,
+            unit: p.leg === 'odd' ? '股' : '張',
+            accountLabel: accountConfirmLabel(rec.account),
+            note: `整零價差補單（${p.leg === 'odd' ? '盤中零股' : '整股'}・最新價限價 ROD）：${p.reason}`,
+        }).catch(() => false);
+        if (!ok) return;
+    }
+    spreadExecAction(rec.id, { type: 'hedgeAccept', orders });
+}
+
+function ExecStatus({ rec }: { rec: SpreadExecRecord }) {
+    const s = rec.state;
+    const sum = execSummary(s);
+    const done = isTerminalPhase(s.phase);
+    const unknown = s.slots.filter(x => x.status === 'unknown');
+    const p = s.pendingHedge;
     return (
         <div className={styles.execBar} role='status'>
-            <span className={styles.execPhase}>{DIRECTION_LABEL[exec.plan.direction]} · {PHASE_LABEL[exec.phase]}</span>
+            <span className={styles.execPhase}>{DIRECTION_LABEL[s.plan.direction]} · {PHASE_LABEL[s.phase]}</span>
             <span className={styles.execNums}>
-                零股 {int(sum.oddFilledShares)}/{int(sum.oddPlannedShares)} 股 · 整股 {sum.roundFilledLots}/{exec.plan.lots} 張
+                零股 {int(sum.oddFilledShares)}/{int(sum.oddPlannedShares)} 股 · 整股 {sum.roundFilledLots}/{s.plan.lots} 張
             </span>
-            {done && sum.unhedgedShares !== 0 && (
-                <span title='零股成交股數與整股成交股數的差額，需自行處理'>
+            {sum.unhedgedShares !== 0 && (done || p) && (
+                <span className={styles.execWarn} title='零股成交股數與整股成交股數的差額'>
                     未配對 {sum.unhedgedShares > 0 ? '零股多' : '整股多'} {int(Math.abs(sum.unhedgedShares))} 股
                 </span>
             )}
-            {done ? (
-                <button className={styles.smallBtn} onClick={execution.dismiss}>關閉</button>
-            ) : (
-                <button
-                    className={styles.smallBtn}
-                    title='刪除未成交的委託；已成交的零股會以整張配對送出整股，不足一張列為未配對'
-                    onClick={execution.cancel}
-                >
-                    取消剩餘
-                </button>
+            {unknown.length > 0 && (
+                <span className={styles.execDetail}>
+                    {unknown.map(x => `${x.leg === 'odd' ? '零股' : '整股'} ${int(x.quantity)}${x.leg === 'odd' ? ' 股' : ' 張'} @ ${fmtPrice(x.price)}`).join('、')}
+                    ：可能已送出但未收到回應，已暫停後續送單；委託列出現後自動接回
+                </span>
             )}
+            {p && (
+                <span className={styles.execDetail}>
+                    需補{hedgeUnitLabel(p.leg, p.quantity)}：{p.reason}{p.orders.length > 0 ? `；最新價 ${levelsText(p.orders)}` : ''}
+                </span>
+            )}
+            <span className={styles.execActions}>
+                {p && (
+                    <>
+                        <button className={styles.smallBtnPrimary} onClick={() => void acceptHedge(rec)}>以最新價補單</button>
+                        <button className={styles.smallBtn} title='不補單，保留未配對部位自行處理' onClick={() => spreadExecAction(rec.id, { type: 'hedgeDecline' })}>取消</button>
+                    </>
+                )}
+                {unknown.length > 0 && (
+                    <button
+                        className={styles.smallBtn}
+                        title='已在委託查詢確認這些委託沒有送出；若之後仍出現在委託列，會自動接回並重新計算'
+                        onClick={() => { for (const x of unknown) spreadExecAction(rec.id, { type: 'resolveUnknown', key: x.key }); }}
+                    >
+                        已核對：未送出
+                    </button>
+                )}
+                {!done && !p && (
+                    <button
+                        className={styles.smallBtn}
+                        title='刪除未成交的委託；已成交的零股會以整張配對送出整股，不足一張列為未配對'
+                        onClick={() => spreadExecAction(rec.id, { type: 'cancel' })}
+                    >
+                        取消剩餘
+                    </button>
+                )}
+                {done && <button className={styles.smallBtn} onClick={() => dismissSpreadExecution(rec.id)}>關閉</button>}
+            </span>
         </div>
     );
 }

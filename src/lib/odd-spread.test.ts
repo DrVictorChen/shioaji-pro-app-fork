@@ -5,12 +5,16 @@ import {
     planLeg,
     quoteBoth,
     quoteDirection,
+    repriceHedge,
     sanitizePrefs,
+    sellableShares,
     sliceOddOrders,
     type SideBook,
     type SpreadInput,
 } from './odd-spread';
-import { applyRateYuan, priceCents, stockSellTax, stockTradeFee } from './utils/contract-cost';
+import { applyRateYuan, isBondEtfCode, priceCents, stockSellTax, stockTaxRate, stockTradeFee } from './utils/contract-cost';
+import type { ContractInfo } from './types/contract';
+import type { Trade } from './types/order';
 
 // 設計稿（2330，6 折、證交稅 0.3%）的五檔
 const ROUND: SideBook = {
@@ -219,8 +223,88 @@ describe('buildSpreadLadder', () => {
 
 describe('sanitizePrefs', () => {
     it('折數 0～1、稅率 0～1%，其餘回預設', () => {
-        expect(sanitizePrefs({ discount: 0.6, taxRate: 0.0015 })).toEqual({ discount: 0.6, taxRate: 0.0015 });
-        expect(sanitizePrefs({ discount: 6, taxRate: 3 })).toEqual({ discount: 1, taxRate: null });
-        expect(sanitizePrefs(null)).toEqual({ discount: 1, taxRate: null });
+        expect(sanitizePrefs({ discount: 0.6, taxRate: 0.0015 })).toMatchObject({ discount: 0.6, taxRate: 0.0015 });
+        expect(sanitizePrefs({ discount: 6, taxRate: 3 })).toMatchObject({ discount: 1, taxRate: null });
+        expect(sanitizePrefs(null)).toMatchObject({ discount: 1, taxRate: null });
+    });
+});
+
+describe('每筆最低手續費可設定（券商訂定）', () => {
+    it('提高零股每筆最低手續費：每筆都收，損益變少', () => {
+        const base = quoteDirection('buyRoundSellOdd', input());
+        const hi = quoteDirection('buyRoundSellOdd', input({ fees: { ...FEES, minFeeOdd: 400 } }));
+        // 380 股那筆手續費 356 → 400
+        expect(hi.pnl).toBe(base.pnl! - (400 - 356));
+        expect(stockTradeFee(priceCents(10) * 10, { odd: true, minFee: 5 })).toBe(5);
+        expect(stockTradeFee(priceCents(10) * 1000, { odd: false, minFee: 1 })).toBe(14); // 14.25 → 14，最低 1 不影響
+    });
+});
+
+describe('sellableShares', () => {
+    const pos = [
+        { code: '2330', direction: 'Buy' as const, quantity: 3420, cond: 'Cash' },
+        { code: '2330', direction: 'Buy' as const, quantity: 1000, cond: 'MarginTrading' },
+        { code: '2317', direction: 'Buy' as const, quantity: 5000, cond: 'Cash' },
+    ];
+    const t = (action: string, lot: string, quantity: number, deal: number, status = 'Submitted', code = '2330') => ({
+        contract: { code },
+        order: { id: `${action}${lot}${quantity}`, action, price: 1000, quantity, order_lot: lot },
+        status: { status, order_quantity: quantity, deal_quantity: deal, cancel_quantity: 0, deals: [] },
+    }) as unknown as Trade;
+    it('現股多單扣掉未成交賣單（整股 × 1,000、零股以股）', () => {
+        expect(sellableShares(pos, [], '2330')).toBe(3420);
+        expect(sellableShares(pos, [t('Sell', 'Common', 2, 0), t('Sell', 'IntradayOdd', 300, 100)], '2330')).toBe(3420 - 2000 - 200);
+        // 買單、已成交完、別檔都不扣
+        expect(sellableShares(pos, [t('Buy', 'Common', 1, 0), t('Sell', 'Common', 1, 1, 'Filled'), t('Sell', 'Common', 1, 0, 'Submitted', '2317')], '2330')).toBe(3420);
+        expect(sellableShares(pos, [t('Sell', 'Common', 9, 0)], '2330')).toBe(0);
+    });
+});
+
+describe('repriceHedge', () => {
+    const step = (p: number, d: 1 | -1) => p + d * 5;
+    const args = { odd: false, action: 'Buy' as const, quantity: 1, plannedPrice: 1085, netPerShare: 12, maxSlipTicks: 2, step, fees: FEES };
+    it('當下價格不比計畫差 → 以最新價送', () => {
+        expect(repriceHedge({ ...args, book: { bids: [], asks: [{ price: 1080, vol: 5 }] } })).toEqual({ ok: true, orders: [{ price: 1080, quantity: 1 }] });
+    });
+    it('偏離在上限內且仍賺 → 可送', () => {
+        expect(repriceHedge({ ...args, book: { bids: [], asks: [{ price: 1095, vol: 5 }] } })).toEqual({ ok: true, orders: [{ price: 1095, quantity: 1 }] });
+    });
+    it('超過滑價上限 → 不送，附最新價建議', () => {
+        const r = repriceHedge({ ...args, book: { bids: [], asks: [{ price: 1100, vol: 5 }] } });
+        expect(r.ok).toBe(false);
+        expect(r.ok === false && r.reason).toContain('超過 2 檔');
+        expect(r.orders).toEqual([{ price: 1100, quantity: 1 }]);
+    });
+    it('上限內但已不足成本 → 不送', () => {
+        const r = repriceHedge({ ...args, netPerShare: 8, book: { bids: [], asks: [{ price: 1095, vol: 5 }] } });
+        expect(r.ok === false && r.reason).toContain('不足成本');
+    });
+    it('賣出方向：價格往下為不利；零股依 999 拆筆', () => {
+        const r = repriceHedge({ ...args, odd: true, action: 'Sell', quantity: 1000, plannedPrice: 1090, book: { bids: [{ price: 1085, vol: 5000 }], asks: [] } });
+        expect(r).toEqual({ ok: true, orders: [{ price: 1085, quantity: 999 }, { price: 1085, quantity: 1 }] });
+    });
+    it('沒有報價或量不足 → 不送', () => {
+        expect(repriceHedge({ ...args, book: { bids: [], asks: [] } })).toMatchObject({ ok: false, orders: [] });
+        expect(repriceHedge({ ...args, quantity: 3, book: { bids: [], asks: [{ price: 1085, vol: 1 }] } })).toMatchObject({ ok: false, orders: [{ price: 1085, quantity: 3 }] });
+    });
+});
+
+describe('債券 ETF 證交稅停徵', () => {
+    const c = (code: string) => ({ code, security_type: 'STK' }) as unknown as ContractInfo;
+    it('代號 B 結尾停徵到 2026-12-31，之後回到 ETF 0.1%', () => {
+        expect(isBondEtfCode('00679B')).toBe(true);
+        expect(isBondEtfCode('00680L')).toBe(false);
+        expect(stockTaxRate(c('00679B'), Date.parse('2026-12-31T23:59:00+08:00'))).toBe(0);
+        expect(stockTaxRate(c('00679B'), Date.parse('2027-01-01T00:00:00+08:00'))).toBe(0.001);
+        expect(stockTaxRate(c('0050'), Date.parse('2026-09-30T10:00:00+08:00'))).toBe(0.001);
+        expect(stockTaxRate(c('2330'), Date.parse('2026-09-30T10:00:00+08:00'))).toBe(0.003);
+    });
+});
+
+describe('sanitizePrefs — 最低手續費與補單滑價', () => {
+    it('預設整股 20、零股 1、滑價 2 檔；超出範圍回預設', () => {
+        expect(sanitizePrefs({})).toMatchObject({ minFeeRound: 20, minFeeOdd: 1, maxSlipTicks: 2 });
+        expect(sanitizePrefs({ minFeeRound: 0, minFeeOdd: 5, maxSlipTicks: 4 })).toMatchObject({ minFeeRound: 0, minFeeOdd: 5, maxSlipTicks: 4 });
+        expect(sanitizePrefs({ minFeeRound: -1, minFeeOdd: 'x', maxSlipTicks: 99 })).toMatchObject({ minFeeRound: 20, minFeeOdd: 1, maxSlipTicks: 2 });
     });
 });

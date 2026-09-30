@@ -352,6 +352,7 @@ export const input = style({
 });
 
 export const inputNarrow = style([input, { width: '3.2rem' }]);
+export const inputTiny = style([input, { width: '2.6rem' }]);
 
 export const lockBtn = styleVariants({
     on: {
@@ -428,8 +429,11 @@ export const execBar = style({
 export const execPhase = style({ fontWeight: 700, color: vars.color.amber });
 export const execNums = style({ fontFamily: vars.font.mono });
 
+export const execWarn = style({ fontWeight: 700, color: vars.color.danger });
+export const execDetail = style({ flexBasis: '100%', lineHeight: 1.4, color: vars.color.foreground });
+export const execActions = style({ marginLeft: 'auto', display: 'inline-flex', gap: 6 });
+
 export const smallBtn = style({
-    marginLeft: 'auto',
     fontSize: '0.64rem',
     padding: '2px 8px',
     borderRadius: vars.radius.sm,
@@ -448,3 +452,10 @@ export const note = style({
     borderTop: `1px solid ${vars.color.border}`,
     flexShrink: 0,
 });
+
+export const smallBtnPrimary = style([smallBtn, {
+    fontWeight: 700,
+    color: vars.color.amber,
+    borderColor: vars.color.amber,
+    ':hover': { borderColor: vars.color.amber, background: AMBER_DIM },
+}]);
