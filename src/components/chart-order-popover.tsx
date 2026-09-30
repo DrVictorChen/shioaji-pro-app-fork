@@ -5,7 +5,7 @@
 // 「500 股」＝盤中零股、「1 張」＝整股、「2 口」＝期貨）。
 
 import { Settings2 } from 'lucide-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
     chartOrderChipLabel,
     chartOrderRows,
@@ -76,6 +76,7 @@ export function OrderSettingsButton({
     ariaLabel,
     className,
     onOpenChange,
+    align = 'start',
 }: {
     market: ChartOrderMarket;
     settings: ChartOrderSettings;
@@ -90,8 +91,13 @@ export function OrderSettingsButton({
     className?: string;
     /** lets the host panel suspend its own hotkeys while the popover is open */
     onOpenChange?: (open: boolean) => void;
+    /** 'panel': span the host row (its nearest positioned ancestor) — for
+     * narrow panels where a button-anchored popover would be clipped */
+    align?: 'start' | 'panel';
 }) {
     const [open, setOpenState] = useState(false);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const [panelTop, setPanelTop] = useState<number | undefined>(undefined);
     const setOpen = (next: boolean | ((v: boolean) => boolean)) => setOpenState(prev => {
         const value = typeof next === 'function' ? next(prev) : next;
         if (value !== prev) onOpenChange?.(value);
@@ -108,15 +114,20 @@ export function OrderSettingsButton({
         return () => window.removeEventListener('keydown', onKey, true);
     }, [open]);
     return (
-        <span className={`${styles.anchor}${className ? ` ${className}` : ''}`}>
+        <span className={`${styles.anchor}${align === 'panel' ? ` ${styles.anchorStatic}` : ''}${className ? ` ${className}` : ''}`}>
             <button
+                ref={buttonRef}
                 type='button'
                 className={styles.chip[open ? 'open' : 'closed']}
                 title={`${layout.title}\n${summary}`}
                 aria-label={ariaLabel}
                 aria-haspopup='dialog'
                 aria-expanded={open}
-                onClick={() => setOpen(v => !v)}
+                onClick={() => {
+                    const b = buttonRef.current;
+                    if (align === 'panel' && b && Number.isFinite(b.offsetTop)) setPanelTop(b.offsetTop + b.offsetHeight + 4);
+                    setOpen(v => !v);
+                }}
             >
                 <Settings2 size={11} aria-hidden />
                 {chip !== undefined && <span className={styles.chipQty}>{chip}</span>}
@@ -130,6 +141,8 @@ export function OrderSettingsButton({
                         onChange={onChange}
                         onSaveDefault={onSaveDefault}
                         onClose={() => setOpen(false)}
+                        align={align}
+                        top={panelTop}
                         layout={layout}
                         contractLabel={contractLabel}
                         summary={summary}
@@ -191,12 +204,16 @@ export function OrderSettingsPanel({
     layout,
     contractLabel,
     summary,
+    align = 'start',
+    top,
 }: {
     market: ChartOrderMarket;
     settings: ChartOrderSettings;
     onChange: (next: ChartOrderSettings) => void;
     onSaveDefault: () => void;
     onClose: () => void;
+    align?: 'start' | 'panel';
+    top?: number;
     layout: OrderSettingsLayout;
     contractLabel: string;
     summary: string;
@@ -209,9 +226,11 @@ export function OrderSettingsPanel({
     const max = odd ? ODD_LOT_MAX_SHARES : 9999;
     const account = layout.account;
     return (
-        <div className={styles.pop} role='dialog' aria-label={layout.title}>
+        <div className={align === 'panel' ? `${styles.pop} ${styles.popPanel}` : styles.pop}
+            style={align === 'panel' && top !== undefined ? { top } : undefined}
+            role='dialog' aria-label={layout.title}>
             <div className={styles.head}>
-                <span>{layout.title}</span>
+                <span className={styles.headTitle}>{layout.title}</span>
                 <span className={styles.headNote} title={contractLabel}>{contractLabel} · {layout.scope}</span>
             </div>
             {account && (

@@ -49,6 +49,8 @@ export const pop = style({
     zIndex: 41,
     width: '19rem',
     display: 'grid',
+    // long contract names must shrink (ellipsis), never widen the popover
+    gridTemplateColumns: 'minmax(0, 1fr)',
     gap: '8px',
     padding: '10px',
     fontFamily: vars.font.body,
@@ -60,6 +62,21 @@ export const pop = style({
     boxShadow: '0 12px 30px rgba(0, 0, 0, 0.35)',
 });
 
+// narrow panels (閃電下單): the popover spans the host row (the nearest
+// positioned ancestor) instead of hanging off the button, so it never
+// overflows the panel; `top` is set from the button position when opened
+export const anchorStatic = style({
+    position: 'static',
+});
+
+export const popPanel = style({
+    left: '6px',
+    right: '6px',
+    width: 'auto',
+    maxWidth: '20rem',
+    marginLeft: 'auto',
+});
+
 export const head = style({
     display: 'flex',
     alignItems: 'baseline',
@@ -69,7 +86,13 @@ export const head = style({
     fontSize: '0.74rem',
 });
 
+export const headTitle = style({
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+});
+
 export const headNote = style({
+    minWidth: 0,
     fontWeight: 400,
     fontSize: '0.62rem',
     color: vars.color.mutedForeground,

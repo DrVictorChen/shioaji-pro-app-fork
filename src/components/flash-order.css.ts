@@ -94,6 +94,8 @@ export const rowBreak = style({
 
 // wraps so an 8-strip tile (~240px wide) still shows every control
 export const controls = style({
+    // the settings popover spans this row (see OrderSettingsButton align='panel')
+    position: 'relative',
     display: 'flex',
     alignItems: 'center',
     flexWrap: 'wrap',
