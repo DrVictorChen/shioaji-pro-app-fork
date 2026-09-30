@@ -35,7 +35,11 @@ import {
 } from '../lib/odd-spread';
 import { execSummary, isTerminalPhase, PHASE_LABEL, type ExecMode, type ExecPlan } from '../lib/odd-spread-exec';
 import {
+    candidateOrders,
+    claimOrder,
     dismissSpreadExecution,
+    ENV_PAUSED_TEXT,
+    envMatches,
     hedgeUnitLabel,
     oddSpreadExecUnavailable,
     refreshHedgeOrders,
@@ -46,6 +50,8 @@ import {
 } from '../lib/odd-spread-service';
 import { requestOrderConfirm, accountConfirmLabel } from '../lib/order-confirm';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
+import { getApiBase } from '../lib/runtime';
+import { useServerInfo } from '../lib/server-info-store';
 import { getRiskSettings } from '../lib/risk';
 import { notify, placeQuickOrder } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
@@ -80,6 +86,8 @@ export interface OddSpreadViewProps {
     exec?: SpreadExecRecord;
     /** 兩腳送單不可用的原因（彈出視窗等）；null＝可用 */
     execUnavailable: string | null;
+    /** 執行綁定的伺服器／模擬正式環境與目前連線不同 */
+    execPaused?: boolean;
     onOrdersChanged?: () => void;
     /** 測試與截圖用：初始張數 */
     initialLots?: number;
@@ -104,6 +112,8 @@ export function OddSpread(props: {
     const inventoryShares = known ? sellableShares(scopedPositions as Parameters<typeof sellableShares>[0], scopedTrades, contract.code) : null;
     const held = known ? sellableShares(scopedPositions as Parameters<typeof sellableShares>[0], [], contract.code) : 0;
     const exec = useSpreadExecution(contract.code, account);
+    const info = useServerInfo();
+    const execPaused = !!exec && !envMatches(exec.env, { base: getApiBase(), simulation: info?.simulation });
     return (
         <OddSpreadView
             contract={contract}
@@ -114,6 +124,7 @@ export function OddSpread(props: {
             account={account}
             exec={exec}
             execUnavailable={oddSpreadExecUnavailable()}
+            execPaused={execPaused}
             onOrdersChanged={onOrdersChanged}
         />
     );
@@ -139,7 +150,7 @@ function NumPref({ label, value, onChange, title, width = 'narrow' }: { label: s
 }
 
 export function OddSpreadView({
-    contract, feed, inventoryShares, reservedShares = 0, live, account, exec, execUnavailable, onOrdersChanged, initialLots = 1,
+    contract, feed, inventoryShares, reservedShares = 0, live, account, exec, execUnavailable, execPaused = false, onOrdersChanged, initialLots = 1,
 }: OddSpreadViewProps) {
     const privMoney = usePrivacyMoney();
     const [lots, setLots] = useState(initialLots);
@@ -150,6 +161,8 @@ export function OddSpreadView({
     const [discountText, setDiscountText] = useState(() => String(Math.round(prefs.discount * 100) / 10));
     const [taxText, setTaxText] = useState<string | null>(null);
     const [armed, setArmed] = useState(false);
+    // 點價單結果不明（可能已送出）：鎖住點價，直到使用者核對委託後解除
+    const [clickLock, setClickLock] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const inflight = useRef(new Set<string>());
 
@@ -194,7 +207,7 @@ export function OddSpreadView({
         if (execUnavailable) return '請在主視窗執行';
         if (!live) return '行情或交易狀態未連線';
         if (!account) return '沒有可用的證券帳戶';
-        if (running) return exec?.state.phase === 'unknown' ? '有委託結果未確認' : '價差單執行中';
+        if (running) return execPaused ? '執行暫停（環境已切換）' : exec?.state.phase === 'unknown' ? '有委託結果未確認' : '價差單執行中';
         if (busy) return '確認中';
         if (q.block === 'inventory' && inventoryShares === null) return '庫存未知';
         return q.block ? BLOCK_LABEL[q.block] : null;
@@ -253,7 +266,7 @@ export function OddSpreadView({
 
     // 點量下單：同閃電下單，要先啟用點價；依設定跳委託確認
     const placeAt = useCallback(async (market: 'round' | 'odd', action: Action, price: number) => {
-        if (!armed || !account) return;
+        if (!armed || !account || clickLock) return;
         const key = `${market}:${action}:${price}`;
         if (inflight.current.has(key)) return;
         inflight.current.add(key);
@@ -294,6 +307,14 @@ export function OddSpreadView({
             if (e instanceof Error && e.name === 'OrderConfirmCancelled') return;
             const msg = e instanceof Error ? e.message : String(e);
             const notStarted = !!(e && typeof e === 'object' && 'mutationNotStarted' in e);
+            const what = market === 'odd'
+                ? `零股 ${slices.length > 1 ? `第 ${sent.length + 1}/${slices.length} 筆 ` : ''}${int(slices[sent.length]?.quantity ?? effOdd)} 股`
+                : `整股 ${lots} 張`;
+            if (!notStarted) {
+                // 可能已送到券商：鎖定點價，核對前不可重送（含拆單第一筆逾時）
+                setArmed(false);
+                setClickLock(`${contract.code} ${action === 'Buy' ? '買' : '賣'} ${what} @ ${fmtPrice(price)} 結果未確認${sent.length > 0 ? `（已送出 ${sent.join('、')}）` : ''}`);
+            }
             if (sent.length > 0) {
                 // 拆單只送出一部分：說清楚哪幾筆已送出，鎖定點價避免整筆重送
                 const idx = sent.length + 1;
@@ -305,12 +326,16 @@ export function OddSpreadView({
                 });
                 onOrdersChanged?.();
             } else {
-                notify({ kind: 'err', title: '整零價差點價下單失敗', body: `${notStarted ? '' : '結果未確認，請核對委託：'}${msg}` });
+                notify({
+                    kind: 'err',
+                    title: notStarted ? '整零價差點價下單失敗' : '點價委託結果未確認',
+                    body: notStarted ? msg : `${what} @ ${fmtPrice(price)} 可能已送出：${msg}。點價已鎖定，請先核對委託，勿重送`,
+                });
             }
         } finally {
             inflight.current.delete(key);
         }
-    }, [armed, account, contract, lots, effOdd, onOrdersChanged]);
+    }, [armed, clickLock, account, contract, lots, effOdd, onOrdersChanged]);
 
     const invLots = inventoryShares === null ? null : Math.floor(inventoryShares / SHARES_PER_LOT);
     const invOdd = inventoryShares === null ? null : inventoryShares % SHARES_PER_LOT;
@@ -340,6 +365,13 @@ export function OddSpreadView({
                 </div>
             )}
             {execUnavailable && <div className={styles.notice}>{execUnavailable}；點價單筆下單仍可使用</div>}
+            {execPaused && <div className={styles.notice}>{ENV_PAUSED_TEXT}：此價差單在另一個伺服器／模擬正式環境開始，切回原環境後才會繼續送單與對帳</div>}
+            {clickLock && (
+                <div className={styles.notice} role='alert'>
+                    {clickLock}；點價已鎖定，請先在委託查詢核對
+                    <button className={styles.noticeBtn} onClick={() => setClickLock(null)}>已核對委託，解除鎖定</button>
+                </div>
+            )}
             <div className={styles.cards}>
                 {DIRECTIONS.map(d => (
                     <SpreadCard
@@ -355,8 +387,8 @@ export function OddSpreadView({
                 <span className={styles.groupCell}>整股（張）</span>
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
-                    disabled={!live || !account}
-                    title={armed ? '點價下單中 — 點擊或 Esc 鎖定' : '啟用後點左側量＝整股限價、右側量＝零股限價'}
+                    disabled={!live || !account || !!clickLock}
+                    title={clickLock ? '有點價委託結果未確認，核對後解除鎖定' : armed ? '點價下單中 — 點擊或 Esc 鎖定' : '啟用後點左側量＝整股限價、右側量＝零股限價'}
                     onClick={() => setArmed(a => !a)}
                 >
                     {armed ? '點價中' : '啟用點價'}
@@ -495,7 +527,7 @@ export function OddSpreadView({
                         onChange={v => { if (Number.isInteger(v) && v >= 0 && v <= 50) updatePrefs({ ...prefs, maxSlipTicks: v }); }} />
                     <span>檔</span>
                 </div>
-                {exec && exec.state.started && <ExecStatus rec={exec} />}
+                {exec && exec.state.started && <ExecStatus rec={exec} paused={execPaused} />}
                 <div className={styles.btns}>
                     {DIRECTIONS.map(d => {
                         const q = quotes[d];
@@ -613,15 +645,17 @@ async function acceptHedge(rec: SpreadExecRecord) {
     spreadExecAction(rec.id, { type: 'hedgeAccept', orders });
 }
 
-function ExecStatus({ rec }: { rec: SpreadExecRecord }) {
+function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean }) {
     const s = rec.state;
     const sum = execSummary(s);
     const done = isTerminalPhase(s.phase);
     const unknown = s.slots.filter(x => x.status === 'unknown');
+    const cancelFailed = s.slots.filter(x => x.cancelState === 'failed' && x.status === 'working');
     const p = s.pendingHedge;
+    const slotText = (x: { leg: string; quantity: number; price: number }) => `${x.leg === 'odd' ? '零股' : '整股'} ${int(x.quantity)}${x.leg === 'odd' ? ' 股' : ' 張'} @ ${fmtPrice(x.price)}`;
     return (
         <div className={styles.execBar} role='status'>
-            <span className={styles.execPhase}>{DIRECTION_LABEL[s.plan.direction]} · {PHASE_LABEL[s.phase]}</span>
+            <span className={styles.execPhase}>{DIRECTION_LABEL[s.plan.direction]} · {paused ? ENV_PAUSED_TEXT : PHASE_LABEL[s.phase]}</span>
             <span className={styles.execNums}>
                 零股 {int(sum.oddFilledShares)}/{int(sum.oddPlannedShares)} 股 · 整股 {sum.roundFilledLots}/{s.plan.lots} 張
             </span>
@@ -630,10 +664,33 @@ function ExecStatus({ rec }: { rec: SpreadExecRecord }) {
                     未配對 {sum.unhedgedShares > 0 ? '零股多' : '整股多'} {int(Math.abs(sum.unhedgedShares))} 股
                 </span>
             )}
-            {unknown.length > 0 && (
+            {paused && (
                 <span className={styles.execDetail}>
-                    {unknown.map(x => `${x.leg === 'odd' ? '零股' : '整股'} ${int(x.quantity)}${x.leg === 'odd' ? ' 股' : ' 張'} @ ${fmtPrice(x.price)}`).join('、')}
-                    ：可能已送出但未收到回應，已暫停後續送單；委託列出現後自動接回
+                    此單在 {rec.env.simulation ? '模擬' : '正式'}環境（{rec.env.base}）開始；目前連線不同，暫停送單與對帳，切回後自動繼續
+                </span>
+            )}
+            {unknown.map(x => {
+                const candidates = paused ? [] : candidateOrders(rec.id, x.key);
+                return (
+                    <span key={x.key} className={styles.execDetail}>
+                        {slotText(x)}：可能已送出但未收到回應，已暫停後續送單；帶本單標記的委託出現後自動接回
+                        {candidates.length > 0 && (
+                            <span className={styles.execActions}>
+                                委託列有相同價量但沒有標記的委託，是否為這筆：
+                                {candidates.map(t => (
+                                    <button key={t.order.id} className={styles.smallBtn} title='指定後以此委託追蹤成交'
+                                        onClick={() => claimOrder(rec.id, x.key, t.order.id)}>
+                                        是 {t.order.ordno || t.order.seqno || t.order.id}
+                                    </button>
+                                ))}
+                            </span>
+                        )}
+                    </span>
+                );
+            })}
+            {cancelFailed.length > 0 && (
+                <span className={styles.execDetail}>
+                    刪單失敗：{cancelFailed.map(x => `${slotText(x)}（${x.cancelError ?? '未知原因'}）`).join('、')}；原單可能仍會成交，請再按「取消剩餘」重試
                 </span>
             )}
             {p && (
@@ -644,14 +701,15 @@ function ExecStatus({ rec }: { rec: SpreadExecRecord }) {
             <span className={styles.execActions}>
                 {p && (
                     <>
-                        <button className={styles.smallBtnPrimary} onClick={() => void acceptHedge(rec)}>以最新價補單</button>
-                        <button className={styles.smallBtn} title='不補單，保留未配對部位自行處理' onClick={() => spreadExecAction(rec.id, { type: 'hedgeDecline' })}>取消</button>
+                        <button className={styles.smallBtnPrimary} disabled={paused} onClick={() => void acceptHedge(rec)}>以最新價補單</button>
+                        <button className={styles.smallBtn} disabled={paused} title='不補單，保留未配對部位自行處理' onClick={() => spreadExecAction(rec.id, { type: 'hedgeDecline' })}>取消</button>
                     </>
                 )}
                 {unknown.length > 0 && (
                     <button
                         className={styles.smallBtn}
-                        title='已在委託查詢確認這些委託沒有送出；若之後仍出現在委託列，會自動接回並重新計算'
+                        disabled={paused}
+                        title='已在委託查詢確認這些委託沒有送出；若之後仍出現帶本單標記的委託，會自動接回並重新計算'
                         onClick={() => { for (const x of unknown) spreadExecAction(rec.id, { type: 'resolveUnknown', key: x.key }); }}
                     >
                         已核對：未送出
@@ -660,10 +718,11 @@ function ExecStatus({ rec }: { rec: SpreadExecRecord }) {
                 {!done && !p && (
                     <button
                         className={styles.smallBtn}
+                        disabled={paused}
                         title='刪除未成交的委託；已成交的零股會以整張配對送出整股，不足一張列為未配對'
                         onClick={() => spreadExecAction(rec.id, { type: 'cancel' })}
                     >
-                        取消剩餘
+                        {cancelFailed.length > 0 ? '再次取消' : '取消剩餘'}
                     </button>
                 )}
                 {done && <button className={styles.smallBtn} onClick={() => dismissSpreadExecution(rec.id)}>關閉</button>}

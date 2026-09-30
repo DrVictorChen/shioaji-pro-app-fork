@@ -4,8 +4,14 @@
 // 引擎，只在主視窗執行）。每筆執行保存在本機（重新整理後接回），並：
 // - 依 odd-spread-exec 狀態機的指令送單／刪單（source:'auto'，整筆價差已在
 //   開始前確認；零股帶 IntradayOdd；委託帶 custom_field 標記）。
-// - 訂閱委託列（trading-state），以委託編號或標記＋商品／方向／價格／數量
-//   對回每一筆：成交先於下單回應、下單結果不明（unknown）事後出現，都能接回。
+// - 每筆委託帶唯一標記（custom_field，最多 6 字元：o＋執行代碼 3 碼＋序號 2 碼）；
+//   訂閱委託列（trading-state），只以委託編號或「完全相同的標記」對回：成交先於
+//   下單回應、結果不明（unknown）事後出現都能接回。沒有標記的委託（投影遺失）
+//   絕不自動認領，只列為候選，由使用者在面板指定。
+// - 執行綁定開始時的伺服器（API base）與模擬／正式模式；目前連線不同時暫停：
+//   不送單、不對帳、回報先保留，同一環境回來後才繼續。
+// - 結束的執行保留到當日結束（晚到成交仍會對帳、必要時補第二腳）；本機保存
+//   永不丟棄執行中或結果不明的紀錄，只限制已結束紀錄的數量。
 // - 第二腳以當下整股／零股委託簿重新定價（repriceHedge）。
 //
 // 彈出視窗沒有這個服務：關掉視窗就無法追蹤第二腳，所以彈出視窗停用兩腳送單
@@ -15,7 +21,10 @@ import { useSyncExternalStore } from 'react';
 import { displayBook } from './display-book';
 import { accountMatches } from './flash-account';
 import { claimExecutor, isExecutor, isMainWindow } from './main-window-commands';
+import { getApiBase } from './runtime';
+import { knownServerInfo, subscribeServerInfo } from './server-info-store';
 import { SHARES_PER_LOT, isOddLot } from './odd-lot';
+import type { LegOrder } from './odd-spread';
 import { repriceHedge, type FeeSettings, type SideBook } from './odd-spread';
 import {
     execReduce,
@@ -27,6 +36,7 @@ import {
     type ExecPlan,
     type ExecState,
     type LegKind,
+    type OrderSlot,
 } from './odd-spread-exec';
 import { retainContractQuotes } from './quote-ownership';
 import { cancelOrders } from './shioaji';
@@ -38,18 +48,32 @@ import type { AccountedTrade, Trade } from './types/order';
 import type { Account } from './types/portfolio';
 import { stepPrice } from './utils/ticksize';
 
-export const ODD_SPREAD_TAG = 'sjodsp';
 const STORE_KEY = 'sj-pro-odd-spread-exec-v1';
-const MAX_KEPT = 20;
+const TAG_KEY = 'sj-pro-odd-spread-tags-v1';
+/** 已結束紀錄最多保存幾筆（當日內）；執行中／結果不明的永不丟棄 */
+const MAX_TERMINAL = 50;
+
+/** 送單環境：API base＋模擬／正式 */
+export interface ExecEnv {
+    base: string;
+    simulation: boolean;
+}
 
 export interface SpreadExecRecord {
     id: string;
+    /** 委託標記前綴（3 碼 base36），同日唯一 */
+    tagBase: string;
+    env: ExecEnv;
     contract: ContractInfo;
     account: Account;
     fees: FeeSettings;
     maxSlipTicks: number;
     startedAt: number;
     state: ExecState;
+    /** 使用者已關閉顯示（仍追蹤晚到成交；重新開啟時再顯示） */
+    dismissed?: boolean;
+    /** 環境不符期間保留的回報，同一環境回來後依序處理 */
+    held?: ExecEvent[];
 }
 
 let records: SpreadExecRecord[] = [];
@@ -62,13 +86,74 @@ function emit() {
     for (const l of listeners) l();
 }
 
+/** 台北時間當日 00:00（ms） */
+function taipeiDayStart(now: number): number {
+    const tw = now + 8 * 3600_000;
+    return tw - (tw % 86_400_000) - 8 * 3600_000;
+}
+
+/** 保存規則：執行中／結果不明全留；已結束的只留當日、最多 MAX_TERMINAL 筆 */
+export function pruneRecords(list: SpreadExecRecord[], now = Date.now()): SpreadExecRecord[] {
+    const day = taipeiDayStart(now);
+    const terminal = list.filter(r => isTerminalPhase(r.state.phase) && r.startedAt >= day);
+    const keepTerminal = new Set(terminal.slice(-MAX_TERMINAL).map(r => r.id));
+    return list.filter(r => !isTerminalPhase(r.state.phase) || keepTerminal.has(r.id));
+}
+
 function persist() {
     try {
-        localStorage.setItem(STORE_KEY, JSON.stringify(records.slice(-MAX_KEPT)));
+        localStorage.setItem(STORE_KEY, JSON.stringify(pruneRecords(records)));
     } catch {
         // 本機儲存不可用：只在本次有效
     }
 }
+
+// ---- 委託標記 ----
+
+/** 此執行某筆委託的 custom_field：o＋執行代碼 3 碼＋序號 2 碼（共 6 字元） */
+export function slotTag(tagBase: string, key: string): string {
+    const n = Number(key.split(':')[1] ?? 0);
+    return `o${tagBase}${n.toString(36).padStart(2, '0')}`;
+}
+
+function usedTagBases(now: number): { day: number; bases: string[] } {
+    try {
+        const v = JSON.parse(localStorage.getItem(TAG_KEY) ?? 'null') as { day: number; bases: string[] } | null;
+        if (v && v.day === taipeiDayStart(now) && Array.isArray(v.bases)) return v;
+    } catch {
+        // 讀不到就當作今天還沒用過
+    }
+    return { day: taipeiDayStart(now), bases: [] };
+}
+
+function newTagBase(now: number): string {
+    const used = usedTagBases(now);
+    const taken = new Set([...used.bases, ...records.map(r => r.tagBase)]);
+    let base = '';
+    for (let i = 0; i < 1000; i++) {
+        base = Math.floor(Math.random() * 36 ** 3).toString(36).padStart(3, '0');
+        if (!taken.has(base)) break;
+    }
+    try {
+        localStorage.setItem(TAG_KEY, JSON.stringify({ day: used.day, bases: [...used.bases, base] }));
+    } catch {
+        // 本機儲存不可用：只避開記憶體中的紀錄
+    }
+    return base;
+}
+
+// ---- 環境 ----
+
+export function currentEnv(): { base: string; simulation: boolean | undefined } {
+    return { base: getApiBase(), simulation: knownServerInfo()?.simulation };
+}
+
+/** 執行的環境與目前連線相同？（模擬／正式未知時視為不同） */
+export function envMatches(env: ExecEnv, now: { base: string; simulation: boolean | undefined } = currentEnv()): boolean {
+    return env.base === now.base && now.simulation !== undefined && now.simulation === env.simulation;
+}
+
+export const ENV_PAUSED_TEXT = '環境已切換，執行暫停';
 
 export function tradeReport(t: Trade): { filled: number; status: 'working' | 'filled' | 'cancelled' | 'failed' } {
     const deals = (t.status.deals ?? []).reduce((a, d) => a + (d.quantity || 0), 0);
@@ -116,14 +201,26 @@ function contextFor(rec: SpreadExecRecord): ExecContext {
     };
 }
 
+function replace(next: SpreadExecRecord) {
+    records = records.map(r => (r.id === next.id ? next : r));
+}
+
 function update(id: string, event: ExecEvent) {
     const rec = records.find(r => r.id === id);
     if (!rec) return;
+    // 環境不符：回報先保留，不推進狀態機（避免在別的環境送第二腳）
+    if (!envMatches(rec.env)) {
+        replace({ ...rec, held: [...(rec.held ?? []), event] });
+        persist();
+        emit();
+        return;
+    }
     const before = rec.state;
     const { state, commands } = execReduce(before, event, contextFor(rec));
     if (state === before && commands.length === 0) return;
-    const next = { ...rec, state };
-    records = records.map(r => (r.id === id ? next : r));
+    // 晚到成交讓已關閉的執行重新需要處理時，恢復顯示
+    const next: SpreadExecRecord = { ...rec, state, dismissed: rec.dismissed && isTerminalPhase(state.phase) };
+    replace(next);
     persist();
     emit();
     announce(next, before);
@@ -152,13 +249,22 @@ function announce(rec: SpreadExecRecord, before: ExecState) {
 
 function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands'][number]) {
     if (c.kind === 'cancel') {
-        void cancelOrders([c.orderId]).catch(() => undefined);
+        void cancelOrders([c.orderId]).then(
+            (results) => {
+                const r = results[0];
+                const ok = r?.status === 'fulfilled';
+                const error = !r ? '沒有回應' : r.status === 'rejected' ? (r.reason instanceof Error ? r.reason.message : String(r.reason)) : undefined;
+                if (!ok) notify({ kind: 'err', title: '整零價差：刪單失敗', body: `${rec.contract.code}：${error}；原單可能仍會成交，請在面板再按「取消」重試` });
+                update(rec.id, { type: 'cancelResult', key: c.key, ok, ...(error ? { error } : {}) });
+            },
+            (e: unknown) => update(rec.id, { type: 'cancelResult', key: c.key, ok: false, error: e instanceof Error ? e.message : String(e) }),
+        );
         return;
     }
     void placeQuickOrder(rec.contract, c.action, c.price, c.quantity, {
         account: rec.account,
         source: 'auto',
-        customField: ODD_SPREAD_TAG,
+        customField: slotTag(rec.tagBase, c.key),
         ...(c.leg === 'odd' ? { orderLot: 'IntradayOdd' as const } : {}),
     }).then(
         (trade) => {
@@ -184,26 +290,32 @@ function tradeAccount(t: AccountedTrade) {
     return t.account ?? t.order.account;
 }
 
-/** 委託列 → 各筆執行的成交回報（含尚無委託編號的 sending／unknown） */
-export function reconcile(trades: AccountedTrade[] = getTradingState().trades) {
+function claimedIds(): Set<string> {
     const claimed = new Set<string>();
     for (const r of records) for (const s of r.state.slots) if (s.orderId) claimed.add(s.orderId);
+    return claimed;
+}
+
+function sameOrder(rec: SpreadExecRecord, slot: OrderSlot, x: AccountedTrade): boolean {
+    return accountMatches(tradeAccount(x), rec.account)
+        && x.contract.code === rec.contract.code
+        && x.order.action === slot.action
+        && Math.round(x.order.price * 100) === Math.round(slot.price * 100)
+        && x.order.quantity === slot.quantity
+        && isOddLot(x.order.order_lot) === (slot.leg === 'odd');
+}
+
+/** 委託列 → 各筆執行的成交回報。尚無委託編號的只認「完全相同標記」的委託 */
+export function reconcile(trades: AccountedTrade[] = getTradingState().trades) {
+    const claimed = claimedIds();
     for (const rec of records) {
-        if (!rec.state.started) continue;
+        if (!rec.state.started || !envMatches(rec.env)) continue;
         for (const slot of rec.state.slots) {
             if (slot.status === 'unsent') continue;
             let t = slot.orderId ? trades.find(x => x.order.id === slot.orderId) : undefined;
-            if (!t && !slot.orderId && (slot.status === 'sending' || slot.status === 'unknown' || slot.status === 'failed')) {
-                t = trades.find(x =>
-                    !claimed.has(x.order.id)
-                    && (x.order.custom_field === ODD_SPREAD_TAG || !x.order.custom_field)
-                    && accountMatches(tradeAccount(x), rec.account)
-                    && x.contract.code === rec.contract.code
-                    && x.order.action === slot.action
-                    && Math.round(x.order.price * 100) === Math.round(slot.price * 100)
-                    && x.order.quantity === slot.quantity
-                    && isOddLot(x.order.order_lot) === (slot.leg === 'odd')
-                    && (x.status.order_ts === undefined || x.status.order_ts * 1000 >= rec.startedAt - 60_000));
+            if (!t && !slot.orderId) {
+                const tag = slotTag(rec.tagBase, slot.key);
+                t = trades.find(x => !claimed.has(x.order.id) && x.order.custom_field === tag && sameOrder(rec, slot, x));
                 if (t) {
                     claimed.add(t.order.id);
                     update(rec.id, { type: 'placed', key: slot.key, orderId: t.order.id });
@@ -212,6 +324,29 @@ export function reconcile(trades: AccountedTrade[] = getTradingState().trades) {
             if (t) update(rec.id, { type: 'report', key: slot.key, ...tradeReport(t) });
         }
     }
+}
+
+/** 結果不明那筆的候選委託（同帳戶／商品／方向／價量／單位、未被認領、沒有或相同標記），供使用者指定 */
+export function candidateOrders(id: string, key: string, trades: AccountedTrade[] = getTradingState().trades): AccountedTrade[] {
+    const rec = records.find(r => r.id === id);
+    const slot = rec?.state.slots.find(s => s.key === key);
+    if (!rec || !slot || slot.orderId) return [];
+    const claimed = claimedIds();
+    const tag = slotTag(rec.tagBase, slot.key);
+    return trades.filter(x => !claimed.has(x.order.id) && (!x.order.custom_field || x.order.custom_field === tag) && sameOrder(rec, slot, x));
+}
+
+/** 使用者指定結果不明那筆就是某筆委託 */
+export function claimOrder(id: string, key: string, orderId: string) {
+    const rec = records.find(r => r.id === id);
+    if (!rec) return;
+    if (!envMatches(rec.env)) {
+        notify({ kind: 'err', title: '整零價差', body: ENV_PAUSED_TEXT });
+        return;
+    }
+    if (!candidateOrders(id, key).some(t => t.order.id === orderId)) return;
+    update(id, { type: 'placed', key, orderId });
+    reconcile();
 }
 
 function retainQuotes(rec: SpreadExecRecord) {
@@ -230,6 +365,18 @@ function releaseQuotes(id: string) {
     releases.delete(id);
 }
 
+/** 同一環境回來：依序處理保留的回報，再對帳 */
+function resumeHeld() {
+    for (const rec of records) {
+        if (!rec.held?.length || !envMatches(rec.env)) continue;
+        const events = rec.held;
+        replace({ ...rec, held: [] });
+        for (const e of events) update(rec.id, e);
+    }
+    reconcile();
+    emit();
+}
+
 // 與觸價單引擎同一把主視窗執行鎖（claimExecutor 在同一視窗只建立一次）
 const EXECUTOR_LOCK = 'sj-protection-executor';
 
@@ -246,15 +393,19 @@ export function startOddSpreadService() {
         const parsed = raw ? (JSON.parse(raw) as SpreadExecRecord[]) : [];
         // 重新整理前還在送出中的委託：結果不明，等委託列對上或使用者核對
         records = Array.isArray(parsed)
-            ? parsed.map(r => ({ ...r, state: { ...r.state, slots: r.state.slots.map(s => (s.status === 'sending' ? { ...s, status: 'unknown' as const } : s)) } }))
+            ? pruneRecords(parsed.filter(r => r && r.tagBase && r.env).map(r => ({
+                ...r,
+                state: { ...r.state, slots: r.state.slots.map(s => (s.status === 'sending' ? { ...s, status: 'unknown' as const } : s)) },
+            })))
             : [];
     } catch {
         records = [];
     }
+    persist();
     for (const r of records) if (!isTerminalPhase(r.state.phase)) retainQuotes(r);
     subscribeTradingState(() => reconcile());
-    reconcile();
-    emit();
+    subscribeServerInfo(() => resumeHeld());
+    resumeHeld();
 }
 
 export interface StartSpreadRequest {
@@ -266,7 +417,7 @@ export interface StartSpreadRequest {
 }
 
 export function liveExecutionFor(code: string, account: Account | undefined): SpreadExecRecord | undefined {
-    return records.find(r => r.contract.code === code && accountMatches(r.account, account) && !isTerminalPhase(r.state.phase));
+    return records.find(r => r.contract.code === code && accountMatches(r.account, account) && r.state.started && !isTerminalPhase(r.state.phase));
 }
 
 export function hasLiveSpreadExecution(): boolean {
@@ -279,37 +430,49 @@ export function startSpreadExecution(req: StartSpreadRequest): string {
     if (unavailable) throw new Error(unavailable);
     startOddSpreadService();
     if (liveExecutionFor(req.contract.code, req.account)) throw new Error('此商品已有執行中的價差單（含結果未確認的委託），請先處理');
-    const id = `os-${Date.now().toString(36)}-${++seq}`;
-    records = [...records.filter(r => !(r.contract.code === req.contract.code && accountMatches(r.account, req.account))), {
+    const env = currentEnv();
+    if (env.simulation === undefined) throw new Error('伺服器環境（模擬／正式）尚未確認，請稍後再試');
+    const now = Date.now();
+    const id = `os-${now.toString(36)}-${++seq}`;
+    // 之前的執行（含已結束）保留追蹤晚到成交，不因新執行刪除
+    records = pruneRecords([...records, {
         id,
+        tagBase: newTagBase(now),
+        env: { base: env.base, simulation: env.simulation },
         contract: req.contract,
         account: req.account,
         fees: req.fees,
         maxSlipTicks: req.maxSlipTicks,
-        startedAt: Date.now(),
+        startedAt: now,
         state: initExec(req.plan),
-    }];
+    }], now);
     update(id, { type: 'start' });
     return id;
 }
 
 export function spreadExecAction(id: string, event: Extract<ExecEvent, { type: 'cancel' | 'hedgeAccept' | 'hedgeDecline' | 'resolveUnknown' }>) {
+    const rec = records.find(r => r.id === id);
+    if (!rec) return;
+    if (!envMatches(rec.env)) {
+        notify({ kind: 'err', title: '整零價差', body: `${ENV_PAUSED_TEXT}：請切回開始時的伺服器與${rec.env.simulation ? '模擬' : '正式'}環境再操作` });
+        return;
+    }
     update(id, event);
 }
 
 /** 以最新委託簿重算補單建議（面板「以最新價補單」前呼叫） */
-export function refreshHedgeOrders(id: string) {
+export function refreshHedgeOrders(id: string): LegOrder[] | undefined {
     const rec = records.find(r => r.id === id);
     const p = rec?.state.pendingHedge;
     if (!rec || !p) return undefined;
     return contextFor(rec).quoteHedge(p.leg, p.action, p.quantity).orders;
 }
 
+/** 關閉顯示：已結束的執行仍保留到當日結束，晚到成交照樣對帳 */
 export function dismissSpreadExecution(id: string) {
     const rec = records.find(r => r.id === id);
     if (!rec || (rec.state.started && !isTerminalPhase(rec.state.phase))) return;
-    records = records.filter(r => r.id !== id);
-    releaseQuotes(id);
+    replace({ ...rec, dismissed: true });
     persist();
     emit();
 }
@@ -321,12 +484,12 @@ function subscribe(l: () => void) {
 
 const getRecords = () => records;
 
-/** 面板顯示：此商品／帳戶最近一筆執行（含已結束、尚未關閉的） */
+/** 面板顯示：此商品／帳戶最近一筆未關閉（或重新需要處理）的執行 */
 export function useSpreadExecution(code: string, account: Account | undefined): SpreadExecRecord | undefined {
     const all = useSyncExternalStore(subscribe, getRecords);
     for (let i = all.length - 1; i >= 0; i--) {
         const r = all[i]!;
-        if (r.contract.code === code && accountMatches(r.account, account)) return r;
+        if (r.contract.code === code && accountMatches(r.account, account) && !r.dismissed) return r;
     }
     return undefined;
 }

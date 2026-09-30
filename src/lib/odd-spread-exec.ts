@@ -58,7 +58,9 @@ export interface OrderSlot {
     orderId?: string;
     /** 累計成交（同 quantity 單位） */
     filled: number;
-    cancelSent?: boolean;
+    /** 刪單狀態：pending＝已發出等待結果、sent＝券商已受理、failed＝刪單失敗（可再按取消重試） */
+    cancelState?: 'pending' | 'sent' | 'failed';
+    cancelError?: string;
     /** 送出途中／結果不明時按了取消：拿到委託編號就刪單 */
     cancelWanted?: boolean;
     /** 第二腳補單 */
@@ -119,6 +121,8 @@ export type ExecEvent =
     | { type: 'placeFailed'; key: string; error: string }
     | { type: 'report'; key: string; filled: number; status: 'working' | 'filled' | 'cancelled' | 'failed' }
     | { type: 'cancel' }
+    /** 刪單請求的結果 */
+    | { type: 'cancelResult'; key: string; ok: boolean; error?: string }
     /** 使用者核對後確認 unknown 那筆沒有送出 */
     | { type: 'resolveUnknown'; key: string }
     | { type: 'hedgeAccept'; orders?: LegOrder[] }
@@ -231,9 +235,10 @@ function cancelWorking(slots: OrderSlot[], commands: ExecCommand[]): OrderSlot[]
     return slots.map(s => {
         if (s.status === 'unsent') return { ...s, status: 'cancelled' };
         if (s.status === 'sending' || s.status === 'unknown' || (s.status === 'working' && !s.orderId)) return { ...s, cancelWanted: true };
-        if (s.status === 'working' && s.orderId && !s.cancelSent) {
+        // 已發出、尚未有結果的不重送；失敗或已受理但仍在委託中的可再刪
+        if (s.status === 'working' && s.orderId && s.cancelState !== 'pending') {
             commands.push({ kind: 'cancel', key: s.key, orderId: s.orderId });
-            return { ...s, cancelSent: true };
+            return { ...s, cancelState: 'pending', cancelError: undefined };
         }
         return s;
     });
@@ -359,7 +364,7 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
                 const next: OrderSlot = { ...s, status, orderId: event.orderId };
                 if (s.cancelWanted && status === 'working') {
                     commands.push({ kind: 'cancel', key: s.key, orderId: event.orderId });
-                    next.cancelSent = true;
+                    next.cancelState = 'pending';
                 }
                 return next;
             }));
@@ -367,6 +372,10 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
             return done(mapSlot(state, event.key, s => (s.status === 'sending' ? { ...s, status: 'unknown', error: event.error } : null)));
         case 'placeFailed':
             return done(mapSlot(state, event.key, s => (s.status === 'sending' ? { ...s, status: 'failed', error: event.error } : null)));
+        case 'cancelResult':
+            return done(mapSlot(state, event.key, s => (s.cancelState === 'pending'
+                ? { ...s, cancelState: event.ok ? 'sent' : 'failed', cancelError: event.ok ? undefined : event.error }
+                : null)));
         case 'resolveUnknown':
             return done(mapSlot(state, event.key, s => (s.status === 'unknown' ? { ...s, status: 'failed' } : null)));
         case 'report':

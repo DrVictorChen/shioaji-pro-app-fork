@@ -459,3 +459,14 @@ export const smallBtnPrimary = style([smallBtn, {
     borderColor: vars.color.amber,
     ':hover': { borderColor: vars.color.amber, background: AMBER_DIM },
 }]);
+
+export const noticeBtn = style({
+    marginLeft: 8,
+    fontSize: '0.62rem',
+    padding: '1px 6px',
+    borderRadius: vars.radius.sm,
+    border: `1px solid ${vars.color.amber}`,
+    background: 'transparent',
+    color: vars.color.amber,
+    cursor: 'pointer',
+});

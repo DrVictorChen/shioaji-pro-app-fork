@@ -390,6 +390,32 @@ describe('simultaneous：兩腳同時送', () => {
     });
 });
 
+describe('刪單結果', () => {
+    it('刪單失敗可再按取消重試；等待結果中不重送；受理後仍在委託中可再刪', () => {
+        const r = run(SELL_ODD, [
+            { type: 'start' },
+            { type: 'placed', key: 'odd:0', orderId: 'A' },
+            { type: 'placed', key: 'odd:1', orderId: 'B' },
+            { type: 'cancel' },
+            { type: 'cancel' },
+        ]);
+        expect(r.commands.filter(c => c.kind === 'cancel')).toHaveLength(2);
+        expect(r.state.slots.map(x => x.cancelState)).toEqual(['pending', 'pending']);
+        const f = run(SELL_ODD, [
+            { type: 'cancelResult', key: 'odd:0', ok: false, error: '網路錯誤' },
+            { type: 'cancelResult', key: 'odd:1', ok: true },
+        ], ctxOf(), r.state);
+        expect(f.state.slots[0]).toMatchObject({ cancelState: 'failed', cancelError: '網路錯誤', status: 'working' });
+        expect(f.state.slots[1]).toMatchObject({ cancelState: 'sent' });
+        const retry = execReduce(f.state, { type: 'cancel' }, ctxOf());
+        expect(retry.commands).toEqual([
+            { kind: 'cancel', key: 'odd:0', orderId: 'A' },
+            { kind: 'cancel', key: 'odd:1', orderId: 'B' },
+        ]);
+        expect(retry.state.slots[0]!.cancelError).toBeUndefined();
+    });
+});
+
 describe('其他', () => {
     it('未開始就取消 → cancelled，之後 start 不送單', () => {
         const { state, commands } = run(SELL_ODD, [{ type: 'cancel' }, { type: 'start' }]);
