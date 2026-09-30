@@ -18,7 +18,7 @@ import {
     Square,
     Trash2,
 } from 'lucide-react';
-import { useState, type ComponentType } from 'react';
+import { useRef, useState, type ComponentType } from 'react';
 import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
 import {
     DRAWING_PALETTE,
@@ -265,9 +265,17 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
 // 水平線的精確價格輸入。編輯中的字串走 local state，不然每打一個字就把
 // 線移到半成品價位（打「25100」會先跳到 2 元、25 元…）；Enter／失焦才
 // 送出，Esc 還原。
-function PriceInput({ price, onCommit }: { price: number; onCommit: (p: number) => void }) {
+export function PriceInput({ price, onCommit }: { price: number; onCommit: (p: number) => void }) {
     const [draft, setDraft] = useState<string | null>(null);
+    // Enter／Esc 之後的 blur() 會同步觸發 onBlur，而那時 draft 還是舊值
+    // （setDraft 要等下次 render）。用 ref 標記這次已處理，不然 Esc 會把
+    // 打到一半的價格套用上去、Enter 會套用兩次。
+    const handled = useRef(false);
     const commit = () => {
+        if (handled.current) {
+            handled.current = false;
+            return;
+        }
         if (draft === null) return;
         const v = Number(draft);
         if (Number.isFinite(v) && v > 0) onCommit(v);
@@ -282,12 +290,15 @@ function PriceInput({ price, onCommit }: { price: number; onCommit: (p: number) 
             aria-label='水平線價格'
             onChange={(e) => setDraft(e.target.value)}
             onBlur={commit}
+            onFocus={() => (handled.current = false)}
             onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                     commit();
+                    handled.current = true;
                     e.currentTarget.blur();
                 } else if (e.key === 'Escape') {
                     setDraft(null); // 還原輸入
+                    handled.current = true;
                     e.currentTarget.blur();
                     e.stopPropagation(); // 不連帶取消圖上的選取
                 }
