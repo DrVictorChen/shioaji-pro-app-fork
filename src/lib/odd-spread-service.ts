@@ -37,6 +37,9 @@ import {
     type ExecState,
     type LegKind,
     type OrderSlot,
+    type ReportStatus,
+    allBrokerFinal,
+    restoreAfterReload,
 } from './odd-spread-exec';
 import { retainContractQuotes } from './quote-ownership';
 import { cancelOrders } from './shioaji';
@@ -93,12 +96,13 @@ function taipeiDayStart(now: number): number {
 }
 
 /**
- * 已完全了結：已結束、沒有保留中的回報、沒有結果不明的刪單，且兩腳已配對
- * （或使用者已關閉、自行處理未配對部位）。只有了結的紀錄可以被丟棄。
+ * 已完全了結：已結束、沒有保留中的回報、每筆委託都是券商確認的終態（刪單要有
+ * 刪單量對得上；使用者標記「未送出」只是暫定、不算），且兩腳已配對或使用者已
+ * 關閉。只有了結的紀錄可以被丟棄。
  */
 export function isSettled(r: SpreadExecRecord): boolean {
     if (!isTerminalPhase(r.state.phase) || (r.held?.length ?? 0) > 0) return false;
-    if (r.state.slots.some(s => s.status === 'unknown' || s.status === 'sending' || s.status === 'working' || s.cancelState === 'pending' || s.cancelState === 'unknown')) return false;
+    if (!allBrokerFinal(r.state)) return false;
     return execSummary(r.state).unhedgedShares === 0 || !!r.dismissed;
 }
 
@@ -165,12 +169,13 @@ export function envMatches(env: ExecEnv, now: { base: string; simulation: boolea
 
 export const ENV_PAUSED_TEXT = '環境已切換，執行暫停';
 
-export function tradeReport(t: Trade): { filled: number; status: 'working' | 'filled' | 'cancelled' | 'failed' } {
+export function tradeReport(t: Trade): { filled: number; status: ReportStatus; cancelled?: number } {
     const deals = (t.status.deals ?? []).reduce((a, d) => a + (d.quantity || 0), 0);
     const filled = Math.max(t.status.deal_quantity || 0, deals);
     const st = t.status.status;
-    const status = st === 'Filled' ? 'filled' : st === 'Cancelled' ? 'cancelled' : st === 'Failed' ? 'failed' : 'working';
-    return { filled, status };
+    const status: ReportStatus = st === 'Filled' ? 'filled' : st === 'Cancelled' ? 'cancelled' : st === 'Failed' ? 'failed' : 'working';
+    const cancelled = Number(t.status.cancel_quantity);
+    return { filled, status, ...(t.status.cancel_quantity !== undefined && Number.isFinite(cancelled) ? { cancelled } : {}) };
 }
 
 /** 兩腳送單在此視窗不可用的原因；可用時回 null */
@@ -406,11 +411,7 @@ export function startOddSpreadService() {
             ? pruneRecords(parsed.filter(r => r && r.tagBase && r.env).map(r => ({
                 ...r,
                 // 送出中 → 結果不明；刪單等待中 → 刪單結果不明（仍在委託中可再取消）
-                state: { ...r.state, slots: r.state.slots.map(s => ({
-                    ...s,
-                    ...(s.status === 'sending' ? { status: 'unknown' as const } : {}),
-                    ...(s.cancelState === 'pending' ? { cancelState: 'unknown' as const } : {}),
-                })) },
+                state: restoreAfterReload(r.state),
             })))
             : [];
     } catch {
@@ -421,6 +422,8 @@ export function startOddSpreadService() {
     subscribeTradingState(() => reconcile());
     subscribeServerInfo(() => resumeHeld());
     resumeHeld();
+    // 接回後以總量重算一次（例如重新發出因重新整理遺失回應的多餘補單刪單）
+    for (const r of records) if (!isSettled(r)) update(r.id, { type: 'refresh' });
 }
 
 export interface StartSpreadRequest {

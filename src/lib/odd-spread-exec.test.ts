@@ -3,6 +3,8 @@ import {
     execReduce,
     execSummary,
     initExec,
+    isBrokerFinal,
+    potentialOf,
     takeOddOrders,
     type ExecCommand,
     type ExecContext,
@@ -413,6 +415,82 @@ describe('刪單結果', () => {
             { kind: 'cancel', key: 'odd:1', orderId: 'B' },
         ]);
         expect(retry.state.slots[0]!.cancelError).toBeUndefined();
+    });
+});
+
+describe('第四輪：總量模型', () => {
+    it('標記「未送出」是暫定：委託之後出現（Submitted）就回到委託中、可刪單；多出的補單自動刪', () => {
+        const r = run(SELL_ODD, [
+            ...oddFilled,
+            { type: 'placeUnknown', key: 'round:2', error: 'timeout' },
+            { type: 'resolveUnknown', key: 'round:2' },
+        ]);
+        // 使用者認為沒送出 → 以當下價補一張
+        expect(places(r.commands).map(c => c.kind === 'place' && c.key)).toEqual(['odd:0', 'odd:1', 'round:2', 'round:3']);
+        expect(r.state.slots.find(x => x.key === 'round:2')).toMatchObject({ status: 'unknown', markedUnsent: true });
+        // 原單其實有送到：出現在委託列
+        const back = run(SELL_ODD, [
+            { type: 'placed', key: 'round:2', orderId: 'R2' },
+            { type: 'report', key: 'round:2', filled: 0, status: 'working' },
+        ], ctxOf(), r.state);
+        expect(back.state.slots.find(x => x.key === 'round:2')).toMatchObject({ status: 'working', markedUnsent: false, orderId: 'R2' });
+        // 兩張在途、只需要一張 → 刪最新的補單（還沒拿到委託編號 → 拿到就刪）
+        expect(potentialOf(back.state, 'round')).toBe(2);
+        expect(back.state.slots.find(x => x.key === 'round:3')).toMatchObject({ cancelWanted: true, surplus: true });
+        const got = execReduce(back.state, { type: 'placed', key: 'round:3', orderId: 'R3' }, ctxOf());
+        expect(got.commands).toEqual([{ kind: 'cancel', key: 'round:3', orderId: 'R3' }]);
+        // 也能由使用者刪回來的那筆
+        const cancel = execReduce(got.state, { type: 'cancel' }, ctxOf());
+        expect(cancel.commands).toEqual([{ kind: 'cancel', key: 'round:2', orderId: 'R2' }]);
+    });
+
+    it('兩腳同時送：補單進行中，刪掉的單晚到成交 → 重算後多出的補單被刪（2,000 股 vs 1 張）', () => {
+        const plan: ExecPlan = { ...SELL_ODD, mode: 'simultaneous' };
+        const r = run(plan, [
+            { type: 'start' },
+            { type: 'placed', key: 'odd:0', orderId: 'A' },
+            { type: 'placed', key: 'odd:1', orderId: 'B' },
+            { type: 'placed', key: 'round:2', orderId: 'R' },
+            { type: 'report', key: 'round:2', filled: 1, status: 'filled' },
+            { type: 'report', key: 'odd:0', filled: 380, status: 'filled' },
+            { type: 'report', key: 'odd:1', filled: 0, status: 'cancelled', cancelled: 620 },
+            { type: 'hedgeAccept', orders: [{ price: 1090, quantity: 620 }] },
+            { type: 'placed', key: 'odd:3', orderId: 'H' },
+        ]);
+        expect(potentialOf(r.state, 'odd')).toBe(1000);
+        // 刪單前其實已成交 620（回報晚到）
+        const late = execReduce(r.state, { type: 'report', key: 'odd:1', filled: 620, status: 'cancelled' }, ctxOf());
+        expect(late.commands).toEqual([{ kind: 'cancel', key: 'odd:3', orderId: 'H' }]);
+        expect(late.state.slots.find(x => x.key === 'odd:3')).toMatchObject({ surplus: true, cancelState: 'pending' });
+    });
+
+    it('補單在途時不再補；在途量足以補上缺口就不送', () => {
+        const r = run(SELL_ODD, [...oddFilled, { type: 'placed', key: 'round:2', orderId: 'R' }, { type: 'report', key: 'round:2', filled: 0, status: 'working' }]);
+        expect(places(r.commands)).toHaveLength(3);
+        const again = execReduce(r.state, { type: 'report', key: 'odd:0', filled: 380, status: 'filled' }, ctxOf());
+        expect(again.commands).toEqual([]);
+    });
+
+    it('終態只認券商確認：零成交刪單要刪單量對上才算終態', () => {
+        const slot = { key: 'odd:0', leg: 'odd' as const, action: 'Sell' as const, price: 1, quantity: 380, filled: 0 };
+        expect(isBrokerFinal({ ...slot, status: 'cancelled' })).toBe(false);
+        expect(isBrokerFinal({ ...slot, status: 'cancelled', cancelledQty: 380 })).toBe(true);
+        expect(isBrokerFinal({ ...slot, status: 'cancelled', filled: 100, cancelledQty: 280 })).toBe(true);
+        expect(isBrokerFinal({ ...slot, status: 'unknown', markedUnsent: true })).toBe(false);
+        expect(isBrokerFinal({ ...slot, status: 'failed', local: true })).toBe(true);
+        expect(isBrokerFinal({ ...slot, status: 'working' })).toBe(false);
+    });
+
+    it('券商終態不被較舊的「委託中」回報蓋回；晚到成交仍累加', () => {
+        const r = run(SELL_ODD, [
+            { type: 'start' },
+            { type: 'placed', key: 'odd:0', orderId: 'A' },
+            { type: 'report', key: 'odd:0', filled: 0, status: 'cancelled', cancelled: 380 },
+            { type: 'report', key: 'odd:0', filled: 0, status: 'working' },
+        ]);
+        expect(r.state.slots[0]!.status).toBe('cancelled');
+        const late = execReduce(r.state, { type: 'report', key: 'odd:0', filled: 200, status: 'working' }, ctxOf());
+        expect(late.state.slots[0]).toMatchObject({ status: 'cancelled', filled: 200 });
     });
 });
 

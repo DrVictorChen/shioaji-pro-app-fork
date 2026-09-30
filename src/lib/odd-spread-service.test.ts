@@ -37,6 +37,7 @@ vi.mock('./main-window-commands', () => ({
 }));
 vi.mock('./utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, d: number) => p + d * 5 }));
 
+import { isTerminalPhase } from './odd-spread-exec';
 import {
     addClickLock,
     clearClickLock,
@@ -75,12 +76,14 @@ const store = new Map<string, string>();
 const req = () => ({ contract, account, plan, fees, maxSlipTicks: 2 });
 
 const flush = () => new Promise(r => setTimeout(r, 0));
-function trade(id: string, price: number, quantity: number, filled: number, status: string, tag: string | undefined, lot = 'IntradayOdd', action = 'Sell'): AccountedTrade {
+function trade(id: string, price: number, quantity: number, filled: number, status: string, tag: string | undefined, lot = 'IntradayOdd', action = 'Sell', cancelQty?: number): AccountedTrade {
+    // 券商確認的刪單：刪單量＝未成交量（可覆寫成落後的數字）
+    const cancel_quantity = cancelQty ?? (status === 'Cancelled' ? quantity - filled : 0);
     return {
         account,
         contract: { code: '2330' },
         order: { id, ordno: `N${id}`, action, price, quantity, order_lot: lot, ...(tag !== undefined ? { custom_field: tag } : {}), account },
-        status: { id, status, deal_quantity: filled, deals: [], order_quantity: quantity, cancel_quantity: 0, modified_price: 0, msg: '', status_code: '' },
+        status: { id, status, deal_quantity: filled, deals: [], order_quantity: quantity, cancel_quantity, modified_price: 0, msg: '', status_code: '' },
     } as unknown as AccountedTrade;
 }
 const setTrades = (t: AccountedTrade[]) => { mocks.trades = t; mocks.tradeListener?.(); };
@@ -223,33 +226,47 @@ it('尚未取得模擬／正式資訊時不開始', () => {
     expect(() => startSpreadExecution(req())).toThrow('尚未確認');
 });
 
-it('新執行不會刪掉同商品已結束的執行：晚到成交仍對帳並補第二腳', async () => {
+it('刪單回報的數量對不上（成交回報晚到）：不當作終態，晚到成交仍對帳並補第二腳', async () => {
     let n = 0;
-    mocks.place.mockImplementation(async (_c: unknown, _a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined));
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
     const first = startSpreadExecution(req());
     await flush();
     spreadExecAction(first, { type: 'cancel' });
     await flush();
-    const base0 = saved()[0]!.tagBase;
-    const tags = [slotTag(base0, 'odd:0'), slotTag(base0, 'odd:1')];
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    // T1 已成交；T2 回報「已刪單」但成交量與刪單量都是 0（對不上 620）
+    setTrades([trade('T1', 1095, 380, 380, 'Filled', tags[0]), trade('T2', 1090, 620, 0, 'Cancelled', tags[1], 'IntradayOdd', 'Sell', 0)]);
+    const rec0 = record();
+    expect(isTerminalPhase(rec0.state.phase)).toBe(false);
+    expect(isSettled(rec0)).toBe(false);
+    expect(mocks.place).toHaveBeenCalledTimes(2);
+    // 刪單前其實已成交（晚到回報）
+    setTrades([trade('T1', 1095, 380, 380, 'Filled', tags[0]), trade('T2', 1090, 620, 620, 'Filled', tags[1])]);
+    expect(mocks.place).toHaveBeenCalledTimes(3);
+    expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
+});
+
+it('新執行不會刪掉同商品較早的執行（含已結束的），之後的回報仍對帳', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    const first = startSpreadExecution(req());
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    spreadExecAction(first, { type: 'cancel' });
+    await flush();
     setTrades([trade('T1', 1095, 380, 0, 'Cancelled', tags[0]), trade('T2', 1090, 620, 0, 'Cancelled', tags[1])]);
     expect(saved()[0]!.state.phase).toBe('cancelled');
     dismissSpreadExecution(first);
     startSpreadExecution(req());
     await flush();
     expect(saved().map(r => r.id)).toContain(first);
-    const calls = mocks.place.mock.calls.length;
-    // 第一筆刪單前其實已全數成交（晚到回報）
-    setTrades([trade('T1', 1095, 380, 380, 'Filled', tags[0]), trade('T2', 1090, 620, 620, 'Filled', tags[1])]);
-    expect(mocks.place.mock.calls.length).toBe(calls + 1);
-    expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
-    expect(saved().find(r => r.id === first)!.dismissed).toBe(false);
 });
 
 it('本機保存：未了結的永不丟棄；只有已了結的限當日、限量', () => {
     const now = Date.parse('2026-09-30T13:00:00+08:00');
     const yesterday = Date.parse('2026-09-29T10:00:00+08:00');
-    const slot = (filled: number, status = 'cancelled') => ({ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status, filled });
+    // 券商確認的刪單：刪單量＋成交量＝委託量
+    const slot = (filled: number, status = 'cancelled') => ({ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status, filled, cancelledQty: 1000 - filled });
     const mk = (id: string, phase: string, startedAt: number, slots: unknown[] = [], extra: Partial<SpreadExecRecord> = {}): SpreadExecRecord => ({
         id, tagBase: 'abc', env: { base: 'b', simulation: true }, contract, account, fees, maxSlipTicks: 2, startedAt,
         state: { plan, phase, slots, started: true, cancelRequested: true, seq: 1, waived: { odd: 0, round: 0 }, pendingHedge: null } as unknown as SpreadExecRecord['state'],
@@ -261,18 +278,22 @@ it('本機保存：未了結的永不丟棄；只有已了結的限當日、限�
         // 昨天取消、有 400 股未配對且使用者沒關閉 → 保留
         mk('unhedged', 'failed', yesterday, [slot(400)]),
         // 刪單結果不明 → 保留
-        mk('cancelUnknown', 'cancelled', yesterday, [{ ...slot(0), cancelState: 'unknown' }]),
+        mk('cancelUnknown', 'cancelled', yesterday, [{ ...slot(0, 'working'), cancelledQty: undefined, cancelState: 'unknown' }]),
         // 環境切換期間保留的回報 → 保留
         mk('held', 'cancelled', yesterday, [slot(0)], { held: [{ type: 'report', key: 'odd:0', filled: 0, status: 'cancelled' }] }),
         // 使用者已關閉的未配對 → 視為了結
         mk('dismissed', 'failed', yesterday, [slot(400)], { dismissed: true }),
         mk('settledOld', 'cancelled', yesterday, [slot(0)]),
+        // 零成交的刪單但刪單量尚未對上（晚到成交仍可能）→ 保留
+        mk('cancelNoQty', 'cancelled', yesterday, [{ ...slot(0), cancelledQty: undefined }]),
+        // 使用者標記未送出（暫定）→ 保留
+        mk('marked', 'cancelled', yesterday, [{ ...slot(0, 'unknown'), markedUnsent: true }]),
         ...Array.from({ length: 60 }, (_, i) => mk(`s${i}`, 'cancelled', now - 60 + i, [slot(0)])),
     ];
     expect(isSettled(list[2]!)).toBe(false);
     expect(isSettled(list[5]!)).toBe(true);
     const kept = pruneRecords(list, now).map(r => r.id);
-    for (const id of ['unknown', 'live', 'unhedged', 'cancelUnknown', 'held']) expect(kept).toContain(id);
+    for (const id of ['unknown', 'live', 'unhedged', 'cancelUnknown', 'held', 'cancelNoQty', 'marked']) expect(kept).toContain(id);
     expect(kept).not.toContain('dismissed');
     expect(kept).not.toContain('settledOld');
     expect(kept.filter(id => /^s\d+$/.test(id))).toHaveLength(50);

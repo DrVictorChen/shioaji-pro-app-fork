@@ -1,30 +1,31 @@
 // src/lib/odd-spread-exec.ts — 整零價差兩腳送單的狀態機（純函式，可測）。
 //
 // reduce(state, event, ctx) → { state, commands }：呼叫端依 commands 實際送單／
-// 刪單，再把結果（placed／placeUnknown／placeFailed／report）當成 event 餵回來。
-// ctx.quoteHedge 以「當下」委託簿替第二腳（補單）重新定價並判斷是否仍在滑價
-// 上限與成本內；狀態機本身不讀行情，測試可注入固定結果。
+// 刪單，再把結果（placed／placeUnknown／placeFailed／report／cancelResult）當成
+// event 餵回來。ctx.quoteHedge 以「當下」委託簿替補單重新定價並判斷是否仍在
+// 滑價上限與成本內；狀態機本身不讀行情。
 //
-// 送單方式：
-// - sequential（預設「零股成交後再送整股」）：先送第一腳（預設零股），第一腳
-//   每筆都到終態、成交量確定後才決定第二腳數量：
-//     · 第一腳零股 → 第二腳整股 = floor(零股成交股數 / 1,000) 張（全數成交＝計畫張數）
-//     · 第一腳整股 → 第二腳零股 = 整股成交張數 × 1,000 股
-//   第二腳以當下委託簿重新定價；在滑價上限與成本內自動送出，否則停在
-//   hedgeDecision（未配對），由使用者選「以最新價補單」或「取消」。
-// - simultaneous（兩腳同時送）：一次送出；全部結束後若兩腳成交不對等，
-//   同樣停在 hedgeDecision 由使用者決定是否補單。
+// 總量模型（不依賴事件轉換的先後）：每個事件後都以「這筆執行所有委託」的最新
+// 委託／成交狀態重算：
+//   filled(leg)     各腳累計成交
+//   potential(leg)  各腳最多可能成交＝已成交＋仍可能成交的剩餘量
+//                   （送出中、結果不明、委託中都算；使用者標記「未送出」的不算）
+//   目標量          由另一腳（sequential 為第一腳）的成交與最多可能成交推得
+//                   區間 [min, max]；第一腳／另一腳還有委託在途時 min < max
+// 規則：
+//   · 補單只在目標確定（另一腳沒有在途委託）且 min − potential > 0 時送出；
+//     自己這腳仍在途的量已算進 potential，所以「仍可能補上缺口」時絕不送。
+//   · potential 超過 max（例如刪掉的單晚到成交）時，多出來的補單（由新到舊）
+//     一律發刪單，直到不再超過；刪過頭的缺口下一輪以剛好的量重補。
+//   · sequential 補單在滑價上限與成本內自動送；否則、或 simultaneous、或先前
+//     補單被拒／被使用者刪除時，停在 hedgeDecision 由使用者決定。
 //
-// 結果不明：送單錯誤可能已到券商（非 mutationNotStarted）時該筆為 unknown —
-// 不算終態、不決定第二腳、也不允許重新執行；委託列出現對應委託（依委託編號
-// 或標記比對）就接回追蹤。使用者核對後可標記為未送出。
+// 終態只認券商確認：委託回報的 Filled／Cancelled／Failed（或送出前就確定沒送出）。
+// 使用者按「未送出」只是暫定：之後委託列出現這筆（回報或下單回應），立即回到
+// 委託中並重新計算。
 //
-// 終態後的晚到成交（例如 unknown 事後成交、刪單前已成交）照樣更新成交量並
-// 重新計算：需要補第二腳時再次自動補單或回到 hedgeDecision，絕不少算。
-//
-// 冪等：每筆委託有唯一 key，只有 unsent → sending 會產生 place 指令；重複的
-// start、重複或倒退的回報都不會多送；第二腳補單只補「目標 − 已承諾」的差額。
-// 券商拒絕或刪除的第二腳不會自動重送（改由使用者決定），避免無限重送。
+// 冪等：每筆委託有唯一 key，只有 unsent → sending 會產生 place 指令；成交量以
+// 累計量回報（取最大值）；券商終態不會被較舊的「委託中」回報蓋回。
 
 import { SHARES_PER_LOT } from './odd-lot';
 import type { LegOrder, SpreadDirection } from './odd-spread';
@@ -58,13 +59,21 @@ export interface OrderSlot {
     orderId?: string;
     /** 累計成交（同 quantity 單位） */
     filled: number;
+    /** 券商回報的刪單量（判斷終態數量是否對得上） */
+    cancelledQty?: number;
+    /** 送出前就確定沒送出（mutationNotStarted）或尚未送出就取消 */
+    local?: boolean;
+    /** 結果不明時使用者標記「未送出」（暫定；委託出現就撤銷） */
+    markedUnsent?: boolean;
     /** 刪單狀態：pending＝已發出等待結果、sent＝券商已受理、failed＝刪單失敗、
      * unknown＝等待結果時重新整理而遺失回應（委託仍在委託中就可再按取消重試） */
     cancelState?: 'pending' | 'sent' | 'failed' | 'unknown';
     cancelError?: string;
-    /** 送出途中／結果不明時按了取消：拿到委託編號就刪單 */
+    /** 送出途中／結果不明時要刪：拿到委託編號就刪單 */
     cancelWanted?: boolean;
-    /** 第二腳補單 */
+    /** 為多出的補單而刪（不算「補單被拒」） */
+    surplus?: boolean;
+    /** 補單 */
     hedge?: boolean;
     error?: string;
 }
@@ -109,9 +118,11 @@ export interface ExecState {
 export type HedgeQuote = { ok: true; orders: LegOrder[] } | { ok: false; reason: string; orders: LegOrder[] };
 
 export interface ExecContext {
-    /** 以當下委託簿為第二腳定價；ok=false 時不自動送 */
+    /** 以當下委託簿為補單定價；ok=false 時不自動送 */
     quoteHedge: (leg: LegKind, action: 'Buy' | 'Sell', quantity: number) => HedgeQuote;
 }
+
+export type ReportStatus = 'working' | 'filled' | 'cancelled' | 'failed';
 
 export type ExecEvent =
     | { type: 'start' }
@@ -120,14 +131,16 @@ export type ExecEvent =
     | { type: 'placeUnknown'; key: string; error: string }
     /** 確定沒有送出 */
     | { type: 'placeFailed'; key: string; error: string }
-    | { type: 'report'; key: string; filled: number; status: 'working' | 'filled' | 'cancelled' | 'failed' }
+    /** 委託最新狀態（累計成交、刪單量） */
+    | { type: 'report'; key: string; filled: number; status: ReportStatus; cancelled?: number }
     | { type: 'cancel' }
-    /** 刪單請求的結果 */
     | { type: 'cancelResult'; key: string; ok: boolean; error?: string }
-    /** 使用者核對後確認 unknown 那筆沒有送出 */
+    /** 使用者核對後認為 unknown 那筆沒有送出（暫定） */
     | { type: 'resolveUnknown'; key: string }
     | { type: 'hedgeAccept'; orders?: LegOrder[] }
-    | { type: 'hedgeDecline' };
+    | { type: 'hedgeDecline' }
+    /** 重新整理接回後重算一次（例如重新發出遺失回應的多餘補單刪單） */
+    | { type: 'refresh' };
 
 export type ExecCommand =
     | { kind: 'place'; key: string; leg: LegKind; action: 'Buy' | 'Sell'; price: number; quantity: number }
@@ -138,8 +151,30 @@ export interface ExecResult {
     commands: ExecCommand[];
 }
 
-const TERMINAL: ReadonlySet<SlotStatus> = new Set(['filled', 'cancelled', 'failed']);
-const LIVE: ReadonlySet<SlotStatus> = new Set(['sending', 'unknown', 'working']);
+const FINAL: ReadonlySet<SlotStatus> = new Set(['filled', 'cancelled', 'failed']);
+
+/** 仍可能成交（在途） */
+export function isLive(s: OrderSlot): boolean {
+    return s.status === 'sending' || s.status === 'working' || (s.status === 'unknown' && !s.markedUnsent);
+}
+
+/** 券商確認的終態（或送出前就確定沒送出），且數量對得上 */
+export function isBrokerFinal(s: OrderSlot): boolean {
+    if (!FINAL.has(s.status)) return false;
+    if (s.local || s.status === 'filled' || s.status === 'failed') return true;
+    return s.cancelledQty !== undefined && s.filled + s.cancelledQty >= s.quantity;
+}
+
+/** 已發刪單（刪單失敗的由使用者按「再次取消」重試，不自動連發） */
+const cancelIssued = (s: OrderSlot) => s.cancelState === 'pending' || s.cancelState === 'sent' || s.cancelState === 'failed' || !!s.cancelWanted;
+const remaining = (s: OrderSlot) => (isLive(s) ? Math.max(0, s.quantity - s.filled) : 0);
+/** 券商已回報刪單／失敗，但「成交＋刪單量」還對不上委託量：差額仍可能是尚未送達的成交 */
+export function unaccounted(s: OrderSlot): number {
+    if (s.local || (s.status !== 'cancelled' && s.status !== 'failed') || s.cancelledQty === undefined) return 0;
+    return Math.max(0, s.quantity - s.filled - s.cancelledQty);
+}
+/** 仍可能增加的成交量（在途剩餘＋對不上的差額） */
+const open = (s: OrderSlot) => remaining(s) + unaccounted(s);
 
 export function isTerminalPhase(p: ExecPhase): boolean {
     return p === 'done' || p === 'failed' || p === 'cancelled';
@@ -171,7 +206,7 @@ function makeSlots(state: ExecState, leg: LegKind, orders: LegOrder[], hedge = f
     return { slots, seq };
 }
 
-/** 計畫的零股委託取前 shares 股（第一腳整股時，第二腳依成交張數切零股） */
+/** 計畫的零股委託取前 shares 股 */
 export function takeOddOrders(orders: LegOrder[], shares: number): LegOrder[] {
     const out: LegOrder[] = [];
     let left = shares;
@@ -188,6 +223,51 @@ export function initExec(plan: ExecPlan): ExecState {
     return { plan, phase: 'idle', slots: [], started: false, cancelRequested: false, seq: 0, waived: { odd: 0, round: 0 }, pendingHedge: null };
 }
 
+// ---- 總量 ----
+
+export function filledOf(s: ExecState, leg: LegKind): number {
+    return s.slots.filter(x => x.leg === leg).reduce((a, x) => a + x.filled, 0);
+}
+
+export function potentialOf(s: ExecState, leg: LegKind): number {
+    return s.slots.filter(x => x.leg === leg).reduce((a, x) => a + x.filled + open(x), 0);
+}
+
+function oddPlanned(plan: ExecPlan): number {
+    return plan.oddOrders.reduce((a, o) => a + o.quantity, 0);
+}
+
+export interface LegTarget {
+    /** 依另一腳已成交推得的目標（確定要配的量） */
+    min: number;
+    /** 依另一腳最多可能成交推得的上限 */
+    max: number;
+    /** 另一腳沒有在途委託 → min 即最終目標 */
+    determined: boolean;
+}
+
+/** 各腳的配對目標（只有需要配對的腳才有） */
+export function legTargets(s: ExecState): Partial<Record<LegKind, LegTarget>> {
+    const { plan } = s;
+    if (!s.started) return {};
+    const lots = plan.lots;
+    const oddCap = oddPlanned(plan);
+    const roundFrom = (oddShares: number) => (oddShares >= oddCap ? lots : Math.min(lots, Math.floor(oddShares / SHARES_PER_LOT)));
+    const oddFrom = (roundLots: number) => (roundLots >= lots ? oddCap : Math.min(oddCap, roundLots * SHARES_PER_LOT));
+    const liveOn = (leg: LegKind) => s.slots.some(x => x.leg === leg && open(x) > 0);
+    if (plan.mode === 'sequential') {
+        const first = firstLegOf(plan);
+        if (!s.slots.some(x => x.leg === first)) return {};
+        const f = first === 'odd' ? roundFrom : oddFrom;
+        const hedgeLeg: LegKind = first === 'odd' ? 'round' : 'odd';
+        return { [hedgeLeg]: { min: f(filledOf(s, first)), max: f(potentialOf(s, first)), determined: !liveOn(first) } };
+    }
+    return {
+        round: { min: roundFrom(filledOf(s, 'odd')), max: roundFrom(potentialOf(s, 'odd')), determined: !liveOn('odd') },
+        odd: { min: oddFrom(filledOf(s, 'round')), max: oddFrom(potentialOf(s, 'round')), determined: !liveOn('round') },
+    };
+}
+
 export interface ExecSummary {
     oddFilledShares: number;
     roundFilledLots: number;
@@ -195,21 +275,8 @@ export interface ExecSummary {
     oddPlannedShares: number;
     /** 未配對股數：零股成交股數 − 整股成交股數（>0 表示零股那邊多） */
     unhedgedShares: number;
-    /** 仍有結果不明的委託 */
+    /** 結果不明（未標記）的委託數 */
     unknownCount: number;
-}
-
-function filledOf(s: ExecState, leg: LegKind): number {
-    return s.slots.filter(x => x.leg === leg).reduce((a, x) => a + x.filled, 0);
-}
-
-/** 仍可能成交的量：委託中／送出中／不明取全量，其餘取已成交 */
-function committedOf(s: ExecState, leg: LegKind): number {
-    return s.slots.filter(x => x.leg === leg).reduce((a, x) => a + (LIVE.has(x.status) ? x.quantity : x.filled), 0);
-}
-
-function oddPlanned(plan: ExecPlan): number {
-    return plan.oddOrders.reduce((a, o) => a + o.quantity, 0);
 }
 
 export function execSummary(s: ExecState): ExecSummary {
@@ -220,8 +287,13 @@ export function execSummary(s: ExecState): ExecSummary {
         roundFilledLots: round,
         oddPlannedShares: oddPlanned(s.plan),
         unhedgedShares: odd - round * SHARES_PER_LOT,
-        unknownCount: s.slots.filter(x => x.status === 'unknown').length,
+        unknownCount: s.slots.filter(x => x.status === 'unknown' && !x.markedUnsent).length,
     };
+}
+
+/** 每筆委託都已是券商確認的終態 */
+export function allBrokerFinal(s: ExecState): boolean {
+    return s.slots.every(isBrokerFinal);
 }
 
 function sendUnsent(slots: OrderSlot[], commands: ExecCommand[]): OrderSlot[] {
@@ -232,39 +304,14 @@ function sendUnsent(slots: OrderSlot[], commands: ExecCommand[]): OrderSlot[] {
     });
 }
 
-function cancelWorking(slots: OrderSlot[], commands: ExecCommand[]): OrderSlot[] {
-    return slots.map(s => {
-        if (s.status === 'unsent') return { ...s, status: 'cancelled' };
-        if (s.status === 'sending' || s.status === 'unknown' || (s.status === 'working' && !s.orderId)) return { ...s, cancelWanted: true };
-        // 已發出、尚未有結果的不重送；失敗或已受理但仍在委託中的可再刪
-        if (s.status === 'working' && s.orderId && s.cancelState !== 'pending') {
-            commands.push({ kind: 'cancel', key: s.key, orderId: s.orderId });
-            return { ...s, cancelState: 'pending', cancelError: undefined };
-        }
-        return s;
-    });
-}
-
-/** 第二腳（或同時送的落後腳）的目標總量；第一腳尚未確定時回 null */
-function hedgeTarget(s: ExecState): { leg: LegKind; qty: number } | null {
-    const { plan } = s;
-    if (!s.started) return null;
-    if (plan.mode === 'sequential') {
-        const first = firstLegOf(plan);
-        const firstSlots = s.slots.filter(x => x.leg === first);
-        if (firstSlots.length === 0 || firstSlots.some(x => !TERMINAL.has(x.status))) return null;
-        const f = filledOf(s, first);
-        const allFilled = firstSlots.every(x => x.status === 'filled' && x.filled >= x.quantity);
-        return first === 'odd'
-            ? { leg: 'round', qty: allFilled ? plan.lots : Math.min(plan.lots, Math.floor(f / SHARES_PER_LOT)) }
-            : { leg: 'odd', qty: allFilled ? oddPlanned(plan) : Math.min(oddPlanned(plan), f * SHARES_PER_LOT) };
-    }
-    if (s.slots.some(x => !TERMINAL.has(x.status))) return null;
-    const odd = filledOf(s, 'odd');
-    const roundSh = filledOf(s, 'round') * SHARES_PER_LOT;
-    if (odd > roundSh) return { leg: 'round', qty: Math.min(plan.lots, Math.floor(odd / SHARES_PER_LOT)) };
-    if (roundSh > odd) return { leg: 'odd', qty: Math.min(oddPlanned(plan), roundSh) };
-    return null;
+/** 對一筆在途委託發刪單（或登記拿到委託編號後刪） */
+function cancelSlot(s: OrderSlot, commands: ExecCommand[], surplus = false): OrderSlot {
+    if (s.status === 'unsent') return { ...s, status: 'cancelled', local: true, surplus };
+    if (!isLive(s)) return s;
+    if (!s.orderId) return { ...s, cancelWanted: true, ...(surplus ? { surplus } : {}) };
+    if (s.cancelState === 'pending') return s;
+    commands.push({ kind: 'cancel', key: s.key, orderId: s.orderId });
+    return { ...s, cancelState: 'pending', cancelError: undefined, ...(surplus ? { surplus } : {}) };
 }
 
 /** 建議委託的總量對齊需補數量（不足的部分加到最後一筆） */
@@ -276,38 +323,54 @@ function fitOrders(orders: LegOrder[], quantity: number): LegOrder[] {
     return out;
 }
 
-// 依目前 slots 推進：決定／補第二腳、計算 phase
+// 每個事件後以總量重算：刪多出的補單、決定是否補單、計算 phase
 function advance(state: ExecState, commands: ExecCommand[], ctx: ExecContext): ExecState {
     let s = state;
-    const target = hedgeTarget(s);
-    const gap = target ? target.qty - committedOf(s, target.leg) - s.waived[target.leg] : 0;
-    if (target && gap > 0) {
-        const leg = target.leg;
+    const targets = legTargets(s);
+    let pending: PendingHedge | null = null;
+    for (const leg of ['round', 'odd'] as LegKind[]) {
+        const t = targets[leg];
+        if (!t) continue;
+        // 1) 多出的補單：potential 超過上限就由新到舊刪，直到不再超過；刪掉後若反而
+        //    不足，下一輪會以剛好的缺口重新補（委託量不能部分刪，寧可重補也不超送）
+        let effective = s.slots.filter(x => x.leg === leg).reduce((a, x) => a + x.filled + unaccounted(x) + (cancelIssued(x) ? 0 : remaining(x)), 0);
+        if (effective > t.max) {
+            const slots = [...s.slots];
+            for (let i = slots.length - 1; i >= 0 && effective > t.max; i--) {
+                const x = slots[i]!;
+                if (x.leg !== leg || !x.hedge || !isLive(x) || cancelIssued(x)) continue;
+                slots[i] = cancelSlot(x, commands, true);
+                effective -= remaining(x);
+            }
+            s = { ...s, slots };
+        }
+        // 2) 缺口：目標確定、且連在途的量都補不上時才補
+        const gap = t.determined ? t.min - potentialOf(s, leg) - s.waived[leg] : 0;
+        if (gap <= 0) continue;
         const action = legAction(s.plan.direction, leg);
         const q = ctx.quoteHedge(leg, action, gap);
-        // 券商拒絕／刪除過的補單不自動重送
-        const rejectedBefore = s.slots.some(x => x.hedge && x.leg === leg && (x.status === 'failed' || x.status === 'cancelled') && x.filled < x.quantity);
-        const auto = s.plan.mode === 'sequential' && !rejectedBefore && !s.pendingHedge;
-        if (auto && q.ok) {
+        // 補單被拒或被使用者刪掉（非為多出而刪）→ 不自動重送
+        const rejectedBefore = s.slots.some(x => x.leg === leg && x.hedge && !x.surplus && (x.status === 'failed' || x.status === 'cancelled') && x.filled < x.quantity);
+        const auto = s.plan.mode === 'sequential' && !rejectedBefore && !s.pendingHedge && q.ok;
+        if (auto) {
             const made = makeSlots(s, leg, fitOrders(q.orders, gap), true);
-            s = { ...s, seq: made.seq, pendingHedge: null, slots: sendUnsent([...s.slots, ...made.slots], commands) };
+            s = { ...s, seq: made.seq, slots: sendUnsent([...s.slots, ...made.slots], commands) };
         } else {
             const reason = !q.ok ? q.reason
                 : s.plan.mode === 'simultaneous' ? '兩腳成交數量不對等'
                     : rejectedBefore ? '補單未成交（被拒或已刪除）' : s.pendingHedge?.reason ?? '第二腳待確認';
-            s = { ...s, pendingHedge: { leg, action, quantity: gap, reason, orders: fitOrders(q.orders, gap) } };
+            pending = { leg, action, quantity: gap, reason, orders: fitOrders(q.orders, gap) };
         }
-    } else if (s.pendingHedge) {
-        s = { ...s, pendingHedge: null };
     }
+    s = { ...s, pendingHedge: pending };
     return { ...s, phase: phaseOf(s) };
 }
 
 function phaseOf(s: ExecState): ExecPhase {
     if (!s.started) return s.cancelRequested ? 'cancelled' : 'idle';
-    if (s.slots.some(x => x.status === 'unknown')) return 'unknown';
+    if (s.slots.some(x => x.status === 'unknown' && !x.markedUnsent)) return 'unknown';
     if (s.pendingHedge) return 'hedgeDecision';
-    const live = s.slots.filter(x => LIVE.has(x.status));
+    const live = s.slots.filter(x => open(x) > 0);
     if (live.length > 0) {
         if (s.plan.mode === 'simultaneous') return 'bothPending';
         const leg = live[0]!.leg;
@@ -331,6 +394,18 @@ function mapSlot(state: ExecState, key: string, fn: (s: OrderSlot) => OrderSlot 
         return next;
     });
     return changed ? { ...state, slots } : null;
+}
+
+/** 重新整理後接回：送出中 → 結果不明；刪單等待中 → 刪單結果不明 */
+export function restoreAfterReload(state: ExecState): ExecState {
+    return {
+        ...state,
+        slots: state.slots.map(s => ({
+            ...s,
+            ...(s.status === 'sending' ? { status: 'unknown' as const } : {}),
+            ...(s.cancelState === 'pending' ? { cancelState: 'unknown' as const } : {}),
+        })),
+    };
 }
 
 export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext): ExecResult {
@@ -359,41 +434,45 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
         }
         case 'placed':
             return done(mapSlot(state, event.key, s => {
-                // 回報可能比下單回應先到，或 unknown 事後才對上：仍要記下委託編號
-                if (s.orderId || s.status === 'unsent') return null;
+                if (s.orderId || s.status === 'unsent' || s.local) return null;
+                // 回報可能比下單回應先到；標記「未送出」的委託出現了 → 撤銷標記
                 const status: SlotStatus = s.status === 'sending' || s.status === 'unknown' ? 'working' : s.status;
-                const next: OrderSlot = { ...s, status, orderId: event.orderId };
+                const next: OrderSlot = { ...s, status, orderId: event.orderId, markedUnsent: false };
                 if (s.cancelWanted && status === 'working') {
                     commands.push({ kind: 'cancel', key: s.key, orderId: event.orderId });
                     next.cancelState = 'pending';
+                    next.cancelWanted = false;
                 }
                 return next;
             }));
         case 'placeUnknown':
             return done(mapSlot(state, event.key, s => (s.status === 'sending' ? { ...s, status: 'unknown', error: event.error } : null)));
         case 'placeFailed':
-            return done(mapSlot(state, event.key, s => (s.status === 'sending' ? { ...s, status: 'failed', error: event.error } : null)));
+            return done(mapSlot(state, event.key, s => (s.status === 'sending' ? { ...s, status: 'failed', local: true, error: event.error } : null)));
+        case 'resolveUnknown':
+            return done(mapSlot(state, event.key, s => (s.status === 'unknown' && !s.markedUnsent ? { ...s, markedUnsent: true } : null)));
+        case 'report':
+            return done(mapSlot(state, event.key, s => {
+                if (s.local) return null;
+                const filled = Math.min(s.quantity, Math.max(s.filled, Math.trunc(event.filled) || 0));
+                const cancelledQty = event.cancelled !== undefined ? Math.max(s.cancelledQty ?? 0, event.cancelled) : s.cancelledQty;
+                let status: SlotStatus;
+                if (filled >= s.quantity) status = 'filled';
+                else if (FINAL.has(s.status)) status = s.status; // 券商終態不被較舊的回報蓋回
+                else status = event.status === 'cancelled' || event.status === 'failed' ? event.status : 'working';
+                const next: OrderSlot = { ...s, filled, status, cancelledQty, markedUnsent: false };
+                if (next.status === s.status && next.filled === s.filled && next.cancelledQty === s.cancelledQty && !s.markedUnsent) return null;
+                if (!isLive(next)) next.cancelWanted = false;
+                return next;
+            }));
         case 'cancelResult':
             return done(mapSlot(state, event.key, s => (s.cancelState === 'pending'
                 ? { ...s, cancelState: event.ok ? 'sent' : 'failed', cancelError: event.ok ? undefined : event.error }
                 : null)));
-        case 'resolveUnknown':
-            return done(mapSlot(state, event.key, s => (s.status === 'unknown' ? { ...s, status: 'failed' } : null)));
-        case 'report':
-            return done(mapSlot(state, event.key, s => {
-                const filled = Math.min(s.quantity, Math.max(s.filled, Math.trunc(event.filled) || 0));
-                let status: SlotStatus = s.status;
-                if (filled >= s.quantity) status = 'filled';
-                else if (!TERMINAL.has(s.status)) {
-                    if (event.status === 'cancelled' || event.status === 'failed') status = event.status;
-                    else if (s.status === 'sending' || s.status === 'unknown') status = 'working';
-                }
-                if (filled === s.filled && status === s.status) return null;
-                return { ...s, filled, status };
-            }));
         case 'cancel': {
             if (!state.started) return { state: { ...state, phase: 'cancelled', cancelRequested: true }, commands };
-            const slots = cancelWorking(state.slots, commands);
+            // 已發出、尚未有結果的不重送；失敗、結果不明或受理後仍在委託中的可再刪
+            const slots = state.slots.map(s => (isLive(s) ? cancelSlot(s, commands) : s.status === 'unsent' ? cancelSlot(s, commands) : s));
             return { state: advance({ ...state, cancelRequested: true, slots }, commands, ctx), commands };
         }
         case 'hedgeAccept': {
@@ -405,6 +484,8 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
             const s: ExecState = { ...state, pendingHedge: null, seq: made.seq, slots: sendUnsent([...state.slots, ...made.slots], commands) };
             return { state: { ...s, phase: phaseOf(s) }, commands };
         }
+        case 'refresh':
+            return { state: advance(state, commands, ctx), commands };
         case 'hedgeDecline': {
             const p = state.pendingHedge;
             if (!p) return { state, commands };

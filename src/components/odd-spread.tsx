@@ -664,7 +664,8 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
     const s = rec.state;
     const sum = execSummary(s);
     const done = isTerminalPhase(s.phase);
-    const unknown = s.slots.filter(x => x.status === 'unknown');
+    const unknown = s.slots.filter(x => x.status === 'unknown' && !x.markedUnsent);
+    const marked = s.slots.filter(x => x.status === 'unknown' && x.markedUnsent);
     const cancelFailed = s.slots.filter(x => (x.cancelState === 'failed' || x.cancelState === 'unknown') && x.status === 'working');
     const p = s.pendingHedge;
     const slotText = (x: { leg: string; quantity: number; price: number }) => `${x.leg === 'odd' ? '零股' : '整股'} ${int(x.quantity)}${x.leg === 'odd' ? ' 股' : ' 張'} @ ${fmtPrice(x.price)}`;
@@ -703,6 +704,11 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
                     </span>
                 );
             })}
+            {marked.length > 0 && (
+                <span className={styles.execDetail}>
+                    已標記未送出：{marked.map(slotText).join('、')}（暫定；若委託列出現這筆會自動接回並重新計算）
+                </span>
+            )}
             {cancelFailed.length > 0 && (
                 <span className={styles.execDetail}>
                     {cancelFailed.map(x => `${x.cancelState === 'unknown' ? '刪單結果未確認' : '刪單失敗'}：${slotText(x)}（${x.cancelState === 'unknown' ? '送出刪單後重新整理，未收到結果' : x.cancelError ?? '未知原因'}）`).join('、')}；仍在委託中，原單可能繼續成交，請再按「再次取消」重試
