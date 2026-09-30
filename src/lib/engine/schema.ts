@@ -225,6 +225,12 @@ export interface PortfolioFill {
     cost: number;
     reason: 'intent' | 'eod';
     tag?: string;
+    /**
+     * CHANGE-4: the final quantity the filled order intended (for a
+     * risk-reducing projection, the rejected original target); null for EOD
+     * liquidation. Fills persisted before v2 have no such field.
+     */
+    orderTarget: number | null;
 }
 
 export interface TagAttribution {
