@@ -9,6 +9,7 @@ import {
     removeDrawings,
     replaceDrawings,
     setDrawingsLocked,
+    writeDrawingJournal,
     __setDrawingLocksForTest,
     TOMBSTONE_TTL_MS,
     __resetDrawingsForTest,
@@ -47,6 +48,10 @@ beforeEach(() => {
         getItem: (k: string) => store.get(k) ?? null,
         setItem: (k: string, v: string) => void store.set(k, v),
         removeItem: (k: string) => void store.delete(k),
+        get length() {
+            return store.size;
+        },
+        key: (i: number) => [...store.keys()][i] ?? null,
     });
     __resetDrawingsForTest();
 });
@@ -666,5 +671,86 @@ describe('線條不透明度', () => {
         const picked = sanitizeSettings({ lineOpacity: 0.5 });
         expect(defaultStyleFor(picked, 'box', 'dark').opacity).toBe(0.5);
         expect(sanitizeSettings({ lineOpacity: 7 }).lineOpacity).toBe(1);
+    });
+});
+
+describe('關窗日誌：pagehide 不在鎖外動主項目', () => {
+    const KEY = 'sj-pro-chart-drawings';
+    const journals = () => [...store.keys()].filter((k) => k.startsWith('sj-chart-drawings-pending:'));
+    const ids = () => (JSON.parse(store.get(KEY) ?? '{}').TXF ?? []).map((d: { id: string }) => d.id).sort();
+    const theirs = (id: string) => ({
+        id,
+        tool: 'horizontal',
+        anchors: [{ time: 1000, price: 25000 }],
+        style: DEFAULT_DRAWING_STYLE,
+        locked: false,
+        hidden: false,
+        createdAt: 1,
+        updatedAt: 1,
+    });
+
+    it('A 在鎖內寫入時 B 關窗：B 只寫日誌、不碰主項目；下一次鎖內寫入把兩邊都併進去', () => {
+        // 本 module 當 B：有還沒寫出的物件
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        // A 正在鎖內寫入主項目（它看不到 B 的物件）
+        store.set(KEY, JSON.stringify({ TXF: [theirs('a-obj')] }));
+        // B 關窗
+        writeDrawingJournal();
+        expect(ids()).toEqual(['a-obj']); // 主項目沒被 B 在鎖外改寫
+        expect(journals()).toHaveLength(1);
+        // A 的寫入晚於 B 的日誌完成、整份蓋掉主項目 — 日誌仍在，B 的物件不會遺失
+        store.set(KEY, JSON.stringify({ TXF: [theirs('a-obj')] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id).sort()).toEqual(['a-obj', mine.id].sort());
+        // 下一個寫入者（鎖內）合併日誌並刪掉
+        flushDrawingWrites();
+        expect(ids()).toEqual(['a-obj', mine.id].sort());
+        expect(journals()).toHaveLength(0);
+    });
+
+    it('本視窗在等鎖時別的視窗關窗留下日誌：拿到鎖後一起寫進去', () => {
+        const queue: (() => unknown)[] = [];
+        __setDrawingLocksForTest({ request: (_n, cb) => (queue.push(cb), Promise.resolve()) });
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        store.set(
+            'sj-chart-drawings-pending:other-window',
+            JSON.stringify({ at: 1, ops: { TXF: { closed: theirs('closed') } }, settings: {} }),
+        );
+        queue.shift()!();
+        expect(ids()).toEqual(['closed', mine.id].sort());
+        expect(journals()).toHaveLength(0);
+    });
+
+    it('日誌裡的刪除與設定也會套用；沒改動時關窗不留日誌', () => {
+        writeDrawingJournal();
+        expect(journals()).toHaveLength(0);
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        removeDrawing('TXF', a.id);
+        setDrawingSettings({ shareContinuousMonth: false });
+        writeDrawingJournal();
+        expect(journals()).toHaveLength(1);
+        // 另一個視窗（模擬重新載入後）讀到的畫面已套用日誌
+        reloadDrawingsFromStorage();
+        reloadDrawingSettingsFromStorage();
+        expect(getDrawings('TXF')).toEqual([]);
+        expect(getDrawingSettings().shareContinuousMonth).toBe(false);
+        flushDrawingWrites();
+        expect(ids()).toEqual([]);
+        expect(JSON.parse(store.get('sj-pro-chart-drawing-settings')!).shareContinuousMonth).toBe(false);
+    });
+});
+
+describe('關窗日誌也帶圖層順序', () => {
+    it('關窗前調整的圖層順序，下一個寫入者照樣套用', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        moveDrawing('TXF', b.id, 0);
+        writeDrawingJournal();
+        flushDrawingWrites();
+        const saved = JSON.parse(store.get('sj-pro-chart-drawings')!).TXF.map((d: { id: string }) => d.id);
+        expect(saved).toEqual([b.id, a.id]);
     });
 });

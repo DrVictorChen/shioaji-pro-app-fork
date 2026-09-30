@@ -18,6 +18,7 @@ import {
 } from '../lib/chart-drawings';
 import type { ContractBase } from '../lib/types/contract';
 import { useHotkeys } from './use-hotkeys';
+import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 
 // Esc×2 全部刪單的整合測試：開啟風控設定、攔下刪單
 const hk = vi.hoisted(() => ({ cancelAll: vi.fn(async () => {}), notify: vi.fn() }));
@@ -232,6 +233,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         keyListeners.clear();
         hk.cancelAll.mockClear();
         hk.notify.mockClear();
+        resetEscCancelArm(); // 前一個測試留下的「第一下」不能帶過來
         vi.stubGlobal('window', {
             addEventListener: (type: string, l: (e: KeyboardEvent) => void, capture?: boolean) => {
                 if (type === 'keydown') keyListeners.set(l, !!capture);
@@ -357,6 +359,26 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         });
         await act(async () => {
             press('Escape'); // 0.6 秒內 — 只能算新的第一下
+        });
+        expect(hk.cancelAll).not.toHaveBeenCalled();
+        expect(hk.notify).toHaveBeenCalledTimes(2);
+    });
+
+    it('Esc（武裝）→ 焦點在樣式面板勾選框上的 Esc → 點外面 → Esc：不會全部刪單', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        await act(async () => {
+            press('Escape'); // 第一下：武裝
+        });
+        expect(hk.notify).toHaveBeenCalledTimes(1);
+        vi.stubGlobal('document', { activeElement: { tagName: 'INPUT' } }); // 勾選框
+        await act(async () => {
+            press('Escape'); // 控制項上的 Esc：清掉等待中的第一下
+        });
+        vi.stubGlobal('document', { activeElement: null }); // 點外面，焦點離開
+        await act(async () => {
+            press('Escape'); // 0.6 秒內，但只能算新的第一下
         });
         expect(hk.cancelAll).not.toHaveBeenCalled();
         expect(hk.notify).toHaveBeenCalledTimes(2);
