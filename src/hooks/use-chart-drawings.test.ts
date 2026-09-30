@@ -3,7 +3,6 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     chartHasFocus,
-    AXIS_LABEL_BAND_PX,
     inOrderLabelArea,
     orderLineMayTakePointer,
     toolShortcutOf,
@@ -20,6 +19,7 @@ import {
 } from '../lib/chart-drawings';
 import type { ContractBase } from '../lib/types/contract';
 import { useHotkeys } from './use-hotkeys';
+import { AXIS_LABEL_H } from '../lib/chart-drawing-layer';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 
 // Esc×2 全部刪單的整合測試：開啟風控設定、攔下刪單
@@ -725,33 +725,42 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         expect(orderLineMayTakePointer({ drawingArmed: false, defaultPrevented: false, drawingHit: null })).toBe(true);
     });
 
-    it('價格軸標籤重疊：委託原價 y=300、水平線 y=304（防重疊把委託標籤推到 284）— 拖水平線的標籤不改委託價', () => {
-        const base = { drawingArmed: false, defaultPrevented: false, drawingHit: null, inGrip: true };
-        const orderY = 300;
-        const drawingLabels = [304];
-        const near = (y: number) => drawingLabels.some((d) => Math.abs(d - y) < AXIS_LABEL_BAND_PX);
-        // 使用者按在水平線的標籤（y=304）上：離委託原價 4px，findNear 會命中 — 但畫圖標籤優先
-        expect(
-            orderLineMayTakePointer({ ...base, drawingLabelAtPointer: near(304), drawingLabelNearOrder: near(orderY) }),
-        ).toBe(false);
-        // 即使選取中的水平線也一樣（價格軸上不做物件命中，靠標籤判斷）
-        expect(near(orderY)).toBe(true);
-        // 兩個標籤距離夠遠（沒被推開）時，委託標籤照常可拖
-        const far = (y: number) => [360].some((d) => Math.abs(d - y) < AXIS_LABEL_BAND_PX);
-        expect(
-            orderLineMayTakePointer({ ...base, drawingLabelAtPointer: far(300), drawingLabelNearOrder: far(orderY) }),
-        ).toBe(true);
+    it('標籤連鎖防重疊：現價 100、兩筆委託 101／102、水平線 103，另一筆委託在 143 — 拖畫圖標籤不改任何委託價', async () => {
+        // 畫圖標籤自己畫在價格軸上、固定在線的價位（不參與函式庫的防重疊
+        // 連鎖推移），範圍確切已知
+        const api = await setup(false, false);
+        addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25200 - 103 }], DEFAULT_DRAWING_STYLE); // y=103
+        await act(async () => {});
+        expect((attachedLayer as unknown as { priceAxisViews?: unknown }).priceAxisViews).toBeUndefined();
+        const orders = [101, 102, 143]; // 各委託原價位的 y
+        const findNear = (y: number) => orders.find((o) => Math.abs(o - y) <= 6);
+        const take = (clientY: number) =>
+            findNear(clientY) !== undefined &&
+            orderLineMayTakePointer({
+                drawingArmed: false,
+                defaultPrevented: false,
+                drawingHit: null,
+                inGrip: true,
+                drawingLabelAtPointer: api().drawingLabelAt(clientY),
+            });
+        // 按在水平線自己的標籤上（y=103，離兩筆委託 1～2px）：屬於畫圖
+        expect(take(103)).toBe(false);
+        expect(take(96)).toBe(false); // 標籤上緣
+        // 舊做法下標籤會被推到 142.5 撞上 143 的委託；現在那裡不是畫圖標籤，
+        // 143 的委託標籤照常可拖
+        expect(api().drawingLabelAt(142.5)).toBe(false);
+        expect(take(143)).toBe(true);
     });
 
-    it('drawingLabelNear：水平線（含選取中）的價格軸標籤位置', async () => {
+    it('drawingLabelAt：標籤範圍＝線的價位上下各半個標籤高，選取中也一樣', async () => {
         const api = await setup(false); // 水平線 25000 → y=200
-        expect(api().drawingLabelNear(204)).toBe(true);
-        expect(api().drawingLabelNear(230)).toBe(false);
+        expect(api().drawingLabelAt(200 + AXIS_LABEL_H / 2)).toBe(true);
+        expect(api().drawingLabelAt(200 - AXIS_LABEL_H / 2 - 1)).toBe(false);
         await act(async () => {
             pressOnLine();
         });
         expect(api().selected?.tool).toBe('horizontal');
-        expect(api().drawingLabelNear(196)).toBe(true);
+        expect(api().drawingLabelAt(195)).toBe(true);
     });
 
     it('drawingAt：游標下的畫圖物件是選取中的還是其他的', async () => {
