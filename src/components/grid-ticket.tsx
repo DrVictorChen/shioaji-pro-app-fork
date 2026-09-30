@@ -15,6 +15,7 @@ import {
     usableCapturedAccount,
 } from '../lib/order-account';
 import { accountMatches } from '../lib/flash-account';
+import { useAccounts } from '../lib/account-store';
 import { maskAccountId, usePrivacyMode } from '../lib/privacy';
 import type { Account } from '../lib/types/portfolio';
 import { cancellationSummary } from '../lib/trade-mutations';
@@ -48,11 +49,48 @@ const MAX_OPS_PER_CYCLE = 4;
 const keyOf = (p: number) => p.toFixed(2);
 
 // 網格單的擁有者（#204）：custom_field 只能帶固定標記，同一檔可能有多個
-// 鋪單面板（不同單位／帳戶／同單位不同面板）。每個面板實例記下自己送出的
-// 委託 id；全撤只撤本面板送出的單，動態跟隨不把其他面板的單當成自己的。
-// 不屬於任何面板（例如重新整理前送出的）的網格單，跟隨仍會納入同單位／
-// 同帳戶的比對，避免重複補單；全撤不碰它們。
-const gridOwners = new Map<string, string>();
+// 鋪單面板（不同單位／帳戶／同單位不同面板）。每個面板（workspace block id）
+// 記下自己送出的委託 id，存在 localStorage（依帳戶分組），重新整理與其他
+// 視窗都看得到。全撤與動態跟隨的撤單只動本面板擁有的單；沒有擁有者的
+// 網格單只用來避免重複補單，永遠不會被跟隨撤掉或取代。
+const OWNERS_KEY = 'sj-pro-grid-owners';
+const OWNERS_TTL_MS = 3 * 24 * 3600 * 1000;
+const OWNERS_MAX = 2000;
+type OwnerEntry = { owner: string; at: number };
+type OwnerStore = Record<string, Record<string, OwnerEntry>>; // account key → order id → owner
+
+const accountKeyOf = (a: Pick<Account, 'account_type' | 'broker_id' | 'account_id'> | undefined | null) =>
+    a ? `${a.account_type}:${a.broker_id}:${a.account_id}` : '';
+
+function readOwners(): OwnerStore {
+    try {
+        const raw = JSON.parse(globalThis.localStorage?.getItem(OWNERS_KEY) ?? '{}') as unknown;
+        return raw && typeof raw === 'object' ? raw as OwnerStore : {};
+    } catch {
+        return {};
+    }
+}
+
+/** Owner (panel id) of a grid order, or undefined when no panel claims it. */
+export function gridOwnerOf(account: Pick<Account, 'account_type' | 'broker_id' | 'account_id'> | undefined | null, orderId: string, store = readOwners()): string | undefined {
+    const e = store[accountKeyOf(account)]?.[orderId];
+    return e && typeof e.owner === 'string' ? e.owner : undefined;
+}
+
+export function recordGridOwner(account: Pick<Account, 'account_type' | 'broker_id' | 'account_id'>, orderId: string, owner: string): void {
+    try {
+        const store = readOwners();
+        const key = accountKeyOf(account);
+        const now = Date.now();
+        const entries = { ...(store[key] ?? {}), [orderId]: { owner, at: now } };
+        const kept = Object.entries(entries)
+            .filter(([, e]) => e && now - Number(e.at) < OWNERS_TTL_MS)
+            .sort((a, b) => Number(b[1].at) - Number(a[1].at))
+            .slice(0, OWNERS_MAX);
+        globalThis.localStorage?.setItem(OWNERS_KEY, JSON.stringify({ ...store, [key]: Object.fromEntries(kept) }));
+    } catch { /* quota / private mode */ }
+}
+
 let gridInstanceSeq = 0;
 
 export interface GridBaseQuote {
@@ -83,10 +121,13 @@ export function gridBasePrice(
 }
 
 export function GridTicket({
+    panelId,
     contract,
     trades = [],
     onOrdersChanged,
 }: {
+    /** workspace block id — the persisted owner of this panel's grid orders */
+    panelId?: string;
     contract: ContractInfo;
     trades?: Trade[];
     onOrdersChanged?: () => void;
@@ -116,9 +157,12 @@ export function GridTicket({
     const oddQuote = useQuote(odd ? contract.code : null, { oddLot: true });
     const last = gridBasePrice(odd, quote, oddQuote, contract.reference, p => roundToTick(contract, p));
     const waitingOdd = odd && last === null;
-    const instanceId = useMemo(() => `grid-${++gridInstanceSeq}`, []);
-    const ownerOf = (t: Trade) => gridOwners.get(t.order.id);
+    const localId = useMemo(() => `grid-local-${Date.now().toString(36)}-${++gridInstanceSeq}`, []);
+    const instanceId = panelId ? `grid:${panelId}` : localId;
+    const instanceRef = useRef(instanceId);
+    instanceRef.current = instanceId;
     const accountOf = (t: Trade) => (t as Trade & { account?: Account }).account ?? t.order.account;
+    const ownerOf = (t: Trade, store?: OwnerStore) => gridOwnerOf(accountOf(t), t.order.id, store);
 
     // refs for the follow loop
     const contractRef = useRef(contract);
@@ -210,7 +254,7 @@ export function GridTicket({
                 order_lot: p.odd ? 'IntradayOdd' : 'Common',
             }, account);
         const id = (trade as Trade | undefined)?.order?.id;
-        if (id) gridOwners.set(id, instanceId);
+        if (id) recordGridOwner(account, id, instanceRef.current);
         return trade;
     };
 
@@ -289,19 +333,35 @@ export function GridTicket({
         onChangedRef.current?.();
     };
 
-    // 全撤只撤「本面板送出、目前單位、目前帳戶」的網格單（#204）
-    const cancelAccount = captureSelectedAccount(futures ? 'F' : 'S');
-    const ownGrid = gridOrders.filter(
-        (t) =>
-            ownerOf(t) === instanceId &&
-            isOddLot(t.order.order_lot) === odd &&
-            (!cancelAccount || accountMatches(accountOf(t), cancelAccount)),
-    );
+    // 全撤只撤「本面板擁有、目前單位、目前帳戶」的網格單（#204）。按鈕上的
+    // 筆數只是提示；實際要撤的清單在按下時依當下帳戶重新計算
+    const ownOrders = (account: Account | null | undefined) => {
+        if (!account) return [];
+        const store = readOwners();
+        return gridOrders.filter(
+            (t) =>
+                ownerOf(t, store) === instanceId &&
+                isOddLot(t.order.order_lot) === odd &&
+                accountMatches(accountOf(t), account),
+        );
+    };
+    // re-render on account changes so the count follows the current account
+    useAccounts();
+    const ownGrid = ownOrders(captureSelectedAccount(futures ? 'F' : 'S'));
     const otherGrid = gridOrders.length - ownGrid.length;
     const cancelGrid = async () => {
-        if (ownGrid.length === 0) return;
+        const account = captureSelectedAccount(futures ? 'F' : 'S');
+        if (!account) {
+            notify({ kind: 'err', title: '鋪單全撤未執行', body: '沒有可用的下單帳戶，無法確認要撤哪個帳戶的鋪單' });
+            return;
+        }
+        const targets = ownOrders(account);
+        if (targets.length === 0) {
+            notify({ kind: 'info', title: '鋪單全撤', body: '目前帳戶與單位沒有本面板送出的在途鋪單' });
+            return;
+        }
         setBusy(true);
-        const results = await cancelOrders(ownGrid.map((t) => t.order.id));
+        const results = await cancelOrders(targets.map((t) => t.order.id));
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -350,20 +410,26 @@ export function GridTicket({
             try {
                 const desired = new Set(desiredPrices(base).map(keyOf));
                 const c = contractRef.current;
-                const mine = tradesRef.current.filter(
+                const owners = readOwners();
+                const same = tradesRef.current.filter(
                     (t) =>
                         ACTIVE_ORDER_STATUSES.has(t.status.status) &&
                         t.order.custom_field === GRID_TAG &&
                         t.order.action === cycle.side &&
                         isOddLot(t.order.order_lot) === followOdd &&
-                        // 其他鋪單面板送出的單不屬於這個跟隨
-                        (ownerOf(t) === undefined || ownerOf(t) === instanceId) &&
                         accountMatches(accountOf(t), followAccount) &&
                         (t.contract.code === c.code ||
                             getAliasFor(t.contract.code) === c.code),
                 );
+                // 撤單／取代只動本面板擁有的單；沒有擁有者的網格單只用來避免
+                // 重複補單，其他面板的單完全不看
+                const mine = same.filter(t => ownerOf(t, owners) === instanceRef.current);
+                const counted = same.filter(t => {
+                    const owner = ownerOf(t, owners);
+                    return owner === undefined || owner === instanceRef.current;
+                });
                 const have = new Set(
-                    mine.map((t) =>
+                    counted.map((t) =>
                         keyOf(t.status.modified_price || t.order.price),
                     ),
                 );
