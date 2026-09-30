@@ -175,12 +175,20 @@ export function GridTicket({
     // a resend (ADR 0004); they stay until the user reconciles manually.
     const unresolvedCancels = useRef(new Set<string>());
 
-    // reset on symbol change（零股股數不沿用成張數）
+    // reset on symbol change：每檔量只在輸入時的單位有效 — 之前是零股，或
+    // 商品類別（股票／期貨）變了，都回 1（比對切換「之前」的單位；render 後
+    // 的 odd 已經是新商品的值），500 股不會變成 500 口或 500 張（#204）
+    const lotStateRef = useRef(lot);
+    lotStateRef.current = lot;
+    const unitClassRef = useRef(futures);
     useEffect(() => {
         setArmed(false);
         setFollow(false);
-        if (paramsRef.current.odd) setQtyPer(1);
+        const classChanged = unitClassRef.current !== futures;
+        unitClassRef.current = futures;
+        if (lotStateRef.current !== 'Common' || classChanged) setQtyPer(1);
         setLot('Common');
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contract.code]);
 
     // our working grid orders for this symbol

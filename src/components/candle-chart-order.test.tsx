@@ -219,4 +219,28 @@ describe('chart order settings button', () => {
         expect(m.addTrigger).not.toHaveBeenCalled();
         expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('等待零股行情') });
     });
+
+    it('another chart saving 設為預設 does not change an existing chart that never customised its settings', async () => {
+        const nodeMock = { createNodeMock: () => ({ clientWidth: 800, clientHeight: 400, getBoundingClientRect: () => ({ width: 800, height: 400, left: 0, top: 0 }), addEventListener() {}, removeEventListener() {}, style: {} }) };
+        let other!: ReactTestRenderer;
+        // a workspace chart (controlled, nothing saved yet for its market)
+        const otherProps = { contract: stk, panelId: 'b', orderSettings: undefined, onOrderSettingsChange: vi.fn() };
+        await act(async () => { other = create(createElement(CandleChart, otherProps as any), nodeMock); });
+        await mount({ contract: stk });
+        await act(async () => { chip().props.onClick(); });
+        await act(async () => { button(pop()!, '盤中零股（股）').props.onClick(); });
+        await act(async () => { button(pop()!, '500').props.onClick(); });
+        await act(async () => { button(pop()!, '設為預設').props.onClick(); });
+        expect(JSON.parse((globalThis as any).localStorage.getItem('sj-pro-chart-order-defaults')).S).toMatchObject({ qty: 500, lot: 'IntradayOdd' });
+        const otherChip = () => other.root.findAll(n => n.type === 'button' && String(n.props['aria-label'] ?? '').startsWith('圖表下單設定'))[0]!;
+        // the other chart re-renders (new quote / props) and keeps 1 張
+        await act(async () => { other.update(createElement(CandleChart, { ...otherProps, contract: { ...stk } } as any)); });
+        await flush();
+        expect(text(otherChip())).toBe('1 張');
+        // a chart opened afterwards starts from the new default
+        let fresh!: ReactTestRenderer;
+        await act(async () => { fresh = create(createElement(CandleChart, { contract: stk } as any), nodeMock); });
+        expect(text(fresh.root.findAll(n => n.type === 'button' && String(n.props['aria-label'] ?? '').startsWith('圖表下單設定'))[0]!)).toBe('500 股');
+        await act(async () => { other.unmount(); fresh.unmount(); });
+    });
 });

@@ -214,12 +214,17 @@ export function CandleChart({
             : contract.security_type === 'FUT' || contract.security_type === 'OPT' ? 'F' : null;
     const [localOrder, setLocalOrder] = useState<ChartOrderPanelState>(() => orderSettingsProp ?? {});
     const panelOrder = onOrderSettingsChange ? (orderSettingsProp ?? {}) : localOrder;
-    const [defaultsVer, setDefaultsVer] = useState(0);
+    // 沒有自訂過的市場用「設為預設」的值 — 在這張圖第一次用到該市場時取一次
+    // 快照，之後別的圖按「設為預設」不會改到這張圖（#204）
+    const defaultSnapshot = useRef<Partial<Record<ChartOrderMarket, ChartOrderSettings>>>({});
+    const defaultFor = (m: ChartOrderMarket) => (defaultSnapshot.current[m] ??= loadChartOrderDefault(m));
+    const savedOrder = panelOrder[orderMarket ?? 'S'];
     const orderSettings: ChartOrderSettings = useMemo(() => {
         const m = orderMarket ?? 'S';
-        const saved = panelOrder[m];
-        return saved ? normalizeChartOrder(saved, m) : loadChartOrderDefault(m);
-    }, [panelOrder, orderMarket, defaultsVer]);
+        return savedOrder ? normalizeChartOrder(savedOrder, m) : defaultFor(m);
+        // defaultFor reads a per-chart snapshot, stable for the chart's lifetime
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [savedOrder, orderMarket]);
     const setOrderSettings = (next: ChartOrderSettings) => {
         if (!orderMarket) return;
         const value = { ...panelOrder, [orderMarket]: normalizeChartOrder(next, orderMarket) };
@@ -1690,7 +1695,6 @@ export function CandleChart({
                         onChange={setOrderSettings}
                         onSaveDefault={() => {
                             saveChartOrderDefault(orderMarket, orderSettings);
-                            setDefaultsVer(v => v + 1);
                             notify({ kind: 'info', title: '已設為圖表下單預設', body: `新開的${orderMarket === 'F' ? '期貨' : '股票'}圖表使用這組設定（不含帳號）；其他現有圖表維持原設定。` });
                         }}
                         account={orderAccountView}

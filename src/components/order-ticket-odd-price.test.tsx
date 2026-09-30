@@ -79,3 +79,19 @@ it('an odd-lot bracket without any odd-lot quote is refused with 等待零股行
     expect(m.validate).not.toHaveBeenCalled();
     expect(text(view.root)).toContain('等待零股行情');
 });
+
+it('odd 500 股 → futures → stock: quantity resets per unit and instrument class', async () => {
+    const fut = { code: 'TXFR1', name: '臺股期貨', security_type: 'FUT', exchange: 'TAIFEX', reference: 100 } as unknown as ContractInfo;
+    await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { qtyInput().props.onChange({ target: { value: '500' } }); });
+    await act(async () => { view.update(createElement(OrderTicket, { contract: fut, onPlaced: vi.fn() })); });
+    expect(qtyInput().props.value).toBe(1);
+    expect(qtyInput().props['aria-label']).toBe('數量（口）');
+    await act(async () => { view.update(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    expect(qtyInput().props.value).toBe(1);
+    expect(qtyInput().props['aria-label']).toBe('數量（張）');
+    await act(async () => { qtyInput().props.onChange({ target: { value: '5' } }); });
+    await act(async () => { view.update(createElement(OrderTicket, { contract: fut, onPlaced: vi.fn() })); });
+    expect(qtyInput().props.value).toBe(1); // 5 張 never becomes 5 口
+});

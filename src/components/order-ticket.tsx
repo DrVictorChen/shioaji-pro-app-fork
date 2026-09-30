@@ -117,6 +117,7 @@ export function OrderTicket({
     const [presetSel, setPresetSel] = useState('');
     const [presetName, setPresetName] = useState('');
 
+    const unitClassRef = useRef(isFutures);
     // reset on symbol change — split state deliberately collapses too
     // (never persisted: a forgotten split from last time must not fire)
     useEffect(() => {
@@ -126,8 +127,11 @@ export function OrderTicket({
         setFeedback(null);
         setPriceType('LMT');
         setOrderType('ROD');
-        // 零股數量是股數：換商品回到整股時歸 1，避免股數被當成張數
-        if (orderLotRef.current !== 'Common') setQty(1);
+        // 數量只在輸入時的單位有效：原本是零股（股數），或商品類別（股票／
+        // 期貨）變了，都歸 1 — 股數不會被當成張數或口數（#204）
+        const classChanged = unitClassRef.current !== isFutures;
+        unitClassRef.current = isFutures;
+        if (orderLotRef.current !== 'Common' || classChanged) setQty(1);
         setOrderLot('Common');
         setOrderCond('Cash');
         setOctype('Auto');
