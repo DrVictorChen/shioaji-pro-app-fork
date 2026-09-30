@@ -197,6 +197,9 @@ export function useChartDrawings(opts: {
         const down = (e: MouseEvent) => {
             if (e.button !== 0) return;
             claimKeyboard(token);
+            // 交易模式武裝中：這一下是點價下單，畫圖物件不能攔（選取、拖曳
+            // 都會吃掉事件，圖表的 click 就不會觸發）
+            if (stateRef.current.tradeArmed) return;
             // 委託線拖曳（同一個 host 上先註冊的 handler）已經吃掉這一下
             if (e.defaultPrevented) return;
             const layer = layerOf();
@@ -287,7 +290,7 @@ export function useChartDrawings(opts: {
         };
 
         const hover = (e: MouseEvent) => {
-            if (drag) return;
+            if (drag || stateRef.current.tradeArmed) return;
             const layer = layerOf();
             const pt = layer?.pointOf(e);
             if (!layer || !pt) return;

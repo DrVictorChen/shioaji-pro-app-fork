@@ -568,23 +568,6 @@ export function CandleChart({
         };
     }, []);
 
-    // 畫圖工具（issue #122 二／三）。必須接在建立圖表的 effect 之後宣告：
-    // 同一個元件的 effect 依宣告順序執行，掛 primitive 時 candleSeriesRef
-    // 才已經有值。
-    const barTimesRef = useRef<number[]>([]);
-    useEffect(() => {
-        barTimesRef.current = barsRef.current.map((b) => b.time);
-    }, [dataVersion]);
-    const drawings = useChartDrawings({
-        contract,
-        hostRef,
-        chartRef,
-        seriesRef: candleSeriesRef,
-        getTimes: () => barTimesRef.current,
-        tradeArmed: mode !== 'observe',
-        onEnterDrawingMode: () => setMode('observe'),
-    });
-
     // keep latest theme readable inside the chart-creation effect
     const themeSettingsRef = useRef(themeSettings);
     themeSettingsRef.current = themeSettings;
@@ -1322,6 +1305,9 @@ export function CandleChart({
 
         const down = (e: MouseEvent) => {
             if (e.button !== 0) return;
+            // 別的 handler（畫圖物件）已經接手這一下 — 同一下不能同時拖
+            // 畫圖又送出改價
+            if (e.defaultPrevented) return;
             const hit = findNear(yOf(e));
             if (!hit) return;
             e.preventDefault();
@@ -1399,6 +1385,25 @@ export function CandleChart({
             if (activeUp) document.removeEventListener('mouseup', activeUp, true);
         };
     }, []);
+
+    // 畫圖工具（issue #122 二／三）。宣告位置有兩個前提（同一個元件的
+    // effect 依宣告順序執行）：
+    // - 在建立圖表的 effect 之後 — 掛 primitive 時 candleSeriesRef 才有值
+    // - 在委託線拖曳的 effect 之後 — host 上的 mousedown／mousemove 由
+    //   委託線先處理：真實委託優先於畫圖物件，游標也由它先決定
+    const barTimesRef = useRef<number[]>([]);
+    useEffect(() => {
+        barTimesRef.current = barsRef.current.map((b) => b.time);
+    }, [dataVersion]);
+    const drawings = useChartDrawings({
+        contract,
+        hostRef,
+        chartRef,
+        seriesRef: candleSeriesRef,
+        getTimes: () => barTimesRef.current,
+        tradeArmed: mode !== 'observe',
+        onEnterDrawingMode: () => setMode('observe'),
+    });
 
     // draw trigger price lines on the candle series
     useEffect(() => {

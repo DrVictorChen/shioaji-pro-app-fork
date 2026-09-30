@@ -281,3 +281,112 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         expect(b().drawings.map((d) => d.id)).toEqual([la.id]);
     });
 });
+
+describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
+    // 最小的圖表替身：y = 25200 - price，時間軸每根 10px
+    type L = (e: MouseEvent) => void;
+    const hostListeners = new Map<string, L>();
+    const host = {
+        style: { cursor: '' },
+        dataset: {},
+        addEventListener: (t: string, l: L) => hostListeners.set(t, l),
+        removeEventListener: (t: string) => hostListeners.delete(t),
+    };
+    const series = {
+        priceToCoordinate: (p: number) => 25200 - p,
+        coordinateToPrice: (y: number) => 25200 - y,
+        priceFormatter: () => ({ format: String }),
+        attachPrimitive(layer: {
+            attached: (p: unknown) => void;
+            noteCanvas: (c: unknown, s: unknown) => void;
+        }) {
+            layer.attached({
+                series,
+                chart: { timeScale: () => ({ logicalToCoordinate: (l: number) => l * 10 }) },
+                requestUpdate() {},
+            });
+            layer.noteCanvas(
+                { getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 400 }) },
+                { width: 800, height: 400 },
+            );
+        },
+        detachPrimitive() {},
+    };
+
+    function DrawProbe({ tradeArmed, receive }: { tradeArmed: boolean; receive: (v: ChartDrawingsApi) => void }) {
+        receive(
+            useChartDrawings({
+                contract,
+                hostRef: { current: host as unknown as HTMLDivElement },
+                chartRef: { current: { applyOptions() {} } as never },
+                seriesRef: { current: series as never },
+                getTimes: () => [1000, 1060, 1120, 1180],
+                tradeArmed,
+                onEnterDrawingMode: vi.fn(),
+            }),
+        );
+        return null;
+    }
+
+    beforeEach(() => {
+        hostListeners.clear();
+        vi.stubGlobal('document', { addEventListener() {}, removeEventListener() {} });
+    });
+
+    // 在水平線（25000 → y=200）上按下
+    function pressOnLine(prevented = false) {
+        const e = {
+            button: 0,
+            clientX: 20,
+            clientY: 200,
+            defaultPrevented: prevented,
+            preventDefault: vi.fn(),
+            stopPropagation: vi.fn(),
+        };
+        hostListeners.get('mousedown')!(e as unknown as MouseEvent);
+        return e;
+    }
+
+    async function setup(tradeArmed: boolean) {
+        let api!: ChartDrawingsApi;
+        let root!: ReactTestRenderer;
+        await act(async () => {
+            root = create(createElement(DrawProbe, { tradeArmed, receive: (v) => (api = v) }));
+        });
+        roots.push(root);
+        addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => {});
+        return () => api;
+    }
+
+    it('沒武裝交易時，按在畫圖物件上會選取並接手這一下', async () => {
+        const api = await setup(false);
+        let e!: ReturnType<typeof pressOnLine>;
+        await act(async () => {
+            e = pressOnLine();
+        });
+        expect(e.preventDefault).toHaveBeenCalled();
+        expect(api().selected?.tool).toBe('horizontal');
+    });
+
+    it('武裝點價買賣時，按在畫圖物件上不攔截 — 這一下要變成下單', async () => {
+        const api = await setup(true);
+        let e!: ReturnType<typeof pressOnLine>;
+        await act(async () => {
+            e = pressOnLine();
+        });
+        expect(e.preventDefault).not.toHaveBeenCalled();
+        expect(e.stopPropagation).not.toHaveBeenCalled();
+        expect(api().selected).toBeNull();
+    });
+
+    it('委託線已接手的一下（defaultPrevented），畫圖物件不跟著拖', async () => {
+        const api = await setup(false);
+        let e!: ReturnType<typeof pressOnLine>;
+        await act(async () => {
+            e = pressOnLine(true);
+        });
+        expect(e.stopPropagation).not.toHaveBeenCalled();
+        expect(api().selected).toBeNull();
+    });
+});
