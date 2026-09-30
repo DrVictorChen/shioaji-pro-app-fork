@@ -111,7 +111,7 @@ describe('chart order settings button', () => {
         expect(t).not.toContain('IOC');
         expect(t).not.toContain('當沖');
         expect(t).not.toContain('開平倉');
-        expect(text(view.root.findAll(n => n.props['data-testid'] === 'chart-order-summary')[0]!)).toMatch(/^點價買／賣以 ROD 限價送出 500 股盤中零股，帳號 .*2207；停損停利觸發後以漲跌停價送零股限價 ROD/);
+        expect(text(view.root.findAll(n => n.props['data-testid'] === 'order-settings-summary')[0]!)).toMatch(/^點價買／賣以 ROD 限價送出 500 股盤中零股，帳號 .*2207；停損停利觸發後以漲跌停價送零股限價 ROD/);
         expect(text(chip())).toBe('500 股');
         await act(async () => { button(pop()!, '完成').props.onClick(); });
         expect(pop()).toBeUndefined();
@@ -161,7 +161,7 @@ describe('chart order settings button', () => {
         expect(t).toContain('自動');
         await act(async () => { button(pop()!, '平倉').props.onClick(); });
         await act(async () => { button(pop()!, '2').props.onClick(); });
-        expect(text(view.root.findAll(n => n.props['data-testid'] === 'chart-order-summary')[0]!)).toContain('2 口（平倉）');
+        expect(text(view.root.findAll(n => n.props['data-testid'] === 'order-settings-summary')[0]!)).toContain('2 口（平倉）');
         await act(async () => { button(view.root, '點價買').props.onClick(); });
         await clickChart();
         expect(m.place.mock.calls[0]![4]).toMatchObject({ ocType: 'Cover', account: F1 });

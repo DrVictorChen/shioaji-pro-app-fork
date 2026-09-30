@@ -27,6 +27,14 @@ const text = (n: ReactTestInstance): string => n.children.map(c => typeof c === 
 let view!: ReactTestRenderer;
 const button = (label: string) => view.root.findAllByType('button').find(b => text(b).includes(label))!;
 const chips = () => view.root.findAllByType('button').filter(b => String(b.props.title ?? '').startsWith('刪除')).map(text);
+// 單位在「閃電下單設定」彈出面板裡（#204）
+const settings = (root: ReactTestInstance = view.root) => root.findAll(n => n.type === 'button' && n.props['aria-label'] === '閃電下單設定')[0];
+const setUnit = async (lot: 'Common' | 'IntradayOdd', root: ReactTestInstance = view.root) => {
+    await act(async () => { settings(root)!.props.onClick(); });
+    const pop = root.findAll(n => n.props.role === 'dialog')[0]!;
+    await act(async () => { pop.findAll(n => n.type === 'button' && text(n) === (lot === 'IntradayOdd' ? '盤中零股（股）' : '整股（張）'))[0]!.props.onClick(); });
+    await act(async () => { pop.findAll(n => n.type === 'button' && text(n) === '完成')[0]!.props.onClick(); });
+};
 const buyCell = () => view.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!;
 const cellPrice = () => Number(String(buyCell().props.title).slice(4).replace(/,/g, ''));
 
@@ -47,7 +55,7 @@ it('switches to 盤中零股: unit 股, limit-only, sends IntradayOdd shares and
     // whole-lot mode: only the 2-張 order is a chip; the odd one is counted aside
     expect(chips()).toEqual(['2']);
     expect(text(view.root)).toContain('另有零股委託 1 筆');
-    await act(async () => { button('零股').props.onClick(); });
+    await setUnit('IntradayOdd');
     expect(chips()).toEqual(['300']);
     expect(text(view.root)).toContain('另有整股委託 1 筆');
     expect(text(view.root)).toContain('盤中零股 · 以股計');
@@ -64,7 +72,7 @@ it('switches to 盤中零股: unit 股, limit-only, sends IntradayOdd shares and
     expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderLot: 'IntradayOdd', account: accounts[0] });
     expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '⚡ 零股買進已送出', body: expect.stringContaining('250 股') });
     // back to whole lots: quantity resets (250 股 must never become 250 張) and orders carry no odd lot
-    await act(async () => { button('零股').props.onClick(); });
+    await setUnit('Common');
     expect(view.root.findAll(n => n.type === 'input' && n.props['aria-label'] === '數量')[0]!.props.value).toBe(1);
     await act(async () => { button('啟用閃電下單').props.onClick(); });
     await act(async () => { buyCell().props.onClick(); });
@@ -75,17 +83,21 @@ it('switches to 盤中零股: unit 股, limit-only, sends IntradayOdd shares and
 it('futures panels have no odd-lot toggle', async () => {
     const fut = { code: 'TMF', security_type: 'FUT', reference: 100 } as unknown as ContractInfo;
     await act(async () => { view = create(createElement(FlashOrder, { contract: fut, trades: [], positions: [] })); });
-    expect(button('零股')).toBeUndefined();
+    // the settings popover has no 單位 row for futures
+    await act(async () => { settings()!.props.onClick(); });
+    const pop = view.root.findAll(n => n.props.role === 'dialog')[0]!;
+    expect(text(pop)).not.toContain('盤中零股');
+    expect(text(pop)).toContain('口');
 });
 
 it('cancelling a chip only cancels orders of the shown unit at that price', async () => {
     mocks.cancel.mockResolvedValue({});
     await act(async () => { view = create(createElement(FlashOrder, { contract, trades, positions })); });
-    await act(async () => { button('零股').props.onClick(); });
+    await setUnit('IntradayOdd');
     await act(async () => { await chip('300').props.onClick({ stopPropagation() {}, preventDefault() {} }); });
     expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual(['odd']);
     mocks.cancel.mockClear();
-    await act(async () => { button('零股').props.onClick(); });
+    await setUnit('Common');
     await act(async () => { await chip('2').props.onClick({ stopPropagation() {}, preventDefault() {} }); });
     expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual(['lot']);
 });

@@ -23,6 +23,8 @@ import {
 } from 'react';
 import { useQuote, useTradingLive } from '../hooks/use-stream';
 import { displayBook } from '../lib/display-book';
+import { flashOrderSummary, loadFlashOrderDefault, normalizeChartOrder, saveFlashOrderDefault } from '../lib/chart-order-settings';
+import { OrderSettingsButton } from './chart-order-popover';
 import { useDisplayBook } from '../hooks/use-display-book';
 import type { Snapshot } from '../lib/types/market';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
@@ -266,9 +268,10 @@ export function FlashOrder({
     const accountRef = useRef(activeAccount);
     accountRef.current = activeAccount;
     const privMoney = usePrivacyMoney();
-    const [qty, setQty] = useState(1);
-    // 股票：整股（張）或盤中零股（股）（#204）
-    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>('Common');
+    // 單位與數量的起始值來自「設為預設」（依股票／期貨）
+    const [qty, setQty] = useState(() => loadFlashOrderDefault(market).qty);
+    // 股票：整股（張）或盤中零股（股）（#204）— 每個面板自己的 state
+    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(() => loadFlashOrderDefault(market).lot);
     const odd = market === 'S' && lot === 'IntradayOdd';
     // 盤中零股是另一個撮合市場：零股模式的五檔、成交價與單量一律取零股
     // 行情（intraday_odd，量以股計），只在這個面板處於零股時才訂閱；
@@ -334,10 +337,16 @@ export function FlashOrder({
         setArmed(false);
     }, [contract.code, accountKey]);
 
-    // 換商品回整股；零股的股數不能沿用成張數
+    // 換商品回預設單位；單位變了（或原本是零股）數量也回預設 —
+    // 零股的股數不能沿用成張數
+    const lotRef = useRef(lot);
+    lotRef.current = lot;
+    const firstCode = useRef(true);
     useEffect(() => {
-        if (oddRef.current) setQty(1);
-        setLot('Common');
+        if (firstCode.current) { firstCode.current = false; return; }
+        const d = loadFlashOrderDefault(contract.security_type === 'STK' ? 'S' : 'F');
+        if (oddRef.current || d.lot !== lotRef.current) setQty(d.qty);
+        setLot(d.lot);
     }, [contract.code]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
@@ -346,11 +355,13 @@ export function FlashOrder({
         if (!live) setArmed(false);
     }, [live]);
 
-    // Esc disarms anywhere
+    // Esc disarms anywhere — except while the settings popover is open:
+    // there Esc only closes the popover
+    const settingsOpenRef = useRef(false);
     useEffect(() => {
         if (!armed) return;
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setArmed(false);
+            if (e.key === 'Escape' && !settingsOpenRef.current && !e.defaultPrevented) setArmed(false);
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
@@ -755,6 +766,7 @@ export function FlashOrder({
     }, [myOrders, trades, contract.code, lotShown]);
 
     const symbolLabel = flashSymbolLabel(contract);
+    const flashSettings = normalizeChartOrder({ qty, lot }, market);
     const accountLabels = flashAccountLabels(eligible, privacy);
     const accountShort = resolved.following
         ? activeAccount ? `跟隨 ${accountLabels.short(activeAccount)}` : accountsLoading ? '帳戶載入中' : '無可用帳戶'
@@ -837,26 +849,37 @@ export function FlashOrder({
                 >
                     ＋
                 </button>
-                {market === 'S' && (
-                    <>
-                        <span className={styles.qtyUnit}>{odd ? '股' : '張'}</span>
-                        <button
-                            className={styles.lotBtn[odd ? 'on' : 'off']}
-                            aria-pressed={odd}
-                            title={odd
-                                ? '盤中零股：以股計（1～999 股）、只能點價限價、僅現股。點擊改回整股'
-                                : '改用盤中零股（以股計，只能點價限價）'}
-                            onClick={() => {
-                                armedRef.current = false;
-                                setArmed(false);
-                                setQty(1);
-                                setLot(odd ? 'Common' : 'IntradayOdd');
-                            }}
-                        >
-                            零股
-                        </button>
-                    </>
-                )}
+                {market === 'S' && <span className={styles.qtyUnit}>{odd ? '股' : '張'}</span>}
+                <OrderSettingsButton
+                    market={market}
+                    settings={flashSettings}
+                    onChange={next => {
+                        if (next.lot !== lot) {
+                            // 換單位一律先上鎖，股數與張數不能互換
+                            armedRef.current = false;
+                            setArmed(false);
+                            setLot(next.lot);
+                        }
+                        setQty(next.qty);
+                    }}
+                    onSaveDefault={() => {
+                        saveFlashOrderDefault(market, flashSettings);
+                        notify({ kind: 'info', title: '已設為閃電下單預設', body: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板與換商品時使用這組單位與數量；帳號不變。` });
+                    }}
+                    layout={{
+                        title: '閃電下單設定',
+                        scope: '只影響這個面板',
+                        unit: market === 'S',
+                        orderType: false,
+                        octype: false,
+                        defaultNote: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量（不含帳號）`,
+                        qtyLabel: '閃電下單數量',
+                    }}
+                    contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
+                    summary={flashOrderSummary(flashSettings, market, accountShort)}
+                    ariaLabel='閃電下單設定'
+                    onOpenChange={open => { settingsOpenRef.current = open; }}
+                />
                 <span className={styles.rowBreak} aria-hidden />
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
