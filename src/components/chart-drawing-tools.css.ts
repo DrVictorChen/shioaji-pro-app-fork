@@ -18,6 +18,13 @@ export const rail = style({
     padding: '4px 3px',
     borderRight: `1px solid ${vars.color.border}`,
     background: vars.color.panel,
+    // 矮面板放不下全部按鈕時整條可捲動（選取中的鎖定／隱藏／複製／刪除
+    // 在最下面，被裁掉就點不到）。捲軸不佔寬度，滾輪照常可捲
+    minHeight: 0,
+    overflowY: 'auto',
+    overflowX: 'hidden',
+    scrollbarWidth: 'none',
+    selectors: { '&::-webkit-scrollbar': { display: 'none' } },
 });
 
 const btnBase = style({
@@ -36,21 +43,25 @@ const btnBase = style({
 });
 
 export const railBtn = styleVariants({
-    normal: [btnBase],
+    normal: [btnBase, { flexShrink: 0 }],
     // 武裝中的工具沿用交易模式那組的視覺語彙（琥珀＝等你點圖）
     armed: [
         btnBase,
         {
+            flexShrink: 0,
+            // 武裝中的工具外加一圈描邊，與「游標」的選中底色明顯不同
+            boxShadow: `0 0 0 1px ${vars.color.foreground}`,
             color: '#1a1304',
             background: vars.color.amber,
             borderColor: vars.color.amber,
             ':hover': { color: '#1a1304', background: vars.color.amber },
         },
     ],
-    active: [btnBase, { color: vars.color.foreground, background: vars.color.muted }],
+    active: [btnBase, { flexShrink: 0, color: vars.color.foreground, background: vars.color.muted }],
     disabled: [
         btnBase,
         {
+            flexShrink: 0,
             opacity: 0.35,
             cursor: 'not-allowed',
             ':hover': { color: vars.color.mutedForeground, background: 'transparent' },
@@ -70,6 +81,7 @@ export const railDivider = style({
 export const swatchBtn = style([
     btnBase,
     {
+        flexShrink: 0,
         ':hover': { background: vars.color.muted },
     },
 ]);
@@ -81,34 +93,39 @@ export const swatchDot = style({
     border: `1px solid ${vars.color.border}`,
 });
 
-export const backdrop = style({
-    position: 'fixed',
-    inset: 0,
-    zIndex: 29,
-});
-
-// 面板從直排往右彈出（往下會被圖表下緣切掉）
+// 樣式面板：portal 到 body、以視窗座標定位（位置由元件依可用空間算），
+// 不受 K 線面板邊界裁切；視窗仍放不下時限高並捲動
 export const pop = style({
-    position: 'absolute',
-    left: 'calc(100% + 4px)',
-    top: 0,
-    zIndex: 30,
+    zIndex: 1000,
     display: 'flex',
     flexDirection: 'column',
     gap: '6px',
     padding: '8px 10px',
+    overflowY: 'auto',
     background: vars.color.panelRaised,
     border: `1px solid ${vars.color.border}`,
     borderRadius: vars.radius.md,
     boxShadow: '0 6px 20px rgba(0, 0, 0, 0.35)',
     whiteSpace: 'nowrap',
+    fontFamily: vars.font.body,
 });
 
-export const popWrap = style({
-    position: 'relative',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
+// 工具列按鈕的提示（portal 到 body，fixed 定位在按鈕右側、垂直置中）
+export const tip = style({
+    position: 'fixed',
+    zIndex: 1001,
+    transform: 'translateY(-50%)',
+    pointerEvents: 'none',
+    padding: '3px 8px',
+    fontFamily: vars.font.body,
+    fontSize: '0.66rem',
+    lineHeight: 1.4,
+    whiteSpace: 'nowrap',
+    color: vars.color.foreground,
+    background: vars.color.panelRaised,
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
 });
 
 export const row = style({
