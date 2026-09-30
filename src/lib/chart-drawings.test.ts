@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     anchorCount,
-    DEFAULT_FIB_LEVELS,
     drawingLabel,
-    fibLevelsOf,
+    fibOptionsOf,
     MAX_TEXT_LENGTH,
     moveDrawing,
     removeDrawings,
@@ -35,6 +34,7 @@ import {
     updateDrawing,
     type DrawingAnchor,
 } from './chart-drawings';
+import { defaultFibLevels, defaultFibOptions } from './chart-drawing-fib';
 
 const store = new Map<string, string>();
 
@@ -487,8 +487,13 @@ describe('第一期：新物件類型、舊資料相容、圖層順序', () => {
             ],
             levels: [1, 0.5, 'x', 0.5, 99, NaN, 0],
         })!;
-        expect(f.levels).toEqual([0, 0.5, 1]);
-        expect(fibLevelsOf(sanitizeDrawing({ ...f, levels: 'bad' })!)).toEqual(DEFAULT_FIB_LEVELS);
+        // #224 第一版的數字陣列轉成新格式，顏色沿用 TradingView 預設順序
+        expect(f.fib!.levels.map((l) => [l.value, l.token, l.visible])).toEqual([
+            [0, 'grey', true],
+            [0.5, 'green', true],
+            [1, 'grey', true],
+        ]);
+        expect(fibOptionsOf(sanitizeDrawing({ ...f, fib: undefined, levels: 'bad' })!).levels).toHaveLength(7);
         expect(sanitizeDrawing({ id: 'h', tool: 'horizontal', anchors: [{ time: 1, price: 1 }], text: 'no' })!.text).toBeUndefined();
     });
 
@@ -539,8 +544,12 @@ describe('第一期：新物件類型、舊資料相容、圖層順序', () => {
 
     it('複製保留文字與斐波那契比例', () => {
         const t = addDrawing('TXF', 'text', [anchors[0]!], DEFAULT_DRAWING_STYLE, { text: '支撐' })!;
-        const f = addDrawing('TXF', 'fib', anchors, DEFAULT_DRAWING_STYLE, { levels: [0, 0.5, 1] })!;
+        const f = addDrawing('TXF', 'fib', anchors, DEFAULT_DRAWING_STYLE, {
+            fib: { ...defaultFibOptions(), labelH: 'right', levels: defaultFibLevels().slice(0, 3) },
+        })!;
         expect(duplicateDrawing('TXF', t.id, (a) => a)!.text).toBe('支撐');
-        expect(duplicateDrawing('TXF', f.id, (a) => a)!.levels).toEqual([0, 0.5, 1]);
+        const copy = duplicateDrawing('TXF', f.id, (a) => a)!;
+        expect(copy.fib!.labelH).toBe('right');
+        expect(copy.fib!.levels.map((l) => l.value)).toEqual([0, 0.236, 0.382]);
     });
 });

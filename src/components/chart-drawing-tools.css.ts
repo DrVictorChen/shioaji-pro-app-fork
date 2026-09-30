@@ -574,3 +574,8 @@ export const textEditor = style({
     outline: 'none',
     resize: 'both',
 });
+
+// 斐波那契比例清單（設定視窗）
+export const fibLevels = style({ display: 'flex', flexDirection: 'column', gap: '4px' });
+
+export const fibLevelRow = style({ display: 'flex', alignItems: 'center', gap: '6px' });

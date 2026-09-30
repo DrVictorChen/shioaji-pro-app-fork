@@ -9,6 +9,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { ContractBase } from './types/contract';
+import { defaultFibOptions, sanitizeFibOptions, type FibOptions } from './chart-drawing-fib';
 
 export type DrawingTool =
     | 'horizontal' // 水平線：單一價位，橫貫整個 pane
@@ -86,7 +87,6 @@ export function anchorCount(tool: DrawingToolId): 1 | 2 | 3 {
     }
 }
 
-export const DEFAULT_FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 
 export interface DrawingAnchor {
     time: number; // UTC 秒（與 lightweight-charts 的 UTCTimestamp 同一刻度）
@@ -110,7 +110,7 @@ export interface Drawing {
     createdAt: number;
     name?: string; // 物件列表裡的名稱（沒設就用工具名稱）
     text?: string; // 文字註記的內容
-    levels?: number[]; // 斐波那契的比例（沒設就用 DEFAULT_FIB_LEVELS）
+    fib?: FibOptions; // 斐波那契的比例、色帶、標籤、延伸（沒設就用預設）
 }
 
 export const MAX_TEXT_LENGTH = 200;
@@ -329,21 +329,13 @@ export function sanitizeDrawing(v: unknown): Drawing | null {
         ...(tool === 'text'
             ? { text: typeof d.text === 'string' ? d.text.slice(0, MAX_TEXT_LENGTH) : '' }
             : {}),
-        ...(tool === 'fib' ? sanitizeLevels(d.levels) : {}),
+        // #224 第一版的 levels（數字陣列）轉成新的 fib.levels
+        ...(tool === 'fib' ? { fib: sanitizeFibOptions(d.fib, d.levels) } : {}),
     };
 }
 
-// 斐波那契比例：有限數值、-5～5、去重排序、最多 16 個；壞掉就不帶（用預設）
-export function sanitizeLevels(v: unknown): { levels?: number[] } {
-    if (!Array.isArray(v)) return {};
-    const out = [...new Set(v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x >= -5 && x <= 5))]
-        .sort((a, b) => a - b)
-        .slice(0, 16);
-    return out.length ? { levels: out } : {};
-}
-
-export function fibLevelsOf(d: Pick<Drawing, 'levels'>): number[] {
-    return d.levels?.length ? d.levels : DEFAULT_FIB_LEVELS;
+export function fibOptionsOf(d: Pick<Drawing, 'fib'>): FibOptions {
+    return d.fib ?? defaultFibOptions();
 }
 
 export function sanitizeSettings(v: unknown): DrawingSettings {
@@ -640,7 +632,7 @@ export function addDrawing(
     tool: DrawingTool,
     anchors: DrawingAnchor[],
     style: DrawingStyle,
-    extra?: Pick<Drawing, 'text' | 'levels' | 'name'>,
+    extra?: Pick<Drawing, 'text' | 'fib' | 'name'>,
 ): Drawing | null {
     if ((store[key]?.length ?? 0) >= MAX_DRAWINGS_PER_SYMBOL) return null;
     const drawing: Drawing = {
@@ -653,7 +645,7 @@ export function addDrawing(
         createdAt: Date.now(),
         ...(extra?.name ? { name: extra.name } : {}),
         ...(tool === 'text' ? { text: extra?.text ?? '' } : {}),
-        ...(tool === 'fib' && extra?.levels ? { levels: [...extra.levels] } : {}),
+        ...(tool === 'fib' ? { fib: sanitizeFibOptions(extra?.fib ?? defaultFibOptions()) } : {}),
     };
     store = { ...store, [key]: [...(store[key] ?? []), drawing] };
     record(key, drawing.id, drawing);
@@ -750,7 +742,7 @@ export function duplicateDrawing(
     if (!source) return null;
     return addDrawing(key, source.tool, source.anchors.map(shift), source.style, {
         text: source.text,
-        levels: source.levels,
+        fib: source.fib,
         name: source.name,
     });
 }

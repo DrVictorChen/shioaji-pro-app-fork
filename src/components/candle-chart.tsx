@@ -1431,6 +1431,7 @@ export function CandleChart({
         // 量測換算損益：期貨／選擇權＝口數 × 乘數；股票＝張數 × 1000 股
         // （零股＝股數）。不知道乘數時不顯示損益
         pnlPerPoint: drawingPnlPerPoint(contract, orderMarket, orderSettings),
+        chartBackground: colors.labelBg,
     });
     drawingArmedRef.current = drawings.tool !== null;
 

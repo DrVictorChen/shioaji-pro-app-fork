@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { defaultFibOptions } from './chart-drawing-fib';
 import {
     channelOffset,
     estimateTextWidth,
@@ -421,8 +422,19 @@ describe('第一期新工具的形狀與命中', () => {
         expect(s.levels.find((l) => l.level === 0.5)!.y).toBe(200);
         expect(fibPrice(48000, 48600, 0.5)).toBe(48300);
         expect(fibPrice(48000, 48600, 0)).toBe(48600);
-        const custom = shapeOf('fib', [a, b], SIZE, { levels: [0, 1.618] }) as Extract<Shape, { kind: 'fib' }>;
-        expect(custom.levels.map((l) => l.level)).toEqual([0, 1.618]);
+        const fib = defaultFibOptions();
+        const custom = shapeOf('fib', [a, b], SIZE, {
+            fib: {
+                ...fib,
+                levels: [
+                    { value: 0, visible: true, token: 'grey' },
+                    { value: 0.5, visible: false, token: 'green' },
+                    { value: 1.618, visible: true, token: 'teal' },
+                ],
+            },
+        }) as Extract<Shape, { kind: 'fib' }>;
+        // 隱藏的比例不畫也點不到；index 對回 fib.levels 取顏色
+        expect(custom.levels.map((l) => [l.level, l.index])).toEqual([[0, 0], [1.618, 2]]);
         expect(hitTest('fib', [a, b], SIZE, { x: 250, y: 202 })).toEqual({ kind: 'body' }); // 0.5 線上
         expect(hitTest('fib', [a, b], SIZE, { x: 600, y: 200 })).toBeNull(); // 範圍外
     });
@@ -479,5 +491,31 @@ describe('價差量測', () => {
         expect(formatSpan(2700)).toBe('45m');
         expect(formatSpan(30)).toBe('30s');
         expect(formatSpan(-120)).toBe('−2m');
+    });
+});
+
+describe('斐波那契：反轉、延伸、趨勢線', () => {
+    const a = { x: 100, y: 300 };
+    const b = { x: 400, y: 100 };
+    const fib = defaultFibOptions();
+    const shape = (patch: Partial<typeof fib>) =>
+        shapeOf('fib', [a, b], SIZE, { fib: { ...fib, ...patch } }) as Extract<Shape, { kind: 'fib' }>;
+
+    it('反轉：0 在起點、1 在終點', () => {
+        const s = shape({ reverse: true });
+        expect(s.levels.find((l) => l.level === 0)!.y).toBe(300);
+        expect(s.levels.find((l) => l.level === 1)!.y).toBe(100);
+    });
+
+    it('延伸線段到圖表左右緣；回撤範圍（標籤外側基準）不變', () => {
+        const s = shape({ extendLeft: true, extendRight: true });
+        expect([s.left, s.right]).toEqual([0, SIZE.width]);
+        expect([s.anchorLeft, s.anchorRight]).toEqual([100, 400]);
+        expect(hitTest('fib', [a, b], SIZE, { x: 700, y: 200 }, 6, { fib: { ...fib, extendRight: true } })).toEqual({ kind: 'body' });
+    });
+
+    it('關掉趨勢線就沒有斜虛線', () => {
+        expect(shape({ showTrend: false }).diag).toBeNull();
+        expect(shape({}).diag).toEqual({ a, b });
     });
 });

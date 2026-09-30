@@ -10,7 +10,8 @@
 // 內插成小數 logical index 再交給 logicalToCoordinate()，任何時間都有
 // 座標，包含最後一根 K 棒右邊的空白區。
 
-import { DEFAULT_FIB_LEVELS, type DrawingAnchor, type DrawingTool } from './chart-drawings';
+import type { DrawingAnchor, DrawingTool } from './chart-drawings';
+import { defaultFibOptions, type FibOptions } from './chart-drawing-fib';
 
 export interface Point {
     x: number;
@@ -120,7 +121,19 @@ export type Shape =
     // 平行通道：基準線、平行線、中線（虛線），fill 是兩線圍出的四邊形
     | { kind: 'channel'; base: Segment; parallel: Segment; mid: Segment; fill: Point[] }
     // 斐波那契：各比例的水平線（left～right），diag 是起點到終點的虛線
-    | { kind: 'fib'; left: number; right: number; levels: { level: number; y: number }[]; diag: Segment }
+    // 斐波那契：各比例的水平線（left～right，延伸時到圖表邊緣）；
+    // anchorLeft／anchorRight 是回撤本身的範圍（標籤放在它外側）；
+    // index 是該比例在 fib.levels 裡的位置（取顏色用）；diag 是起點到終點
+    // 的斜虛線（關掉時為 null）
+    | {
+          kind: 'fib';
+          left: number;
+          right: number;
+          anchorLeft: number;
+          anchorRight: number;
+          levels: { level: number; y: number; index: number }[];
+          diag: Segment | null;
+      }
     // 文字註記：以錨點為左上角的文字框
     | { kind: 'text'; left: number; top: number; right: number; bottom: number; lines: string[] };
 
@@ -132,7 +145,7 @@ export interface Segment {
 // 形狀需要的物件資料（控制點以外）
 export interface ShapeExtra {
     text?: string;
-    levels?: number[];
+    fib?: FibOptions;
 }
 
 export const TEXT_FONT_PX = 12;
@@ -281,16 +294,24 @@ export function shapeOf(
             };
         }
         case 'fib': {
-            // y 在畫面座標線性內插 — 線性價格軸下與價格內插完全一致
-            const levels = (extra?.levels?.length ? extra.levels : DEFAULT_FIB_LEVELS).map(
-                (level) => ({ level, y: b.y + (a.y - b.y) * level }),
-            );
+            // y 在畫面座標線性內插 — 線性價格軸下與價格內插完全一致。
+            // 預設終點＝0、起點＝1；反轉時起點＝0、終點＝1
+            const fib = extra?.fib ?? defaultFibOptions();
+            const [from, to] = fib.reverse ? [b, a] : [a, b];
+            const levels = fib.levels
+                .map((l, index) => ({ level: l.value, y: to.y + (from.y - to.y) * l.value, index, visible: l.visible }))
+                .filter((l) => l.visible)
+                .map(({ level, y, index }) => ({ level, y, index }));
+            const anchorLeft = Math.min(a.x, b.x);
+            const anchorRight = Math.max(a.x, b.x);
             return {
                 kind: 'fib',
-                left: Math.min(a.x, b.x),
-                right: Math.max(a.x, b.x),
+                left: fib.extendLeft ? Math.min(0, anchorLeft) : anchorLeft,
+                right: fib.extendRight ? Math.max(size.width, anchorRight) : anchorRight,
+                anchorLeft,
+                anchorRight,
                 levels,
-                diag: { a, b },
+                diag: fib.showTrend ? { a, b } : null,
             };
         }
     }
@@ -357,7 +378,7 @@ export function hitTest(
         const inX = at.x >= shape.left - tolerance && at.x <= shape.right + tolerance;
         const hit =
             (inX && shape.levels.some((l) => Math.abs(at.y - l.y) <= tolerance)) ||
-            near(shape.diag);
+            (!!shape.diag && near(shape.diag));
         return hit ? { kind: 'body' } : null;
     }
     // 方框：填色區域內部與四個邊都算命中（有填色就該點得到）
@@ -379,7 +400,7 @@ export function pickDrawing<
         anchors: DrawingAnchor[];
         hidden: boolean;
         text?: string;
-        levels?: number[];
+        fib?: FibOptions;
     },
 >(
     list: readonly T[],

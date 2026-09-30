@@ -53,7 +53,7 @@ import {
     DRAWING_PALETTE,
     DRAWING_TOOL_DEFS,
     drawingLabel,
-    fibLevelsOf,
+    fibOptionsOf,
     MAX_DRAWINGS_PER_SYMBOL,
     MAX_TEXT_LENGTH,
     toolDef,
@@ -61,6 +61,16 @@ import {
     type DrawingGroup,
     type DrawingToolId,
 } from '../lib/chart-drawings';
+import {
+    defaultFibLevels,
+    FIB_FONT_SIZES,
+    FIB_TOKEN_COLORS,
+    fibLevelColor,
+    MAX_FIB_LEVELS,
+    tokenForValue,
+    type FibLevel,
+    type FibOptions,
+} from '../lib/chart-drawing-fib';
 import * as styles from './chart-drawing-tools.css';
 
 const WIDTHS = [1, 2, 3, 4];
@@ -729,14 +739,19 @@ export function DrawingSettingsDialog({
     });
     const d = drawing;
     const style = d.style;
-    const showsFill = d.tool === 'box' || d.tool === 'channel' || d.tool === 'fib';
+    const showsFill = d.tool === 'box' || d.tool === 'channel';
     const names = ANCHOR_NAMES[d.tool] ?? (d.anchors.length === 1 ? ['位置'] : ['起點', '終點']);
-    const [levelsText, setLevelsText] = useState(fibLevelsOf(d).join(', '));
     const [text, setText] = useState(d.text ?? '');
 
     const body = (
         <div className={styles.overlay} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-            <div ref={dialogRef} className={styles.dialog} role='dialog' aria-label='畫圖物件設定'>
+            <div
+                ref={dialogRef}
+                className={styles.dialog}
+                style={d.tool === 'fib' ? { width: 'min(30rem, 94vw)' } : undefined}
+                role='dialog'
+                aria-label='畫圖物件設定'
+            >
                 <div className={styles.dialogHeader}>
                     <span>{drawingLabel(d)}</span>
                     <button className={styles.iconBtn} aria-label='關閉' onClick={onClose}>
@@ -802,23 +817,7 @@ export function DrawingSettingsDialog({
                                     <span>{Math.round(style.fillOpacity * 100)}%</span>
                                 </span>
                             )}
-                            {d.tool === 'fib' && (
-                                <span className={styles.row}>
-                                    <span className={styles.label}>比例</span>
-                                    <input
-                                        className={styles.wideInput}
-                                        aria-label='斐波那契比例'
-                                        value={levelsText}
-                                        disabled={d.locked}
-                                        onChange={(e) => setLevelsText(e.target.value)}
-                                        onBlur={() => api.setLevels(d.id, parseLevels(levelsText))}
-                                        onKeyDown={(e) => e.key === 'Enter' && api.setLevels(d.id, parseLevels(levelsText))}
-                                    />
-                                </span>
-                            )}
-                            {d.tool === 'fib' && (
-                                <span className={styles.hint}>以逗號分隔，例如 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1；終點＝0、起點＝1。</span>
-                            )}
+                            {d.tool === 'fib' && <FibSection api={api} drawing={d} />}
                             {d.tool === 'text' && (
                                 <span className={styles.row}>
                                     <span className={styles.label}>文字</span>
@@ -890,6 +889,239 @@ export function DrawingSettingsDialog({
     const host = typeof document !== 'undefined' ? document.body : null;
     return host ? createPortal(body, host) : body;
 }
+
+// ── 斐波那契設定（樣式分頁內）─────────────────────────────────────────
+
+export function nextFibValue(values: number[]): number {
+    for (const v of [1.272, 1.618, 2, 2.618, 3.618, 4.236, -0.272, -0.618]) {
+        if (!values.includes(v)) return v;
+    }
+    return Number(((values.length ? Math.max(...values) : 0) + 0.5).toFixed(3));
+}
+
+function FibSection({ api, drawing }: { api: ChartDrawingsApi; drawing: Drawing }) {
+    const fib = fibOptionsOf(drawing);
+    const set = (patch: Partial<FibOptions>) => api.setFib(drawing.id, patch);
+    const locked = drawing.locked;
+    const [colorFor, setColorFor] = useState<{ index: number; anchor: HTMLElement } | null>(null);
+    const [newValue, setNewValue] = useState('');
+    const setLevel = (index: number, patch: Partial<FibLevel>) =>
+        set({ levels: fib.levels.map((l, i) => (i === index ? { ...l, ...patch } : l)) });
+    const chip = (on: boolean) => styles.chip[on ? 'active' : 'normal'];
+    const check = (label: string, on: boolean, onChange: (v: boolean) => void) => (
+        <label className={styles.row} style={{ cursor: 'pointer' }}>
+            <input type='checkbox' checked={on} disabled={locked} onChange={(e) => onChange(e.target.checked)} />
+            {label}
+        </label>
+    );
+    const addValue = (v: number) => {
+        if (!Number.isFinite(v) || fib.levels.some((l) => l.value === v)) return;
+        set({
+            levels: [...fib.levels, { value: v, visible: true, token: tokenForValue(v, fib.levels.length) }],
+        });
+    };
+
+    return (
+        <>
+            <span className={styles.row}>
+                <span className={styles.label}>色帶</span>
+                <input
+                    type='range'
+                    className={styles.slider}
+                    min={0}
+                    max={50}
+                    step={2}
+                    aria-label='色帶透明度'
+                    disabled={locked}
+                    value={Math.round(fib.bandOpacity * 100)}
+                    style={{ ['--sj-fill' as string]: `${fib.bandOpacity * 200}%` }}
+                    onChange={(e) => set({ bandOpacity: Number(e.target.value) / 100 })}
+                />
+                <span>{Math.round(fib.bandOpacity * 100)}%</span>
+            </span>
+            {check('使用單一顏色（物件線色）', fib.singleColor, (v) => set({ singleColor: v }))}
+
+            <span className={styles.row} style={{ alignItems: 'flex-start' }}>
+                <span className={styles.label}>比例</span>
+                <span className={styles.fibLevels}>
+                    {fib.levels.map((l, i) => {
+                        const color = fibLevelColor(l, fib, drawing.style.color, api.themeMode);
+                        return (
+                            <span key={`${l.value}-${i}`} className={styles.fibLevelRow}>
+                                <input
+                                    type='checkbox'
+                                    aria-label={`顯示比例 ${l.value}`}
+                                    checked={l.visible}
+                                    disabled={locked}
+                                    onChange={(e) => setLevel(i, { visible: e.target.checked })}
+                                />
+                                <input
+                                    className={styles.input}
+                                    style={{ width: '4.2rem' }}
+                                    aria-label={`比例 ${l.value}`}
+                                    defaultValue={String(l.value)}
+                                    disabled={locked}
+                                    onBlur={(e) => {
+                                        const v = Number(e.target.value);
+                                        if (Number.isFinite(v) && v !== l.value && !fib.levels.some((x) => x.value === v)) {
+                                            setLevel(i, { value: v });
+                                        } else {
+                                            e.target.value = String(l.value);
+                                        }
+                                    }}
+                                    onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                                />
+                                <button
+                                    className={styles.swatch.normal}
+                                    style={{ background: color, opacity: fib.singleColor ? 0.4 : 1 }}
+                                    aria-label={`比例 ${l.value} 的顏色`}
+                                    disabled={locked || fib.singleColor}
+                                    onClick={(e) => {
+                                        const anchor = e.currentTarget;
+                                        setColorFor((c) => (c?.index === i ? null : { index: i, anchor }));
+                                    }}
+                                />
+                                <button
+                                    className={styles.iconBtn}
+                                    aria-label={`移除比例 ${l.value}`}
+                                    disabled={locked || fib.levels.length <= 1}
+                                    onClick={() => set({ levels: fib.levels.filter((_, j) => j !== i) })}
+                                >
+                                    <X size={11} />
+                                </button>
+                            </span>
+                        );
+                    })}
+                    <span className={styles.fibLevelRow}>
+                        <input
+                            className={styles.input}
+                            style={{ width: '4.2rem' }}
+                            aria-label='新增比例'
+                            placeholder={String(nextFibValue(fib.levels.map((l) => l.value)))}
+                            value={newValue}
+                            disabled={locked || fib.levels.length >= MAX_FIB_LEVELS}
+                            onChange={(e) => setNewValue(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key !== 'Enter') return;
+                                addValue(newValue.trim() ? Number(newValue) : nextFibValue(fib.levels.map((l) => l.value)));
+                                setNewValue('');
+                            }}
+                        />
+                        <button
+                            className={styles.chip.normal}
+                            disabled={locked || fib.levels.length >= MAX_FIB_LEVELS}
+                            onClick={() => {
+                                addValue(newValue.trim() ? Number(newValue) : nextFibValue(fib.levels.map((l) => l.value)));
+                                setNewValue('');
+                            }}
+                        >
+                            新增比例
+                        </button>
+                        <button
+                            className={styles.chip.normal}
+                            disabled={locked}
+                            onClick={() => set({ levels: defaultFibLevels() })}
+                        >
+                            還原預設
+                        </button>
+                    </span>
+                </span>
+            </span>
+
+            <span className={styles.row}>
+                <span className={styles.label}>標籤</span>
+                <button className={chip(fib.labelH === 'left')} disabled={locked} onClick={() => set({ labelH: 'left' })}>左</button>
+                <button className={chip(fib.labelH === 'right')} disabled={locked} onClick={() => set({ labelH: 'right' })}>右</button>
+                <span className={styles.floatSep} />
+                <button className={chip(fib.labelV === 'top')} disabled={locked} onClick={() => set({ labelV: 'top' })}>上</button>
+                <button className={chip(fib.labelV === 'middle')} disabled={locked} onClick={() => set({ labelV: 'middle' })}>中</button>
+                <button className={chip(fib.labelV === 'bottom')} disabled={locked} onClick={() => set({ labelV: 'bottom' })}>下</button>
+            </span>
+            <span className={styles.row}>
+                <span className={styles.label} />
+                <label className={styles.row} style={{ cursor: 'pointer' }}>
+                    <input type='checkbox' checked={fib.showLevel} disabled={locked} onChange={(e) => set({ showLevel: e.target.checked })} />
+                    顯示層級
+                </label>
+                <button className={chip(fib.levelFormat === 'value')} disabled={locked || !fib.showLevel} onClick={() => set({ levelFormat: 'value' })}>數值</button>
+                <button className={chip(fib.levelFormat === 'percent')} disabled={locked || !fib.showLevel} onClick={() => set({ levelFormat: 'percent' })}>百分比</button>
+            </span>
+            <span className={styles.row}>
+                <span className={styles.label} />
+                <label className={styles.row} style={{ cursor: 'pointer' }}>
+                    <input type='checkbox' checked={fib.showPrice} disabled={locked} onChange={(e) => set({ showPrice: e.target.checked })} />
+                    顯示價格
+                </label>
+            </span>
+            <span className={styles.row}>
+                <span className={styles.label}>字級</span>
+                {FIB_FONT_SIZES.map((f) => (
+                    <button key={f} className={chip(fib.fontSize === f)} disabled={locked} onClick={() => set({ fontSize: f })}>
+                        {f}
+                    </button>
+                ))}
+            </span>
+            <span className={styles.row}>
+                <span className={styles.label}>延伸線段</span>
+                <label className={styles.row} style={{ cursor: 'pointer' }}>
+                    <input type='checkbox' checked={fib.extendLeft} disabled={locked} onChange={(e) => set({ extendLeft: e.target.checked })} />
+                    向左
+                </label>
+                <label className={styles.row} style={{ cursor: 'pointer' }}>
+                    <input type='checkbox' checked={fib.extendRight} disabled={locked} onChange={(e) => set({ extendRight: e.target.checked })} />
+                    向右
+                </label>
+            </span>
+            <span className={styles.row}>
+                <span className={styles.label} />
+                <label className={styles.row} style={{ cursor: 'pointer' }}>
+                    <input type='checkbox' checked={fib.reverse} disabled={locked} onChange={(e) => set({ reverse: e.target.checked })} />
+                    反轉
+                </label>
+                <label className={styles.row} style={{ cursor: 'pointer' }}>
+                    <input type='checkbox' checked={fib.showTrend} disabled={locked} onChange={(e) => set({ showTrend: e.target.checked })} />
+                    趨勢線
+                </label>
+            </span>
+            <span className={styles.hint}>預設終點＝0、起點＝1；反轉後起點＝0。標籤放在回撤範圍外側，延伸到圖表邊緣時改貼畫面內緣。</span>
+
+            {colorFor && fib.levels[colorFor.index] && (
+                <Popover anchor={colorFor.anchor} label='比例顏色' onClose={() => setColorFor(null)}>
+                    <span className={styles.palette}>
+                        {FIB_COLOR_CHOICES[api.themeMode].map((c) => (
+                            <button
+                                key={c}
+                                className={styles.swatch[fibLevelColor(fib.levels[colorFor.index]!, fib, drawing.style.color, api.themeMode) === c ? 'active' : 'normal']}
+                                style={{ background: c }}
+                                aria-label={`顏色 ${c}`}
+                                onClick={() => {
+                                    setLevel(colorFor.index, { color: c });
+                                    setColorFor(null);
+                                }}
+                            />
+                        ))}
+                    </span>
+                    <button
+                        className={styles.chip.normal}
+                        onClick={() => {
+                            const l = fib.levels[colorFor.index]!;
+                            setLevel(colorFor.index, { color: undefined, token: tokenForValue(l.value, colorFor.index) });
+                            setColorFor(null);
+                        }}
+                    >
+                        預設顏色
+                    </button>
+                </Popover>
+            )}
+        </>
+    );
+}
+
+// 比例顏色的選項：TradingView 那組（依主題）加上一般色盤
+const FIB_COLOR_CHOICES: Record<'dark' | 'light', string[]> = {
+    dark: [...new Set([...Object.values(FIB_TOKEN_COLORS.dark), ...DRAWING_PALETTE])],
+    light: [...new Set([...Object.values(FIB_TOKEN_COLORS.light), ...DRAWING_PALETTE])],
+};
 
 // ── 物件列表 ─────────────────────────────────────────────────────────
 

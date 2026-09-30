@@ -26,7 +26,6 @@ import {
     moveDrawing,
     removeDrawings,
     replaceDrawings,
-    sanitizeLevels,
     setDrawingSettings,
     setDrawingsLocked,
     showAllDrawings,
@@ -59,6 +58,7 @@ import {
     type Projector,
 } from '../lib/chart-drawing-geometry';
 import { DrawingHistory, rebase } from '../lib/chart-drawing-history';
+import { sanitizeFibOptions, type FibOptions } from '../lib/chart-drawing-fib';
 import { DrawingLayer, type DrawingDraft, type MeasureOverlay } from '../lib/chart-drawing-layer';
 import { escStackDepth } from './use-esc-close';
 import type { ContractBase } from '../lib/types/contract';
@@ -167,7 +167,8 @@ export interface ChartDrawingsApi {
     setSelectedPrice: (price: number) => void;
     // 設定視窗「座標」分頁
     setAnchor: (id: string, index: number, anchor: DrawingAnchor) => void;
-    setLevels: (id: string, levels: number[]) => void;
+    // 斐波那契選項（比例、色帶、標籤、延伸、反轉…）
+    setFib: (id: string, patch: Partial<FibOptions>) => void;
     // 文字註記
     editingTextId: string | null;
     editText: (id: string) => void;
@@ -192,6 +193,7 @@ export interface ChartDrawingsApi {
     selectionBox: Box | null;
     editBox: Box | null;
     hostSize: { width: number; height: number };
+    themeMode: DrawingThemeMode;
     symbolKey: string;
     shareContinuousMonth: boolean;
     setShareContinuousMonth: (v: boolean) => void;
@@ -226,6 +228,8 @@ export function useChartDrawings(opts: {
     themeMode?: DrawingThemeMode;
     // 量測換算損益：每一點價差值多少錢（目前下單數量 × 乘數），不知道就 null
     pnlPerPoint?: number | null;
+    // 圖表背景色：畫圖標籤的描邊（halo）用
+    chartBackground?: string;
 }): ChartDrawingsApi {
     const { contract, hostRef, chartRef, seriesRef, getTimes, tradeArmed } = opts;
     const themeMode = opts.themeMode ?? 'dark';
@@ -267,6 +271,7 @@ export function useChartDrawings(opts: {
         themeMode,
         editingTextId,
         pnlPerPoint: opts.pnlPerPoint ?? null,
+        chartBackground: opts.chartBackground ?? (themeMode === 'light' ? '#f7f8fa' : '#10131a'),
     };
     const stateRef = useRef(live);
     stateRef.current = live;
@@ -337,6 +342,11 @@ export function useChartDrawings(opts: {
     }, [seriesRef]);
 
     const pushState = useCallback(() => {
+        const layer = layerRef.current;
+        if (layer) {
+            layer.themeMode = stateRef.current.themeMode;
+            layer.background = stateRef.current.chartBackground;
+        }
         layerRef.current?.setState({
             drawings: stateRef.current.drawings,
             draft: draftRef.current,
@@ -348,7 +358,7 @@ export function useChartDrawings(opts: {
     }, []);
 
     // 資料／選取變動時重繪；draft 變動時由事件處理器自己呼叫 pushState
-    useEffect(pushState, [pushState, drawings, selectedIds, editingTextId]);
+    useEffect(pushState, [pushState, drawings, selectedIds, editingTextId, themeMode, live.chartBackground]);
 
     // 每次重繪後重新算浮動工具列與文字框的位置（物件跟著平移縮放移動）
     useEffect(() => {
@@ -1173,10 +1183,14 @@ export function useChartDrawings(opts: {
         [patchOne],
     );
 
-    const setLevels = useCallback(
-        (id: string, levels: number[]) => {
-            const clean = sanitizeLevels(levels).levels;
-            if (clean) patchOne(id, { levels: clean });
+    const setFib = useCallback(
+        (id: string, patch: Partial<FibOptions>) => {
+            const d = stateRef.current.drawings.find((x) => x.id === id);
+            if (!d || d.tool !== 'fib') return;
+            // 整份過一次驗證：比例去重排序、範圍夾住
+            const fib = sanitizeFibOptions({ ...d.fib, ...patch });
+            // 連續拉滑桿（色帶透明度）合併成一步復原
+            patchOne(id, { fib }, `fib:${Object.keys(patch).sort().join(',')}`);
         },
         [patchOne],
     );
@@ -1291,7 +1305,7 @@ export function useChartDrawings(opts: {
         allLocked,
         setSelectedPrice,
         setAnchor,
-        setLevels,
+        setFib,
         editingTextId,
         editText,
         commitText,
@@ -1311,6 +1325,7 @@ export function useChartDrawings(opts: {
         selectionBox,
         editBox,
         hostSize,
+        themeMode,
         symbolKey,
         shareContinuousMonth: settings.shareContinuousMonth,
         setShareContinuousMonth,

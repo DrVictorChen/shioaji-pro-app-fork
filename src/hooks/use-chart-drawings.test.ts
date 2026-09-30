@@ -849,6 +849,22 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(api().drawings).toHaveLength(0); // 復原的是第一筆文字
     });
 
+    it('斐波那契設定：改選項會驗證、連續拉色帶合併成一步復原', async () => {
+        const api = await setup();
+        const f = addDrawing('TXF', 'fib', [{ time: 1000, price: 1 }, { time: 1060, price: 2 }], DEFAULT_DRAWING_STYLE)!;
+        await act(async () => {});
+        await down(700, 350); // 取得鍵盤
+        await act(async () => api().setFib(f.id, { labelH: 'right', fontSize: 99 }));
+        expect(api().drawings[0]!.fib).toMatchObject({ labelH: 'right', fontSize: 16 });
+        for (const o of [0.1, 0.2, 0.3]) await act(async () => api().setFib(f.id, { bandOpacity: o }));
+        expect(api().drawings[0]!.fib!.bandOpacity).toBe(0.3);
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings[0]!.fib!.bandOpacity).toBe(0.12); // 三次拉動算一步
+        expect(api().drawings[0]!.fib!.labelH).toBe('right');
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings[0]!.fib!.labelH).toBe('left');
+    });
+
     it('物件列表操作：改名、隱藏、鎖定、調整圖層都可復原', async () => {
         const api = await setup();
         const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 1 }, { time: 1060, price: 2 }], DEFAULT_DRAWING_STYLE)!;

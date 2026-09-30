@@ -19,6 +19,14 @@ import type {
     Time,
 } from 'lightweight-charts';
 import {
+    fibLabel,
+    fibLabelPlacement,
+    fibLevelColor,
+    fibLevelPrice,
+    type FibOptions,
+} from './chart-drawing-fib';
+import {
+    fibOptionsOf,
     contrastTextColor,
     type Drawing,
     type DrawingAnchor,
@@ -28,7 +36,6 @@ import {
 import {
     ANCHOR_RADIUS,
     estimateBarSeconds,
-    fibPrice,
     formatSpan,
     logicalOfX,
     logicalToTime,
@@ -55,7 +62,7 @@ export interface DrawingDraft {
     anchors: DrawingAnchor[];
     style: DrawingStyle;
     text?: string;
-    levels?: number[];
+    fib?: FibOptions;
 }
 
 // 價差量測（暫時的覆蓋層）
@@ -96,9 +103,6 @@ function withAlpha(hex: string, alpha: number): string {
     return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
-function fmtLevel(level: number): string {
-    return String(Number(level.toFixed(3)));
-}
 
 class DrawingRenderer implements IPrimitivePaneRenderer {
     constructor(private readonly _layer: DrawingLayer) {}
@@ -140,7 +144,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                         hr,
                         vr,
                         size,
-                        { ...draft, levels: draft.levels, text: draft.text },
+                        { ...draft, fib: draft.fib, text: draft.text },
                         pts,
                         false,
                         false,
@@ -168,7 +172,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
         hr: number,
         vr: number,
         size: PaneSize,
-        d: Pick<Drawing, 'tool' | 'anchors' | 'style' | 'text' | 'levels'>,
+        d: Pick<Drawing, 'tool' | 'anchors' | 'style' | 'text' | 'fib'>,
         pts: Point[],
         selected: boolean,
         locked: boolean,
@@ -221,42 +225,66 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 break;
             }
             case 'fib': {
+                const fib = fibOptionsOf(d);
                 const start = d.anchors[0]!.price;
                 const end = d.anchors[1]!.price;
-                // 相鄰兩條比例線之間的淡填色
-                if (style.fillOpacity > 0) {
-                    ctx.fillStyle = withAlpha(style.color, style.fillOpacity * 0.6);
-                    for (let i = 0; i + 1 < shape.levels.length; i += 2) {
-                        const y0 = shape.levels[i]!.y;
-                        const y1 = shape.levels[i + 1]!.y;
+                const mode = this._layer.themeMode;
+                const colorOf = (index: number) =>
+                    fibLevelColor(fib.levels[index]!, fib, style.color, mode);
+                // 相鄰兩條比例線之間的半透明色帶（TradingView 式）：顏色取
+                // 離 0 較遠的那一條
+                if (fib.bandOpacity > 0) {
+                    const sorted = [...shape.levels].sort((p, q) => p.level - q.level);
+                    for (let i = 0; i + 1 < sorted.length; i++) {
+                        const lo = sorted[i]!;
+                        const hi = sorted[i + 1]!;
+                        ctx.fillStyle = withAlpha(colorOf(hi.index), fib.bandOpacity);
                         ctx.fillRect(
                             shape.left * hr,
-                            Math.min(y0, y1) * vr,
+                            Math.min(lo.y, hi.y) * vr,
                             (shape.right - shape.left) * hr,
-                            Math.abs(y1 - y0) * vr,
+                            Math.abs(hi.y - lo.y) * vr,
                         );
                     }
                 }
-                ctx.font = `${10 * vr}px sans-serif`;
-                ctx.fillStyle = style.color;
-                ctx.textBaseline = 'bottom';
                 for (const l of shape.levels) {
-                    // 0 與 1 用實線，其餘虛線
-                    ctx.setLineDash(l.level === 0 || l.level === 1 ? dash : [4 * hr, 3 * hr]);
+                    ctx.strokeStyle = colorOf(l.index);
                     this._stroke(ctx, hr, vr, {
                         a: { x: shape.left, y: l.y },
                         b: { x: shape.right, y: l.y },
                     });
-                    const price = fibPrice(start, end, l.level);
-                    ctx.fillText(
-                        `${fmtLevel(l.level)} (${fmt(price)})`,
-                        (shape.left + 4) * hr,
-                        (l.y - 2) * vr,
-                    );
                 }
-                ctx.setLineDash([3 * hr, 3 * hr]);
-                ctx.globalAlpha *= 0.6;
-                this._stroke(ctx, hr, vr, shape.diag);
+                if (shape.diag) {
+                    ctx.strokeStyle = style.color;
+                    ctx.setLineDash([3 * hr, 3 * hr]);
+                    ctx.globalAlpha *= 0.7;
+                    this._stroke(ctx, hr, vr, shape.diag);
+                    ctx.globalAlpha /= 0.7;
+                }
+                // 標籤：回撤範圍外側、線的顏色＋圖表背景色描邊，蓋在 K 棒上
+                // 也讀得清楚（不用實心底框）
+                if (fib.showLevel || fib.showPrice) {
+                    ctx.setLineDash([]);
+                    ctx.font = `${fib.fontSize * vr}px sans-serif`;
+                    for (const l of shape.levels) {
+                        const text = fibLabel(
+                            l.level,
+                            fibLevelPrice(start, end, l.level, fib.reverse),
+                            fib,
+                            fmt,
+                        );
+                        const at = fibLabelPlacement(
+                            { min: shape.anchorLeft, max: shape.anchorRight },
+                            fib,
+                            size.width,
+                            l.y,
+                            fib.fontSize,
+                        );
+                        ctx.textAlign = at.align;
+                        ctx.textBaseline = at.baseline;
+                        this._haloText(ctx, text, at.x * hr, at.y * vr, colorOf(l.index), hr);
+                    }
+                }
                 break;
             }
             case 'text': {
@@ -265,6 +293,10 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 const w = (shape.right - shape.left) * hr;
                 const h = (shape.bottom - shape.top) * vr;
                 ctx.setLineDash([]);
+                // 底色先鋪一層圖表背景色（半透明），再疊物件色：蓋在 K 棒上
+                // 的文字也讀得清楚
+                ctx.fillStyle = withAlpha(this._layer.background, 0.82);
+                ctx.fillRect(x, y, w, h);
                 ctx.fillStyle = withAlpha(style.color, 0.16);
                 ctx.fillRect(x, y, w, h);
                 ctx.lineWidth = (selected ? 1.5 : 1) * hr;
@@ -284,6 +316,26 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 break;
             }
         }
+        ctx.restore();
+    }
+
+    // 文字加一圈圖表背景色的描邊（halo）：蓋在 K 棒、格線上仍讀得清楚，
+    // 又不像實心底框那樣擋住後面的 K 棒
+    private _haloText(
+        ctx: CanvasRenderingContext2D,
+        text: string,
+        x: number,
+        y: number,
+        color: string,
+        hr: number,
+    ) {
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = 4 * hr;
+        ctx.strokeStyle = withAlpha(this._layer.background, 0.92);
+        ctx.strokeText(text, x, y);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
         ctx.restore();
     }
 
@@ -407,6 +459,9 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
     private _barSeconds = 60;
     // 每次重繪完成後呼叫（浮動工具列、文字輸入框跟著物件移動）
     onDrawn: (() => void) | null = null;
+    // 主題：斐波那契的預設色依深淺取；文字描邊用圖表背景色
+    themeMode: 'dark' | 'light' = 'dark';
+    background = '#000000';
     private _drawnQueued = false;
 
     // getTimes：目前圖上 K 棒的時間陣列（遞增）。切換週期／載入更舊的
