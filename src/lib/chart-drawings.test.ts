@@ -587,3 +587,74 @@ describe('關窗日誌：pagehide 不在鎖外動主項目', () => {
         expect(JSON.parse(store.get('sj-pro-chart-drawing-settings')!).shareContinuousMonth).toBe(false);
     });
 });
+
+describe('round 4：初始化順序、日誌只刪合併過的那一版', () => {
+    const journal = (id: string) =>
+        JSON.stringify({
+            at: 1,
+            ops: {
+                TXF: {
+                    [id]: {
+                        id,
+                        tool: 'horizontal',
+                        anchors: [{ time: 1000, price: 25000 }],
+                        style: DEFAULT_DRAWING_STYLE,
+                        locked: false,
+                        hidden: false,
+                        createdAt: 1,
+                        updatedAt: 1,
+                    },
+                },
+            },
+            settings: {},
+        });
+
+    it('storage 裡已有含物件的關窗日誌時，module 初始化不會丟 ReferenceError（TDZ），畫面看得到它', async () => {
+        store.set('sj-chart-drawings-pending:0000:w1:1', journal('from-journal'));
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [JSON.parse(journal('main')).ops.TXF.main] }));
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        expect(fresh.getDrawings('TXF').map((d) => d.id).sort()).toEqual(['from-journal', 'main']);
+    });
+
+    it('合併期間同一視窗又寫了新日誌（bfcache 回來後再關）：新日誌不會被刪掉', () => {
+        store.set('sj-chart-drawings-pending:0000:w1:1', journal('old'));
+        const realSet = localStorage.setItem.bind(localStorage);
+        let injected = false;
+        vi.stubGlobal('localStorage', {
+            getItem: (k: string) => store.get(k) ?? null,
+            removeItem: (k: string) => void store.delete(k),
+            get length() {
+                return store.size;
+            },
+            key: (i: number) => [...store.keys()][i] ?? null,
+            setItem: (k: string, v: string) => {
+                realSet(k, v);
+                // 鎖內合併寫主項目的同時，那個視窗又關了一次
+                if (k === 'sj-pro-chart-drawings' && !injected) {
+                    injected = true;
+                    store.set('sj-chart-drawings-pending:0001:w1:2', journal('newer'));
+                    // 同名覆寫（舊寫法）也要擋：內容變了就不刪
+                    store.set('sj-chart-drawings-pending:0000:w1:1', journal('old-rewritten'));
+                }
+            },
+        });
+        addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        flushDrawingWrites();
+        const left = [...store.keys()].filter((k) => k.startsWith('sj-chart-drawings-pending:')).sort();
+        expect(left).toEqual(['sj-chart-drawings-pending:0000:w1:1', 'sj-chart-drawings-pending:0001:w1:2']);
+        // 下一次寫入把它們併進去
+        flushDrawingWrites();
+        const ids = JSON.parse(store.get('sj-pro-chart-drawings')!).TXF.map((d: { id: string }) => d.id);
+        expect(ids).toEqual(expect.arrayContaining(['old', 'old-rewritten', 'newer']));
+        expect([...store.keys()].filter((k) => k.startsWith('sj-chart-drawings-pending:'))).toEqual([]);
+    });
+
+    it('關窗兩次寫的是兩個不同的日誌項目', () => {
+        addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        writeDrawingJournal();
+        addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        writeDrawingJournal();
+        expect([...store.keys()].filter((k) => k.startsWith('sj-chart-drawings-pending:'))).toHaveLength(2);
+    });
+});

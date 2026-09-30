@@ -146,6 +146,11 @@ export function defaultStyleFor(
 }
 
 const STORAGE_KEY = 'sj-pro-chart-drawings';
+
+// 每個商品鍵的上限。整份 store 是一個 localStorage 項目，無上限地長下去
+// 每次寫入與跨視窗解析都會變慢，也會吃掉其他設定的配額。
+// （放在檔案前段：module 初始化載入資料時 capDrawings 就要用到）
+export const MAX_DRAWINGS_PER_SYMBOL = 200;
 const SETTINGS_KEY = 'sj-pro-chart-drawing-settings';
 
 // ── 商品鍵 ───────────────────────────────────────────────────────────
@@ -359,9 +364,11 @@ function loadSettings(): DrawingSettings {
 // 也把日誌疊上去，還沒被併進去之前畫面就看得到。
 const JOURNAL_PREFIX = 'sj-chart-drawings-pending:';
 const WINDOW_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+let journalSeq = 0;
 
 interface Journal {
     name: string; // localStorage 項目名稱
+    raw: string; // 讀到的原始內容：刪除前比對，只刪「併進去的那一版」
     ops: Map<string, Map<string, Drawing | number>>;
     settings: Partial<DrawingSettings>;
 }
@@ -383,7 +390,9 @@ function loadJournals(): Journal[] {
     const out: Journal[] = [];
     for (const name of journalNames()) {
         try {
-            const raw = JSON.parse(localStorage.getItem(name) ?? 'null') as {
+            const text = localStorage.getItem(name);
+            if (text === null) continue;
+            const raw = JSON.parse(text) as {
                 ops?: Record<string, Record<string, unknown>>;
                 settings?: Record<string, unknown>;
             } | null;
@@ -403,7 +412,7 @@ function loadJournals(): Journal[] {
             }
             const settingsPatch =
                 raw.settings && typeof raw.settings === 'object' ? (raw.settings as Partial<DrawingSettings>) : {};
-            out.push({ name, ops, settings: settingsPatch });
+            out.push({ name, raw: text, ops, settings: settingsPatch });
         } catch {
             // 壞掉的日誌略過（寫入者會把它刪掉）
         }
@@ -425,8 +434,10 @@ function loadSettingsView(journals: Journal[] = loadJournals()): DrawingSettings
     return sanitizeSettings(Object.assign({}, loadSettings(), ...journals.map((j) => j.settings)));
 }
 
-let store: Store = loadView();
-let settings: DrawingSettings = loadSettingsView();
+// 實際的初始載入在檔案最後面（所有常數都初始化之後才讀 localStorage，
+// 不會碰到尚未初始化的 const — TDZ）
+let store: Store = {};
+let settings: DrawingSettings = DEFAULT_SETTINGS;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -562,8 +573,11 @@ function writeDrawingsNow() {
             // 關窗日誌裡的設定也併進主設定（本視窗還沒寫出的欄位之後照常寫）
             localStorage.setItem(SETTINGS_KEY, JSON.stringify(loadSettingsView(journalSettings)));
         }
-        // 已併進主項目的日誌刪掉
-        for (const j of journals) localStorage.removeItem(j.name);
+        // 已併進主項目的日誌刪掉 — 只刪內容與讀到時相同的那一版（每次
+        // 關窗寫的是新的項目名稱，照理不會變；比對內容是第二道保險）
+        for (const j of journals) {
+            if (localStorage.getItem(j.name) === j.raw) localStorage.removeItem(j.name);
+        }
     } catch {
         // 配額滿或隱私模式：改動留在 pending（跨視窗同步不會把它們蓋掉，
         // 下一次改動會再試著寫出），並讓 UI 提示使用者
@@ -640,16 +654,16 @@ export function writeDrawingJournal() {
     writeTimer = null;
     settingsTimer = null;
     if (!pending.size && !pendingSettingKeys.size) return;
-    const name = JOURNAL_PREFIX + WINDOW_ID;
-    // 同一個視窗（bfcache 回來後）再關一次：疊在自己之前的日誌上
-    const prev = loadJournals().find((j) => j.name === name);
+    // 每次都寫新的項目名稱（時間＋視窗＋序號）：bfcache 回來後又改了東西
+    // 再關一次時，另一個視窗正在合併、準備刪除的舊日誌不會連新內容一起
+    // 被刪掉。名稱以時間開頭，依名稱排序就是寫入順序
+    const name = `${JOURNAL_PREFIX}${Date.now().toString(36).padStart(9, '0')}:${WINDOW_ID}:${++journalSeq}`;
     const ops: Record<string, Record<string, Drawing | number>> = {};
-    for (const [key, byId] of prev?.ops ?? []) ops[key] = Object.fromEntries(byId);
-    for (const [key, byId] of pending) ops[key] = { ...(ops[key] ?? {}), ...Object.fromEntries(byId) };
+    for (const [key, byId] of pending) ops[key] = Object.fromEntries(byId);
     const journal = {
         at: Date.now(),
         ops,
-        settings: { ...(prev?.settings ?? {}), ...pickSettings(settings, pendingSettingKeys) },
+        settings: pickSettings(settings, pendingSettingKeys),
     };
     try {
         localStorage.setItem(name, JSON.stringify(journal));
@@ -744,9 +758,6 @@ function newId(): string {
     return `dw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// 每個商品鍵的上限。整份 store 是一個 localStorage 項目，無上限地長下去
-// 每次寫入與跨視窗解析都會變慢，也會吃掉其他設定的配額。
-export const MAX_DRAWINGS_PER_SYMBOL = 200;
 
 // 已達上限回傳 null — 呼叫端的工具列會先把畫圖按鈕停用
 export function addDrawing(
@@ -863,3 +874,8 @@ export function __resetDrawingsForTest() {
         // ignore
     }
 }
+
+// ── 初始載入 ─────────────────────────────────────────────────────────
+// 放在最後：loadView／loadSettingsView 會用到上面所有常數與函式
+store = loadView();
+settings = loadSettingsView();

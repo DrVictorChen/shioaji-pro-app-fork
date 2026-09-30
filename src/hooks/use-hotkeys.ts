@@ -29,6 +29,24 @@ export function useHotkeys({
     onAfterCancelAll: () => void;
 }) {
     useEffect(() => {
+        // 每個 Esc 一個序號；countedSeq＝最近一次被算成 Esc×2 一下的序號
+        let seq = 0;
+        let countedSeq = 0;
+        let current: { e: KeyboardEvent; n: number } | null = null;
+        // 保險：任何元件都可能在 Esc 上 stopPropagation（例如價格輸入框的
+        // 「還原輸入」），這一下就到不了下面的 bubble handler，也就沒機會
+        // 清掉等待中的第一下。window 的 capture listener 一定最先收到事件、
+        // 擋不掉；等整個派送結束（setTimeout 0 — microtask 會在每個 listener
+        // 之間就跑掉，太早）還沒被算成一下的 Esc，一律清除武裝。
+        const onEscCapture = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            const n = ++seq;
+            current = { e, n };
+            setTimeout(() => {
+                // 這一下沒被算，而且之後也沒有新的一下被算 → 清除武裝
+                if (countedSeq < n) resetEscCancelArm();
+            }, 0);
+        };
         const onKey = (e: KeyboardEvent) => {
             // OS key auto-repeat must never count — holding Esc a beat too
             // long would otherwise arm AND fire cancel-all in one press
@@ -48,6 +66,7 @@ export function useHotkeys({
                     return;
                 }
                 if (!getRiskSettings().escCancelAll) return;
+                if (current?.e === e) countedSeq = current.n;
                 if (noteEscPress(performance.now())) {
                     void cancelAllOrders().then(onAfterCancelAll);
                 } else {
@@ -69,7 +88,11 @@ export function useHotkeys({
                 );
             }
         };
+        window.addEventListener('keydown', onEscCapture, true);
         window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
+        return () => {
+            window.removeEventListener('keydown', onEscCapture, true);
+            window.removeEventListener('keydown', onKey);
+        };
     }, [onOpenPalette, onAfterCancelAll]);
 }
