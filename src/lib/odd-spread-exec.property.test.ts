@@ -205,8 +205,10 @@ function simulate(seed: number) {
         const g = identity();
         for (const t of snapshot) stamps.set(t, g);
     };
+    // 服務每次對帳都先向伺服器（目前的程序）讀一次委託列，帶讀取當下的身分
     const reconcile = () => {
         if (!envOk()) return;
+        fetchListing();
         const gen = identity();
         const trusted = new Set(gen === null ? [] : s.slots.filter(x => x.orderId && x.idGen === gen).map(x => x.orderId!));
         for (const e of reconcileEvents({ tagBase: TAG_BASE, code: '2330', account: ACC, state: s }, snapshot, trusted, gen, t => stamps.get(t) ?? null)) reduce(e);
@@ -328,7 +330,6 @@ function simulate(seed: number) {
             o.hidden = !o.hidden; // 委託列暫時漏列
         } else if (roll < 0.64 && book.length) {
             see(pick(book), chance(0.3));
-            if (chance(0.7)) fetchListing(); // 否則用舊快照對帳
             reconcile();
         } else if (roll < 0.68 && envOk()) {
             feed({ type: 'cancel' });

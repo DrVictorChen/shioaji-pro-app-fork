@@ -59,6 +59,8 @@ export interface ServerInfo {
     description: string;
     protocols: string[];
     simulation: boolean;
+    /** SDK 1.7.8+：sidecar 程序的 instance id（每次啟動不同） */
+    instance_id?: string;
     agent_harness?: Health['agent_harness'];
 }
 
@@ -782,7 +784,7 @@ export function placeStockOrder(
     contract: ContractBase,
     order: StockOrderReq,
     account?: Account,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; onResponse?: (res: Response) => void },
 ) {
     // 零股不支援的組合（融資券／當沖／市價／IOC／超過 999 股）一律在送出前擋下（#204）
     const problem = stockOrderProblem(order);
@@ -881,6 +883,7 @@ export function cancelOrder(
     tradeId: string,
     opts?: {
         agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; batch?: CancelBatchMember;
+        onResponse?: (res: Response) => void;
         // runs synchronously right before the HTTP cancel is sent; throwing
         // refuses it (mutationNotStarted) — e.g. the caller's bound environment changed
         beforeSend?: () => void;
@@ -896,14 +899,14 @@ export function cancelOrder(
  *  cancels share one authoritative confirmation read (refresh:true) instead of
  *  one per order. Used by every batch path (flash 全刪, 鋪單全撤, 全部刪單,
  *  batch cancel). Single cancels use cancelOrder. */
-export function cancelOrders(tradeIds: string[], onSettled?: () => void, beforeSend?: () => void): Promise<PromiseSettledResult<Trade>[]> {
+export function cancelOrders(tradeIds: string[], onSettled?: () => void, beforeSend?: () => void, onResponse?: (res: Response) => void): Promise<PromiseSettledResult<Trade>[]> {
     const batch = createCancelBatch(tradeIds.length);
-    return Promise.allSettled(tradeIds.map(id => cancelOrder(id, { batch: batch.member(), beforeSend }).finally(() => onSettled?.())));
+    return Promise.allSettled(tradeIds.map(id => cancelOrder(id, { batch: batch.member(), beforeSend, onResponse }).finally(() => onSettled?.())));
 }
 
 function observeCancel(
     tradeId: string,
-    opts: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; onResponse?: (res: Response) => void },
     batch: CancelBatchMember | undefined,
     beforeSend?: () => void,
 ) {

@@ -171,6 +171,8 @@ export async function placeQuickOrder(
         confirmLivePriceCode?: string;
         // 股票委託的 custom_field 標記（整零價差用來對回自己送出的委託）
         customField?: string;
+        // 讀下單回應的標頭（X-Shioaji-Instance，SDK 1.7.8+）
+        onResponse?: (res: Response) => void;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
@@ -238,6 +240,7 @@ export async function placeQuickOrder(
         opts?.ocType,
         opts?.orderType,
         opts?.customField,
+        opts?.onResponse,
     );
 }
 
@@ -254,6 +257,7 @@ async function sendOrder(
     ocType: FuturesOCType = 'Auto',
     orderType: OrderType = 'ROD',
     customField?: string,
+    onResponse?: (res: Response) => void,
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -275,7 +279,7 @@ async function sendOrder(
               order_type: market ? 'IOC' : orderType,
               order_lot: orderLot ?? 'Common',
               ...(customField ? { custom_field: customField } : {}),
-          }, account, { agentInitiated, ...agentContext });
+          }, account, { agentInitiated, ...agentContext, ...(onResponse ? { onResponse } : {}) });
     return trade;
 }
 

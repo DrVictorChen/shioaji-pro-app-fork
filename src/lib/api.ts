@@ -203,7 +203,11 @@ export async function apiGet<T>(path: string, opts?: { signal?: AbortSignal; hea
 export async function apiPost<T>(
     path: string,
     body: unknown,
-    opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts?: {
+        timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean;
+        // 讀取回應標頭（例如 X-Shioaji-Instance，SDK 1.7.8+）；在解析 body 前呼叫
+        onResponse?: (res: Response) => void;
+    },
 ): Promise<T> {
     if (isTauri && AGENT_HARNESS_MUTATIONS.has(path) && !serverIdentityVerified()) {
         throw Object.assign(
@@ -260,6 +264,7 @@ export async function apiPost<T>(
             status: proxied.status,
             headers: { 'Content-Type': 'application/json' },
         });
+        opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }
@@ -271,6 +276,7 @@ export async function apiPost<T>(
             body: JSON.stringify(body),
             signal,
         });
+        opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);

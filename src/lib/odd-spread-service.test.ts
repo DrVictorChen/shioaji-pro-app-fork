@@ -36,8 +36,14 @@ vi.mock('./trade', () => ({
 vi.mock('./shioaji', () => ({
     cancelOrders: (ids: string[], onSettled?: unknown, beforeSend?: unknown) => mocks.cancel(ids, onSettled, beforeSend),
     // 送出前的新鮮讀取：/info 回報目前伺服器的模擬／正式；委託快取回報目前的委託列
-    fetchInfo: async () => { if (!mocks.info) throw new Error('down'); return { simulation: mocks.serverSim ?? mocks.info.simulation }; },
-    fetchTrades: async () => mocks.serverTrades ?? [...mocks.serverRows, ...mocks.trades],
+    fetchInfo: async () => { if (!mocks.info) throw new Error('down'); return { ...mocks.info, simulation: mocks.serverSim ?? mocks.info.simulation }; },
+    // 伺服器委託快取：送出過的委託（依 id，較新的委託列狀態覆蓋）
+    fetchTrades: async () => {
+        if (mocks.serverTrades) return mocks.serverTrades;
+        const byId = new Map<string, unknown>();
+        for (const t of [...mocks.serverRows, ...(mocks.trades as { order: { id: string } }[])]) byId.set(t.order.id, t);
+        return [...byId.values()];
+    },
 }));
 vi.mock('./trading-state', () => ({
     getTradingState: () => ({ trades: mocks.trades }),
@@ -98,6 +104,12 @@ const store = new Map<string, string>();
 const req = () => ({ contract, account, plan, fees, maxSlipTicks: 2, env: { base: mocks.base, simulation: mocks.info!.simulation } });
 
 const flush = () => new Promise(r => setTimeout(r, 0));
+// 以指定的伺服器委託列對帳一次
+async function reconcileRows(rows: unknown[]) {
+    mocks.serverTrades = rows;
+    await reconcile();
+    mocks.serverTrades = undefined;
+}
 function trade(id: string, price: number, quantity: number, filled: number, status: string, tag: string | undefined, lot = 'IntradayOdd', action = 'Sell', cancelQty?: number): AccountedTrade {
     // 券商確認的刪單：刪單量＝未成交量（可覆寫成落後的數字）
     const cancel_quantity = cancelQty ?? (status === 'Cancelled' ? quantity - filled : 0);
@@ -198,18 +210,21 @@ it('沒有標記或標記不同的同價量委託絕不自動認領；列為候�
     expect(mocks.place.mock.calls[2]!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
 });
 
-it('重新整理後：先前一筆相同價量（別的標記、沒有標記）不會被認成這次的首腳；真正的首腳出現才接回', () => {
+it('重新整理後：先前一筆相同價量（別的標記、沒有標記）不會被認成這次的首腳；真正的首腳出現才接回', async () => {
     mocks.place.mockImplementation(() => new Promise(() => undefined));
     startSpreadExecution(req());
+    await flush();
     const t0 = tagOf('odd:0');
     resetOddSpreadServiceForTest(); // 模擬重新整理
     mocks.place.mockReset();
     mocks.trades = [trade('OLD', 1095, 380, 380, 'Filled', 'oabc00'), trade('MAN', 1095, 380, 380, 'Filled', undefined)];
     startOddSpreadService();
+    await flush();
     let s = record().state;
     expect(s.slots.map(x => [x.status, x.orderId])).toEqual([['unknown', undefined], ['unknown', undefined]]);
     expect(mocks.place).not.toHaveBeenCalled();
     setTrades([...mocks.trades as AccountedTrade[], trade('REAL', 1095, 380, 380, 'Filled', t0)]);
+    await flush();
     s = record().state;
     expect(s.slots[0]).toMatchObject({ orderId: 'REAL', status: 'filled' });
     expect(s.slots[1]!.status).toBe('unknown');
@@ -262,7 +277,7 @@ it('環境切換期間到達的下單回應先保留，回到原環境才處理'
     expect(record().held).toEqual([]);
 });
 
-it('開始時的環境必須與按下時綁定的相同（含模擬／正式未知）', () => {
+it('開始時的環境必須與按下時綁定的相同（含模擬／正式未知）', async () => {
     const bound = req();
     mocks.info = undefined;
     expect(() => startSpreadExecution(bound)).toThrow('環境已切換');
@@ -338,25 +353,89 @@ it('同商品有標記「未送出」、券商未確認的較早執行 → 擋�
     expect(() => startSpreadExecution(req())).not.toThrow();
 });
 
-it('委託列裡舊身分時期的列不會把舊編號授予新身分', async () => {
+it('本地投影帶著舊標記更新被重用的編號：不採用（只看伺服器剛回的列）', async () => {
+    // 回報的情境：零股 999＋1 送出後 sidecar 重啟，舊編號 T1 被別的委託重用並成交；
+    // App 端 trading-state 的投影把新成交合併進帶著我們舊標記的列
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    startSpreadExecution({ ...req(), plan: { ...plan, oddOrders: [{ price: 1095, quantity: 999 }, { price: 1095, quantity: 1 }] } });
+    await flush();
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    mocks.epoch = 2;
+    // 伺服器（新程序）：T1、T2 是沒有標記的別人委託，已成交；我們的兩筆還沒出現
+    mocks.serverTrades = [trade('T1', 1095, 999, 999, 'Filled', undefined), trade('T2', 1095, 1, 1, 'Filled', undefined)];
+    // 本地投影：同一 id 帶著我們的舊標記、顯示已成交
+    setTrades([trade('T1', 1095, 999, 999, 'Filled', tags[0]), trade('T2', 1095, 1, 1, 'Filled', tags[1])]);
+    await flush();
+    await flush();
+    expect(record().state.slots.map(x => x.filled)).toEqual([0, 0]);
+    expect(mocks.place).toHaveBeenCalledTimes(2); // 沒有因此送出整股
+});
+
+it('讀委託列期間身分變了：這批列不採用', async () => {
     let n = 0;
     mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
     startSpreadExecution(req());
     await flush();
-    const t0 = tagOf('odd:0');
-    const g1 = currentGen();
-    // 身分 1 時讀到的列（同一個物件）在 sidecar 重啟後仍留在委託列
-    const stale = trade('T1', 1095, 380, 0, 'Submitted', t0);
-    reconcile([stale]);
-    mocks.epoch = 2;
-    reconcile([stale]);
-    // 舊快照不能讓舊編號在新身分下變成可信
-    expect(record().state.slots[0]).toMatchObject({ orderId: 'T1', idGen: g1 });
-    expect(record().state.slots[0]!.idGen).not.toBe(currentGen());
-    // 新身分下重新讀到的列才接回
-    reconcile([trade('NEW', 1095, 380, 0, 'Submitted', t0)]);
-    expect(record().state.slots[0]).toMatchObject({ orderId: 'NEW', idGen: currentGen() });
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    // 讀取途中串流重連（sidecar 重啟）
+    mocks.serverTrades = [trade('N1', 1095, 380, 380, 'Filled', tags[0])];
+    const p = reconcile();
+    mocks.epoch = 7;
+    await p;
+    expect(record().state.slots[0]!.orderId).toBe('T1');
+    expect(record().state.slots[0]!.filled).toBe(0);
 });
+
+it('候選委託只從目前身分下剛讀到的列提供；指定時重新讀取確認', async () => {
+    mocks.place.mockImplementationOnce(async () => trade('T1', 1095, 380, 380, 'Filled', undefined))
+        .mockImplementationOnce(async () => { throw new Error('timeout'); })
+        .mockImplementation(() => new Promise(() => undefined));
+    const id = startSpreadExecution(req());
+    await flush();
+    await flush();
+    mocks.serverTrades = [trade('X1', 1090, 620, 0, 'Submitted', undefined)];
+    await reconcile();
+    expect(candidateOrders(id, 'odd:1').map(t => t.order.id)).toEqual(['X1']);
+    // 身分變了 → 舊的讀取結果不再提供
+    mocks.epoch = 3;
+    expect(candidateOrders(id, 'odd:1')).toEqual([]);
+    // 指定時重新讀：X1 已不在 → 不接受
+    mocks.serverTrades = [];
+    expect(await claimOrder(id, 'odd:1', 'X1')).toBe(false);
+    expect(record().state.slots[1]!.orderId).toBeUndefined();
+    mocks.serverTrades = [trade('X1', 1090, 620, 620, 'Filled', undefined)];
+    expect(await claimOrder(id, 'odd:1', 'X1')).toBe(true);
+    await flush();
+    expect(record().state.slots[1]).toMatchObject({ orderId: 'X1', userClaimed: true, filled: 620 });
+});
+
+it('X-Shioaji-Instance：沒有標頭不做任何事；與送出前驗證的 instance 不同 → 結果不明、重新驗證', async () => {
+    mocks.info = { simulation: true, instance_id: 'inst-A' } as unknown as { simulation: boolean };
+    mocks.serverSim = undefined;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number, opts: { onResponse?: (r: Response) => void; customField?: string }) => {
+        // 第一筆：沒有標頭（舊版 SDK）；第二筆：標頭顯示另一個程序
+        const n = mocks.place.mock.calls.length;
+        opts.onResponse?.(new Response('{}', { headers: n === 1 ? {} : { 'X-Shioaji-Instance': 'inst-B' } }));
+        return trade(`T${n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a);
+    });
+    const genBefore = currentGen();
+    startSpreadExecution(req());
+    await flush();
+    await flush();
+    const s = record().state;
+    // 沒有標頭：照常接受
+    expect(s.slots[0]).toMatchObject({ orderId: 'T1', status: 'working' });
+    // 標頭不同：回應不採用（結果不明），身分作廢後重新驗證，再以標記從伺服器委託列接回
+    expect(mocks.notify.mock.calls.some(c => c[0].title === '整零價差：伺服器程序可能已更換')).toBe(true);
+    expect(s.slots[1]!.orderId).toBe('T2');
+    // 重新驗證後換了身分世代，兩筆都以新鮮的委託列重新確認
+    expect(currentGen()).not.toBe(genBefore);
+    expect(s.slots.every(x => x.idGen === currentGen())).toBe(true);
+});
+
 
 it('sidecar 重啟後委託換了 id：以唯一標記重新接回；舊 id 被別的委託重用也不會誤計', async () => {
     let n = 0;
@@ -370,15 +449,20 @@ it('sidecar 重啟後委託換了 id：以唯一標記重新接回；舊 id 被�
     expect(record().state.slots.map(s => [s.orderId, s.idGen])).toEqual([['T1', g1], ['T2', g1]]);
     // sidecar 重啟：同樣兩筆換成新 id；舊 id T1 被一筆無關（沒標記）的委託重用、已成交
     mocks.epoch = 2; // sidecar 重啟 → 串流重連
-    setTrades([
+    // 新程序的委託快取：兩筆換了新 id；舊 id T1 被一筆沒有標記的委託重用
+    mocks.serverTrades = [
         trade('T1', 1095, 380, 380, 'Filled', undefined),
         trade('N1', 1095, 380, 0, 'Submitted', tags[0]),
         trade('N2', 1090, 620, 0, 'Submitted', tags[1]),
-    ]);
+    ];
+    setTrades([]);
+    await flush();
     const s = record().state;
     expect(s.slots.map(x => [x.orderId, x.idGen, x.filled])).toEqual([['N1', currentGen(), 0], ['N2', currentGen(), 0]]);
     // 新 id 上的成交照常對帳 → 送整股
-    setTrades([trade('N1', 1095, 380, 380, 'Filled', tags[0]), trade('N2', 1090, 620, 620, 'Filled', tags[1])]);
+    mocks.serverTrades = [trade('N1', 1095, 380, 380, 'Filled', tags[0]), trade('N2', 1090, 620, 620, 'Filled', tags[1])];
+    setTrades([]);
+    await flush();
     await flush();
     expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
 });
@@ -440,7 +524,7 @@ it('新執行不會刪掉同商品較早的執行（含已結束的），之後�
     expect(saved().map(r => r.id)).toContain(first);
 });
 
-it('本機保存：未了結的永不丟棄；只有已了結的限當日、限量', () => {
+it('本機保存：未了結的永不丟棄；只有已了結的限當日、限量', async () => {
     const now = Date.parse('2026-09-30T13:00:00+08:00');
     const yesterday = Date.parse('2026-09-29T10:00:00+08:00');
     // 券商確認的刪單：刪單量＋成交量＝委託量
@@ -496,6 +580,7 @@ it('重新整理時刪單等待結果 → 刪單結果不明；委託仍在委�
     // T1 已刪除、T2 仍在委託中
     mocks.trades = [trade('T1', 1095, 380, 0, 'Cancelled', tags[0]), trade('T2', 1090, 620, 0, 'Submitted', tags[1])];
     startOddSpreadService();
+    await flush();
     const s = record().state;
     expect(s.slots[0]).toMatchObject({ status: 'cancelled', cancelState: 'unknown' });
     expect(s.slots[1]).toMatchObject({ status: 'working', cancelState: 'unknown' });
@@ -504,7 +589,7 @@ it('重新整理時刪單等待結果 → 刪單結果不明；委託仍在委�
     expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual([['T2']]);
 });
 
-it('點價鎖持久化：重新整理（或重開面板）後仍在，核對後才解除；只影響同商品同帳戶', () => {
+it('點價鎖持久化：重新整理（或重開面板）後仍在，核對後才解除；只影響同商品同帳戶', async () => {
     const id = addClickLock('2330', account, '送出中');
     updateClickLock(id, '已送出 999 股；第 2/2 筆 1 股未送出');
     resetOddSpreadServiceForTest(); // 重新整理：記憶體清空
@@ -586,7 +671,7 @@ it('補單超出滑價上限：不送，列未配對待處理；以最新價補�
     expect(mocks.place.mock.calls[2]!.slice(1, 4)).toEqual(['Buy', 1100, 1]);
 });
 
-it('彈出視窗與非執行中的主視窗不可執行', () => {
+it('彈出視窗與非執行中的主視窗不可執行', async () => {
     mocks.main = false;
     expect(oddSpreadExecUnavailable()).toContain('只能在主視窗');
     expect(() => startSpreadExecution(req())).toThrow('只能在主視窗');
@@ -595,11 +680,12 @@ it('彈出視窗與非執行中的主視窗不可執行', () => {
     expect(oddSpreadExecUnavailable()).toContain('另一個主視窗');
 });
 
-it('對帳只認同帳戶、同商品、同方向與單位，且標記完全相同（價量可因改單而不同）', () => {
+it('對帳只認同帳戶、同商品、同方向與單位，且標記完全相同（價量可因改單而不同）', async () => {
     mocks.place.mockImplementation(() => new Promise(() => undefined));
     startSpreadExecution(req());
+    await flush();
     const t0 = tagOf('odd:0');
-    reconcile([
+    await reconcileRows([
         { ...trade('W1', 1095, 380, 380, 'Filled', t0), account: { ...account, account_id: 'B' } } as AccountedTrade,
         trade('W2', 1095, 380, 380, 'Filled', t0, 'Common'),
         trade('W3', 1095, 380, 380, 'Filled', t0, 'IntradayOdd', 'Buy'), // 方向不同（標記相同也不認）
@@ -608,7 +694,7 @@ it('對帳只認同帳戶、同商品、同方向與單位，且標記完全相�
     ]);
     expect(record().state.slots[0]!.orderId).toBeUndefined();
     expect(record().state.slots[1]!.orderId).toBe('W5');
-    reconcile([trade('W6', 1095, 380, 380, 'Filled', t0)]);
+    await reconcileRows([trade('W6', 1095, 380, 380, 'Filled', t0)]);
     expect(record().state.slots[0]!.orderId).toBe('W6');
 });
 
