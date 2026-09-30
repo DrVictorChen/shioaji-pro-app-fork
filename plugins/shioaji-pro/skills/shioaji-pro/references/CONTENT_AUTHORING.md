@@ -190,9 +190,11 @@ longExit(ta.crossunder(close, priorLow))
   end-of-run rejection.
 - Futures daily bars follow the exchange trading day: the night session from
   15:00 belongs to the next date that has a day session (after a holiday, the
-  day after it). Night sessions follow the TAIFEX after-hours list (15:00 for
-  index futures and crude oil; 17:25 for TOPIX, FX, gold and listed stock
-  futures). Minutes outside the instrument's sessions are dropped; index
+  day after it); night minutes after the last day session in the data are
+  left out until the next day session is available. Night sessions follow the
+  TAIFEX after-hours list (15:00 for index futures, TXO and its weeklies, and
+  crude oil; 17:25 for TOPIX, FX, gold and listed stock/ETF futures); some
+  ETF futures trade until 16:15. Minutes outside the instrument's sessions are dropped; index
   closing values printed at 13:31–13:33 belong to the 13:30 bar. Daily
   price limits are ±10% of the previous close (futures: previous day-session
   close as the settlement stand-in). Sharpe and Sortino annualize with

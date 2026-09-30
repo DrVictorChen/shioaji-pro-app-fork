@@ -292,7 +292,8 @@ export interface PrepareRequest {
 /**
  * out-of-session: minutes outside every session were dropped.
  * trading-day-assumed: night-session minutes after the last day session in
- * the data were assigned by the calendar rule (weekday / holiday table).
+ * the data; their trading day is unknown (the next weekday may be a holiday),
+ * so they are left out of the bars until a later day session is in the data.
  */
 export interface PrepareDiagnostic {
     kind: 'out-of-session' | 'trading-day-assumed';
