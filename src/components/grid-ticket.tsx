@@ -35,7 +35,7 @@ import {
 } from '../lib/types/order';
 import { fmtPrice } from '../lib/utils/format';
 import { isOddLot, ODD_LOT_MAX_SHARES, orderQtyUnit } from '../lib/odd-lot';
-import { stepPrice } from '../lib/utils/ticksize';
+import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import * as styles from './order-ticket.css';
 import * as flash from './flash-order.css';
 import * as panel from './panel.css';
@@ -46,6 +46,41 @@ const FOLLOW_INTERVAL_MS = 2500;
 const MAX_OPS_PER_CYCLE = 4;
 
 const keyOf = (p: number) => p.toFixed(2);
+
+// 網格單的擁有者（#204）：custom_field 只能帶固定標記，同一檔可能有多個
+// 鋪單面板（不同單位／帳戶／同單位不同面板）。每個面板實例記下自己送出的
+// 委託 id；全撤只撤本面板送出的單，動態跟隨不把其他面板的單當成自己的。
+// 不屬於任何面板（例如重新整理前送出的）的網格單，跟隨仍會納入同單位／
+// 同帳戶的比對，避免重複補單；全撤不碰它們。
+const gridOwners = new Map<string, string>();
+let gridInstanceSeq = 0;
+
+export interface GridBaseQuote {
+    tick?: { close: string | number };
+    bidask?: { bid_price: (string | number)[]; ask_price: (string | number)[] };
+}
+
+/** 鋪單基準價：整股取整股成交價（沒有則參考價）；盤中零股只看零股行情 —
+ * 零股成交價，沒有成交時取零股最佳買賣中價（只有一邊就用那一邊），
+ * 都沒有回 null（等待零股行情），絕不退回整股價格。 */
+export function gridBasePrice(
+    odd: boolean,
+    quote: GridBaseQuote | undefined,
+    oddQuote: GridBaseQuote | undefined,
+    reference: number | null | undefined,
+    round: (p: number) => number,
+): number | null {
+    if (!odd) return quote?.tick ? Number(quote.tick.close) : reference || null;
+    if (oddQuote?.tick && Number(oddQuote.tick.close) > 0) return Number(oddQuote.tick.close);
+    const bid = Number(oddQuote?.bidask?.bid_price?.[0]);
+    const ask = Number(oddQuote?.bidask?.ask_price?.[0]);
+    const okBid = Number.isFinite(bid) && bid > 0;
+    const okAsk = Number.isFinite(ask) && ask > 0;
+    if (okBid && okAsk) return round((bid + ask) / 2);
+    if (okBid) return bid;
+    if (okAsk) return ask;
+    return null;
+}
 
 export function GridTicket({
     contract,
@@ -76,14 +111,14 @@ export function GridTicket({
     const [followAccountShown, setFollowAccountShown] = useState<Account | null>(null);
     const priv = usePrivacyMode();
 
-    // 盤中零股網格以零股成交價為基準（另一個撮合市場，#204）；尚無零股成交
-    // 時退回整股成交價
+    // 盤中零股網格以零股行情為基準（另一個撮合市場，#204）；沒有零股
+    // 成交也沒有零股五檔時等待，不用整股價格
     const oddQuote = useQuote(odd ? contract.code : null, { oddLot: true });
-    const last = odd && oddQuote?.tick
-        ? Number(oddQuote.tick.close)
-        : quote?.tick
-          ? Number(quote.tick.close)
-          : contract.reference || null;
+    const last = gridBasePrice(odd, quote, oddQuote, contract.reference, p => roundToTick(contract, p));
+    const waitingOdd = odd && last === null;
+    const instanceId = useMemo(() => `grid-${++gridInstanceSeq}`, []);
+    const ownerOf = (t: Trade) => gridOwners.get(t.order.id);
+    const accountOf = (t: Trade) => (t as Trade & { account?: Account }).account ?? t.order.account;
 
     // refs for the follow loop
     const contractRef = useRef(contract);
@@ -163,18 +198,20 @@ export function GridTicket({
             order_type: 'ROD' as const,
             custom_field: GRID_TAG,
         };
-        if (isFuturesContract(c)) {
-            return placeFuturesOrder(c, {
+        const trade = isFuturesContract(c)
+            ? await placeFuturesOrder(c, {
                 ...req,
                 price_type: 'LMT',
                 octype: 'Auto',
+            }, account)
+            : await placeStockOrder(c, {
+                ...req,
+                price_type: 'LMT',
+                order_lot: p.odd ? 'IntradayOdd' : 'Common',
             }, account);
-        }
-        return placeStockOrder(c, {
-            ...req,
-            price_type: 'LMT',
-            order_lot: p.odd ? 'IntradayOdd' : 'Common',
-        }, account);
+        const id = (trade as Trade | undefined)?.order?.id;
+        if (id) gridOwners.set(id, instanceId);
+        return trade;
     };
 
     const layGrid = async () => {
@@ -252,10 +289,19 @@ export function GridTicket({
         onChangedRef.current?.();
     };
 
+    // 全撤只撤「本面板送出、目前單位、目前帳戶」的網格單（#204）
+    const cancelAccount = captureSelectedAccount(futures ? 'F' : 'S');
+    const ownGrid = gridOrders.filter(
+        (t) =>
+            ownerOf(t) === instanceId &&
+            isOddLot(t.order.order_lot) === odd &&
+            (!cancelAccount || accountMatches(accountOf(t), cancelAccount)),
+    );
+    const otherGrid = gridOrders.length - ownGrid.length;
     const cancelGrid = async () => {
-        if (gridOrders.length === 0) return;
+        if (ownGrid.length === 0) return;
         setBusy(true);
-        const results = await cancelOrders(gridOrders.map((t) => t.order.id));
+        const results = await cancelOrders(ownGrid.map((t) => t.order.id));
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -291,6 +337,11 @@ export function GridTicket({
             if (cycleBusy.current) return;
             const base = lastRef.current;
             if (base === null) return;
+            // 每個週期固定單位／數量／方向（#204）；進行中若使用者改了單位或
+            // 方向，這個週期立刻停止，不以新單位送出任何一筆
+            const cycle = { qtyPer: paramsRef.current.qtyPer, odd: paramsRef.current.odd, side: sideRef.current };
+            if (cycle.odd !== followOdd) return;
+            const changed = () => paramsRef.current.odd !== cycle.odd || sideRef.current !== cycle.side;
             if (!usableCapturedAccount(followAccount)) {
                 stop('跟隨啟動時的帳戶已不可用');
                 return;
@@ -303,9 +354,11 @@ export function GridTicket({
                     (t) =>
                         ACTIVE_ORDER_STATUSES.has(t.status.status) &&
                         t.order.custom_field === GRID_TAG &&
-                        t.order.action === sideRef.current &&
+                        t.order.action === cycle.side &&
                         isOddLot(t.order.order_lot) === followOdd &&
-                        accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, followAccount) &&
+                        // 其他鋪單面板送出的單不屬於這個跟隨
+                        (ownerOf(t) === undefined || ownerOf(t) === instanceId) &&
+                        accountMatches(accountOf(t), followAccount) &&
                         (t.contract.code === c.code ||
                             getAliasFor(t.contract.code) === c.code),
                 );
@@ -316,7 +369,7 @@ export function GridTicket({
                 );
                 let ops = 0;
                 for (const t of mine) {
-                    if (ops >= MAX_OPS_PER_CYCLE) break;
+                    if (ops >= MAX_OPS_PER_CYCLE || changed()) break;
                     const k = keyOf(t.status.modified_price || t.order.price);
                     if (!desired.has(k) && !unresolvedCancels.current.has(t.order.id)) {
                         ops += 1;
@@ -338,18 +391,18 @@ export function GridTicket({
                     if (now - ts > RECENT_MS) recentPlace.current.delete(k);
                 }
                 for (const k of desired) {
-                    if (ops >= MAX_OPS_PER_CYCLE) break;
+                    if (ops >= MAX_OPS_PER_CYCLE || changed()) break;
                     // skip levels visible in trades OR placed moments ago
                     // (the poll hasn't caught up — re-placing would double)
                     if (!have.has(k) && !recentPlace.current.has(k)) {
                         // 風控鎖／單筆上限／當日虧損上限同樣擋自動補單
-                        const blocked = checkOrderAllowed(paramsRef.current.qtyPer, followOdd ? 'IntradayOdd' : undefined);
+                        const blocked = checkOrderAllowed(cycle.qtyPer, cycle.odd ? 'IntradayOdd' : undefined);
                         if (blocked) {
                             stop(blocked);
                             break;
                         }
                         ops += 1;
-                        await placeAt(Number(k), followAccount).catch(() => undefined);
+                        await placeAt(Number(k), followAccount, cycle).catch(() => undefined);
                     }
                 }
                 if (ops > 0) onChangedRef.current?.();
@@ -489,16 +542,19 @@ export function GridTicket({
                 >
                     {!live
                         ? '⚠ 未連線'
-                        : busy
+                        : waitingOdd
+                          ? '等待零股行情'
+                          : busy
                           ? '處理中…'
                           : `鋪 ${preview.length} 檔`}
                 </button>
                 <button
                     className={flash.cancelAllBtn}
-                    disabled={busy || gridOrders.length === 0}
+                    disabled={busy || ownGrid.length === 0}
+                    title={otherGrid > 0 ? `只撤本面板目前單位與帳戶的鋪單；另有 ${otherGrid} 筆其他鋪單請在委託面板處理` : '撤掉本面板送出的鋪單'}
                     onClick={() => void cancelGrid()}
                 >
-                    全撤 {gridOrders.length > 0 ? gridOrders.length : ''}
+                    全撤 {ownGrid.length > 0 ? ownGrid.length : ''}
                 </button>
             </div>
 

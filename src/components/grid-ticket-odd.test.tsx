@@ -5,17 +5,17 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
 import type { Trade } from '../lib/types/order';
 import type { ContractInfo } from '../lib/types/contract';
-const m = vi.hoisted(() => ({ confirm: vi.fn(), stock: vi.fn(), cancel: vi.fn(), notify: vi.fn(), risk: vi.fn() }));
-const h = vi.hoisted(() => ({ account: { account_type: 'S', broker_id: 'BR', account_id: 'A', signed: true, person_id: '', username: '' } }));
+const m = vi.hoisted(() => ({ confirm: vi.fn(), stock: vi.fn(), cancel: vi.fn(), cancelMany: vi.fn(), notify: vi.fn(), risk: vi.fn() }));
+const h = vi.hoisted(() => ({ odd: { tick: { close: '100' } } as unknown, account: { account_type: 'S', broker_id: 'BR', account_id: 'A', signed: true, person_id: '', username: '' } }));
 vi.mock('../lib/account-store', () => ({ getAccountState: () => ({ accounts: [h.account], selectedStock: h.account, selectedFutures: null, loaded: true }) }));
 vi.mock('../lib/order-confirm', () => ({ requestOrderConfirm: m.confirm, accountConfirmLabel: (a: Account) => `${a.broker_id}-${a.account_id}` }));
 vi.mock('../lib/risk', () => ({ checkOrderAllowed: m.risk, getRiskSettings: () => ({ confirmManualOrders: true }) }));
-vi.mock('../lib/shioaji', () => ({ cancelOrder: m.cancel, cancelOrders: vi.fn(), placeFuturesOrder: vi.fn(), placeStockOrder: m.stock }));
+vi.mock('../lib/shioaji', () => ({ cancelOrder: m.cancel, cancelOrders: m.cancelMany, placeFuturesOrder: vi.fn(), placeStockOrder: m.stock }));
 vi.mock('../lib/trade', () => ({ notify: m.notify, isFuturesContract: () => false }));
 vi.mock('../lib/stream', () => ({ getAliasFor: () => undefined }));
-vi.mock('../hooks/use-stream', () => ({ useQuote: () => ({ tick: { close: '100' } }), useTradingLive: () => true }));
-vi.mock('../lib/utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, step: number) => p + step }));
-import { GridTicket } from './grid-ticket';
+vi.mock('../hooks/use-stream', () => ({ useQuote: (code: string | null, o?: { oddLot?: boolean }) => (o?.oddLot ? (code ? h.odd : undefined) : { tick: { close: '100' } }), useTradingLive: () => true }));
+vi.mock('../lib/utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, step: number) => p + step, roundToTick: (_c: unknown, p: number) => Math.round(p) }));
+import { GridTicket, gridBasePrice } from './grid-ticket';
 
 const contract = { code: '2330', security_type: 'STK', exchange: 'TSE', reference: 100, limit_up: 0, limit_down: 0 } as unknown as ContractInfo;
 const text = (n: ReactTestInstance): string => n.children.map(c => typeof c === 'string' ? c : text(c)).join('');
@@ -29,7 +29,10 @@ beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     m.confirm.mockResolvedValue(true);
-    m.stock.mockResolvedValue({});
+    let n = 0;
+    m.stock.mockImplementation(async () => ({ order: { id: `placed-${++n}` } }));
+    m.cancelMany.mockImplementation(async (ids: string[]) => ids.map(() => ({ status: 'fulfilled', value: {} })));
+    h.odd = { tick: { close: '100' } };
     m.cancel.mockResolvedValue({});
     m.risk.mockReturnValue(null);
 });
@@ -82,4 +85,78 @@ it('a batch keeps the unit and quantity it was confirmed with; unit buttons are 
     expect(m.stock.mock.calls.every(c => c[1].order_lot === 'IntradayOdd' && c[1].quantity === 250)).toBe(true);
     expect(unitBtn('整股').props.disabled).toBe(false);
     expect(unitBtn('整股').props['aria-checked']).toBe(false);
+});
+
+it('a follow cycle in flight when the unit is switched sends nothing in the new unit', async () => {
+    let release!: () => void;
+    m.cancel.mockReturnValue(new Promise(r => { release = () => r({}); }));
+    // an unowned odd stray at 90 makes the cycle cancel first, and that cancel hangs
+    const trades = [gridTrade(90, 'o90', 'IntradayOdd')];
+    await act(async () => { view = create(createElement(GridTicket, { contract, trades })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { view.root.findAllByType('input')[3]!.props.onChange({ target: { value: '300' } }); });
+    await act(async () => { btn('解鎖鋪單').props.onClick(); });
+    await act(async () => { btn('動態跟隨現價').props.onClick(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
+    expect(m.cancel).toHaveBeenCalledWith('o90');
+    // user switches to 整股 while the cycle waits on the cancel
+    await act(async () => { view.root.findAll(n => n.type === 'button' && n.props.role === 'radio' && text(n) === '整股')[0]!.props.onClick(); });
+    await act(async () => { release(); await vi.advanceTimersByTimeAsync(3000); });
+    expect(m.stock).not.toHaveBeenCalled();
+});
+
+it('a follow cycle uses the quantity it started with', async () => {
+    await act(async () => { view = create(createElement(GridTicket, { contract, trades: [] })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { view.root.findAllByType('input')[3]!.props.onChange({ target: { value: '300' } }); });
+    let first!: () => void;
+    m.stock.mockImplementationOnce(() => new Promise(r => { first = () => r({ order: { id: 'p1' } }); }));
+    await act(async () => { btn('解鎖鋪單').props.onClick(); });
+    await act(async () => { btn('動態跟隨現價').props.onClick(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
+    await act(async () => { view.root.findAllByType('input')[3]!.props.onChange({ target: { value: '5' } }); });
+    await act(async () => { first(); await vi.advanceTimersByTimeAsync(10); });
+    expect(m.stock.mock.calls.slice(0, 4).map(c => [c[1].quantity, c[1].order_lot])).toEqual(Array(4).fill([300, 'IntradayOdd']));
+});
+
+it('odd-lot grid prices come from the odd-lot market only; without odd quotes it waits', async () => {
+    const r = (p: number) => Math.round(p);
+    expect(gridBasePrice(true, { tick: { close: 100 } }, undefined, 100, r)).toBeNull();
+    expect(gridBasePrice(true, { tick: { close: 100 } }, { bidask: { bid_price: ['96'], ask_price: ['98'] } }, 100, r)).toBe(97);
+    expect(gridBasePrice(true, { tick: { close: 100 } }, { bidask: { bid_price: [], ask_price: ['98'] } }, 100, r)).toBe(98);
+    expect(gridBasePrice(true, { tick: { close: 100 } }, { tick: { close: 95 } }, 100, r)).toBe(95);
+    expect(gridBasePrice(false, { tick: { close: 100 } }, { tick: { close: 95 } }, 90, r)).toBe(100);
+    h.odd = undefined;
+    await act(async () => { view = create(createElement(GridTicket, { contract, trades: [] })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { btn('解鎖鋪單').props.onClick(); });
+    const lay = btn('等待零股行情');
+    expect(lay.props.disabled).toBe(true);
+    await act(async () => { btn('動態跟隨現價').props.onClick(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(m.stock).not.toHaveBeenCalled();
+});
+
+it('全撤 only cancels this panel\'s own grid orders of its unit and account', async () => {
+    m.confirm.mockResolvedValue(true);
+    const views: ReactTestRenderer[] = [];
+    const rootOf = (i: number) => views[i]!.root;
+    const b = (i: number, label: string) => rootOf(i).findAllByType('button').find(x => text(x).includes(label))!;
+    for (let i = 0; i < 2; i++) await act(async () => { views.push(create(createElement(GridTicket, { contract, trades: [] }))); });
+    // panel 0: odd grid; panel 1: whole-lot grid — same symbol, same account
+    await act(async () => { b(0, '盤中零股').props.onClick(); });
+    await act(async () => { b(0, '解鎖鋪單').props.onClick(); });
+    await act(async () => { await b(0, '鋪 ').props.onClick(); });
+    await act(async () => { b(1, '解鎖鋪單').props.onClick(); });
+    await act(async () => { await b(1, '鋪 ').props.onClick(); });
+    const placed = m.stock.mock.results.map((r, i) => ({ id: `placed-${i + 1}`, lot: m.stock.mock.calls[i]![1].order_lot, price: m.stock.mock.calls[i]![1].price }));
+    // a third panel (another instance) at the same unit as panel 1, plus an unowned leftover
+    const trades = [...placed.map(p => gridTrade(p.price, p.id, p.lot)), gridTrade(80, 'leftover', 'Common')];
+    for (let i = 0; i < 2; i++) await act(async () => { views[i]!.update(createElement(GridTicket, { contract, trades })); });
+    await act(async () => { await b(0, '全撤').props.onClick(); });
+    expect(m.cancelMany).toHaveBeenCalledTimes(1);
+    expect(m.cancelMany.mock.calls[0]![0]).toEqual(placed.filter(p => p.lot === 'IntradayOdd').map(p => p.id));
+    await act(async () => { await b(1, '全撤').props.onClick(); });
+    expect(m.cancelMany.mock.calls[1]![0]).toEqual(placed.filter(p => p.lot === 'Common').map(p => p.id));
+    for (const v of views) await act(async () => v.unmount());
 });
