@@ -258,9 +258,12 @@ export function TrayPanel() {
                                     </span>
                                     <span className={styles.name}>
                                         {p.direction === 'Buy' ? '多' : '空'}{' '}
-                                        {'yd_quantity' in p
-                                            ? fmtStockLots(p.quantity)
-                                            : fmtInt(p.quantity)}{' '}
+                                        {maskMoney(
+                                            'yd_quantity' in p
+                                                ? fmtStockLots(p.quantity)
+                                                : fmtInt(p.quantity),
+                                            privMoney,
+                                        )}{' '}
                                         @{fmtPrice(p.price)}
                                     </span>
                                     <span

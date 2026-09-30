@@ -825,7 +825,7 @@ export function FlashOrder({
                 {pos && (
                     <button
                         className={`${styles.flatBtn} ${armed ? '' : styles.disabledCell}`}
-                        title={pos.safeExit ? `市價平倉 ${Math.abs(pos.net)}` : '持倉方向或交易條件不明，請使用持倉面板確認'}
+                        title={pos.safeExit ? `市價平倉 ${maskMoney(String(Math.abs(pos.net)), privMoney)}` : '持倉方向或交易條件不明，請使用持倉面板確認'}
                         disabled={!pos.safeExit || !armed || !activeAccount}
                         onClick={() => void flatten()}
                     >
@@ -843,7 +843,7 @@ export function FlashOrder({
             {pos && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}>
-                        {pos.net > 0 ? '多' : '空'} {Math.abs(pos.net)}
+                        {pos.net > 0 ? '多' : '空'} {maskMoney(String(Math.abs(pos.net)), privMoney)}
                     </span>
                     <span>@ {fmtPrice(pos.avg)}</span>
                     {(pos.mixed || pos.twoWay || pos.stale) && (

@@ -6,11 +6,11 @@ import type { Account } from '../lib/types/portfolio';
 import type { Trade } from '../lib/types/order';
 import type { ContractInfo } from '../lib/types/contract';
 import type { FlashAccountKeys } from '../lib/flash-account';
-const mocks = vi.hoisted(() => ({ cancel: vi.fn(), place: vi.fn(), stockExit: vi.fn(), notify: vi.fn(), ensure: vi.fn(), selected: 'A', privacy: false, loaded: true }));
+const mocks = vi.hoisted(() => ({ cancel: vi.fn(), place: vi.fn(), stockExit: vi.fn(), notify: vi.fn(), ensure: vi.fn(), selected: 'A', privacy: false, privacyMoney: false, loaded: true }));
 const accounts: Account[] = ['A', 'B'].map(account_id => ({ account_type: 'F', broker_id: 'BR', account_id: `12345${account_id}`, signed: true, person_id: '', username: '' }));
 const [accA, accB] = accounts as [Account, Account];
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => { mocks.ensure(); }, useAccounts: () => ({ loaded: mocks.loaded, accounts: mocks.loaded ? accounts : [], selectedStock: undefined, selectedFutures: accounts.find(a => a.account_id.endsWith(mocks.selected)) }) }));
-vi.mock('../lib/privacy', async (orig) => ({ ...(await orig<typeof import('../lib/privacy')>()), usePrivacyMode: () => mocks.privacy, usePrivacyMoney: () => mocks.privacy }));
+vi.mock('../lib/privacy', async (orig) => ({ ...(await orig<typeof import('../lib/privacy')>()), usePrivacyMode: () => mocks.privacy, usePrivacyMoney: () => mocks.privacyMoney }));
 vi.mock('../hooks/use-stream', () => ({ useTradingLive: () => true }));
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: undefined, snapshot: { close: 100 }, book: undefined }) }));
 vi.mock('../lib/shioaji', () => ({ cancelOrders: (ids: string[]) => Promise.allSettled(ids.map(id => mocks.cancel(id))) }));
@@ -41,6 +41,7 @@ beforeEach(() => {
     vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     mocks.selected = 'A';
     mocks.privacy = false;
+    mocks.privacyMoney = false;
     mocks.loaded = true;
     mocks.cancel.mockResolvedValue({ status: { status: 'Cancelled' } });
     mocks.place.mockResolvedValue(trades[0]);
@@ -95,6 +96,15 @@ it('a panel without a saved account follows the app-wide selection and shows it 
     await act(async () => { view.update(render()); });
     expect(text(panels()[0])).toContain('多 5');
     expect(select(p2).props.value).toBe('F:BR:12345B');
+});
+
+it('masks the position quantity with the money privacy toggle, like the positions panel (#85 B-3)', async () => {
+    mocks.privacyMoney = true;
+    await act(async () => { view = create(render()); });
+    const [p1] = panels();
+    expect(text(p1)).toContain('多 •••••');
+    expect(text(p1)).not.toContain('多 3');
+    expect(button(p1, '平倉').props.title).toBe('市價平倉 •••••');
 });
 
 it('a saved account that disappears is shown unavailable, not replaced by the global one', async () => {
