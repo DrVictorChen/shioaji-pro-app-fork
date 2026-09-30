@@ -17,7 +17,7 @@ import {
 } from '../lib/chart-drawings';
 import type { ContractBase } from '../lib/types/contract';
 import { useHotkeys } from './use-hotkeys';
-import { AXIS_LABEL_H } from '../lib/chart-drawing-layer';
+import { AXIS_LABEL_H, axisLabelBox } from '../lib/chart-drawing-layer';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 
 // Esc×2 全部刪單的整合測試：開啟風控設定、攔下刪單
@@ -750,10 +750,42 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         expect(take(143)).toBe(true);
     });
 
+    it('小數 y：畫出來的色塊邊緣與保護範圍一致，並往外各多 1px', async () => {
+        const api = await setup(false, false);
+        addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25200 - 31.49 }], DEFAULT_DRAWING_STYLE); // y=31.49
+        await act(async () => {});
+        const box = axisLabelBox(31.49);
+        expect(box).toEqual({ top: 22, bottom: 41 }); // 色塊從 22 畫起（DPR=1）
+        // 按在看得到的上緣 y=22、下緣 y=41，以及外擴的 1px 都屬於畫圖標籤
+        for (const y of [21, 22, 22.2, 41, 42]) expect(api().drawingLabelAt(y)).toBe(true);
+        expect(api().drawingLabelAt(20.5)).toBe(false);
+        expect(api().drawingLabelAt(42.5)).toBe(false);
+        // 繪製用的也是同一個矩形
+        const fills: number[][] = [];
+        const ctx = {
+            save() {},
+            restore() {},
+            fillRect: (...a: number[]) => void fills.push(a),
+            fillText() {},
+            set font(_v: string) {},
+            set textBaseline(_v: string) {},
+            set textAlign(_v: string) {},
+            set fillStyle(_v: string) {},
+        };
+        const view = (attachedLayer as unknown as { priceAxisPaneViews(): { renderer(): { draw(t: unknown): void } }[] })
+            .priceAxisPaneViews()[0]!;
+        view.renderer().draw({
+            useBitmapCoordinateSpace: (fn: (s: unknown) => void) =>
+                fn({ context: ctx, horizontalPixelRatio: 1, verticalPixelRatio: 1, mediaSize: { width: 60, height: 400 } }),
+        });
+        expect(fills[0]!.slice(1)).toEqual([22, 60, 19]);
+    });
+
     it('drawingLabelAt：標籤範圍＝線的價位上下各半個標籤高，選取中也一樣', async () => {
         const api = await setup(false); // 水平線 25000 → y=200
         expect(api().drawingLabelAt(200 + AXIS_LABEL_H / 2)).toBe(true);
-        expect(api().drawingLabelAt(200 - AXIS_LABEL_H / 2 - 1)).toBe(false);
+        expect(api().drawingLabelAt(200 - AXIS_LABEL_H / 2 - 1)).toBe(true); // 外擴 1px
+        expect(api().drawingLabelAt(200 - AXIS_LABEL_H / 2 - 1.5)).toBe(false);
         await act(async () => {
             pressOnLine();
         });
