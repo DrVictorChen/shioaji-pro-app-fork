@@ -123,13 +123,23 @@ export function chartTriggerFields(s: ChartOrderSettings, market: ChartOrderMark
     };
 }
 
-// ---- 設為預設：依商品類別（股票／期貨）存新圖表的預設 ----
-const DEFAULTS_KEY = 'sj-pro-chart-order-defaults';
+// ---- 閃電下單設定（#204）：只有單位與數量 — 閃電下單點價一律 ROD 限價、
+// 市價鈕固定市價 IOC、期貨固定自動開平倉，沒有其他可選的送單參數 ----
 
-/** 預設不含帳戶 — 固定帳戶只屬於設定它的那張圖。 */
-export function loadChartOrderDefault(market: ChartOrderMarket): ChartOrderSettings {
+/** 閃電下單面板底部一句話：點下去實際會送什麼。 */
+export function flashOrderSummary(s: ChartOrderSettings, market: ChartOrderMarket, accountLabel: string): string {
+    const odd = market === 'S' && s.lot === 'IntradayOdd';
+    return `點買量／賣量以 ROD 限價送出 ${lotText(s, market)}，帳號 ${accountLabel}；`
+        + (odd ? '零股沒有市價單，市價買／賣停用。' : '市價買／賣以市價 IOC 送出。');
+}
+
+// ---- 設為預設：依商品類別（股票／期貨）存新面板的預設 ----
+const DEFAULTS_KEY = 'sj-pro-chart-order-defaults';
+const FLASH_DEFAULTS_KEY = 'sj-pro-flash-order-defaults';
+
+function loadDefault(key: string, market: ChartOrderMarket): ChartOrderSettings {
     try {
-        const all = JSON.parse(globalThis.localStorage?.getItem(DEFAULTS_KEY) ?? '{}') as Record<string, Partial<ChartOrderSettings>>;
+        const all = JSON.parse(globalThis.localStorage?.getItem(key) ?? '{}') as Record<string, Partial<ChartOrderSettings>>;
         const { accountKey: _ignored, ...rest } = all?.[market] ?? {};
         return normalizeChartOrder(rest, market);
     } catch {
@@ -137,12 +147,30 @@ export function loadChartOrderDefault(market: ChartOrderMarket): ChartOrderSetti
     }
 }
 
-export function saveChartOrderDefault(market: ChartOrderMarket, s: ChartOrderSettings): void {
+function saveDefault(key: string, market: ChartOrderMarket, s: ChartOrderSettings): void {
     try {
-        const all = JSON.parse(globalThis.localStorage?.getItem(DEFAULTS_KEY) ?? '{}') as Record<string, unknown>;
+        const all = JSON.parse(globalThis.localStorage?.getItem(key) ?? '{}') as Record<string, unknown>;
         const { accountKey: _ignored, ...rest } = normalizeChartOrder(s, market);
-        globalThis.localStorage?.setItem(DEFAULTS_KEY, JSON.stringify({ ...(all && typeof all === 'object' ? all : {}), [market]: rest }));
+        globalThis.localStorage?.setItem(key, JSON.stringify({ ...(all && typeof all === 'object' ? all : {}), [market]: rest }));
     } catch { /* quota / private mode */ }
+}
+
+/** 預設不含帳戶 — 固定帳戶只屬於設定它的那張圖。 */
+export function loadChartOrderDefault(market: ChartOrderMarket): ChartOrderSettings {
+    return loadDefault(DEFAULTS_KEY, market);
+}
+
+export function saveChartOrderDefault(market: ChartOrderMarket, s: ChartOrderSettings): void {
+    saveDefault(DEFAULTS_KEY, market, s);
+}
+
+/** 閃電下單新面板／換商品時的單位與數量（不含帳戶）。 */
+export function loadFlashOrderDefault(market: ChartOrderMarket): ChartOrderSettings {
+    return loadDefault(FLASH_DEFAULTS_KEY, market);
+}
+
+export function saveFlashOrderDefault(market: ChartOrderMarket, s: ChartOrderSettings): void {
+    saveDefault(FLASH_DEFAULTS_KEY, market, s);
 }
 
 /** Stored panel value → settings per market (a chart can switch between a stock and a future). */

@@ -197,28 +197,6 @@ export const followBtn = styleVariants({
     ],
 });
 
-// 整股／零股切換（#204）：開啟時琥珀色，和啟用閃電下單的警示色同系
-export const lotBtn = styleVariants({
-    on: [
-        smallToggle,
-        {
-            color: vars.color.amber,
-            borderColor: vars.color.amber,
-            background: 'rgba(224, 164, 60, 0.12)',
-            fontWeight: 600,
-        },
-    ],
-    off: [
-        smallToggle,
-        {
-            color: vars.color.mutedForeground,
-            borderColor: vars.color.border,
-            background: 'transparent',
-            ':hover': { color: vars.color.foreground },
-        },
-    ],
-});
-
 export const qtyUnit = style({
     fontFamily: vars.font.body,
     fontSize: '0.64rem',

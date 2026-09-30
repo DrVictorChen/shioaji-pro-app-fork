@@ -31,6 +31,12 @@ let view!: ReactTestRenderer;
 const panels = () => view.root.findAllByType(FlashOrder);
 const button = (panel: ReactTestInstance, label: string) => panel.findAllByType('button').find(b => text(b).includes(label))!;
 const buyCell = (panel: ReactTestInstance, price: number) => panel.findAll(n => n.type === 'div' && n.props.title === `限價買 ${price.toFixed(2)}`)[0]!;
+const setUnit = async (panel: ReactTestInstance, lot: 'Common' | 'IntradayOdd') => {
+    await act(async () => { panel.findAll(n => n.type === 'button' && n.props['aria-label'] === '閃電下單設定')[0]!.props.onClick(); });
+    const pop = panel.findAll(n => n.props.role === 'dialog')[0]!;
+    await act(async () => { pop.findAll(n => n.type === 'button' && text(n) === (lot === 'IntradayOdd' ? '盤中零股（股）' : '整股（張）'))[0]!.props.onClick(); });
+    await act(async () => { pop.findAll(n => n.type === 'button' && text(n) === '完成')[0]!.props.onClick(); });
+};
 const qtyInput = (panel: ReactTestInstance) => panel.findAll(n => n.type === 'input' && String(n.props['aria-label']).startsWith('數量'))[0]!;
 
 beforeEach(() => {
@@ -51,7 +57,7 @@ it('an odd-lot and a round-lot panel on the same stock keep their own unit, quot
             createElement(FlashOrder, { contract, trades: [], positions: [] })));
     });
     const [odd, round] = panels() as [ReactTestInstance, ReactTestInstance];
-    await act(async () => { button(odd, '零股').props.onClick(); });
+    await setUnit(odd, 'IntradayOdd');
 
     // unit is per panel: only the first switched
     expect(qtyInput(odd).props['aria-label']).toBe('數量（股）');
@@ -87,8 +93,8 @@ it('an odd-lot and a round-lot panel on the same stock keep their own unit, quot
     expect(mocks.place.mock.calls[1]![4].orderLot).toBeUndefined();
 
     // switching the round panel to odd does not flip the odd one back
-    await act(async () => { button(round, '零股').props.onClick(); });
-    await act(async () => { button(odd, '零股').props.onClick(); });
+    await setUnit(round, 'IntradayOdd');
+    await setUnit(odd, 'Common');
     expect(qtyInput(round).props['aria-label']).toBe('數量（股）');
     expect(qtyInput(odd).props['aria-label']).toBe('數量');
 });
@@ -97,7 +103,7 @@ it('an odd-lot panel without any odd-lot quote yet shows no round-lot book as if
     mocks.useQuote.mockImplementation(() => undefined);
     await act(async () => { view = create(createElement(FlashOrder, { contract, trades: [], positions: [] })); });
     const [panel] = panels() as [ReactTestInstance];
-    await act(async () => { button(panel, '零股').props.onClick(); });
+    await setUnit(panel, 'IntradayOdd');
     expect(text(panel)).not.toContain('591');
     expect(text(panel)).toContain('等待零股行情');
 });
