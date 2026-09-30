@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     chartHasFocus,
+    AXIS_LABEL_BAND_PX,
     inOrderLabelArea,
     orderLineMayTakePointer,
     toolShortcutOf,
@@ -722,6 +723,35 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         expect(orderLineMayTakePointer({ ...base, inGrip: true })).toBe(true);
         // 沒有畫圖時照舊整條線都能拖
         expect(orderLineMayTakePointer({ drawingArmed: false, defaultPrevented: false, drawingHit: null })).toBe(true);
+    });
+
+    it('價格軸標籤重疊：委託原價 y=300、水平線 y=304（防重疊把委託標籤推到 284）— 拖水平線的標籤不改委託價', () => {
+        const base = { drawingArmed: false, defaultPrevented: false, drawingHit: null, inGrip: true };
+        const orderY = 300;
+        const drawingLabels = [304];
+        const near = (y: number) => drawingLabels.some((d) => Math.abs(d - y) < AXIS_LABEL_BAND_PX);
+        // 使用者按在水平線的標籤（y=304）上：離委託原價 4px，findNear 會命中 — 但畫圖標籤優先
+        expect(
+            orderLineMayTakePointer({ ...base, drawingLabelAtPointer: near(304), drawingLabelNearOrder: near(orderY) }),
+        ).toBe(false);
+        // 即使選取中的水平線也一樣（價格軸上不做物件命中，靠標籤判斷）
+        expect(near(orderY)).toBe(true);
+        // 兩個標籤距離夠遠（沒被推開）時，委託標籤照常可拖
+        const far = (y: number) => [360].some((d) => Math.abs(d - y) < AXIS_LABEL_BAND_PX);
+        expect(
+            orderLineMayTakePointer({ ...base, drawingLabelAtPointer: far(300), drawingLabelNearOrder: far(orderY) }),
+        ).toBe(true);
+    });
+
+    it('drawingLabelNear：水平線（含選取中）的價格軸標籤位置', async () => {
+        const api = await setup(false); // 水平線 25000 → y=200
+        expect(api().drawingLabelNear(204)).toBe(true);
+        expect(api().drawingLabelNear(230)).toBe(false);
+        await act(async () => {
+            pressOnLine();
+        });
+        expect(api().selected?.tool).toBe('horizontal');
+        expect(api().drawingLabelNear(196)).toBe(true);
     });
 
     it('drawingAt：游標下的畫圖物件是選取中的還是其他的', async () => {
