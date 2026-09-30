@@ -16,7 +16,8 @@ function isTyping(): boolean {
         !!el &&
         (el.tagName === 'INPUT' ||
             el.tagName === 'TEXTAREA' ||
-            el.tagName === 'SELECT')
+            el.tagName === 'SELECT' ||
+            (el as HTMLElement).isContentEditable === true)
     );
 }
 
@@ -37,12 +38,12 @@ export function useHotkeys({
                 onOpenPalette();
                 return;
             }
-            if (isTyping()) return;
             if (e.key === 'Escape') {
-                // dialogs／畫圖工具 claim their Esc via preventDefault — that
-                // press must not arm the cancel-all window, and it also
-                // disarms a pending first press (Esc, 畫圖 Esc, Esc ≠ Esc×2)
-                if (e.defaultPrevented) {
+                // 只有「沒被任何介面用掉、也不是在輸入框／勾選框等控制項上」
+                // 的 Esc 才算一下。其他 Esc（對話框／畫圖工具 preventDefault
+                // 的、焦點在樣式面板勾選框上的…）一律清掉等待中的第一下 —
+                // Esc、介面 Esc、Esc 不能湊成 Esc×2 全部刪單
+                if (e.defaultPrevented || isTyping()) {
                     resetEscCancelArm();
                     return;
                 }
@@ -58,6 +59,7 @@ export function useHotkeys({
                 }
                 return;
             }
+            if (isTyping()) return;
             const k = e.key.toLowerCase();
             if (k === 'b' || k === 's') {
                 window.dispatchEvent(

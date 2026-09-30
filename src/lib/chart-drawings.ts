@@ -349,8 +349,84 @@ function loadSettings(): DrawingSettings {
     }
 }
 
-let store: Store = loadStore();
-let settings: DrawingSettings = loadSettings();
+// ── 關窗日誌 ─────────────────────────────────────────────────────────
+//
+// 關視窗（pagehide）時等不到非同步的 Web Lock，但也不能在鎖外做「讀→
+// 合併→寫」主項目 — 會蓋掉正在鎖內寫入的視窗，或被它蓋掉而永久遺失。
+// 所以關窗時只把本視窗還沒寫出去的改動（逐物件、設定逐欄位）同步寫到
+// 自己專屬的日誌項目 sj-chart-drawings-pending:<視窗 id>，不碰主項目。
+// 之後任何一個視窗在鎖內寫入時把所有日誌併進主項目並刪掉日誌；讀取時
+// 也把日誌疊上去，還沒被併進去之前畫面就看得到。
+const JOURNAL_PREFIX = 'sj-chart-drawings-pending:';
+const WINDOW_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+interface Journal {
+    name: string; // localStorage 項目名稱
+    ops: Map<string, Map<string, Drawing | number>>;
+    settings: Partial<DrawingSettings>;
+}
+
+function journalNames(): string[] {
+    try {
+        const out: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k?.startsWith(JOURNAL_PREFIX)) out.push(k);
+        }
+        return out.sort();
+    } catch {
+        return [];
+    }
+}
+
+function loadJournals(): Journal[] {
+    const out: Journal[] = [];
+    for (const name of journalNames()) {
+        try {
+            const raw = JSON.parse(localStorage.getItem(name) ?? 'null') as {
+                ops?: Record<string, Record<string, unknown>>;
+                settings?: Record<string, unknown>;
+            } | null;
+            if (!raw || typeof raw !== 'object') continue;
+            const ops = new Map<string, Map<string, Drawing | number>>();
+            for (const [key, byId] of Object.entries(raw.ops ?? {})) {
+                if (!byId || typeof byId !== 'object') continue;
+                const m = new Map<string, Drawing | number>();
+                for (const [id, v] of Object.entries(byId)) {
+                    if (typeof v === 'number' && Number.isFinite(v)) m.set(id, v);
+                    else {
+                        const d = sanitizeDrawing(v);
+                        if (d && d.id === id) m.set(id, d);
+                    }
+                }
+                if (m.size) ops.set(key, m);
+            }
+            const settingsPatch =
+                raw.settings && typeof raw.settings === 'object' ? (raw.settings as Partial<DrawingSettings>) : {};
+            out.push({ name, ops, settings: settingsPatch });
+        } catch {
+            // 壞掉的日誌略過（寫入者會把它刪掉）
+        }
+    }
+    return out;
+}
+
+function applyJournals(base: Store, tombs: Tombs, journals: Journal[]): Store {
+    return journals.reduce((acc, j) => applyOps(acc, j.ops, tombs), base);
+}
+
+// 主項目＋所有日誌（讀取時看到的樣子）
+function loadView(tombs: Tombs = loadTombs(), journals: Journal[] = loadJournals()): Store {
+    return applyJournals(loadStore(tombs), tombs, journals);
+}
+
+function loadSettingsView(journals: Journal[] = loadJournals()): DrawingSettings {
+    if (!journals.some((j) => Object.keys(j.settings).length)) return loadSettings();
+    return sanitizeSettings(Object.assign({}, loadSettings(), ...journals.map((j) => j.settings)));
+}
+
+let store: Store = loadView();
+let settings: DrawingSettings = loadSettingsView();
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -420,6 +496,11 @@ if (typeof window !== 'undefined') {
             reloadDrawingsFromStorage();
         } else if (e.key === SETTINGS_KEY) {
             reloadDrawingSettingsFromStorage();
+        } else if (e.key?.startsWith(JOURNAL_PREFIX) && e.newValue) {
+            // 別的視窗關掉時留下日誌：先顯示出來，再排一次（鎖內的）寫入把它併進主項目
+            reloadDrawingsFromStorage();
+            reloadDrawingSettingsFromStorage();
+            writeTimer ??= setTimeout(flushDrawingWrites, WRITE_THROTTLE_MS);
         }
     });
 }
@@ -463,10 +544,12 @@ let settingsTimer: ReturnType<typeof setTimeout> | null = null;
 // 讀→合併→寫（在鎖內呼叫）。寫出的是「當下」的 pending；寫出期間又有
 // 新改動的物件保留在 pending，下一輪再寫
 function writeDrawingsNow() {
-    if (!pending.size) return;
+    const journals = loadJournals();
+    if (!pending.size && !journals.length) return;
     const snapshot = new Map([...pending].map(([k, ops]) => [k, new Map(ops)]));
     const tombs = loadTombs();
-    const next = applyOps(loadStore(tombs), snapshot, tombs);
+    const next = applyOps(loadView(tombs, journals), snapshot, tombs);
+    const journalSettings = journals.filter((j) => Object.keys(j.settings).length);
     const now = Date.now();
     for (const [key, ids] of Object.entries(tombs)) {
         for (const [id, at] of Object.entries(ids)) if (now - at > TOMBSTONE_TTL_MS) delete ids[id];
@@ -475,6 +558,12 @@ function writeDrawingsNow() {
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
         localStorage.setItem(TOMB_KEY, JSON.stringify(tombs));
+        if (journalSettings.length) {
+            // 關窗日誌裡的設定也併進主設定（本視窗還沒寫出的欄位之後照常寫）
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(loadSettingsView(journalSettings)));
+        }
+        // 已併進主項目的日誌刪掉
+        for (const j of journals) localStorage.removeItem(j.name);
     } catch {
         // 配額滿或隱私模式：改動留在 pending（跨視窗同步不會把它們蓋掉，
         // 下一次改動會再試著寫出），並讓 UI 提示使用者
@@ -502,7 +591,7 @@ export function flushDrawingWrites() {
         clearTimeout(writeTimer);
         writeTimer = null;
     }
-    if (!pending.size) return;
+    if (!pending.size && !journalNames().length) return;
     withLock(writeDrawingsNow);
 }
 
@@ -520,7 +609,7 @@ function writeSettingsNow() {
     if (!pendingSettingKeys.size) return;
     const keys = [...pendingSettingKeys];
     const written = pickSettings(settings, keys);
-    const merged = { ...loadSettings(), ...written };
+    const merged = { ...loadSettingsView(), ...written };
     try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
     } catch {
@@ -540,15 +629,35 @@ export function flushDrawingSettings() {
 
 if (typeof window !== 'undefined') {
     // 還在節流窗內就關視窗 — 最後一筆不能丟。pagehide 裡等不到非同步
-    // 的鎖，直接同步寫（盡力而為）
-    window.addEventListener('pagehide', () => {
-        if (writeTimer !== null) clearTimeout(writeTimer);
-        if (settingsTimer !== null) clearTimeout(settingsTimer);
-        writeTimer = null;
-        settingsTimer = null;
-        writeDrawingsNow();
-        writeSettingsNow();
-    });
+    // 的鎖：只寫本視窗的日誌（見「關窗日誌」），不在鎖外動主項目
+    window.addEventListener('pagehide', writeDrawingJournal);
+}
+
+// pagehide：本視窗還沒寫出去的改動同步寫進自己的日誌項目
+export function writeDrawingJournal() {
+    if (writeTimer !== null) clearTimeout(writeTimer);
+    if (settingsTimer !== null) clearTimeout(settingsTimer);
+    writeTimer = null;
+    settingsTimer = null;
+    if (!pending.size && !pendingSettingKeys.size) return;
+    const name = JOURNAL_PREFIX + WINDOW_ID;
+    // 同一個視窗（bfcache 回來後）再關一次：疊在自己之前的日誌上
+    const prev = loadJournals().find((j) => j.name === name);
+    const ops: Record<string, Record<string, Drawing | number>> = {};
+    for (const [key, byId] of prev?.ops ?? []) ops[key] = Object.fromEntries(byId);
+    for (const [key, byId] of pending) ops[key] = { ...(ops[key] ?? {}), ...Object.fromEntries(byId) };
+    const journal = {
+        at: Date.now(),
+        ops,
+        settings: { ...(prev?.settings ?? {}), ...pickSettings(settings, pendingSettingKeys) },
+    };
+    try {
+        localStorage.setItem(name, JSON.stringify(journal));
+    } catch {
+        return; // 配額滿：已經在關窗，沒有別的地方可放
+    }
+    pending.clear();
+    pendingSettingKeys.clear();
 }
 
 function persist() {
@@ -558,13 +667,14 @@ function persist() {
 
 // 別的視窗寫入了 — 以它的版本為準，再疊上本視窗還沒寫出去的改動
 export function reloadDrawingsFromStorage() {
-    store = applyPending(loadStore());
+    const tombs = loadTombs();
+    store = applyPending(loadView(tombs), tombs);
     emit();
 }
 
 export function reloadDrawingSettingsFromStorage() {
     // 本視窗還沒寫出去的欄位保留自己的
-    settings = { ...loadSettings(), ...pickSettings(settings, pendingSettingKeys) };
+    settings = { ...loadSettingsView(), ...pickSettings(settings, pendingSettingKeys) };
     emit();
 }
 
@@ -748,6 +858,7 @@ export function __resetDrawingsForTest() {
         localStorage.removeItem(STORAGE_KEY);
         localStorage.removeItem(SETTINGS_KEY);
         localStorage.removeItem(TOMB_KEY);
+        for (const name of journalNames()) localStorage.removeItem(name);
     } catch {
         // ignore
     }
