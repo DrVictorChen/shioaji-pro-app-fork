@@ -897,6 +897,12 @@ export function step(state: EngineState, event: ExecEvent): StepResult {
         case 'restore': onRestore(ctx); break;
         case 'command': onCommand(ctx, event); break;
     }
+    // time advanced on the live connection: cancel retries / timeouts run for
+    // every program, not only those whose symbol ticked (a halted or quiet
+    // symbol must not leave a working order uncancelled)
+    if ((event.type === 'tick' || event.type === 'heartbeat') && fromLive(s, event)) {
+        for (const p of s.programs) if (p.hold === null) ensureCancels(ctx, p, true);
+    }
     for (const p of s.programs) refreshStopping(p);
     updateHolds(ctx);
     return { state: s, intents: ctx.intents, notices: ctx.notices };
