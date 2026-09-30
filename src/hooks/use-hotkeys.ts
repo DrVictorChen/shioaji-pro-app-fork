@@ -4,6 +4,7 @@
 // Ignored while typing in form fields.
 
 import { useEffect } from 'react';
+import { noteEscPress, resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { getRiskSettings } from '../lib/risk';
 import { cancelAllOrders, notify } from '../lib/trade';
 
@@ -27,7 +28,6 @@ export function useHotkeys({
     onAfterCancelAll: () => void;
 }) {
     useEffect(() => {
-        let lastEsc = 0;
         const onKey = (e: KeyboardEvent) => {
             // OS key auto-repeat must never count — holding Esc a beat too
             // long would otherwise arm AND fire cancel-all in one press
@@ -39,16 +39,17 @@ export function useHotkeys({
             }
             if (isTyping()) return;
             if (e.key === 'Escape') {
-                // dialogs claim their close-Esc via preventDefault — that
-                // press must not arm the cancel-all window
-                if (e.defaultPrevented) return;
+                // dialogs／畫圖工具 claim their Esc via preventDefault — that
+                // press must not arm the cancel-all window, and it also
+                // disarms a pending first press (Esc, 畫圖 Esc, Esc ≠ Esc×2)
+                if (e.defaultPrevented) {
+                    resetEscCancelArm();
+                    return;
+                }
                 if (!getRiskSettings().escCancelAll) return;
-                const now = performance.now();
-                if (now - lastEsc < 600) {
-                    lastEsc = 0;
+                if (noteEscPress(performance.now())) {
                     void cancelAllOrders().then(onAfterCancelAll);
                 } else {
-                    lastEsc = now;
                     notify({
                         kind: 'info',
                         title: '再按一次 Esc 全部刪單',

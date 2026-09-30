@@ -10,6 +10,7 @@ const mk = (id: string, price = 100, extra: Partial<Drawing> = {}): Drawing => (
     locked: false,
     hidden: false,
     createdAt: 0,
+    updatedAt: 0,
     ...extra,
 });
 

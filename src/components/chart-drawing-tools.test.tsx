@@ -143,7 +143,7 @@ describe('彈出層（工具組、色盤、線寬）：Esc 與點外面關閉', 
         await act(async () => {
             e = esc();
         });
-        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(onClose).toHaveBeenCalledWith('esc');
         expect(e.defaultPrevented).toBe(true);
     });
 
@@ -166,6 +166,8 @@ describe('彈出層（工具組、色盤、線寬）：Esc 與點外面關閉', 
         expect(onClose).not.toHaveBeenCalled();
         await act(async () => down({ tagName: 'DIV' }));
         expect(onClose).toHaveBeenCalledTimes(1);
+        // 點外面關閉：不把焦點搶回圖表（呼叫端依 reason 決定）
+        expect(onClose).toHaveBeenCalledWith('outside');
     });
 });
 

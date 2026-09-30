@@ -146,7 +146,8 @@ export function Popover({
     onMouseDown,
 }: {
     anchor: HTMLElement | null;
-    onClose: () => void;
+    // esc：Esc 關閉；outside：點外面關閉（焦點留在點到的地方，不搶回圖表）
+    onClose: (reason: 'esc' | 'outside') => void;
     children: ReactNode;
     label: string;
     onMouseDown?: (e: ReactMouseEvent) => void;
@@ -162,7 +163,7 @@ export function Popover({
     useEscClose(() => {
         const active = popRef.current?.ownerDocument?.activeElement;
         if (active && active.tagName === 'INPUT' && popRef.current?.contains(active)) return;
-        closeRef.current();
+        closeRef.current('esc');
     });
 
     useLayoutEffect(() => {
@@ -196,7 +197,7 @@ export function Popover({
         const onDown = (ev: Event) => {
             const t = ev.target as Node | null;
             if (t && (popRef.current?.contains(t) || anchor.contains(t))) return;
-            closeRef.current();
+            closeRef.current('outside');
         };
         doc.addEventListener('pointerdown', onDown, true);
         return () => doc.removeEventListener('pointerdown', onDown, true);

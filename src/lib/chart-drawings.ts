@@ -108,6 +108,9 @@ export interface Drawing {
     locked: boolean; // 鎖定：不可拖曳、改價、刪除（仍可選取與改樣式）
     hidden: boolean; // 隱藏：不繪製，但仍保存
     createdAt: number;
+    // 最後修改時間：跨視窗合併時與刪除墓碑比較，較舊的修改不能讓已刪除
+    // 的物件復活
+    updatedAt: number;
     name?: string; // 物件列表裡的名稱（沒設就用工具名稱）
     text?: string; // 文字註記的內容
     fib?: FibOptions; // 斐波那契的比例、色帶、標籤、延伸（沒設就用預設）
@@ -323,6 +326,12 @@ export function sanitizeDrawing(v: unknown): Drawing | null {
         locked: d.locked === true,
         hidden: d.hidden === true,
         createdAt: typeof d.createdAt === 'number' && Number.isFinite(d.createdAt) ? d.createdAt : 0,
+        updatedAt:
+            typeof d.updatedAt === 'number' && Number.isFinite(d.updatedAt)
+                ? d.updatedAt
+                : typeof d.createdAt === 'number' && Number.isFinite(d.createdAt)
+                  ? d.createdAt
+                  : 0,
         ...(typeof d.name === 'string' && d.name.trim()
             ? { name: d.name.trim().slice(0, MAX_NAME_LENGTH) }
             : {}),
@@ -377,7 +386,58 @@ export function sanitizeSettings(v: unknown): DrawingSettings {
 
 type Store = Record<string, Drawing[]>;
 
-function loadStore(): Store {
+// 刪除墓碑：{ 商品鍵: { 物件 id: 刪除時間 } }，另存一個項目。別的視窗
+// 手上還有這個物件的舊版本時，寫出或同步都不會讓它復活；超過 TTL 的
+// 墓碑在寫出時清掉，不會無限長大。
+type Tombs = Record<string, Record<string, number>>;
+const TOMB_KEY = 'sj-pro-chart-drawing-tombstones';
+export const TOMBSTONE_TTL_MS = 7 * 24 * 3600 * 1000;
+
+function loadTombs(): Tombs {
+    try {
+        const raw = localStorage.getItem(TOMB_KEY);
+        if (!raw) return {};
+        const parsed: unknown = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+        const out: Tombs = {};
+        for (const [key, ids] of Object.entries(parsed as Record<string, unknown>)) {
+            if (!ids || typeof ids !== 'object') continue;
+            for (const [id, at] of Object.entries(ids as Record<string, unknown>)) {
+                if (typeof at === 'number' && Number.isFinite(at)) (out[key] ??= {})[id] = at;
+            }
+        }
+        return out;
+    } catch {
+        return {};
+    }
+}
+
+// 墓碑不比物件的最後修改舊 → 物件已被刪除（時間戳嚴格遞增，見 stamp）
+function buried(tombs: Tombs, key: string, d: Drawing): boolean {
+    const at = tombs[key]?.[d.id];
+    return at !== undefined && at >= d.updatedAt;
+}
+
+// 嚴格遞增的時間戳：同一毫秒內的「修改」與「刪除」也分得出先後
+let lastStamp = 0;
+export function stamp(): number {
+    lastStamp = Math.max(Date.now(), lastStamp + 1);
+    return lastStamp;
+}
+
+// 每個商品只留最新的 MAX_DRAWINGS_PER_SYMBOL 個（依建立時間），順序不變
+export function capDrawings(list: Drawing[]): Drawing[] {
+    if (list.length <= MAX_DRAWINGS_PER_SYMBOL) return list;
+    const keep = new Set(
+        [...list]
+            .sort((x, y) => y.createdAt - x.createdAt)
+            .slice(0, MAX_DRAWINGS_PER_SYMBOL)
+            .map((d) => d.id),
+    );
+    return list.filter((d) => keep.has(d.id));
+}
+
+function loadStore(tombs: Tombs = loadTombs()): Store {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return {};
@@ -387,11 +447,15 @@ function loadStore(): Store {
         for (const [key, list] of Object.entries(parsed as Record<string, unknown>)) {
             if (!Array.isArray(list)) continue;
             const clean: Drawing[] = [];
+            const seen = new Set<string>();
             for (const item of list) {
                 const d = sanitizeDrawing(item);
-                if (d) clean.push(d);
+                if (!d || seen.has(d.id) || buried(tombs, key, d)) continue;
+                seen.add(d.id);
+                clean.push(d);
             }
-            if (clean.length) out[key] = clean;
+            // 上限在載入時也要守住 — 超量的舊資料每次重繪、命中判定都要掃
+            if (clean.length) out[key] = capDrawings(clean);
         }
         return out;
     } catch {
@@ -421,51 +485,67 @@ function emit() {
 //
 // popout 是另一個 window，module state 不共用，靠同一個 localStorage 項目
 // 與 storage 事件同步。本視窗的改動先記成「每個物件 id 的最新版本」，
-// 刪除記成墓碑（null）。寫出時一律「讀最新的 localStorage → 疊上本視窗
-// 的改動 → 寫回」，收到別的視窗寫入時也是「對方版本 → 疊上本視窗還沒
-// 寫出去的改動」。兩個視窗在節流窗內各改同一商品的不同物件，兩邊的
-// 改動都會留下；只有同一個物件兩邊都改時，較晚寫出的那一方勝出。
-const pending = new Map<string, Map<string, Drawing | null>>();
+// 刪除記成刪除時間（墓碑）。寫出時一律「讀最新的 localStorage → 疊上本
+// 視窗的改動 → 寫回」，而且整段在跨視窗的 Web Lock 裡做（見 withLock），
+// 兩個視窗不會同時讀到同一份舊資料再各自寫回。收到別的視窗寫入時也是
+// 「對方版本 → 疊上本視窗還沒寫出去的改動」。同一個物件兩邊都改時，
+// 較晚修改（updatedAt）的一方勝出；刪除比修改晚就維持刪除。
+type Op = Drawing | number; // number＝刪除時間
+const pending = new Map<string, Map<string, Op>>();
 // 本視窗調整過圖層順序的商品：記下想要的 id 順序，疊上對方版本時照排
 const pendingOrder = new Map<string, string[]>();
 
-function record(key: string, id: string, d: Drawing | null) {
+function record(key: string, id: string, op: Op) {
     let ops = pending.get(key);
     if (!ops) {
         ops = new Map();
         pending.set(key, ops);
     }
-    ops.set(id, d);
+    ops.set(id, op);
 }
 
-function applyPending(base: Store): Store {
-    if (!pending.size && !pendingOrder.size) return base;
+function applyOps(
+    base: Store,
+    ops: Map<string, Map<string, Op>>,
+    tombs: Tombs,
+    order: Map<string, string[]> = pendingOrder,
+): Store {
+    if (!ops.size && !order.size) return base;
     const out: Store = { ...base };
-    for (const [key, ops] of pending) {
+    for (const [key, byId] of ops) {
         const list = [...(out[key] ?? [])];
-        for (const [id, d] of ops) {
+        for (const [id, op] of byId) {
             const i = list.findIndex((x) => x.id === id);
-            if (d === null) {
+            if (typeof op === 'number') {
+                if (i >= 0 && list[i]!.updatedAt <= op) list.splice(i, 1);
+                const t = (tombs[key] ??= {});
+                t[id] = Math.max(t[id] ?? 0, op);
+            } else if (buried(tombs, key, op)) {
+                // 別的視窗在本視窗修改之後刪掉了它 — 維持刪除
                 if (i >= 0) list.splice(i, 1);
             } else if (i >= 0) {
-                list[i] = d;
+                if (list[i]!.updatedAt <= op.updatedAt) list[i] = op;
             } else {
-                list.push(d);
+                list.push(op);
             }
         }
-        if (list.length) out[key] = list;
+        if (list.length) out[key] = capDrawings(list);
         else delete out[key];
     }
-    for (const [key, order] of pendingOrder) {
+    for (const [key, ord] of order) {
         const list = out[key];
         if (!list) continue;
-        const rank = new Map(order.map((id, i) => [id, i]));
+        const rank = new Map(ord.map((id, i) => [id, i]));
         // 本視窗排過的依本視窗順序；對方新加的（不在排序裡）保持在原位之後
         const known = list.filter((d) => rank.has(d.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
         const unknown = list.filter((d) => !rank.has(d.id));
         out[key] = [...known, ...unknown];
     }
     return out;
+}
+
+function applyPending(base: Store, tombs: Tombs = loadTombs()): Store {
+    return applyOps(base, pending, tombs);
 }
 
 // 儲存失敗（多半是配額滿）— 畫面上的物件還在，但關掉就沒了，要讓
@@ -476,14 +556,41 @@ let saveErrorNoticePending = false;
 // cross-window sync — 沒有這段，在主視窗畫的線不會出現在已開啟的彈出視窗
 if (typeof window !== 'undefined') {
     window.addEventListener('storage', (e) => {
-        if (e.key === STORAGE_KEY) {
+        if (e.key === STORAGE_KEY || e.key === TOMB_KEY) {
             reloadDrawingsFromStorage();
         } else if (e.key === SETTINGS_KEY) {
-            // 本視窗還有沒寫出去的設定就保留自己的，稍後的寫入會覆蓋
-            if (settingsTimer !== null) return;
             reloadDrawingSettingsFromStorage();
         }
     });
+}
+
+// ── 跨視窗鎖 ─────────────────────────────────────────────────────────
+//
+// localStorage 沒有跨視窗鎖（HTML 規範明說不能假設有），「讀→合併→寫」
+// 要自己序列化。Web Locks API（Chromium／WebView2、WebKit 都有）以同一個
+// origin 為範圍排隊；沒有這個 API 的環境直接同步做（至少同一視窗內仍是
+// 原子的）。
+const LOCK_NAME = 'sj-chart-drawings';
+type LockManagerLike = { request: (name: string, cb: () => unknown) => Promise<unknown> };
+let lockOverride: LockManagerLike | null | undefined; // 測試用；undefined＝用 navigator.locks
+
+function lockManager(): LockManagerLike | null {
+    if (lockOverride !== undefined) return lockOverride;
+    const nav = typeof navigator !== 'undefined' ? (navigator as { locks?: LockManagerLike }) : undefined;
+    return nav?.locks && typeof nav.locks.request === 'function' ? nav.locks : null;
+}
+
+function withLock(fn: () => void) {
+    const locks = lockManager();
+    if (!locks) {
+        fn();
+        return;
+    }
+    locks.request(LOCK_NAME, () => fn()).catch(() => fn());
+}
+
+export function __setDrawingLocksForTest(locks: LockManagerLike | null | undefined) {
+    lockOverride = locks;
 }
 
 // 落地節流：拖曳、拉透明度滑桿時每個 mousemove 都會改 store。畫面照常
@@ -493,17 +600,22 @@ const WRITE_THROTTLE_MS = 300;
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 let settingsTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function flushDrawingWrites() {
-    if (writeTimer !== null) {
-        clearTimeout(writeTimer);
-        writeTimer = null;
-    }
+// 讀→合併→寫（在鎖內呼叫）。寫出的是「當下」的 pending；寫出期間又有
+// 新改動的物件保留在 pending，下一輪再寫
+function writeDrawingsNow() {
     if (!pending.size && !pendingOrder.size) return;
-    // 讀最新版本再疊上本視窗的改動 — 別的視窗剛寫入、storage 事件還沒
-    // 送到這裡時，也不會把對方的物件蓋掉
-    const next = applyPending(loadStore());
+    const snapshot = new Map([...pending].map(([k, ops]) => [k, new Map(ops)]));
+    const orderSnap = new Map(pendingOrder);
+    const tombs = loadTombs();
+    const next = applyOps(loadStore(tombs), snapshot, tombs, orderSnap);
+    const now = Date.now();
+    for (const [key, ids] of Object.entries(tombs)) {
+        for (const [id, at] of Object.entries(ids)) if (now - at > TOMBSTONE_TTL_MS) delete ids[id];
+        if (!Object.keys(ids).length) delete tombs[key];
+    }
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        localStorage.setItem(TOMB_KEY, JSON.stringify(tombs));
     } catch {
         // 配額滿或隱私模式：改動留在 pending（跨視窗同步不會把它們蓋掉，
         // 下一次改動會再試著寫出），並讓 UI 提示使用者
@@ -514,30 +626,70 @@ export function flushDrawingWrites() {
         }
         return;
     }
-    pending.clear();
-    pendingOrder.clear();
+    for (const [key, ops] of snapshot) {
+        const cur = pending.get(key);
+        if (!cur) continue;
+        for (const [id, op] of ops) if (cur.get(id) === op) cur.delete(id);
+        if (!cur.size) pending.delete(key);
+    }
+    for (const [key, order] of orderSnap) if (pendingOrder.get(key) === order) pendingOrder.delete(key);
     if (saveError) {
         saveError = false;
         emit();
     }
 }
 
-export function flushDrawingSettings() {
-    if (settingsTimer === null) return;
-    clearTimeout(settingsTimer);
-    settingsTimer = null;
-    try {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    } catch {
-        // 設定寫不進去只影響下次開啟的預設樣式，不另外提示
+export function flushDrawingWrites() {
+    if (writeTimer !== null) {
+        clearTimeout(writeTimer);
+        writeTimer = null;
     }
+    if (!pending.size && !pendingOrder.size) return;
+    withLock(writeDrawingsNow);
+}
+
+// 設定依欄位合併：本視窗改過哪幾個欄位就只寫那幾個，別的視窗同時改的
+// 其他欄位（例如一邊開共用、一邊改樣式）都留下
+const pendingSettingKeys = new Set<keyof DrawingSettings>();
+
+function pickSettings(from: DrawingSettings, keys: Iterable<keyof DrawingSettings>): Partial<DrawingSettings> {
+    const out: Partial<DrawingSettings> = {};
+    for (const k of keys) (out as Record<string, unknown>)[k] = from[k];
+    return out;
+}
+
+function writeSettingsNow() {
+    if (!pendingSettingKeys.size) return;
+    const keys = [...pendingSettingKeys];
+    const written = pickSettings(settings, keys);
+    const merged = { ...loadSettings(), ...written };
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+    } catch {
+        return; // 設定寫不進去只影響下次開啟的預設樣式，不另外提示
+    }
+    for (const k of keys) if (settings[k] === written[k]) pendingSettingKeys.delete(k);
+}
+
+export function flushDrawingSettings() {
+    if (settingsTimer !== null) {
+        clearTimeout(settingsTimer);
+        settingsTimer = null;
+    }
+    if (!pendingSettingKeys.size) return;
+    withLock(writeSettingsNow);
 }
 
 if (typeof window !== 'undefined') {
-    // 還在節流窗內就關視窗 — 最後一筆不能丟
+    // 還在節流窗內就關視窗 — 最後一筆不能丟。pagehide 裡等不到非同步
+    // 的鎖，直接同步寫（盡力而為）
     window.addEventListener('pagehide', () => {
-        flushDrawingWrites();
-        flushDrawingSettings();
+        if (writeTimer !== null) clearTimeout(writeTimer);
+        if (settingsTimer !== null) clearTimeout(settingsTimer);
+        writeTimer = null;
+        settingsTimer = null;
+        writeDrawingsNow();
+        writeSettingsNow();
     });
 }
 
@@ -553,7 +705,8 @@ export function reloadDrawingsFromStorage() {
 }
 
 export function reloadDrawingSettingsFromStorage() {
-    settings = loadSettings();
+    // 本視窗還沒寫出去的欄位保留自己的
+    settings = { ...loadSettings(), ...pickSettings(settings, pendingSettingKeys) };
     emit();
 }
 
@@ -588,6 +741,7 @@ export function getDrawingSettings(): DrawingSettings {
 
 export function setDrawingSettings(patch: Partial<DrawingSettings>) {
     settings = { ...settings, ...patch };
+    for (const k of Object.keys(patch) as (keyof DrawingSettings)[]) pendingSettingKeys.add(k);
     persistSettings();
 }
 
@@ -635,6 +789,7 @@ export function addDrawing(
     extra?: Pick<Drawing, 'text' | 'fib' | 'name'>,
 ): Drawing | null {
     if ((store[key]?.length ?? 0) >= MAX_DRAWINGS_PER_SYMBOL) return null;
+    const now = stamp();
     const drawing: Drawing = {
         id: newId(),
         tool,
@@ -642,7 +797,8 @@ export function addDrawing(
         style: { ...style },
         locked: false,
         hidden: false,
-        createdAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
         ...(extra?.name ? { name: extra.name } : {}),
         ...(tool === 'text' ? { text: extra?.text ?? '' } : {}),
         ...(tool === 'fib' ? { fib: sanitizeFibOptions(extra?.fib ?? defaultFibOptions()) } : {}),
@@ -654,12 +810,19 @@ export function addDrawing(
 }
 
 // 把 key 的清單換成 next，並把有變動的物件記進待寫入（依 id）
-function commit(key: string, next: Drawing[]) {
+function commit(key: string, nextIn: Drawing[]) {
     const before = store[key] ?? EMPTY;
-    const ids = new Set(next.map((d) => d.id));
-    for (const d of before) if (!ids.has(d.id)) record(key, d.id, null);
+    const now = stamp();
+    const ids = new Set(nextIn.map((d) => d.id));
+    for (const d of before) if (!ids.has(d.id)) record(key, d.id, now);
     const prev = new Map(before.map((d) => [d.id, d]));
-    for (const d of next) if (prev.get(d.id) !== d) record(key, d.id, d);
+    // 有變動的物件蓋上修改時間（跨視窗合併、與墓碑比較用）
+    const next = nextIn.map((d) => {
+        if (prev.get(d.id) === d) return d;
+        const stamped = d.updatedAt >= now ? d : { ...d, updatedAt: now };
+        record(key, d.id, stamped);
+        return stamped;
+    });
     // 共同物件的相對順序變了（調整圖層）— 記下想要的順序
     const common = (list: Drawing[], other: Map<string, unknown> | Set<string>) =>
         list.filter((d) => other.has(d.id)).map((d) => d.id);
@@ -775,6 +938,8 @@ export function __resetDrawingsForTest() {
     settingsTimer = null;
     pending.clear();
     pendingOrder.clear();
+    pendingSettingKeys.clear();
+    lockOverride = null;
     saveError = false;
     saveErrorNoticePending = false;
     store = {};
@@ -782,6 +947,7 @@ export function __resetDrawingsForTest() {
     try {
         localStorage.removeItem(STORAGE_KEY);
         localStorage.removeItem(SETTINGS_KEY);
+        localStorage.removeItem(TOMB_KEY);
     } catch {
         // ignore
     }
