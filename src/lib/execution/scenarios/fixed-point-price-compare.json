@@ -202,7 +202,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "b/L1/entry/0/0",
+            "key": "simulation/local-a/b/L1/entry/0/0",
             "action": "Sell",
             "qty": 1,
             "leg": "entry",
@@ -225,7 +225,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "a/L1/entry/0/0",
+            "key": "simulation/local-a/a/L1/entry/0/0",
             "action": "Buy",
             "qty": 1,
             "leg": "entry",

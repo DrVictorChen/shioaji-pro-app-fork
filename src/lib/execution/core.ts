@@ -62,6 +62,13 @@ export const ORPHAN_DEAL_LIMIT = 200;
 export const ORPHAN_ORDER_LIMIT = 200;
 export const ISSUE_LIMIT = 50;
 export const MAX_CANCEL_ATTEMPTS = 3;
+export const CANCEL_UNKNOWN_RETRY_MS = 30_000;
+
+/** Globally unique idempotency key: the partition (env + server identity) is
+ * part of the key itself, so a sender may dedupe across environments. */
+export function intentKey(p: OrderProgram, lv: Level, leg: LegName): string {
+    return `${p.binding.env}/${encodeURIComponent(p.binding.serverId)}/${p.id}/${lv.id}/${leg}/${lv.cycles}/${p.intentSeq}`;
+}
 
 export function initialState(): EngineState {
     return {
@@ -168,7 +175,7 @@ const exitFired = (lv: Level) => lv.exit?.type === 'oco' && cycleSlots(lv, 'exit
 function emitPlace(ctx: Ctx, p: OrderProgram, lv: Level, role: 'entry' | 'exit', leg: LegName, qty: number,
     price: number | null, order: OrderSpec): boolean {
     if (!envMatches(ctx.s, p) || qty <= 0) return false; // isolation guard: never cross environments
-    const key = `${p.id}/${lv.id}/${leg}/${lv.cycles}/${p.intentSeq}`;
+    const key = intentKey(p, lv, leg);
     p.intentSeq += 1;
     lv.orders.push({ key, role, leg, cycle: lv.cycles, qty, status: 'pendingSubmit', orderId: null, filled: 0,
         fills: {}, fillTs: {}, detail: null, acknowledged: false, cancel: null });
@@ -185,7 +192,7 @@ function emitCancel(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot): bool
     if (!envMatches(ctx.s, p) || !slot.orderId) return false;
     const attempts = (slot.cancel?.attempts ?? 0) + 1;
     const key = `${slot.key}/cancel/${attempts}`;
-    slot.cancel = { key, status: 'pendingSubmit', attempts, detail: null };
+    slot.cancel = { key, status: 'pendingSubmit', attempts, detail: null, sentAt: ctx.ts };
     const b = p.binding;
     ctx.intents.push({ kind: 'cancel', key, programId: p.id, levelId: lv.id, version: p.version,
         env: b.env, serverId: b.serverId, account: b.account, orderId: slot.orderId });
@@ -194,7 +201,8 @@ function emitCancel(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot): bool
 }
 
 /** Stopping program: cancel every working entry not yet asked to cancel;
- * with `retry`, also resend failed / unknown cancels (bounded). */
+ * with `retry`, also resend failed cancels, and unknown ones that stayed
+ * unsettled for CANCEL_UNKNOWN_RETRY_MS (bounded by MAX_CANCEL_ATTEMPTS). */
 function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
     if (p.status !== 'stopping' || !envMatches(ctx.s, p)) return;
     for (const lv of p.levels) {
@@ -202,7 +210,8 @@ function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
             if (slot.role !== 'entry' || slot.status !== 'working' || !slot.orderId) continue;
             const c = slot.cancel;
             if (c === null) emitCancel(ctx, p, lv, slot);
-            else if (retry && (c.status === 'failed' || c.status === 'unknown') && c.attempts < MAX_CANCEL_ATTEMPTS) {
+            else if (retry && c.attempts < MAX_CANCEL_ATTEMPTS && (c.status === 'failed'
+                || (c.status === 'unknown' && ctx.ts - c.sentAt >= CANCEL_UNKNOWN_RETRY_MS))) {
                 emitCancel(ctx, p, lv, slot);
             }
         }
@@ -522,9 +531,15 @@ function onIntentResult(ctx: Ctx, e: IntentResultEvent) {
 function applyOrder(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, e: OrderEvent) {
     if (e.op === 'Cancel') {
         if (e.failed) {
-            if (slot.cancel && slot.cancel.status !== 'confirmed' && slot.cancel.status !== 'failed' && isActive(slot)) {
-                cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
+            const c = slot.cancel;
+            if (!c || c.status === 'confirmed' || c.status === 'failed' || !isActive(slot)) return;
+            if (!e.cancelKey) {
+                // cannot tell which attempt failed: never mark the current one
+                addIssue(ctx, p, 'cancelReportUnkeyed', `${slot.key}: Cancel failure without attempt key ignored`);
+                return;
             }
+            if (e.cancelKey !== c.key) return; // a stale attempt's failure
+            cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
             return;
         }
         if (slot.cancel) slot.cancel.status = 'confirmed';

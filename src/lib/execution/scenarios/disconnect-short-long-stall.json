@@ -318,7 +318,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "t4/L1/entry/0/0",
+            "key": "simulation/local-a/t4/L1/entry/0/0",
             "action": "Buy",
             "qty": 1,
             "leg": "entry",

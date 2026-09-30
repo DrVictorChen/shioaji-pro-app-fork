@@ -94,7 +94,7 @@ describe('trigger adapter', () => {
         expect(held!.levels[0]).toMatchObject({ phase: 'needsConfirm', pending: { leg: 'entry', price: 98, reason: 'env' } });
         const [kept] = programsFromTriggers([trigger({ awaitingRecross: true })]);
         const r = run([live(1), create(2, kept!), tick(3, 99), tick(4, 101), tick(5, 100)]);
-        expect(r.intents.map(i => i.key)).toEqual(['trg:tg-1/tg-1/entry/0/0']);
+        expect(r.intents.map(i => i.key)).toEqual(['simulation/https%3A%2F%2F127.0.0.1%3A9999/trg:tg-1/tg-1/entry/0/0']);
     });
 });
 

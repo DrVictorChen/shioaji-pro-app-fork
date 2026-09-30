@@ -1,7 +1,7 @@
 {
   "schema": "execution-conformance-v1",
   "name": "cancel-tracking-retry",
-  "description": "P1-2: stop tracks each cancel; a failed cancel keeps the program stopping and is retried with a new key on the next tick; a cancel in flight at a crash is resent after reconnect; stopped only once the cancel is confirmed.",
+  "description": "P1-2: stop tracks each cancel; a failed attempt is retried with a new key on the next tick; an unknown attempt (may still be in flight) is NOT retried until 30 s pass unsettled — also across a restart; stale or unkeyed Cancel failures never mark the current attempt; stopped only once the cancel is confirmed.",
   "covers": [
     "stop",
     "cancel",
@@ -151,7 +151,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "g1/L1/entry/0/0",
+            "key": "simulation/local-a/g1/L1/entry/0/0",
             "action": "Buy",
             "qty": 1,
             "leg": "entry",
@@ -167,7 +167,7 @@
         "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0",
+        "key": "simulation/local-a/g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       }
@@ -187,7 +187,7 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/1",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
             "orderId": "o1"
           }
         ],
@@ -200,7 +200,8 @@
                   {
                     "cancel": {
                       "status": "pendingSubmit",
-                      "attempts": 1
+                      "attempts": 1,
+                      "sentAt": 1004
                     }
                   }
                 ]
@@ -216,7 +217,7 @@
         "ts": 1005,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0/cancel/1",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
         "outcome": "accepted"
       },
       "expect": {
@@ -250,6 +251,38 @@
       },
       "expect": {
         "notices": [
+          "issue.cancelReportUnkeyed"
+        ],
+        "programs": {
+          "g1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "requested"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "order",
+        "ts": 1007,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o1",
+        "op": "Cancel",
+        "failed": true,
+        "cancelKey": "simulation/local-a/g1/L1/entry/0/0/cancel/1"
+      },
+      "expect": {
+        "notices": [
           "cancelFailed"
         ],
         "programs": {
@@ -274,7 +307,7 @@
     {
       "event": {
         "type": "tick",
-        "ts": 1007,
+        "ts": 1008,
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
@@ -284,10 +317,81 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/2",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
             "orderId": "o1"
           }
         ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1009,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
+        "outcome": "unknown",
+        "detail": "timeout"
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "unknown",
+                      "attempts": 2,
+                      "sentAt": 1008
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1010,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {}
+    },
+    {
+      "event": {
+        "type": "order",
+        "ts": 1011,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o1",
+        "op": "Cancel",
+        "failed": true,
+        "cancelKey": "simulation/local-a/g1/L1/entry/0/0/cancel/1"
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "unknown",
+                      "attempts": 2
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
     },
     {
@@ -322,11 +426,33 @@
         "env": "simulation",
         "serverId": "local-a"
       },
+      "expect": {}
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 30000,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {}
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 31008,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
       "expect": {
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/3",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3",
             "orderId": "o1"
           }
         ]
@@ -335,20 +461,10 @@
     {
       "event": {
         "type": "intentResult",
-        "ts": 5002,
+        "ts": 31009,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0/cancel/3",
-        "outcome": "accepted"
-      }
-    },
-    {
-      "event": {
-        "type": "intentResult",
-        "ts": 5003,
-        "env": "simulation",
-        "serverId": "local-a",
-        "key": "g1/L1/entry/0/0/cancel/2",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
         "outcome": "accepted"
       },
       "expect": {
@@ -359,7 +475,7 @@
                 "orders": [
                   {
                     "cancel": {
-                      "status": "requested",
+                      "status": "pendingSubmit",
                       "attempts": 3
                     }
                   }
@@ -372,8 +488,18 @@
     },
     {
       "event": {
+        "type": "intentResult",
+        "ts": 31010,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3",
+        "outcome": "accepted"
+      }
+    },
+    {
+      "event": {
         "type": "order",
-        "ts": 5004,
+        "ts": 31011,
         "env": "simulation",
         "serverId": "local-a",
         "orderId": "o1",

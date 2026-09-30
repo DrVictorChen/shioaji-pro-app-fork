@@ -95,14 +95,20 @@ export type LegName = 'entry' | 'stop' | 'take' | 'tp';
 
 /** Cancel request tracking for a working order (stop / bound break). A
  * program is not stopped until every cancel is confirmed or the order ended
- * otherwise. Cancels are safe to repeat: failed or unknown ones are retried
- * (new key per attempt) on the next tick / reconnect, at most
- * MAX_CANCEL_ATTEMPTS times. */
+ * otherwise. A failed attempt is retried (new key per attempt) on the next
+ * tick / reconnect; an unknown one only once CANCEL_UNKNOWN_RETRY_MS passed
+ * without a report settling it; at most MAX_CANCEL_ATTEMPTS attempts. Results
+ * and Cancel reports name the attempt (`key` / `cancelKey`); a stale attempt's
+ * answer never changes the current one. */
 export interface CancelState {
     key: string;
     status: 'pendingSubmit' | 'requested' | 'confirmed' | 'failed' | 'unknown';
     attempts: number;
     detail: string | null;
+    /** ts the current attempt was emitted. An `unknown` attempt may still be
+     * in flight: it is only retried after CANCEL_UNKNOWN_RETRY_MS, unless a
+     * report / reconcile settles it first. */
+    sentAt: number;
 }
 
 export type SlotStatus =
@@ -339,6 +345,9 @@ export interface OrderEvent extends Source {
     type: 'order'; ts: number; orderId: string;
     op: 'New' | 'Cancel' | 'UpdatePrice' | 'UpdateQty';
     failed: boolean; detail?: string;
+    /** Cancel reports: the cancel intent key (attempt) this report answers.
+     * A Cancel failure without it is not applied (it may be a stale attempt). */
+    cancelKey?: string;
 }
 export interface DealEvent extends Source {
     type: 'deal'; ts: number; orderId: string;
@@ -386,6 +395,8 @@ export type ExecEvent =
 
 export interface PlaceIntent {
     kind: 'place';
+    /** Idempotency key, globally unique: `<env>/<encodeURIComponent(serverId)>/
+     * <programId>/<levelId>/<leg>/<cycle>/<seq>` (see intentKey in core.ts). */
     key: string;
     programId: string;
     levelId: string;

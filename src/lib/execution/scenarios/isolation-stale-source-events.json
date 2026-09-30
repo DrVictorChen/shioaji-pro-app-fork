@@ -117,7 +117,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "t1/L1/entry/0/0",
+            "key": "simulation/local-a/t1/L1/entry/0/0",
             "action": "Sell",
             "qty": 1,
             "leg": "entry",
@@ -134,7 +134,7 @@
         "ts": 1003,
         "env": "production",
         "serverId": "local-a",
-        "key": "t1/L1/entry/0/0",
+        "key": "simulation/local-a/t1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "x"
       },
@@ -161,7 +161,7 @@
         "ts": 1004,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "t1/L1/entry/0/0",
+        "key": "simulation/local-a/t1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       },
@@ -338,7 +338,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "p1/L1/entry/0/0",
+            "key": "production/local-a/p1/L1/entry/0/0",
             "action": "Sell",
             "qty": 1,
             "leg": "entry",

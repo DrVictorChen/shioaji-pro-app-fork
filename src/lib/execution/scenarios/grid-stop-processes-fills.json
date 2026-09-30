@@ -183,7 +183,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "g1/L1/entry/0/0",
+            "key": "simulation/local-a/g1/L1/entry/0/0",
             "action": "Buy",
             "qty": 2,
             "leg": "entry",
@@ -192,7 +192,7 @@
           },
           {
             "kind": "place",
-            "key": "g1/L2/entry/0/1",
+            "key": "simulation/local-a/g1/L2/entry/0/1",
             "action": "Buy",
             "qty": 2,
             "leg": "entry",
@@ -208,7 +208,7 @@
         "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0",
+        "key": "simulation/local-a/g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       }
@@ -219,7 +219,7 @@
         "ts": 1004,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L2/entry/0/1",
+        "key": "simulation/local-a/g1/L2/entry/0/1",
         "outcome": "accepted",
         "orderId": "o2"
       }
@@ -239,12 +239,12 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/1",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
             "orderId": "o1"
           },
           {
             "kind": "cancel",
-            "key": "g1/L2/entry/0/1/cancel/1",
+            "key": "simulation/local-a/g1/L2/entry/0/1/cancel/1",
             "orderId": "o2"
           }
         ],
@@ -278,7 +278,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "g1/L1/tp/0/2",
+            "key": "simulation/local-a/g1/L1/tp/0/2",
             "action": "Sell",
             "qty": 1,
             "leg": "tp",
@@ -341,7 +341,7 @@
         "ts": 1010,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/tp/0/2",
+        "key": "simulation/local-a/g1/L1/tp/0/2",
         "outcome": "accepted",
         "orderId": "x1"
       }

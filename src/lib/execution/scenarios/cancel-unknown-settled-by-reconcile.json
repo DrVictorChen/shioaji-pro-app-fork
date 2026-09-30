@@ -1,9 +1,11 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "unknown-outcome-live",
-  "description": "A submit with an unknown outcome freezes the level: no resend on later ticks; ack disables it.",
+  "name": "cancel-unknown-settled-by-reconcile",
+  "description": "P1-2: an unknown cancel is settled by a reconcile that shows the order ended — no retry is ever sent.",
   "covers": [
-    "unknown"
+    "stop",
+    "cancel",
+    "reconcile"
   ],
   "steps": [
     {
@@ -23,8 +25,8 @@
         "command": {
           "op": "create",
           "program": {
-            "id": "t1",
-            "kind": "trigger",
+            "id": "g1",
+            "kind": "grid",
             "binding": {
               "env": "simulation",
               "serverId": "local-a",
@@ -48,19 +50,26 @@
             "levels": [
               {
                 "id": "L1",
-                "side": "Sell",
+                "side": "Buy",
                 "qty": 1,
                 "entry": {
-                  "type": "touch",
-                  "condition": "below",
-                  "price": 100,
+                  "type": "limit",
+                  "price": 99,
                   "order": {
-                    "priceType": "MKT",
-                    "timeInForce": "IOC",
-                    "octype": "Auto"
+                    "priceType": "LMT",
+                    "timeInForce": "ROD",
+                    "octype": "New"
                   }
                 },
-                "exit": null,
+                "exit": {
+                  "type": "takeProfit",
+                  "price": 100,
+                  "order": {
+                    "priceType": "LMT",
+                    "timeInForce": "ROD",
+                    "octype": "Cover"
+                  }
+                },
                 "phase": "idle",
                 "check": null,
                 "recross": [],
@@ -73,9 +82,36 @@
                 "detail": null
               }
             ],
-            "generator": null,
+            "generator": {
+              "type": "ladder",
+              "anchor": {
+                "type": "fixed",
+                "price": 99
+              },
+              "spacing": {
+                "type": "abs",
+                "value": 1
+              },
+              "count": 1,
+              "direction": "down",
+              "qty": 1,
+              "takeProfit": {
+                "type": "abs",
+                "value": 1
+              },
+              "order": {
+                "priceType": "LMT",
+                "timeInForce": "ROD",
+                "octype": "New"
+              },
+              "exitOrder": {
+                "priceType": "LMT",
+                "timeInForce": "ROD",
+                "octype": "Cover"
+              }
+            },
             "cycle": {
-              "rearmAfterExit": false,
+              "rearmAfterExit": true,
               "maxCycles": null,
               "partialFill": "immediate"
             },
@@ -109,18 +145,18 @@
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
-        "price": 99
+        "price": 100
       },
       "expect": {
         "intents": [
           {
             "kind": "place",
-            "key": "simulation/local-a/t1/L1/entry/0/0",
-            "action": "Sell",
+            "key": "simulation/local-a/g1/L1/entry/0/0",
+            "action": "Buy",
             "qty": 1,
             "leg": "entry",
             "role": "entry",
-            "price": null
+            "price": 99
           }
         ]
       }
@@ -131,38 +167,29 @@
         "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "simulation/local-a/t1/L1/entry/0/0",
-        "outcome": "unknown",
-        "detail": "timeout"
-      },
-      "expect": {
-        "notices": [
-          "unknown"
-        ],
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "unknown",
-                "orders": [
-                  {
-                    "status": "unknown"
-                  }
-                ]
-              }
-            }
-          }
-        }
+        "key": "simulation/local-a/g1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "o1"
       }
     },
     {
       "event": {
-        "type": "tick",
+        "type": "command",
         "ts": 1004,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 98
+        "id": "c1004",
+        "command": {
+          "op": "stop",
+          "programId": "g1",
+          "version": 1
+        }
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1"
+          }
+        ]
       }
     },
     {
@@ -171,46 +198,55 @@
         "ts": 1005,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "simulation/local-a/t1/L1/entry/0/0",
-        "outcome": "accepted",
-        "orderId": "late"
-      },
-      "expect": {
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "unknown"
-              }
-            }
-          }
-        }
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
+        "outcome": "unknown"
       }
     },
     {
       "event": {
-        "type": "command",
+        "type": "tick",
         "ts": 1006,
-        "id": "c1006",
-        "command": {
-          "op": "ackUnknown",
-          "programId": "t1",
-          "version": 1,
-          "levelId": "L1"
-        }
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {}
+    },
+    {
+      "event": {
+        "type": "reconcile",
+        "ts": 1007,
+        "account": {
+          "accountType": "F",
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "env": "simulation",
+        "serverId": "local-a",
+        "orders": [
+          {
+            "intentKey": "simulation/local-a/g1/L1/entry/0/0",
+            "orderId": "o1",
+            "status": "ended",
+            "qty": 1,
+            "deals": []
+          }
+        ],
+        "complete": true
       },
       "expect": {
         "programs": {
-          "t1": {
-            "version": 2,
+          "g1": {
+            "status": "stopped",
             "levels": {
               "L1": {
-                "phase": "disabled",
-                "detail": "unknownAcknowledged",
                 "orders": [
                   {
                     "status": "ended",
-                    "acknowledged": true
+                    "cancel": {
+                      "status": "confirmed"
+                    }
                   }
                 ]
               }
@@ -222,12 +258,13 @@
     {
       "event": {
         "type": "tick",
-        "ts": 1007,
+        "ts": 40000,
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
-        "price": 97
-      }
+        "price": 100
+      },
+      "expect": {}
     }
   ]
 }

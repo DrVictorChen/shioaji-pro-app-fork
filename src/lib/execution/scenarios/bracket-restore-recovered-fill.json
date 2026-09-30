@@ -79,7 +79,7 @@
                 "pending": null,
                 "orders": [
                   {
-                    "key": "b1/L1/entry/0/ext",
+                    "key": "simulation/local-a/b1/L1/entry/0/ext",
                     "role": "entry",
                     "leg": "entry",
                     "cycle": 0,
@@ -248,7 +248,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "b1/L1/stop/0/0",
+            "key": "simulation/local-a/b1/L1/stop/0/0",
             "action": "Sell",
             "qty": 2,
             "leg": "stop",

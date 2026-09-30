@@ -152,7 +152,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "g1/L1/entry/0/0",
+            "key": "simulation/local-a/g1/L1/entry/0/0",
             "action": "Buy",
             "qty": 2,
             "leg": "entry",
@@ -168,7 +168,7 @@
         "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0",
+        "key": "simulation/local-a/g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       }
@@ -191,7 +191,7 @@
         "serverId": "local-a",
         "orders": [
           {
-            "intentKey": "g1/L1/entry/0/0",
+            "intentKey": "simulation/local-a/g1/L1/entry/0/0",
             "orderId": "o1",
             "status": "working",
             "qty": 2,
@@ -274,7 +274,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "g1/L1/tp/0/1",
+            "key": "simulation/local-a/g1/L1/tp/0/1",
             "action": "Sell",
             "qty": 2,
             "leg": "tp",

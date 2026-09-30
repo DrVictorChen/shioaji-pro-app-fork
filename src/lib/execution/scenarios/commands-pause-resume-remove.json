@@ -192,7 +192,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "t1/L1/entry/0/0",
+            "key": "simulation/local-a/t1/L1/entry/0/0",
             "action": "Sell",
             "qty": 1,
             "leg": "entry",
@@ -226,7 +226,7 @@
         "ts": 1008,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "t1/L1/entry/0/0",
+        "key": "simulation/local-a/t1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       }

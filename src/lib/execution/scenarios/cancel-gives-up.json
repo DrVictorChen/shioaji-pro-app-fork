@@ -150,7 +150,7 @@
         "intents": [
           {
             "kind": "place",
-            "key": "g1/L1/entry/0/0",
+            "key": "simulation/local-a/g1/L1/entry/0/0",
             "action": "Buy",
             "qty": 1,
             "leg": "entry",
@@ -166,7 +166,7 @@
         "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0",
+        "key": "simulation/local-a/g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       }
@@ -186,7 +186,7 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/1"
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1"
           }
         ]
       }
@@ -197,7 +197,7 @@
         "ts": 1005,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0/cancel/1",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/1",
         "outcome": "notSent",
         "detail": "killSwitch"
       },
@@ -220,7 +220,7 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/2"
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2"
           }
         ]
       }
@@ -231,7 +231,7 @@
         "ts": 1007,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0/cancel/2",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/2",
         "outcome": "notSent",
         "detail": "killSwitch"
       }
@@ -249,7 +249,7 @@
         "intents": [
           {
             "kind": "cancel",
-            "key": "g1/L1/entry/0/0/cancel/3"
+            "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3"
           }
         ]
       }
@@ -260,7 +260,7 @@
         "ts": 1009,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L1/entry/0/0/cancel/3",
+        "key": "simulation/local-a/g1/L1/entry/0/0/cancel/3",
         "outcome": "notSent",
         "detail": "killSwitch"
       },
