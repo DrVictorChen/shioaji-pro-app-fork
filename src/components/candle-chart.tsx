@@ -1316,14 +1316,13 @@ export function CandleChart({
 
         // 委託線能不能接手這一下（見 orderLineMayTakePointer）。右側把手
         // 區＝價格軸上委託線自己的價格標籤（不含繪圖區）
-        const mayTake = (e: MouseEvent, orderY: number) => {
+        const mayTake = (e: MouseEvent) => {
             const d = drawingsRef.current;
             const rect = host.getBoundingClientRect();
             const axis = chartRef.current?.priceScale('right').width() ?? 60;
             const onLabel = inOrderLabelArea(e.clientX - rect.left, rect.width, axis);
             return orderLineMayTakePointer({
-                drawingLabelAtPointer: onLabel && (d?.drawingLabelNear(e.clientY) ?? false),
-                drawingLabelNearOrder: onLabel && (d?.drawingLabelNear(rect.top + orderY) ?? false),
+                drawingLabelAtPointer: onLabel && (d?.drawingLabelAt(e.clientY) ?? false),
                 drawingArmed: drawingArmedRef.current,
                 defaultPrevented: e.defaultPrevented,
                 // 價格軸上沒有畫圖物件（只畫在繪圖區）；線端的命中容差不算
@@ -1337,7 +1336,7 @@ export function CandleChart({
             if (dragging) return;
             const near = findNear(yOf(e));
             // 武裝畫圖工具、或這個位置歸畫圖物件時委託線不接手，游標交給畫圖
-            if (!near || !mayTake(e, near.coord)) {
+            if (!near || !mayTake(e)) {
                 if (host.style.cursor === 'ns-resize') host.style.cursor = '';
                 return;
             }
@@ -1350,7 +1349,7 @@ export function CandleChart({
             // 在委託價附近畫線不能變成改價；別的 handler 已經接手的一下
             // 也不能同時拖畫圖又送出改價
             const hit = findNear(yOf(e));
-            if (!hit || !mayTake(e, hit.coord)) return;
+            if (!hit || !mayTake(e)) return;
             e.preventDefault();
             e.stopPropagation();
             chartRef.current?.applyOptions({

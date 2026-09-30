@@ -8,7 +8,6 @@
 import type {
     IPrimitivePaneRenderer,
     IPrimitivePaneView,
-    ISeriesPrimitiveAxisView,
     ISeriesApi,
     ISeriesPrimitive,
     IChartApi,
@@ -182,35 +181,56 @@ class DrawingPaneView implements IPrimitivePaneView {
     }
 }
 
-// 水平線在價格軸上的色塊標籤 — 與現價游標、委託單價格線同一種呈現，
-// 線是什麼顏色，標籤就是什麼顏色，一眼看得出這個價位屬於哪一條線。
+// 水平線在價格軸上的色塊標籤 — 線是什麼顏色，標籤就是什麼顏色，一眼
+// 看得出這個價位屬於哪一條線。
 //
-// 物件本身可變（座標每次重繪都在動）：lightweight-charts 用陣列 reference
-// 當快取鍵，每次都 new 一批會讓它每幀重建標籤，所以只在「有哪些線」變了
-// 的時候換陣列，座標就地更新。
-class DrawingAxisView implements ISeriesPrimitiveAxisView {
-    y = 0;
-    label = '';
-    color = '#ffffff';
-    ok = false; // 價位在可視範圍外時 priceToCoordinate 會回 null
-    coordinate(): number {
-        return this.y;
-    }
-    text(): string {
-        return this.label;
-    }
-    textColor(): string {
-        return contrastTextColor(this.color);
-    }
-    backColor(): string {
-        return this.color;
-    }
-    visible(): boolean {
-        return this.ok;
+// 自己畫在價格軸上（priceAxisPaneViews），不用 lightweight-charts 的
+// priceAxisViews：後者會加入函式庫的標籤防重疊，標籤被連鎖推到別的價位，
+// 我們不知道它最後在哪 — 委託線的拖曳判斷就可能把「拖畫圖標籤」當成
+// 「拖委託標籤」而送出改價。自己畫就固定在線的價位上，範圍確切已知
+// （axisLabelRects），委託線拖曳時排除這些範圍。
+export const AXIS_LABEL_H = 18; // 標籤高度（px）
+const AXIS_LABEL_FONT_PX = 11;
+
+export interface AxisLabelRow {
+    y: number; // pane 座標（與價格軸同一個垂直座標系）
+    text: string;
+    color: string;
+}
+
+class DrawingAxisRenderer implements IPrimitivePaneRenderer {
+    constructor(private readonly _rows: AxisLabelRow[]) {}
+    draw(target: DrawTarget): void {
+        target.useBitmapCoordinateSpace((scope) => {
+            const ctx = scope.context;
+            const hr = scope.horizontalPixelRatio;
+            const vr = scope.verticalPixelRatio;
+            const width = scope.mediaSize.width;
+            ctx.save();
+            ctx.font = `${AXIS_LABEL_FONT_PX * vr}px sans-serif`;
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'left';
+            for (const r of this._rows) {
+                const top = Math.round((r.y - AXIS_LABEL_H / 2) * vr);
+                ctx.fillStyle = r.color;
+                ctx.fillRect(0, top, Math.round(width * hr), Math.round(AXIS_LABEL_H * vr));
+                ctx.fillStyle = contrastTextColor(r.color);
+                ctx.fillText(r.text, 5 * hr, r.y * vr);
+            }
+            ctx.restore();
+        });
     }
 }
 
-const NO_AXIS_VIEWS: readonly ISeriesPrimitiveAxisView[] = [];
+class DrawingAxisPaneView implements IPrimitivePaneView {
+    constructor(private readonly _layer: DrawingLayer) {}
+    zOrder(): PrimitivePaneViewZOrder {
+        return 'top'; // 蓋在函式庫的標籤之上 — 畫圖標籤按得到的地方就是看得到的地方
+    }
+    renderer(): IPrimitivePaneRenderer {
+        return new DrawingAxisRenderer(this._layer.axisLabelRows());
+    }
+}
 
 export class DrawingLayer implements ISeriesPrimitive<Time> {
     state: DrawingLayerState = EMPTY_STATE;
@@ -220,8 +240,7 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
     private _requestUpdate: (() => void) | null = null;
     private _canvas: HTMLCanvasElement | null = null;
     private readonly _views: DrawingPaneView[];
-    private _axisViews: DrawingAxisView[] = [];
-    private _axisKey = '';
+    private readonly _axisPaneViews: DrawingAxisPaneView[];
     // 棒距估計要排序全部 K 棒間距 — 依時間陣列（資料變更才換新陣列）
     // 快取，滑鼠事件與每幀重繪都不重算
     private _barTimes: number[] | null = null;
@@ -231,6 +250,7 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
     // 歷史都會換一份，所以用 callback 每次重讀，不快照。
     constructor(private readonly _getTimes: () => number[]) {
         this._views = [new DrawingPaneView(this)];
+        this._axisPaneViews = [new DrawingAxisPaneView(this)];
     }
 
     attached(param: SeriesAttachedParameter<Time>): void {
@@ -244,8 +264,6 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
         this._chart = null;
         this._requestUpdate = null;
         this._canvas = null;
-        this._axisViews = [];
-        this._axisKey = '';
     }
 
     paneViews(): readonly IPrimitivePaneView[] {
@@ -254,64 +272,44 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
 
     // 只有水平線有標籤：斜線與方框沒有單一價位可標，硬標一個（例如端點）
     // 反而會在拖曳時跳來跳去。繪製中的水平線也標，跟游標十字線一樣即時。
-    // 畫圖物件價格軸標籤的 y（pane 座標）：委託線拖曳判斷用 — 標籤在
-    // 游標下時標籤屬於畫圖，委託線不能接手
-    axisLabelYs(): number[] {
+    axisLabelRows(): AxisLabelRow[] {
         const series = this._series;
         if (!series) return [];
-        const out: number[] = [];
-        const prices: number[] = [];
+        const rows: { price: number; color: string }[] = [];
         for (const d of this.state.drawings) {
-            if (d.tool === 'horizontal' && !d.hidden && d.anchors[0]) prices.push(d.anchors[0].price);
+            if (d.tool !== 'horizontal' || d.hidden || !d.anchors[0]) continue;
+            rows.push({ price: d.anchors[0].price, color: d.style.color });
         }
         const draft = this.state.draft;
-        if (draft?.tool === 'horizontal' && draft.anchors[0]) prices.push(draft.anchors[0].price);
-        for (const p of prices) {
-            const y = series.priceToCoordinate(p);
-            if (y !== null) out.push(y);
+        if (draft?.tool === 'horizontal' && draft.anchors[0]) {
+            rows.push({ price: draft.anchors[0].price, color: draft.style.color });
+        }
+        const out: AxisLabelRow[] = [];
+        for (const r of rows) {
+            const y = series.priceToCoordinate(r.price);
+            if (y === null) continue;
+            out.push({ y, text: this.formatAxis(r.price), color: r.color });
         }
         return out;
     }
 
-    priceAxisViews(): readonly ISeriesPrimitiveAxisView[] {
-        const series = this._series;
-        if (!series) return NO_AXIS_VIEWS;
-        const rows: { id: string; price: number; color: string }[] = [];
-        for (const d of this.state.drawings) {
-            if (d.tool !== 'horizontal' || d.hidden) continue;
-            const price = d.anchors[0]?.price;
-            if (price === undefined) continue;
-            rows.push({ id: d.id, price, color: d.style.color });
-        }
-        const draft = this.state.draft;
-        if (draft?.tool === 'horizontal') {
-            const price = draft.anchors[0]?.price;
-            if (price !== undefined) {
-                rows.push({ id: 'draft', price, color: draft.style.color });
-            }
-        }
-        if (!rows.length) {
-            this._axisKey = '';
-            this._axisViews = [];
-            return NO_AXIS_VIEWS;
-        }
-        // 價格不進 key：改價時標籤文字跟著 format 出來就好，不必換陣列
-        const key = rows.map((r) => `${r.id}|${r.color}`).join(';');
-        if (key !== this._axisKey) {
-            this._axisKey = key;
-            this._axisViews = rows.map(() => new DrawingAxisView());
-        }
-        const formatter = series.priceFormatter();
-        rows.forEach((r, i) => {
-            const view = this._axisViews[i]!;
-            const y = series.priceToCoordinate(r.price);
-            view.ok = y !== null;
-            view.y = y ?? 0;
-            view.label = formatter.format(r.price);
-            view.color = r.color;
-        });
-        return this._axisViews;
+    // 畫圖標籤在價格軸上的確切範圍（pane 座標）：委託線拖曳判斷要排除
+    axisLabelRects(): { top: number; bottom: number }[] {
+        return this.axisLabelRows().map((r) => ({
+            top: r.y - AXIS_LABEL_H / 2,
+            bottom: r.y + AXIS_LABEL_H / 2,
+        }));
     }
+
+    priceAxisPaneViews(): readonly IPrimitivePaneView[] {
+        return this._axisPaneViews;
+    }
+
+    // 價格軸標籤的文字
+    formatAxis = (price: number): string => {
+        const series = this._series;
+        return series ? series.priceFormatter().format(price) : String(price);
+    };
 
     setState(state: DrawingLayerState): void {
         this.state = state;
