@@ -35,6 +35,7 @@ export const CORE_MESSAGE_TABLE = {
         BARS_VOLUME_INVALID: '{assetId}.volume[{index}] 無效',
         BARS_PRICE_INVALID: '{assetId}.{field}[{index}] 無效；價格範圍 [{min}, {max}]',
         BARS_OHLC_INCONSISTENT: '{assetId} OHLC 範圍不一致',
+        BARS_LIMIT_INCONSISTENT: '{assetId}.limitDown[{index}] 必須小於 limitUp',
         EXECUTION_FIELD_MISSING: '缺少 execution.{field}',
         EXECUTION_FIELD_UNKNOWN: '未知 execution 欄位: {field}',
         TICK_LADDER_INVALID: '{assetId} tickLadder 無效',
@@ -78,6 +79,7 @@ export const CORE_MESSAGE_TABLE = {
         RISK_INVALID_FILL_PRICE: { reason: 'invalid-fill-price', message: '滑價後成交價必須大於 0' },
         RISK_LIMIT_NOT_REACHED: { reason: 'limit-not-reached', message: '下一根可用 K 棒未觸及限價' },
         RISK_UNAVAILABLE_BAR: { reason: 'unavailable-bar', message: '缺 K 或停牌，等待下一個可成交 open' },
+        RISK_LIMIT_LOCKED: { reason: 'limit-locked', message: '漲跌停鎖死，等待下一根可成交 K 棒' },
         RISK_FINAL_BAR_UNAVAILABLE: { reason: 'unavailable-bar', message: '最後一根缺 K 或停牌，部位未平倉並以最後收盤估值' },
     },
     riskReasonLabels: {
@@ -88,6 +90,7 @@ export const CORE_MESSAGE_TABLE = {
         'unavailable-bar': '行情資料暫缺',
         'invalid-fill-price': '成交價格無效',
         'limit-not-reached': '限價未觸及',
+        'limit-locked': '漲跌停鎖死',
     },
     diagnosticLabels: {
         'signal-conflict': '同時觸發多個訊號',

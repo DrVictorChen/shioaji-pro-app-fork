@@ -82,6 +82,14 @@ export interface PortfolioBarsInput {
     close: (number | null)[];
     volume: (number | null)[];
     availability?: boolean[];
+    /**
+     * DECIDED-2: daily upper / lower price limit valid for each row (null =
+     * unknown). A row that traded entirely at its limit-up blocks buys and one
+     * entirely at its limit-down blocks sells; such orders wait for the next
+     * fillable bar. Both omitted: no limit-lock handling.
+     */
+    limitUp?: (number | null)[];
+    limitDown?: (number | null)[];
 }
 
 /** Portfolio clock: `sourceIndices[asset][i]` is the row of that asset's bars at `time[i]`, null when unavailable. */
@@ -285,7 +293,7 @@ export type PortfolioDiagnostic = SignalConflictDiagnostic | LotRoundingDiagnost
 export type PortfolioDiagnosticKind = PortfolioDiagnostic['kind'];
 
 export type RiskReason = 'missing-price' | 'nonpositive-equity' | 'gross-leverage' | 'net-leverage' |
-    'unavailable-bar' | 'invalid-fill-price' | 'limit-not-reached';
+    'unavailable-bar' | 'invalid-fill-price' | 'limit-not-reached' | 'limit-locked';
 
 export interface PortfolioRejection {
     time: number;
