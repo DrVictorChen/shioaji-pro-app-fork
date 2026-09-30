@@ -438,13 +438,21 @@ export function fetchScanner(
 
 // ---- streaming subscriptions ----
 
+export interface QuoteSubscribeOptions {
+    /** 盤中零股行情（intraday_odd）— 與整股是兩個獨立訂閱（#204） */
+    oddLot?: boolean;
+}
+
 export function subscribeQuote(
     contract: ContractBase,
     quoteType: QuoteTypeName,
+    options?: QuoteSubscribeOptions,
 ) {
+    const oddLot = options?.oddLot === true;
     // 組合商品走巢狀腳訂閱（flat code 如 TXFI6/J6 server 不認）
     const comboMeta = (contract as { combo?: unknown }).combo;
     if (comboMeta) {
+        if (oddLot) return Promise.reject(new Error('組合商品沒有零股行情'));
         return subscribeComboQuote(
             comboMeta as Parameters<typeof subscribeComboQuote>[0],
             quoteType,
@@ -455,7 +463,7 @@ export function subscribeQuote(
         // empty string must become null — the server 500s on target_code ""
         target_code: contract.target_code || null,
         quote_type: quoteType,
-        intraday_odd: false,
+        intraday_odd: oddLot,
     };
     return apiPost<SubscriptionResponse>('/api/v1/stream/subscribe', body).then(
         (response) => {
@@ -471,9 +479,11 @@ export function subscribeQuote(
 export function unsubscribeQuote(
     contract: ContractBase,
     quoteType: QuoteTypeName,
+    options?: QuoteSubscribeOptions,
 ) {
+    const oddLot = options?.oddLot === true;
     const comboMeta = (contract as { combo?: unknown }).combo;
-    if (comboMeta) {
+    if (comboMeta && !oddLot) {
         return unsubscribeComboQuote(
             comboMeta as Parameters<typeof unsubscribeComboQuote>[0],
             quoteType,
@@ -482,12 +492,12 @@ export function unsubscribeQuote(
     return apiPost<SubscriptionResponse>('/api/v1/stream/unsubscribe', {
         ...contractKey(contract),
         quote_type: quoteType,
-        intraday_odd: false,
+        intraday_odd: oddLot,
     }).then((response) => {
         if (!response.success) {
             throw new Error(response.message || '取消行情訂閱失敗');
         }
-        unregisterSubscription(contract.code, quoteType);
+        unregisterSubscription(contract.code, quoteType, oddLot);
         return response;
     });
 }

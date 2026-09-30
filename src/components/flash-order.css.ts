@@ -236,6 +236,11 @@ export const oddBanner = style({
     flexShrink: 0,
 });
 
+export const oddMatchTime = style({
+    fontFamily: vars.font.mono,
+    whiteSpace: 'nowrap',
+});
+
 export const recenterBtn = style({
     fontFamily: vars.font.body,
     fontSize: '0.64rem',

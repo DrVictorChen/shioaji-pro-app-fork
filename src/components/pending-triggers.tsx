@@ -20,6 +20,7 @@ import { currentProtectionEnv, protectionEnvLabel } from '../lib/protection-env'
 import { useServerInfo } from '../lib/server-info-store';
 import {
     isPendingUnpast,
+    priceKeyOf,
     RESTORE_REASON_TEXT,
     requestPendingPrices,
     resolvePendingTrigger,
@@ -229,7 +230,7 @@ export function PendingTriggers({ compact = false }: { compact?: boolean }) {
                     <div className={styles.hint}>
                         App 恢復盯價時，價格已經穿過這些單的觸發價。為了避免意外成交，系統先不送單，請逐筆決定。同一組停損停利（OCO）送出其中一筆後，其餘會自動取消。
                     </div>
-                    {pending.map(t => <Row key={t.id} trigger={t} price={prices[t.code]} envNow={envNow} sending={sending.includes(t.id)} />)}
+                    {pending.map(t => <Row key={t.id} trigger={t} price={prices[priceKeyOf(t)]} envNow={envNow} sending={sending.includes(t.id)} />)}
                 </>
             )}
         </div>

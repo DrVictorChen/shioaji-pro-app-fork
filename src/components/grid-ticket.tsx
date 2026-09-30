@@ -76,9 +76,14 @@ export function GridTicket({
     const [followAccountShown, setFollowAccountShown] = useState<Account | null>(null);
     const priv = usePrivacyMode();
 
-    const last = quote?.tick
-        ? Number(quote.tick.close)
-        : contract.reference || null;
+    // 盤中零股網格以零股成交價為基準（另一個撮合市場，#204）；尚無零股成交
+    // 時退回整股成交價
+    const oddQuote = useQuote(odd ? contract.code : null, { oddLot: true });
+    const last = odd && oddQuote?.tick
+        ? Number(oddQuote.tick.close)
+        : quote?.tick
+          ? Number(quote.tick.close)
+          : contract.reference || null;
 
     // refs for the follow loop
     const contractRef = useRef(contract);

@@ -12,12 +12,14 @@ const ACCT = { account_type: 'S' as const, broker_id: S1.broker_id, account_id: 
 
 const m = vi.hoisted(() => ({
     tick: null as ((t: { code: string; close: number; simtrade?: boolean }) => void) | null,
+    oddTick: null as ((t: { code: string; close: number; simtrade?: boolean }) => void) | null,
     accounts: [] as Account[],
     positions: [] as unknown[],
     positionsAt: null as number | null,
     place: vi.fn(),
     notify: vi.fn(),
     ensure: vi.fn(),
+    retain: vi.fn(),
 }));
 
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://sim.invalid' }));
@@ -26,6 +28,7 @@ vi.mock('./stream', () => ({
     subscribeStatusStore: () => () => undefined,
     onOrderEvent: () => () => undefined,
     onAnyTick: (cb: typeof m.tick) => { m.tick = cb; return () => undefined; },
+    onOddLotTick: (cb: typeof m.tick) => { m.oddTick = cb; return () => undefined; },
     onStreamEvent: () => () => undefined,
 }));
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accounts,
@@ -33,7 +36,7 @@ vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accoun
     selectedFutures: m.accounts.find(a => a.account_type === 'F') ?? null }) }));
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
-vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
+vi.mock('./quote-ownership', () => ({ retainQuote: (...args: unknown[]) => { m.retain(...args); return () => undefined; } }));
 vi.mock('./trading-state', () => ({ getTradingState: () => ({ positions: m.positions,
     queries: { positions: { updatedAt: m.positionsAt, needsReconcile: false, error: null } } }) }));
 vi.mock('./shioaji', () => ({ fetchTrades: async () => [] }));
@@ -65,13 +68,15 @@ async function boot() {
     await flush();
 }
 const tick = async (close: number) => { m.tick!({ code: '2330', close }); await flush(); };
+// 盤中零股成交（intraday_odd）：零股觸價單只看這個價格來源
+const oddTick = async (close: number) => { m.oddTick!({ code: '2330', close }); await flush(); };
 const bodies = () => m.notify.mock.calls.map(([n]) => `${(n as { title: string }).title}：${(n as { body: string }).body}`);
 
 beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal('BroadcastChannel', undefined);
     m.accounts = [S1, F1]; m.positions = []; m.positionsAt = null;
-    for (const f of [m.place, m.notify, m.ensure]) f.mockReset();
+    for (const f of [m.place, m.notify, m.ensure, m.retain]) f.mockReset();
     m.ensure.mockResolvedValue(STK);
     let n = 0;
     m.place.mockImplementation(async () => ({ order: { id: `exit-${++n}` }, status: { status: 'PendingSubmit' } }));
@@ -84,7 +89,11 @@ describe('odd-lot triggers (#204)', () => {
         const t = await engine.addTrigger({ code: '2330', condition: 'below', price: 950, action: 'Sell', quantity: 300,
             kind: 'stop', orderLot: 'IntradayOdd' }, STK as never);
         expect(t?.orderLot).toBe('IntradayOdd');
+        // a regular-lot trade through the stop does not fire an odd-lot stop:
+        // the exit trades in the odd-lot market, so its price decides
         await tick(949);
+        expect(m.place).not.toHaveBeenCalled();
+        await oddTick(949);
         expect(m.place).toHaveBeenCalledTimes(1);
         const [, action, price, qty, opts] = m.place.mock.calls[0]!;
         expect([action, price, qty]).toEqual(['Sell', 900, 300]);
@@ -94,9 +103,23 @@ describe('odd-lot triggers (#204)', () => {
         expect(engine.getExits()[0]).toMatchObject({ status: 'working', orderLot: 'IntradayOdd' });
     });
 
+    it('holds the 盤中零股 Tick feed for odd-lot triggers, separately from the regular feed', async () => {
+        await boot();
+        await engine.addTrigger({ code: '2330', condition: 'below', price: 950, action: 'Sell', quantity: 300,
+            kind: 'stop', orderLot: 'IntradayOdd' }, STK as never);
+        await engine.addTrigger({ code: '2330', condition: 'below', price: 940, action: 'Sell', quantity: 1, kind: 'stop' }, STK as never);
+        await flush();
+        const holds = m.retain.mock.calls.map(c => [c[1], c[2]?.oddLot === true]);
+        expect(holds).toEqual(expect.arrayContaining([['Tick', true], ['Tick', false]]));
+        expect(holds).toHaveLength(2);
+    });
+
     it('whole-lot stops stay market orders without an order lot', async () => {
         await boot();
         await engine.addTrigger({ code: '2330', condition: 'below', price: 950, action: 'Sell', quantity: 2, kind: 'stop' }, STK as never);
+        // an odd-lot trade never fires a whole-lot stop
+        await oddTick(900);
+        expect(m.place).not.toHaveBeenCalled();
         await tick(949);
         const [, , price, qty, opts] = m.place.mock.calls[0]!;
         expect([price, qty]).toEqual([null, 2]);
@@ -123,7 +146,7 @@ describe('odd-lot triggers (#204)', () => {
         m.ensure.mockResolvedValue({ ...STK, limit_down: 0 });
         await engine.addTrigger({ code: '2330', condition: 'below', price: 950, action: 'Sell', quantity: 100,
             kind: 'stop', orderLot: 'IntradayOdd' }, STK as never);
-        await tick(949);
+        await oddTick(949);
         expect(m.place).not.toHaveBeenCalled();
         expect(engine.getExits()[0]).toMatchObject({ status: 'not-sent' });
         expect(bodies().join('\n')).toContain('漲跌停價');
@@ -136,7 +159,7 @@ describe('odd-lot triggers (#204)', () => {
         engine.armBracketGroup({ group: 'bracket:o', bracketId: 'plan-odd', env: SIM, account: ACCT, code: '2330',
             orderCode: '2330', entryAction: 'Buy', orderLot: 'IntradayOdd', stopPrice: 950, takePrice: null, quantity: 500 });
         expect(engine.getTriggers()[0]).toMatchObject({ orderLot: 'IntradayOdd', quantity: 500 });
-        await tick(949);
+        await oddTick(949);
         const [, , price, qty, opts] = m.place.mock.calls[0]!;
         expect([price, qty, opts.orderLot]).toEqual([900, 300, 'IntradayOdd']);
         expect(engine.getExits()[0]!.detail).toContain('可賣出現股僅 300 股');
@@ -149,7 +172,7 @@ describe('odd-lot triggers (#204)', () => {
         // an odd exit of 500 shares is still working …
         engine.armBracketGroup({ group: 'bracket:o', bracketId: 'plan-odd', env: SIM, account: ACCT, code: '2330',
             orderCode: '2330', entryAction: 'Buy', orderLot: 'IntradayOdd', stopPrice: 960, takePrice: null, quantity: 500 });
-        await tick(959);
+        await oddTick(959);
         // … so a whole-lot exit of 2 張 can only sell the remaining 1 張
         engine.armBracketGroup({ group: 'bracket:c', bracketId: 'plan-lot', env: SIM, account: ACCT, code: '2330',
             orderCode: '2330', entryAction: 'Buy', stopPrice: 950, takePrice: null, quantity: 2 });

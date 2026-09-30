@@ -8,7 +8,7 @@ import type { ContractInfo } from '../lib/types/contract';
 const mocks = vi.hoisted(() => ({ cancel: vi.fn(), place: vi.fn(), stockExit: vi.fn(), notify: vi.fn() }));
 const accounts: Account[] = [{ account_type: 'S', broker_id: 'BR', account_id: 'A', signed: true, person_id: '', username: '' }];
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts, selectedStock: accounts[0], selectedFutures: undefined }) }));
-vi.mock('../hooks/use-stream', () => ({ useTradingLive: () => true }));
+vi.mock('../hooks/use-stream', () => ({ useQuote: () => undefined, useTradingLive: () => true }));
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: undefined, snapshot: { close: 100 }, book: undefined }) }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: mocks.cancel, cancelOrders: (ids: string[]) => Promise.allSettled(ids.map(id => mocks.cancel(id))) }));
 vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place, placeStockExitByShares: mocks.stockExit }));

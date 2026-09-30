@@ -79,6 +79,11 @@ export function OrderTicket({
     const [orderType, setOrderType] = useState<OrderType>('ROD');
     const [orderLot, setOrderLot] = useState<StockOrderLot>('Common');
     const [orderCond, setOrderCond] = useState<StockOrderCond>('Cash');
+    // 盤中零股：帶價與括號單參考價取零股成交價（另一個撮合市場，#204）；
+    // 尚無零股成交時退回整股成交價。盤後零股沒有即時行情。
+    const intradayOdd = !isFutures && orderLot === 'IntradayOdd';
+    const oddQuote = useQuote(intradayOdd ? contract.code : null, { oddLot: true });
+    const lastClose = (intradayOdd ? oddQuote?.tick?.close : undefined) ?? quote?.tick?.close;
     const [octype, setOctype] = useState<FuturesOCType>('Auto');
     const [daytradeShort, setDaytradeShort] = useState(false);
     const [armed, setArmed] = useState(false);
@@ -204,7 +209,7 @@ export function OrderTicket({
     }, [action, orderCond]);
 
     // autofill price from live quote until user edits it
-    const liveClose = quote?.tick?.close;
+    const liveClose = lastClose;
     useEffect(() => {
         if (!priceTouched.current && liveClose) {
             setPrice(String(Number(liveClose)));
@@ -255,7 +260,7 @@ export function OrderTicket({
                     referencePrice:
                         priceType === 'LMT'
                             ? p
-                            : Number(quote?.tick?.close) || null,
+                            : Number(lastClose) || null,
                     stopPrice: bracketStop,
                     takePrice: bracketTake,
                     orderLot,

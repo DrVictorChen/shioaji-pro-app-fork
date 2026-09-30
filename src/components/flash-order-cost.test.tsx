@@ -8,7 +8,7 @@ const account: Account = { account_type: 'F', broker_id: 'BR', account_id: 'A', 
 const stockAccount: Account = { ...account, account_type: 'S', account_id: 'S1' };
 const book = vi.hoisted(() => ({ close: 45532 }));
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts: [account, stockAccount], selectedStock: stockAccount, selectedFutures: account }), selectAccount: () => {}, accountFor: (t: string) => (t === 'S' ? stockAccount : account) }));
-vi.mock('../hooks/use-stream', () => ({ useTradingLive: () => true }));
+vi.mock('../hooks/use-stream', () => ({ useQuote: () => undefined, useTradingLive: () => true }));
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: undefined, snapshot: { close: book.close }, book: undefined }) }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: vi.fn(), cancelOrders: vi.fn() }));
 vi.mock('../lib/trade', () => ({ notify: vi.fn(), placeQuickOrder: vi.fn(), placeStockExitByShares: vi.fn() }));

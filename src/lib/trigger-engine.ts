@@ -58,7 +58,7 @@ import {
 import { retainQuote } from './quote-ownership';
 import { getApiBase } from './runtime';
 import { fetchTrades } from './shioaji';
-import { getStreamStatus, onAnyTick, onStreamEvent, subscribeStatusStore } from './stream';
+import { getStreamStatus, onAnyTick, onOddLotTick, onStreamEvent, subscribeStatusStore } from './stream';
 import { notify, placeQuickOrder } from './trade';
 import { getTradingState } from './trading-state';
 import { fmtPrice } from './utils/format';
@@ -184,6 +184,22 @@ let snapshot: Snapshot = { triggers, exits, feedMissing: [], executing: false, p
 const restoreCheck = new Map<string, RestoreReason>();
 let lastRestoreReason: RestoreReason = 'restart';
 const lastPrices = new Map<string, number>();
+
+// 價格來源（#204）：盤中零股停損停利／觸價單以「零股成交價」判斷 — 零股
+// 出場單送進零股市場撮合，零股與整股分開撮合、價格可能不同，觸發條件要看
+// 實際成交的那個市場。整股單與價格警示仍看整股成交價。零股成交較稀疏，
+// 觸發時點以零股實際成交為準。lastPrices／待確認價格以 priceKey 區分兩者。
+const ODD_PRICE_SUFFIX = '#odd';
+function feedKey(code: string, oddLot: boolean): string {
+    return oddLot ? `${code}${ODD_PRICE_SUFFIX}` : code;
+}
+/** Key of the price feed a trigger is evaluated on (see usePendingPrices). */
+export function priceKeyOf(t: Pick<TriggerOrder, 'code' | 'orderLot' | 'kind'>): string {
+    return feedKey(t.code, usesOddFeed(t));
+}
+function usesOddFeed(t: Pick<TriggerOrder, 'orderLot' | 'kind'>): boolean {
+    return t.kind !== 'alert' && t.orderLot === 'IntradayOdd';
+}
 
 
 export type PendingChoice = 'send' | 'cancel' | 'keep';
@@ -757,13 +773,13 @@ async function sendPending(id: string, allowUnpast: boolean) {
             account: ctx.account,
             ocType: first.octype,
             orderLot: isOddLot(first.orderLot) ? first.orderLot : undefined,
-            confirmLivePriceCode: userOrder ? first.code : undefined,
+            confirmLivePriceCode: userOrder ? priceKeyOf(first) : undefined,
             beforeSend: () => {
                 const cur = triggers.find(x => x.id === id);
                 if (!cur?.pending) throw new Error('已不在待確認（OCO 另一邊可能已觸發或已被處理），未送出');
                 if (currentProtectionEnv() !== cur.env) throw new Error('伺服器或模擬／正式模式已切換，未送出');
                 if (cur.group && processedGroups[groupKey(cur.env, cur.group)]) throw new Error('此 OCO 群組已觸發，未送出');
-                const price = lastPrices.get(cur.code);
+                const price = lastPrices.get(priceKeyOf(cur));
                 if (getStreamStatus() !== 'live' || price === undefined) throw new Error('行情中斷，未送出');
                 // The manual order dialog can stay open while the price crosses
                 // back. An earlier confirmation of a crossed price does not
@@ -794,8 +810,8 @@ async function sendPending(id: string, allowUnpast: boolean) {
         triggers = [...triggers, ...back];
         commit();
         notify({ kind: 'err', title: '觸價單未送出（仍待確認）', body: `${f.t.code} ${message}` });
-        const latest = lastPrices.get(f.t.code);
-        if (latest !== undefined) evaluateTick(f.t.code, latest);
+        const latest = lastPrices.get(priceKeyOf(f.t));
+        if (latest !== undefined) evaluateTick(f.t.code, latest, usesOddFeed(f.t));
     }
 }
 
@@ -871,16 +887,19 @@ export function applyExitTrade(trade: Trade, opts: { settle?: boolean } = {}) {
 const isPast = (t: Pick<TriggerOrder, 'condition' | 'price'>, price: number) =>
     (t.condition === 'below' && price <= t.price) || (t.condition === 'above' && price >= t.price);
 
-export function evaluateTick(code: string, price: number) {
+/** `oddLot`: a 盤中零股 trade — evaluates only odd-lot triggers of `code`;
+ * a regular-lot trade evaluates everything else (#204). */
+export function evaluateTick(code: string, price: number, oddLot = false) {
     if (!main || !executing || !Number.isFinite(price) || price <= 0) return;
-    const previous = lastPrices.get(code);
-    lastPrices.set(code, price);
+    const key = feedKey(code, oddLot);
+    const previous = lastPrices.get(key);
+    lastPrices.set(key, price);
     if (triggers.length === 0) return;
     const env = currentProtectionEnv(); // null → only alerts may fire
     let rearmed = false;
     const held: { t: TriggerOrder; reason: RestoreReason }[] = [];
     for (const t of triggers.slice()) {
-        if (t.code !== code || t.suspended || t.pending) continue;
+        if (t.code !== code || usesOddFeed(t) !== oddLot || t.suspended || t.pending) continue;
         if (t.kind !== 'alert' && t.env !== env) continue;
         const past = isPast(t, price);
         if (t.awaitingRecross) {
@@ -905,7 +924,7 @@ export function evaluateTick(code: string, price: number) {
     const stillHeld = held.filter(h => triggers.some(x => x.id === h.t.id));
     if (stillHeld.length) holdPending(stillHeld, price);
     else if (rearmed) commit();
-    else if (previous !== price && triggers.some(t => t.pending && t.code === code)) schedulePricePublish();
+    else if (previous !== price && triggers.some(t => t.pending && priceKeyOf(t) === key)) schedulePricePublish();
 }
 
 // ---- restore confirmation (#144) ----
@@ -980,8 +999,9 @@ function noteActivity() {
 function pendingPrices(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const t of triggers) {
-        const p = t.pending ? lastPrices.get(t.code) : undefined;
-        if (p !== undefined) out[t.code] = p;
+        const key = priceKeyOf(t);
+        const p = t.pending ? lastPrices.get(key) : undefined;
+        if (p !== undefined) out[key] = p;
     }
     return out;
 }
@@ -1068,7 +1088,7 @@ function resolvePending(id: string, choice: PendingChoice, allowUnpast = false):
     const account = t.account && getAccountState().accounts.find(a => a.signed && a.account_type === t.account!.account_type
         && a.broker_id === t.account!.broker_id && a.account_id === t.account!.account_id);
     if (!account) throw new Error('建立時的帳戶已不可用，未送出');
-    const latest = lastPrices.get(t.code);
+    const latest = lastPrices.get(priceKeyOf(t));
     if (getStreamStatus() !== 'live' || latest === undefined) throw new Error('行情未連線或連線後尚未收到新成交價，未送出');
     if (!isPast(t, latest) && !allowUnpast) throw new Error(`目前已未穿價（目前價 ${latest}），未送出；如仍要送出請再確認`);
     if (userSending.has(id)) throw new Error('送出處理中');
@@ -1089,25 +1109,30 @@ function syncQuotes() {
     if (!main || !executing) return;
     const env = currentProtectionEnv();
     const base = getApiBase();
-    const codes = new Set(triggers.filter(t => !t.suspended && (t.kind === 'alert' || t.env === env
-        || (!env && t.env?.startsWith(`${base}|`)))).map(t => t.code));
-    for (const [code, hold] of quoteHolds) {
-        if (!codes.has(code)) { hold.release?.(); quoteHolds.delete(code); }
+    // one hold per price feed: 整股 Tick, and 盤中零股 Tick for odd-lot triggers
+    const feeds = new Map<string, { code: string; oddLot: boolean }>();
+    for (const t of triggers) {
+        if (t.suspended || !(t.kind === 'alert' || t.env === env || (!env && t.env?.startsWith(`${base}|`)))) continue;
+        feeds.set(priceKeyOf(t), { code: t.code, oddLot: usesOddFeed(t) });
+    }
+    const codes = new Set([...feeds.values()].map(f => f.code));
+    for (const [key, hold] of quoteHolds) {
+        if (!feeds.has(key)) { hold.release?.(); quoteHolds.delete(key); }
     }
     let changed = false;
     for (const code of [...feedMissing]) if (!codes.has(code)) { feedMissing.delete(code); changed = true; }
-    for (const code of codes) {
-        if (quoteHolds.has(code)) continue;
+    for (const [key, { code, oddLot }] of feeds) {
+        if (quoteHolds.has(key)) continue;
         const hold: { release?: () => void } = {};
-        quoteHolds.set(code, hold);
+        quoteHolds.set(key, hold);
         void ensureContract(code).then(contract => {
-            if (quoteHolds.get(code) !== hold) return;
-            hold.release = retainQuote(contract, 'Tick');
+            if (quoteHolds.get(key) !== hold) return;
+            hold.release = oddLot ? retainQuote(contract, 'Tick', { oddLot: true }) : retainQuote(contract, 'Tick');
             retryDelay = 5000;
             if (feedMissing.delete(code)) publishFeed();
         }).catch(() => {
-            if (quoteHolds.get(code) !== hold) return;
-            quoteHolds.delete(code);
+            if (quoteHolds.get(key) !== hold) return;
+            quoteHolds.delete(key);
             if (!feedMissing.has(code)) {
                 feedMissing.add(code);
                 publishFeed();
@@ -1165,6 +1190,10 @@ function becomeExecutor() {
     onAnyTick(tick => {
         noteActivity();
         if (!tick.simtrade) evaluateTick(tick.code, Number(tick.close));
+    });
+    onOddLotTick(tick => {
+        noteActivity();
+        if (!tick.simtrade) evaluateTick(tick.code, Number(tick.close), true);
     });
     onStreamEvent('heartbeat', () => noteActivity());
     onTrackedReport((report, _info, base) => applyExitReport(report, base));
