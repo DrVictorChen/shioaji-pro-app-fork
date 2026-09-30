@@ -24,6 +24,7 @@ import { PendingTriggers } from './components/pending-triggers';
 import { FeatureGate } from './components/feature-gate';
 import { FlashOrder } from './components/flash-order';
 import { GridTicket } from './components/grid-ticket';
+import { OddSpread } from './components/odd-spread';
 import { HudHeader } from './components/hud-header';
 import { IntradayChart } from './components/intraday-chart';
 import { IntradayWallPanel } from './components/intraday-wall';
@@ -129,6 +130,7 @@ const POPOUT_TYPES: ReadonlySet<string> = new Set([
     'ticket',
     'tape',
     'flash',
+    'oddspread',
     'chips',
     'volprofile',
     'optchain',
@@ -305,6 +307,18 @@ function BlockBody({
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
             );
+        case 'oddspread':
+            return contract ? (
+                <OddSpread
+                    snapshot={snapshot}
+                    contract={contract}
+                    trades={dockProps.trades}
+                    positions={dockProps.positions}
+                    onOrdersChanged={dockProps.onTradesChanged}
+                />
+            ) : (
+                <BlockPlaceholder phase={missingContractPhase} />
+            );
         case 'pnl':
             return <PnlPanel />;
         case 'chips':
@@ -450,7 +464,7 @@ function indexBlockMessage(type: BlockType): string | null {
     if (type === 'tape' || type === 'volprofile') {
         return '指數沒有即時 Tick 串流，此面板不支援盤中更新';
     }
-    if (type === 'flash' || type === 'grid') {
+    if (type === 'flash' || type === 'grid' || type === 'oddspread') {
         return '指數商品不可下單';
     }
     return null;
@@ -467,7 +481,7 @@ function IndexBlockUnavailable({ type }: { type: BlockType }) {
 // 組合商品是行情/圖表身分 — 下單類面板要導向組合單（整體 action ×
 // 組合型別的展開語意，一般單腿下單面板無法表達）
 function comboBlockMessage(type: BlockType): string | null {
-    if (type === 'ticket' || type === 'grid' || type === 'flash') {
+    if (type === 'ticket' || type === 'grid' || type === 'flash' || type === 'oddspread') {
         return '組合商品請使用「組合單」面板下單';
     }
     return null;
@@ -518,7 +532,7 @@ function BlockView(props: BlockViewProps) {
                 title={`${meta.label}${pulseMarket}`}
                 symbolCode={symbol?.code}
                 // 閃電下單的商品名稱改在面板內的名稱列顯示（#176）
-                symbolName={block.type === 'flash' ? undefined : symbol?.name}
+                symbolName={block.type === 'flash' || block.type === 'oddspread' ? undefined : symbol?.name}
                 pinnable={meta.pinnable}
                 pin={block.pin}
                 currentCode={selected?.code ?? null}
@@ -573,7 +587,7 @@ function PopoutView({
     const trading = useTradingState();
     // Tiles have no HUD header to fetch /info before the first confirmation.
     useEffect(() => {
-        if (type === 'flash') void primeOrderConfirmSimulation();
+        if (type === 'flash' || type === 'oddspread') void primeOrderConfirmSimulation();
     }, [type]);
     // popouts (incl. 閃電全開 tiles, web and desktop alike) have no dock or
     // settings dialog to trigger the account fetch — load it here (#139)
@@ -671,6 +685,19 @@ function PopoutView({
                     />
                 );
                 break;
+            case 'oddspread':
+                body = (
+                    <OddSpread
+                        contract={contract}
+                        trades={tradesState.data ?? []}
+                        positions={popoutPositionsState.data ?? []}
+                        onOrdersChanged={() => {
+                            tradesState.refresh();
+                            popoutPositionsState.refresh();
+                        }}
+                    />
+                );
+                break;
             case 'chips':
                 body = <ChipsCard contract={contract} />;
                 break;
@@ -697,7 +724,7 @@ function PopoutView({
                 <PanelChrome
                     title={meta.label}
                     symbolCode={contract?.code}
-                    symbolName={type === 'flash' ? undefined : contract?.name}
+                    symbolName={type === 'flash' || type === 'oddspread' ? undefined : contract?.name}
                 />
                 <PanelErrorBoundary label={meta.label}>
                     {body}
