@@ -165,9 +165,11 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
                 <StylePopover
                     api={api}
                     anchor={swatchRef.current}
-                    onClose={() => {
+                    onClose={(reason) => {
                         setOpen(false);
-                        api.focusChart();
+                        // 點面板外關閉時焦點留在點到的地方（不搶回圖表）：
+                        // 點了別的面板後，Delete 不能還作用在圖上的物件
+                        if (reason !== 'outside') api.focusChart();
                     }}
                 />
             )}
@@ -238,7 +240,7 @@ export function StylePopover({
 }: {
     api: ChartDrawingsApi;
     anchor: HTMLElement | null;
-    onClose: () => void;
+    onClose: (reason: 'esc' | 'outside' | 'action') => void;
 }) {
     const popRef = useRef<HTMLDivElement | null>(null);
     const [pos, setPos] = useState<CSSProperties>({ position: 'fixed', visibility: 'hidden' });
@@ -256,7 +258,7 @@ export function StylePopover({
     useEscClose(() => {
         const active = popRef.current?.ownerDocument?.activeElement;
         if (active && active.tagName === 'INPUT' && popRef.current?.contains(active)) return;
-        closeRef.current();
+        closeRef.current('esc');
     });
 
     // 依可用空間定位；視窗縮放或工具列捲動時重新定位
@@ -289,7 +291,7 @@ export function StylePopover({
         const onDown = (ev: Event) => {
             const t = ev.target as Node | null;
             if (t && (popRef.current?.contains(t) || anchor.contains(t))) return;
-            closeRef.current();
+            closeRef.current('outside');
         };
         doc.addEventListener('pointerdown', onDown, true);
         return () => doc.removeEventListener('pointerdown', onDown, true);
@@ -393,7 +395,7 @@ export function StylePopover({
                     title='清除目前商品的所有畫圖（鎖定的保留）'
                     onClick={() => {
                         api.clearAll();
-                        closeRef.current();
+                        closeRef.current('action');
                     }}
                 >
                     清除全部

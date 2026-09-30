@@ -35,7 +35,12 @@ import {
     X,
 } from 'lucide-react';
 import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { orderLineMayTakePointer, useChartDrawings } from '../hooks/use-chart-drawings';
+import {
+    ORDER_GRIP_PX,
+    orderLineMayTakePointer,
+    useChartDrawings,
+    type ChartDrawingsApi,
+} from '../hooks/use-chart-drawings';
 import { takeDrawingSaveErrorNotice, useDrawingsSaveFailed } from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
 import {
@@ -1273,6 +1278,7 @@ export function CandleChart({
     // 畫圖工具武裝中（下方 useChartDrawings 每次 render 更新）。委託線的
     // 拖曳 effect 宣告在畫圖 hook 之前，靠這個 ref 讀最新狀態
     const drawingArmedRef = useRef(false);
+    const drawingsRef = useRef<ChartDrawingsApi | null>(null);
 
     // drag an order line to modify its price
     useEffect(() => {
@@ -1303,14 +1309,30 @@ export function CandleChart({
             return null;
         };
 
+        // 委託線能不能接手這一下（見 orderLineMayTakePointer）。右側把手
+        // 區＝價格軸加上它左邊 ORDER_GRIP_PX，委託標籤就在那裡
+        const mayTake = (e: MouseEvent) => {
+            const d = drawingsRef.current;
+            const rect = host.getBoundingClientRect();
+            const axis = chartRef.current?.priceScale('right').width() ?? 60;
+            return orderLineMayTakePointer({
+                drawingArmed: drawingArmedRef.current,
+                defaultPrevented: e.defaultPrevented,
+                drawingHit: d?.drawingAt(e) ?? null,
+                drawingBusy: d?.drawingBusy() ?? false,
+                inGrip: e.clientX - rect.left >= rect.width - axis - ORDER_GRIP_PX,
+            });
+        };
+
         const hover = (e: MouseEvent) => {
             if (dragging) return;
-            // 武裝畫圖工具時委託線不接手，游標交給畫圖（十字）
-            if (drawingArmedRef.current) {
+            const near = findNear(yOf(e));
+            // 武裝畫圖工具、或這個位置歸畫圖物件時委託線不接手，游標交給畫圖
+            if (!near || !mayTake(e)) {
                 if (host.style.cursor === 'ns-resize') host.style.cursor = '';
                 return;
             }
-            host.style.cursor = findNear(yOf(e)) ? 'ns-resize' : '';
+            host.style.cursor = 'ns-resize';
         };
 
         const down = (e: MouseEvent) => {
@@ -1318,16 +1340,8 @@ export function CandleChart({
             // 「委託線優先」只在瀏覽模式：武裝畫圖工具時這一下屬於畫圖，
             // 在委託價附近畫線不能變成改價；別的 handler 已經接手的一下
             // 也不能同時拖畫圖又送出改價
-            if (
-                !orderLineMayTakePointer({
-                    drawingArmed: drawingArmedRef.current,
-                    defaultPrevented: e.defaultPrevented,
-                })
-            ) {
-                return;
-            }
             const hit = findNear(yOf(e));
-            if (!hit) return;
+            if (!hit || !mayTake(e)) return;
             e.preventDefault();
             e.stopPropagation();
             chartRef.current?.applyOptions({
@@ -1424,6 +1438,7 @@ export function CandleChart({
         themeMode: baseMode(themeSettings),
     });
     drawingArmedRef.current = drawings.tool !== null;
+    drawingsRef.current = drawings;
 
     // 畫圖存不進 localStorage（配額滿）— 畫面上的物件還在，但關掉就沒了。
     // 多張圖同時訂閱，notice 只由第一張拿到的圖發出

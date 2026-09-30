@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+    __setDrawingLocksForTest,
+    TOMBSTONE_TTL_MS,
     __resetDrawingsForTest,
     addDrawing,
     clearDrawings,
@@ -166,7 +168,8 @@ describe('畫圖物件的增刪改', () => {
             expect(getDrawings('TXF')[0]!.anchors[1]!.price).toBe(25150);
             expect(setItem).not.toHaveBeenCalled();
             vi.runAllTimers();
-            expect(setItem).toHaveBeenCalledTimes(1);
+            // 畫圖一次（另加墓碑項目一次）
+            expect(setItem.mock.calls.filter((c) => c[0] === 'sj-pro-chart-drawings')).toHaveLength(1);
             expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF[0].anchors[1].price).toBe(25150);
         } finally {
             vi.useRealTimers();
@@ -417,5 +420,97 @@ describe('設定寫入節流', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('review 修正：跨視窗鎖、墓碑、上限、設定合併', () => {
+    const KEY = 'sj-pro-chart-drawings';
+    const TKEY = 'sj-pro-chart-drawing-tombstones';
+    const saved = () => JSON.parse(store.get(KEY) ?? '{}') as Record<string, { id: string }[]>;
+    const theirs = (id: string, updatedAt = 1) => ({
+        id,
+        tool: 'horizontal',
+        anchors: [{ time: 1000, price: 25000 }],
+        style: DEFAULT_DRAWING_STYLE,
+        locked: false,
+        hidden: false,
+        createdAt: 1,
+        updatedAt,
+    });
+
+    it('讀→合併→寫在 Web Lock 裡做：拿到鎖之前別的視窗寫入的物件不會被蓋掉', () => {
+        const queue: (() => unknown)[] = [];
+        const request = vi.fn((name: string, cb: () => unknown) => {
+            expect(name).toBe('sj-chart-drawings');
+            queue.push(cb);
+            return Promise.resolve();
+        });
+        __setDrawingLocksForTest({ request });
+        const mine = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        expect(request).toHaveBeenCalledTimes(1);
+        expect(store.get(KEY)).toBeUndefined(); // 還在等鎖
+        // 鎖被另一個視窗拿著時，它寫入了自己的物件
+        store.set(KEY, JSON.stringify({ TXF: [theirs('other')] }));
+        // 等鎖期間本視窗又改了一次
+        updateDrawing('TXF', mine.id, { locked: true });
+        queue.shift()!();
+        const ids = saved().TXF!.map((d) => d.id).sort();
+        expect(ids).toEqual([mine.id, 'other'].sort());
+        expect((saved().TXF!.find((d) => d.id === mine.id) as unknown as { locked: boolean }).locked).toBe(true);
+    });
+
+    it('刪除墓碑寫出後仍保留：別的視窗較舊的寫入不會讓物件復活；比刪除更晚的修改才算數', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        removeDrawing('TXF', a.id);
+        flushDrawingWrites();
+        const tombs = JSON.parse(store.get(TKEY)!);
+        expect(typeof tombs.TXF[a.id]).toBe('number');
+        // 別的視窗還拿著 a 的舊版本，整份寫回
+        store.set(KEY, JSON.stringify({ TXF: [{ ...a }] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')).toEqual([]);
+        // 刪除之後才修改的版本（updatedAt 較新）才會留下
+        store.set(KEY, JSON.stringify({ TXF: [{ ...a, updatedAt: tombs.TXF[a.id] + 10 }] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([a.id]);
+    });
+
+    it('過期（超過 TTL）的墓碑在寫出時清掉', () => {
+        const old = Date.now() - TOMBSTONE_TTL_MS - 1000;
+        store.set(TKEY, JSON.stringify({ TXF: { gone: old, fresh: Date.now() } }));
+        addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        flushDrawingWrites();
+        expect(Object.keys(JSON.parse(store.get(TKEY)!).TXF)).toEqual(['fresh']);
+    });
+
+    it('載入時也守住每個商品的上限，保留最新的，順序不變', () => {
+        const list = Array.from({ length: MAX_DRAWINGS_PER_SYMBOL + 50 }, (_, i) => ({
+            ...theirs(`d${i}`),
+            createdAt: i,
+            updatedAt: i,
+        }));
+        store.set(KEY, JSON.stringify({ TXF: list }));
+        reloadDrawingsFromStorage();
+        const got = getDrawings('TXF');
+        expect(got).toHaveLength(MAX_DRAWINGS_PER_SYMBOL);
+        expect(got[0]!.id).toBe('d50');
+        expect(got.at(-1)!.id).toBe(`d${MAX_DRAWINGS_PER_SYMBOL + 49}`);
+    });
+
+    it('設定依欄位合併：兩個視窗各改不同欄位，兩邊都留下', () => {
+        setDrawingSettings({ shareContinuousMonth: false }); // 本視窗（尚未寫出）
+        store.set(
+            'sj-pro-chart-drawing-settings',
+            JSON.stringify({ shareContinuousMonth: true, defaultStyle: { width: 4, dash: 'dashed', fillOpacity: 0.2 } }),
+        );
+        reloadDrawingSettingsFromStorage();
+        expect(getDrawingSettings().shareContinuousMonth).toBe(false);
+        expect(getDrawingSettings().defaultStyle.width).toBe(4);
+        flushDrawingSettings();
+        const s = JSON.parse(store.get('sj-pro-chart-drawing-settings')!);
+        expect(s.shareContinuousMonth).toBe(false);
+        expect(s.defaultStyle.width).toBe(4);
     });
 });

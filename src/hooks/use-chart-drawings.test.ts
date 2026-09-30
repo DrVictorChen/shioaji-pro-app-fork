@@ -295,7 +295,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
         expect(keyListeners.size).toBe(0);
     });
 
-    it('選取中按 Esc 只取消選取，不吃掉這一下 — Esc×2 全刪單第一下仍然算數', async () => {
+    it('選取中按 Esc 取消選取並吃掉這一下 — 不算進 Esc×2 全刪單', async () => {
         const api = await mountChart();
         const d = line(25000);
         await act(async () => api().select(d.id));
@@ -304,7 +304,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
             e = press('Escape');
         });
         expect(api().selected).toBeNull();
-        expect(e.defaultPrevented).toBe(false);
+        expect(e.defaultPrevented).toBe(true);
     });
 
     it('武裝畫圖工具時按 Esc 退出工具並吃掉這一下 — 不算進 Esc×2 全刪單', async () => {
@@ -337,6 +337,27 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
             press('Escape');
         });
         expect(hk.cancelAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('Esc（武裝全刪單）→ 畫圖 UI 用掉的 Esc → Esc：第三下不會跟第一下湊成 Esc×2', async () => {
+        await act(async () => {
+            roots.push(create(createElement(HotkeysProbe)));
+        });
+        const api = await mountChart();
+        const d = line(25000);
+        await act(async () => {
+            press('Escape'); // 什麼都沒選：算第一下（武裝）
+        });
+        expect(hk.notify).toHaveBeenCalledTimes(1);
+        await act(async () => api().select(d.id));
+        await act(async () => {
+            press('Escape'); // 取消選取：被畫圖吃掉，並清掉第一下
+        });
+        await act(async () => {
+            press('Escape'); // 0.6 秒內 — 只能算新的第一下
+        });
+        expect(hk.cancelAll).not.toHaveBeenCalled();
+        expect(hk.notify).toHaveBeenCalledTimes(2);
     });
 
     it('兩張圖：後選取的那張接手鍵盤，Delete 只刪它的物件，前一張放掉選取', async () => {
@@ -571,6 +592,29 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         await act(async () => light().setTool('trend'));
         expect(light().style.color).toBe(TOOL_DEFAULT_COLORS.light.trend);
         expect(TOOL_DEFAULT_COLORS.light.trend).not.toBe(TOOL_DEFAULT_COLORS.dark.trend);
+    });
+
+    it('委託線與畫圖物件重疊：選取中的物件絕不讓；有畫圖時只能從右側把手區拖委託線', () => {
+        const base = { drawingArmed: false, defaultPrevented: false };
+        expect(orderLineMayTakePointer({ ...base })).toBe(true);
+        expect(orderLineMayTakePointer({ ...base, drawingArmed: true, inGrip: true })).toBe(false);
+        expect(orderLineMayTakePointer({ ...base, drawingHit: 'selected', inGrip: true })).toBe(false);
+        expect(orderLineMayTakePointer({ ...base, drawingHit: 'other' })).toBe(false);
+        expect(orderLineMayTakePointer({ ...base, drawingHit: 'other', inGrip: true })).toBe(true);
+        expect(orderLineMayTakePointer({ ...base, drawingBusy: true })).toBe(false);
+        expect(orderLineMayTakePointer({ ...base, drawingBusy: true, inGrip: true })).toBe(true);
+    });
+
+    it('drawingAt：游標下的畫圖物件是選取中的還是其他的', async () => {
+        const api = await setup(false);
+        expect(api().drawingAt({ clientX: 20, clientY: 200 })).toBe('other');
+        expect(api().drawingAt({ clientX: 20, clientY: 350 })).toBeNull();
+        expect(api().drawingBusy()).toBe(false);
+        await act(async () => {
+            pressOnLine();
+        });
+        expect(api().drawingAt({ clientX: 20, clientY: 200 })).toBe('selected');
+        expect(api().drawingBusy()).toBe(true);
     });
 
     it('沒武裝交易時，按在畫圖物件上會選取並接手這一下', async () => {

@@ -36,6 +36,7 @@ import {
 } from '../lib/chart-drawing-geometry';
 import { DrawingLayer, type DrawingDraft } from '../lib/chart-drawing-layer';
 import { escStackDepth } from './use-esc-close';
+import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import type { ContractBase } from '../lib/types/contract';
 import { roundToTick } from '../lib/utils/ticksize';
 
@@ -58,12 +59,30 @@ function claimKeyboard(token: object) {
 // 委託線（改價拖曳）可不可以接手這一下滑鼠。只有瀏覽模式才讓委託線
 // 優先：武裝畫圖工具時，使用者要的是在那個價位畫線，按住稍微移動就
 // 送出改價會直接動到真實委託。
+//
+// 瀏覽模式下畫圖物件與委託線重疊時，使用者以為在拖畫圖、放開卻送出
+// 改價 — 所以：
+// - 游標下是「選取中」的畫圖物件：委託線絕不接手
+// - 游標下有畫圖物件，或有物件選取中：委託線只能從右側把手區（委託
+//   標籤、靠價格軸那一段）拖，線的其他部分交給畫圖
+// - 游標下什麼畫圖都沒有、也沒選取：照舊整條線都能拖
+export type DrawingHit = 'selected' | 'other' | null;
+
 export function orderLineMayTakePointer(opts: {
     drawingArmed: boolean;
     defaultPrevented: boolean;
+    drawingHit?: DrawingHit;
+    drawingBusy?: boolean; // 有畫圖物件選取中（第二版還含顯示中的量測）
+    inGrip?: boolean; // 游標在委託線右側把手區
 }): boolean {
-    return !opts.drawingArmed && !opts.defaultPrevented;
+    if (opts.drawingArmed || opts.defaultPrevented) return false;
+    if (opts.drawingHit === 'selected') return false;
+    if (opts.inGrip) return true;
+    return !opts.drawingHit && !opts.drawingBusy;
 }
+
+// 委託線右側把手區的寬度（價格軸左邊這麼多像素，加上價格軸本身）
+export const ORDER_GRIP_PX = 90;
 
 // 鍵盤焦點是否在這張圖（圖表本體或它的左側工具列）上。Delete／Backspace
 // 只在這時作用 — 「最後操作的圖表」不夠：選取物件後點了別的面板的按鈕，
@@ -95,6 +114,10 @@ export interface ChartDrawingsApi {
     setShareContinuousMonth: (v: boolean) => void;
     // 點工具列時把鍵盤焦點交回圖表（WebKit 點按鈕不會給它焦點）
     focusChart: () => void;
+    // 委託線拖曳判斷用：游標下有沒有畫圖物件（選取中／其他）、有沒有
+    // 物件選取中
+    drawingAt: (ev: { clientX: number; clientY: number }) => DrawingHit;
+    drawingBusy: () => boolean;
 }
 
 export function useChartDrawings(opts: {
@@ -472,21 +495,21 @@ export function useChartDrawings(opts: {
             if (e.key === 'Escape') {
                 // 已被 modal 的 Esc 收走就不重複處理
                 if (e.defaultPrevented) return;
+                // 畫圖 UI 用掉的 Esc 一律吃掉（preventDefault）並清掉 Esc×2
+                // 的「第一下」：use-hotkeys 看到 defaultPrevented 就不算、
+                // 也不會跟更早的一下湊成兩下。連按兩下 Esc 確保取消畫圖／
+                // 取消選取是很自然的習慣，這兩下絕不能變成撤掉全部委託。
                 if (draftRef.current || stateRef.current.tool) {
-                    // 取消繪製／退出畫圖工具：吃掉這一下（preventDefault），
-                    // use-hotkeys 看到 defaultPrevented 就不算進 Esc×2 全部
-                    // 刪單。連按兩下 Esc 確保取消畫圖是很自然的習慣，這兩下
-                    // 絕不能變成撤掉全部委託。
                     draftRef.current = null;
                     setTool(null);
                     pushState();
-                    e.preventDefault();
                 } else if (stateRef.current.selectedId) {
-                    // 只取消選取：選取是被動狀態，不吃掉這一下 — 使用者按
-                    // Esc×2 要的是全部刪單，第一下不能因為圖上剛好選著
-                    // 一條線就失效
                     setSelectedId(null);
+                } else {
+                    return;
                 }
+                e.preventDefault();
+                resetEscCancelArm();
                 return;
             }
             if (e.key !== 'Delete' && e.key !== 'Backspace') return;
@@ -630,6 +653,19 @@ export function useChartDrawings(opts: {
         if (t) setSelectedId(null);
     }, []);
 
+    const drawingAt = useCallback((ev: { clientX: number; clientY: number }): DrawingHit => {
+        const layer = layerRef.current;
+        const pt = layer?.pointOf(ev);
+        const projector = layer?.projector();
+        if (!layer || !pt || !projector) return null;
+        const { drawings: list, selectedId: sel } = stateRef.current;
+        if (!list.length) return null;
+        const picked = pickDrawing(list, projector, layer.paneSize, pt);
+        if (!picked) return null;
+        return picked.drawing.id === sel ? 'selected' : 'other';
+    }, []);
+    const drawingBusy = useCallback(() => !!stateRef.current.selectedId, []);
+
     const focusChart = useCallback(() => {
         const host = hostRef.current;
         if (!host || typeof host.focus !== 'function') return;
@@ -641,6 +677,8 @@ export function useChartDrawings(opts: {
         tool,
         setTool: setToolChecked,
         focusChart,
+        drawingAt,
+        drawingBusy,
         drawings,
         selected,
         select,
