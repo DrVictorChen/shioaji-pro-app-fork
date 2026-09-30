@@ -12,7 +12,7 @@ import { coreErrorText, type CoreErrorCode, type MessageParams } from './message
 import type {
     BtMetrics, BtResult, BtTrade, PortfolioBarsInput, PortfolioCalendar, PortfolioExecutionConfig,
     PortfolioResult, PortfolioRiskLimits, ResearchMetrics, SignalConflictDiagnostic, SignalRule,
-    SignalSeries, StrategyIntent,
+    SignalSeries, StrategyIntent, TickBand,
 } from './schema';
 
 export const CORE_REQUEST_SCHEMA_VERSION = 'backtest-core-v2';
@@ -229,6 +229,58 @@ export interface CoreError {
 }
 
 export type CoreResponse = { ok: true; result: CoreResult } | { ok: false; error: CoreError };
+
+// ---------------------------------------------------------------------------
+// Data preparation (L1, backtest-spec-v2.1 §4)
+// ---------------------------------------------------------------------------
+
+/** Trading sessions in Taiwan wall-clock 'HH:MM'; close < open is an overnight session. */
+export interface SessionCalendar {
+    name: string;
+    sessions: { open: string; close: string }[];
+    /** Weekday dates that are not trading days. */
+    holidays: string[];
+    /** Weekend dates that are trading days (make-up days). */
+    extraTradingDays: string[];
+}
+
+export interface InstrumentMeta {
+    securityType: 'STK' | 'FUT' | 'OPT' | 'IND';
+    code: string;
+    root?: string;
+    specKind?: string;
+    underlyingKind?: string;
+    underlyingCode?: string;
+    isWarrant?: boolean;
+    multiplier?: number;
+    tick?: number;
+    tickLadder?: TickBand[];
+    priceLimitPct?: number | null;
+}
+
+export interface PrepareRequest {
+    schemaVersion: 'backtest-prepare-v1';
+    minutes: 1 | 5 | 15 | 30 | 60 | 1440;
+    /** Taiwan dates 'YYYY-MM-DD', inclusive. */
+    range: { from: string; to: string };
+    minBars: number;
+    costSettings: { discount: number; futuresFee: number; slippageTicks: number };
+    assets: {
+        id: string;
+        symbol: string;
+        instrument: InstrumentMeta;
+        calendar: SessionCalendar;
+        /** 'YYYY-MM-DD HH:MM[:SS]' Taiwan time, close-label-right minutes. */
+        minuteBars: { datetime: string; open: number | null; high: number | null; low: number | null;
+            close: number | null; volume: number | null }[];
+        daily?: { tradingDay: string; referencePrice?: number; limitUp?: number; limitDown?: number }[];
+    }[];
+}
+
+export type PrepareResponse =
+    | { ok: true; bars: Record<string, PortfolioBarsInput>; execution: Record<string, PortfolioExecutionConfig>;
+        periodsPerYear: number; diagnostics: { kind: 'out-of-session'; assetId: string; count: number }[] }
+    | { ok: false; error: { code: 'DATA_TOO_FEW_BARS' | 'DATA_NO_BARS' | 'DATA_INVALID'; params: Record<string, string | number> } };
 
 // ---------------------------------------------------------------------------
 // Optimization candidate selection

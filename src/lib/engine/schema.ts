@@ -400,11 +400,18 @@ export interface BtResult {
     metrics: BtMetrics;
 }
 
-export const RESULT_SCHEMA_VERSION = 'research-v1';
+/**
+ * research-v2 (CHANGE-9): Sharpe / Sortino annualize with the request's
+ * periodsPerYear (session calendar, spec §4.9) and buy-and-hold uses the first
+ * and last available close. Persisted research-v1 records stay readable with
+ * their stored values.
+ */
+export const RESULT_SCHEMA_VERSION = 'research-v2';
+export type ResearchSchemaVersion = typeof RESULT_SCHEMA_VERSION | 'research-v1';
 
-/** In-memory research-v1 metrics; the JSON form is ResearchMetricsRecord (core.ts). */
+/** In-memory research metrics; the JSON form is ResearchMetricsRecord (core.ts). */
 export interface ResearchMetrics {
-    schemaVersion: typeof RESULT_SCHEMA_VERSION;
+    schemaVersion: ResearchSchemaVersion;
     returnPct: number;
     /** In memory `Infinity` when a short span overflows the annualization; see ResearchMetricsRecord for JSON. */
     annualizedReturnPct: number;
