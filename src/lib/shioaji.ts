@@ -879,33 +879,46 @@ async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tr
  *  — the cancel was sent, its effect is unknown, and it is never resent. */
 export function cancelOrder(
     tradeId: string,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; batch?: CancelBatchMember },
+    opts?: {
+        agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; batch?: CancelBatchMember;
+        // runs synchronously right before the HTTP cancel is sent; throwing
+        // refuses it (mutationNotStarted) — e.g. the caller's bound environment changed
+        beforeSend?: () => void;
+    },
 ) {
-    const { batch, ...requestOpts } = opts ?? {};
+    const { batch, beforeSend, ...requestOpts } = opts ?? {};
     // A batch member that fails before verification still arrives, so the
     // batch's shared confirmation read is not held back.
-    return observeCancel(tradeId, requestOpts, batch).finally(() => batch?.arrive());
+    return observeCancel(tradeId, requestOpts, batch, beforeSend).finally(() => batch?.arrive());
 }
 
 /** Cancel several orders: every request is sent first, then each account's
  *  cancels share one authoritative confirmation read (refresh:true) instead of
  *  one per order. Used by every batch path (flash 全刪, 鋪單全撤, 全部刪單,
  *  batch cancel). Single cancels use cancelOrder. */
-export function cancelOrders(tradeIds: string[], onSettled?: () => void): Promise<PromiseSettledResult<Trade>[]> {
+export function cancelOrders(tradeIds: string[], onSettled?: () => void, beforeSend?: () => void): Promise<PromiseSettledResult<Trade>[]> {
     const batch = createCancelBatch(tradeIds.length);
-    return Promise.allSettled(tradeIds.map(id => cancelOrder(id, { batch: batch.member() }).finally(() => onSettled?.())));
+    return Promise.allSettled(tradeIds.map(id => cancelOrder(id, { batch: batch.member(), beforeSend }).finally(() => onSettled?.())));
 }
 
 function observeCancel(
     tradeId: string,
     opts: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
     batch: CancelBatchMember | undefined,
+    beforeSend?: () => void,
 ) {
     return observeTradeMutation(tradeId, async () => {
         const target = await prepareOrderMutation(tradeId);
         const { account } = target;
         const { cancelCacheTrusted, locallyCancelled } = target.tradingState;
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
+        if (beforeSend) {
+            try {
+                beforeSend();
+            } catch (e) {
+                throw Object.assign(e instanceof Error ? e : new Error(String(e)), { mutationNotStarted: true });
+            }
+        }
         await apiPost<Trade>(
             '/api/v1/order/cancel_order',
             { trade_id: target.tradeId },

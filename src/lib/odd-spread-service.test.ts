@@ -16,21 +16,20 @@ const mocks = vi.hoisted(() => ({
     executor: true,
     base: 'http://127.0.0.1:21322',
     info: { simulation: true } as { simulation: boolean } | undefined,
-    gen: 0,
+    epoch: 1,
 }));
 vi.mock('./trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place }));
-vi.mock('./shioaji', () => ({ cancelOrders: (ids: string[]) => mocks.cancel(ids) }));
+vi.mock('./shioaji', () => ({ cancelOrders: (ids: string[], onSettled?: unknown, beforeSend?: unknown) => mocks.cancel(ids, onSettled, beforeSend) }));
 vi.mock('./trading-state', () => ({
     getTradingState: () => ({ trades: mocks.trades }),
     subscribeTradingState: (l: () => void) => { mocks.tradeListener = l; return () => undefined; },
-    ordersBaselineLostMark: () => mocks.gen,
 }));
 vi.mock('./server-info-store', () => ({
     knownServerInfo: () => mocks.info,
     subscribeServerInfo: (l: () => void) => { mocks.infoListener = l; return () => undefined; },
 }));
 vi.mock('./runtime', () => ({ getApiBase: () => mocks.base }));
-vi.mock('./stream', () => ({ getQuote: (code: string, odd = false) => mocks.quotes.get(`${code}:${odd}`) }));
+vi.mock('./stream', () => ({ getQuote: (code: string, odd = false) => mocks.quotes.get(`${code}:${odd}`), streamConnectionEpoch: () => mocks.epoch }));
 vi.mock('./quote-ownership', () => ({ retainContractQuotes: () => () => undefined }));
 vi.mock('./main-window-commands', () => ({
     isMainWindow: () => mocks.main,
@@ -42,6 +41,7 @@ vi.mock('./utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, d: numb
 import { isTerminalPhase } from './odd-spread-exec';
 import {
     acceptHedge,
+    currentGen,
     addClickLock,
     clearClickLock,
     clickLocksFor,
@@ -105,7 +105,7 @@ beforeEach(() => {
     mocks.executor = true;
     mocks.base = 'http://127.0.0.1:21322';
     mocks.info = { simulation: true };
-    mocks.gen = 0;
+    mocks.epoch = 1;
     mocks.quotes.clear();
     mocks.quotes.set('2330:false', { bidask: { code: '2330', date: '2026/09/30', time: '10:00:00', bid_price: ['1080'], bid_volume: [100], ask_price: ['1085'], ask_volume: [100] } });
     mocks.cancel.mockResolvedValue([{ status: 'fulfilled', value: {} }]);
@@ -254,16 +254,18 @@ it('sidecar 重啟後委託換了 id：以唯一標記重新接回；舊 id 被�
     startSpreadExecution(req());
     await flush();
     const tags = [tagOf('odd:0'), tagOf('odd:1')];
-    expect(record().state.slots.map(s => [s.orderId, s.idGen])).toEqual([['T1', 0], ['T2', 0]]);
+    const g1 = currentGen();
+    expect(g1).not.toBeNull();
+    expect(record().state.slots.map(s => [s.orderId, s.idGen])).toEqual([['T1', g1], ['T2', g1]]);
     // sidecar 重啟：同樣兩筆換成新 id；舊 id T1 被一筆無關（沒標記）的委託重用、已成交
-    mocks.gen = 1;
+    mocks.epoch = 2; // sidecar 重啟 → 串流重連
     setTrades([
         trade('T1', 1095, 380, 380, 'Filled', undefined),
         trade('N1', 1095, 380, 0, 'Submitted', tags[0]),
         trade('N2', 1090, 620, 0, 'Submitted', tags[1]),
     ]);
     const s = record().state;
-    expect(s.slots.map(x => [x.orderId, x.idGen, x.filled])).toEqual([['N1', 1, 0], ['N2', 1, 0]]);
+    expect(s.slots.map(x => [x.orderId, x.idGen, x.filled])).toEqual([['N1', currentGen(), 0], ['N2', currentGen(), 0]]);
     // 新 id 上的成交照常對帳 → 送整股
     setTrades([trade('N1', 1095, 380, 380, 'Filled', tags[0]), trade('N2', 1090, 620, 620, 'Filled', tags[1])]);
     expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
@@ -274,7 +276,7 @@ it('世代變了、委託列又沒有標記：舊 id 不採用，列為候選由
     mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
     const id = startSpreadExecution(req());
     await flush();
-    mocks.gen = 2;
+    mocks.epoch = 3;
     setTrades([trade('T1', 1095, 380, 380, 'Filled', undefined)]);
     expect(record().state.slots[0]!.filled).toBe(0);
     expect(candidateOrders(id, 'odd:0').map(t => t.order.id)).toEqual(['T1']);
@@ -456,18 +458,60 @@ it('彈出視窗與非執行中的主視窗不可執行', () => {
     expect(oddSpreadExecUnavailable()).toContain('另一個主視窗');
 });
 
-it('對帳只認同帳戶、同商品、同方向價量與單位，且標記完全相同', () => {
+it('對帳只認同帳戶、同商品、同方向與單位，且標記完全相同（價量可因改單而不同）', () => {
     mocks.place.mockImplementation(() => new Promise(() => undefined));
     startSpreadExecution(req());
     const t0 = tagOf('odd:0');
     reconcile([
         { ...trade('W1', 1095, 380, 380, 'Filled', t0), account: { ...account, account_id: 'B' } } as AccountedTrade,
         trade('W2', 1095, 380, 380, 'Filled', t0, 'Common'),
-        trade('W3', 1095, 381, 380, 'Filled', t0),
+        trade('W3', 1095, 380, 380, 'Filled', t0, 'IntradayOdd', 'Buy'), // 方向不同（標記相同也不認）
         trade('W4', 1095, 380, 380, 'Filled', undefined),
-        trade('W5', 1095, 380, 380, 'Filled', tagOf('odd:1')),
+        trade('W5', 1095, 380, 380, 'Filled', tagOf('odd:1')), // 別筆的標記 → 屬於 odd:1（改過價量）
     ]);
-    expect(record().state.slots.every(s => !s.orderId)).toBe(true);
+    expect(record().state.slots[0]!.orderId).toBeUndefined();
+    expect(record().state.slots[1]!.orderId).toBe('W5');
     reconcile([trade('W6', 1095, 380, 380, 'Filled', t0)]);
     expect(record().state.slots[0]!.orderId).toBe('W6');
+});
+
+it('串流中斷（身分無法判定）：不信任任何委託編號、不以編號刪單', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    const id = startSpreadExecution(req());
+    await flush();
+    mocks.epoch = -1;
+    expect(currentGen()).toBeNull();
+    setTrades([trade('T1', 1095, 380, 380, 'Filled', undefined)]);
+    expect(record().state.slots[0]!.filled).toBe(0);
+    spreadExecAction(id, { type: 'cancel' });
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(record().state.slots.every(s => s.cancelWanted)).toBe(true);
+});
+
+it('刪單送出前最後一刻比對完整環境與伺服器身分', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    const id = startSpreadExecution(req());
+    await flush();
+    spreadExecAction(id, { type: 'cancel' });
+    const hook = mocks.cancel.mock.calls[0]![2] as () => void;
+    expect(() => hook()).not.toThrow();
+    mocks.info = { simulation: false };
+    expect(() => hook()).toThrow('環境已切換');
+    mocks.info = { simulation: true };
+    mocks.epoch = 5;
+    expect(() => hook()).toThrow('伺服器身分已變更');
+});
+
+it('改價後仍以標記對上同一筆委託，之後的成交照常', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    startSpreadExecution(req());
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    // 兩筆都被改價（1,095→1,100、1,090→1,095）後全數成交
+    setTrades([trade('T1', 1100, 380, 380, 'Filled', tags[0]), trade('T2', 1095, 620, 620, 'Filled', tags[1])]);
+    expect(record().state.slots.slice(0, 2).map(s => s.filled)).toEqual([380, 620]);
+    expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
 });

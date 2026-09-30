@@ -282,3 +282,7 @@ describe('mutation without an authoritative baseline on this sidecar', () => {
         expect(m.post).not.toHaveBeenCalled();
     });
 });
+it('cancel beforeSend runs right before the HTTP send; throwing refuses it (not started)', async () => {
+    await expect(cancelOrder('fixture', { beforeSend: () => { throw new Error('環境已切換'); } })).rejects.toMatchObject({ mutationNotStarted: true, message: '環境已切換' });
+    expect(m.post).not.toHaveBeenCalled();
+});

@@ -43,9 +43,9 @@ import {
 } from './odd-spread-exec';
 import { retainContractQuotes } from './quote-ownership';
 import { cancelOrders } from './shioaji';
-import { getQuote } from './stream';
+import { getQuote, streamConnectionEpoch } from './stream';
 import { notify, placeQuickOrder } from './trade';
-import { getTradingState, ordersBaselineLostMark, subscribeTradingState } from './trading-state';
+import { getTradingState, subscribeTradingState } from './trading-state';
 import { candidateTrades, reconcileEvents, slotTag, tradeReport } from './odd-spread-reconcile';
 import type { ContractInfo } from './types/contract';
 import type { AccountedTrade } from './types/order';
@@ -181,6 +181,7 @@ function bookOf(rec: SpreadExecRecord, odd: boolean): SideBook {
 
 function contextFor(rec: SpreadExecRecord): ExecContext {
     return {
+        currentGen,
         quoteHedge: (leg: LegKind, action, quantity) => {
             const plan = rec.state.plan;
             const odd = leg === 'odd';
@@ -252,11 +253,18 @@ function announce(rec: SpreadExecRecord, before: ExecState) {
 
 function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands'][number]) {
     if (c.kind === 'cancel') {
-        if (!envMatches(rec.env)) {
-            update(rec.id, { type: 'cancelResult', key: c.key, ok: false, error: ENV_PAUSED_TEXT });
+        const slot = rec.state.slots.find(s => s.key === c.key);
+        const gen = currentGen();
+        if (!envMatches(rec.env) || gen === null || slot?.orderId !== c.orderId || slot.idGen !== gen) {
+            update(rec.id, { type: 'cancelResult', key: c.key, ok: false, error: !envMatches(rec.env) ? ENV_PAUSED_TEXT : '委託編號待重新接回（伺服器已重啟或連線中斷）' });
             return;
         }
-        void cancelOrders([c.orderId]).then(
+        // 送出刪單前最後一刻再比對完整環境（API base＋模擬／正式）與伺服器身分
+        const beforeSend = () => {
+            if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未刪單`);
+            if (currentGen() !== gen) throw new Error('伺服器身分已變更，未刪單');
+        };
+        void cancelOrders([c.orderId], undefined, beforeSend).then(
             (results) => {
                 const r = results[0];
                 const ok = r?.status === 'fulfilled';
@@ -268,6 +276,7 @@ function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands']
         );
         return;
     }
+    const genAtSend = currentGen();
     void placeQuickOrder(rec.contract, c.action, c.price, c.quantity, {
         account: rec.account,
         source: 'auto',
@@ -277,7 +286,9 @@ function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands']
         beforeSend: () => { if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未送出`); },
     }).then(
         (trade) => {
-            update(rec.id, { type: 'placed', key: c.key, orderId: trade.order.id, gen: currentGen() });
+            // 回應期間伺服器身分變了 → 這個 id 不可信（之後以標記接回）
+            const g = currentGen();
+            update(rec.id, { type: 'placed', key: c.key, orderId: trade.order.id, gen: g !== null && g === genAtSend ? g : null });
             update(rec.id, { type: 'report', key: c.key, ...tradeReport(trade) });
             reconcile();
         },
@@ -295,18 +306,23 @@ function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands']
     );
 }
 
-/** 目前的 sidecar 世代（trade_id 只在同一 sidecar 程序有效） */
-function currentGen(): number {
-    try {
-        return ordersBaselineLostMark();
-    } catch {
-        return 0;
-    }
+// 本頁面的隨機身分：重新整理後舊頁面取得的委託編號一律不信任（以標記重新接回）
+const PAGE_ID = Math.random().toString(36).slice(2, 10);
+
+/**
+ * 目前的伺服器身分：頁面＋API base＋串流連線世代。HTTP API 沒有提供 sidecar 程序
+ * 身分；sidecar 重啟必然中斷串流，所以同一連線世代內程序不變。串流不是 live
+ * （連線中斷、重連中）時回 null＝無法判定，所有委託編號都不信任。
+ */
+export function currentGen(): string | null {
+    const epoch = streamConnectionEpoch();
+    return epoch < 0 ? null : `${PAGE_ID}|${getApiBase()}|${epoch}`;
 }
 
-/** 同一世代取得、可信的委託編號（標記對帳時不可被別的委託占用） */
-function trustedIds(gen: number): Set<string> {
+/** 目前身分下取得、可信的委託編號（標記對帳時不可被別的委託占用） */
+function trustedIds(gen: string | null): Set<string> {
     const ids = new Set<string>();
+    if (gen === null) return ids;
     for (const r of records) for (const s of r.state.slots) if (s.orderId && s.idGen === gen) ids.add(s.orderId);
     return ids;
 }

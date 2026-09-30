@@ -33,7 +33,7 @@ import {
     type SpreadDirection,
     type SpreadQuote,
 } from '../lib/odd-spread';
-import { execSummary, isTerminalPhase, PHASE_LABEL, type ExecMode, type ExecPlan } from '../lib/odd-spread-exec';
+import { execSummary, isLive, isTerminalPhase, PHASE_LABEL, type ExecMode, type ExecPlan } from '../lib/odd-spread-exec';
 import {
     acceptHedge,
     currentEnv,
@@ -726,6 +726,11 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
                     </span>
                 );
             })}
+            {s.slots.some(x => isLive(x) && x.orderId && x.cancelWanted) && (
+                <span className={styles.execDetail}>
+                    刪單待重新接回：{s.slots.filter(x => isLive(x) && x.orderId && x.cancelWanted).map(slotText).join('、')}（伺服器重啟或連線中斷，委託編號需以標記重新對上後才會刪，不會用舊編號刪單）
+                </span>
+            )}
             {marked.length > 0 && (
                 <span className={styles.execDetail}>
                     已標記未送出：{marked.map(slotText).join('、')}（暫定；若委託列出現這筆會自動接回並重新計算）

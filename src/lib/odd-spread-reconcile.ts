@@ -4,9 +4,11 @@
 // 對帳規則：
 // - 委託列中「完全相同標記」且商品／帳戶／方向／價量／單位都相同的唯一一筆，就是
 //   這筆委託；id 與已知不同（sidecar 重啟後 trade_id 換了）→ 以新 id 重新接回。
-// - 沒找到標記時，只有在「同一個 sidecar 世代」取得的 id 才可信：依 id 找到、且
-//   標記相符（或該列沒有標記）才採用回報；世代變了的舊 id 不信任（可能被別的
-//   委託重用），等標記出現或使用者在面板指定。
+// - 沒找到標記時，只有在「同一個伺服器身分」（串流連線世代）取得的 id 才可信：
+//   依 id 找到、且標記相符（或該列沒有標記）才採用回報；身分變了或無法判定時
+//   舊 id 不信任（可能被別的委託重用），等標記出現或使用者在面板指定。
+// - 以標記或可信 id 認出的委託，價格／數量可能已被正常改單，只要求商品、帳戶、
+//   方向、單位相同。
 // - 同一標記對到多列（不應發生）→ 不接回，避免猜錯。
 //
 // 回報帶累計成交、券商狀態與刪單量（刪單量讓「回讀仍 Submitted、刪單量已涵蓋全部」
@@ -60,25 +62,32 @@ export function tradeReport(t: TradeLike): { filled: number; status: ReportStatu
     return { filled, status, ...(t.status.cancel_quantity !== undefined && Number.isFinite(cancelled) ? { cancelled } : {}) };
 }
 
-export function sameOrder(rec: Pick<ReconcileTarget, 'code' | 'account'>, slot: OrderSlot, x: TradeLike): boolean {
+/** 商品、帳戶、方向、單位相同（標記或可信 id 已確認是同一筆時，價格與數量可能已被改） */
+export function sameInstrument(rec: Pick<ReconcileTarget, 'code' | 'account'>, slot: OrderSlot, x: TradeLike): boolean {
     return accountMatches(x.account ?? x.order.account, rec.account)
         && x.contract.code === rec.code
         && x.order.action === slot.action
-        && Math.round(x.order.price * 100) === Math.round(slot.price * 100)
-        && x.order.quantity === slot.quantity
         && isOddLot(x.order.order_lot) === (slot.leg === 'odd');
+}
+
+/** 另外要求價格與數量也相同（沒有標記、只能靠內容比對時） */
+export function sameOrder(rec: Pick<ReconcileTarget, 'code' | 'account'>, slot: OrderSlot, x: TradeLike): boolean {
+    return sameInstrument(rec, slot, x)
+        && Math.round(x.order.price * 100) === Math.round(slot.price * 100)
+        && x.order.quantity === slot.quantity;
 }
 
 /**
  * 依委託列產生一筆執行的對帳事件。claimed：其他委託已使用的 id（會就地更新）；
  * gen：目前的 sidecar 世代。
  */
-export function reconcileEvents(rec: ReconcileTarget, trades: TradeLike[], claimed: Set<string>, gen: number): ExecEvent[] {
+export function reconcileEvents(rec: ReconcileTarget, trades: TradeLike[], claimed: Set<string>, gen: string | null): ExecEvent[] {
     const events: ExecEvent[] = [];
     for (const slot of rec.state.slots) {
         if (slot.status === 'unsent' || slot.local) continue;
         const tag = slotTag(rec.tagBase, slot.key);
-        const tagged = trades.filter(x => x.order.custom_field === tag && sameOrder(rec, slot, x));
+        // 標記唯一：同一筆委託改價／改量後仍以標記認得（只要求商品、帳戶、方向、單位）
+        const tagged = trades.filter(x => x.order.custom_field === tag && sameInstrument(rec, slot, x));
         if (tagged.length === 1) {
             const t = tagged[0]!;
             if (t.order.id !== slot.orderId || slot.idGen !== gen) {
@@ -90,10 +99,11 @@ export function reconcileEvents(rec: ReconcileTarget, trades: TradeLike[], claim
             continue;
         }
         if (tagged.length > 1) continue;
-        // 沒有標記可對：只信任同一 sidecar 世代取得的 id，且標記不可矛盾
-        if (slot.orderId && slot.idGen === gen) {
+        // 沒有標記可對：只信任同一伺服器身分取得的 id（身分無法判定時一律不信任），
+        // 且標記不可矛盾；id 可信時價格／數量可能已被改
+        if (slot.orderId && gen !== null && slot.idGen === gen) {
             const t = trades.find(x => x.order.id === slot.orderId);
-            if (t && (!t.order.custom_field || t.order.custom_field === tag) && sameOrder(rec, slot, t)) {
+            if (t && (!t.order.custom_field || t.order.custom_field === tag) && sameInstrument(rec, slot, t)) {
                 events.push({ type: 'report', key: slot.key, ...tradeReport(t) });
             }
         }
@@ -102,8 +112,8 @@ export function reconcileEvents(rec: ReconcileTarget, trades: TradeLike[], claim
 }
 
 /** 使用者指定用的候選：同帳戶／商品／方向／價量／單位、未被認領、沒有或相同標記 */
-export function candidateTrades(rec: ReconcileTarget, slot: OrderSlot, trades: TradeLike[], claimed: Set<string>, gen: number): TradeLike[] {
-    if (slot.orderId && slot.idGen === gen) return [];
+export function candidateTrades(rec: ReconcileTarget, slot: OrderSlot, trades: TradeLike[], claimed: Set<string>, gen: string | null): TradeLike[] {
+    if (slot.orderId && gen !== null && slot.idGen === gen) return [];
     const tag = slotTag(rec.tagBase, slot.key);
     return trades.filter(x => !claimed.has(x.order.id) && (!x.order.custom_field || x.order.custom_field === tag) && sameOrder(rec, slot, x));
 }

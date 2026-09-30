@@ -59,7 +59,7 @@ export interface OrderSlot {
     orderId?: string;
     /** 取得 orderId 時的 sidecar 世代（trade_id 只在該 sidecar 程序內有效）；世代變了
      * 舊 id 不可信，只能以唯一標記重新接回 */
-    idGen?: number;
+    idGen?: string | null;
     /** 累計成交（同 quantity 單位） */
     filled: number;
     /** 券商回報的刪單量（判斷終態數量是否對得上） */
@@ -123,6 +123,16 @@ export type HedgeQuote = { ok: true; orders: LegOrder[] } | { ok: false; reason:
 export interface ExecContext {
     /** 以當下委託簿為補單定價；ok=false 時不自動送 */
     quoteHedge: (leg: LegKind, action: 'Buy' | 'Sell', quantity: number) => HedgeQuote;
+    /** 目前的伺服器身分（連線世代）；null＝無法判定。省略時視為委託編號都可信（純測試用） */
+    currentGen?: () => string | null;
+}
+
+/** 委託編號在目前伺服器身分下可信（trade_id 只在同一 sidecar 程序有效） */
+function idTrusted(s: OrderSlot, ctx: ExecContext): boolean {
+    if (!s.orderId) return false;
+    if (!ctx.currentGen) return true;
+    const g = ctx.currentGen();
+    return g !== null && s.idGen === g;
 }
 
 export type ReportStatus = 'working' | 'filled' | 'cancelled' | 'failed';
@@ -130,7 +140,7 @@ export type ReportStatus = 'working' | 'filled' | 'cancelled' | 'failed';
 export type ExecEvent =
     | { type: 'start' }
     /** 取得委託編號；rebind=true 表示以唯一標記在權威更新中找到同一筆、換成新 id */
-    | { type: 'placed'; key: string; orderId: string; gen?: number; rebind?: boolean }
+    | { type: 'placed'; key: string; orderId: string; gen?: string | null; rebind?: boolean }
     /** 送出失敗但可能已到券商 */
     | { type: 'placeUnknown'; key: string; error: string }
     /** 確定沒有送出 */
@@ -319,10 +329,12 @@ function sendUnsent(slots: OrderSlot[], commands: ExecCommand[]): OrderSlot[] {
 }
 
 /** 對一筆在途委託發刪單（或登記拿到委託編號後刪） */
-function cancelSlot(s: OrderSlot, commands: ExecCommand[], surplus = false): OrderSlot {
+function cancelSlot(s: OrderSlot, commands: ExecCommand[], ctx: ExecContext, surplus = false): OrderSlot {
     if (s.status === 'unsent') return { ...s, status: 'cancelled', local: true, surplus };
     if (!isLive(s)) return s;
-    if (!s.orderId) return { ...s, cancelWanted: true, ...(surplus ? { surplus } : {}) };
+    // 沒有委託編號，或編號來自別的伺服器身分（sidecar 重啟後可能被別的委託重用）：
+    // 絕不以舊編號刪單，登記「待重新接回後刪單」
+    if (!s.orderId || !idTrusted(s, ctx)) return { ...s, cancelWanted: true, ...(surplus ? { surplus } : {}) };
     if (s.cancelState === 'pending') return s;
     commands.push({ kind: 'cancel', key: s.key, orderId: s.orderId });
     return { ...s, cancelState: 'pending', cancelError: undefined, ...(surplus ? { surplus } : {}) };
@@ -353,7 +365,7 @@ function advance(state: ExecState, commands: ExecCommand[], ctx: ExecContext): E
             for (let i = slots.length - 1; i >= 0 && effective > t.max; i--) {
                 const x = slots[i]!;
                 if (x.leg !== leg || !x.hedge || !isLive(x) || cancelIssued(x)) continue;
-                slots[i] = cancelSlot(x, commands, true);
+                slots[i] = cancelSlot(x, commands, ctx, true);
                 effective -= remaining(x);
             }
             s = { ...s, slots };
@@ -455,7 +467,8 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
                 // sidecar 重啟後同一筆委託換了 id → 以唯一標記接回的新 id 取代
                 const status: SlotStatus = s.status === 'sending' || s.status === 'unknown' ? 'working' : s.status;
                 const next: OrderSlot = { ...s, status, orderId: event.orderId, idGen: event.gen, markedUnsent: false };
-                if (s.cancelWanted && status === 'working') {
+                const fresh = !ctx.currentGen || (event.gen !== undefined && event.gen !== null && event.gen === ctx.currentGen());
+                if (s.cancelWanted && status === 'working' && fresh) {
                     commands.push({ kind: 'cancel', key: s.key, orderId: event.orderId });
                     next.cancelState = 'pending';
                     next.cancelWanted = false;
@@ -491,7 +504,7 @@ export function execReduce(state: ExecState, event: ExecEvent, ctx: ExecContext)
         case 'cancel': {
             if (!state.started) return { state: { ...state, phase: 'cancelled', cancelRequested: true }, commands };
             // 已發出、尚未有結果的不重送；失敗、結果不明或受理後仍在委託中的可再刪
-            const slots = state.slots.map(s => (isLive(s) ? cancelSlot(s, commands) : s.status === 'unsent' ? cancelSlot(s, commands) : s));
+            const slots = state.slots.map(s => (isLive(s) || s.status === 'unsent' ? cancelSlot(s, commands, ctx) : s));
             return { state: advance({ ...state, cancelRequested: true, slots }, commands, ctx), commands };
         }
         case 'hedgeAccept': {

@@ -554,12 +554,34 @@ describe('第五輪：券商回讀型態與補單確認', () => {
     it('sidecar 重啟後以標記接回的新 id 取代舊 id（rebind），之後回報照常', () => {
         const r = run(SELL_ODD, [
             { type: 'start' },
-            { type: 'placed', key: 'odd:0', orderId: 'A', gen: 0 },
-            { type: 'placed', key: 'odd:0', orderId: 'Z', gen: 1 }, // 沒有 rebind → 不換
+            { type: 'placed', key: 'odd:0', orderId: 'A', gen: 'g0' },
+            { type: 'placed', key: 'odd:0', orderId: 'Z', gen: 'g1' }, // 沒有 rebind → 不換
         ]);
-        expect(r.state.slots[0]).toMatchObject({ orderId: 'A', idGen: 0 });
-        const re = execReduce(r.state, { type: 'placed', key: 'odd:0', orderId: 'Z', gen: 1, rebind: true }, ctxOf());
-        expect(re.state.slots[0]).toMatchObject({ orderId: 'Z', idGen: 1, status: 'working' });
+        expect(r.state.slots[0]).toMatchObject({ orderId: 'A', idGen: 'g0' });
+        const re = execReduce(r.state, { type: 'placed', key: 'odd:0', orderId: 'Z', gen: 'g1', rebind: true }, ctxOf());
+        expect(re.state.slots[0]).toMatchObject({ orderId: 'Z', idGen: 'g1', status: 'working' });
+    });
+});
+
+describe('第六輪：委託編號只在同一伺服器身分可信', () => {
+    it('身分變了不以舊編號刪單：登記待重新接回；以標記接回新編號後才刪', () => {
+        let gen: string | null = 'g1';
+        const ctx: ExecContext = { ...ctxOf(), currentGen: () => gen };
+        const r = run(SELL_ODD, [
+            { type: 'start' },
+            { type: 'placed', key: 'odd:0', orderId: 'A', gen: 'g1' },
+            { type: 'placed', key: 'odd:1', orderId: 'B', gen: 'g1' },
+        ], ctx);
+        gen = 'g2'; // sidecar 重啟（串流重連）
+        const c = execReduce(r.state, { type: 'cancel' }, ctx);
+        expect(c.commands).toEqual([]);
+        expect(c.state.slots.map(x => x.cancelWanted)).toEqual([true, true]);
+        const re = execReduce(c.state, { type: 'placed', key: 'odd:0', orderId: 'A2', gen: 'g2', rebind: true }, ctx);
+        expect(re.commands).toEqual([{ kind: 'cancel', key: 'odd:0', orderId: 'A2' }]);
+        // 身分無法判定（串流中斷）也不刪
+        gen = null;
+        const none = execReduce(re.state, { type: 'placed', key: 'odd:1', orderId: 'B2', gen: null, rebind: true }, ctx);
+        expect(none.commands).toEqual([]);
     });
 });
 
