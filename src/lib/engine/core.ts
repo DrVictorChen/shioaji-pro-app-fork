@@ -256,6 +256,13 @@ export interface InstrumentMeta {
     tick?: number;
     tickLadder?: TickBand[];
     priceLimitPct?: number | null;
+    /**
+     * Reference price of derived daily limits when no `daily` entry supplies
+     * one: stocks always use the previous trading day's last close;
+     * 'previous-close' opts other instruments (futures without settlement
+     * data) into the same rule.
+     */
+    limitReference?: 'previous-close';
 }
 
 export interface PrepareRequest {
@@ -277,9 +284,20 @@ export interface PrepareRequest {
     }[];
 }
 
+/**
+ * out-of-session: minutes outside every session were dropped.
+ * trading-day-assumed: night-session minutes after the last day session in
+ * the data were assigned by the calendar rule (weekday / holiday table).
+ */
+export interface PrepareDiagnostic {
+    kind: 'out-of-session' | 'trading-day-assumed';
+    assetId: string;
+    count: number;
+}
+
 export type PrepareResponse =
     | { ok: true; bars: Record<string, PortfolioBarsInput>; execution: Record<string, PortfolioExecutionConfig>;
-        periodsPerYear: number; diagnostics: { kind: 'out-of-session'; assetId: string; count: number }[] }
+        periodsPerYear: number; diagnostics: PrepareDiagnostic[] }
     | { ok: false; error: { code: 'DATA_TOO_FEW_BARS' | 'DATA_NO_BARS' | 'DATA_INVALID'; params: Record<string, string | number> } };
 
 // ---------------------------------------------------------------------------

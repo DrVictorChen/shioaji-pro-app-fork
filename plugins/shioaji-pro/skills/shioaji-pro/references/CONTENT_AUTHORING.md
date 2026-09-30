@@ -150,7 +150,8 @@ A value greater than zero or `true` means the signal is confirmed at that bar's
 close. Signals must use only the current and earlier bars: reading `close[i + 1]`,
 `close.length`, the last bar, or a whole-history statistic (maximum, average) to
 compute earlier signals or options fails the run with a look-ahead error, and so
-does a negative `ta.offset` shift. `Math.random`, `Date.now`, `new Date()` without
+does a negative `ta.offset` shift. Price series such as `close` are read-only;
+copy them (`close.slice()`) before changing values. `Math.random`, `Date.now`, `new Date()` without
 an argument, and timers are not available; use bar `time` and parameters so
 every run of the same inputs gives the same result. At least one entry is required. A long entry needs `longExit` or a reverse
 `shortEntry`; a short entry needs `shortExit` or a reverse `longEntry`.
@@ -188,7 +189,10 @@ longExit(ta.crossunder(close, priorLow))
   position then stays open, is valued at its last close, and the run records an
   end-of-run rejection.
 - Futures daily bars follow the exchange trading day: the night session from
-  15:00 belongs to the next trading day's bar. Sharpe and Sortino annualize with
+  15:00 belongs to the next date that has a day session (after a holiday, the
+  day after it). Minutes outside the instrument's sessions are dropped. Daily
+  price limits are ±10% of the previous close (futures: previous day-session
+  close as the settlement stand-in). Sharpe and Sortino annualize with
   the actual number of bars per trading day (for example 5,040 per year for
   60-minute TAIFEX day+night bars).
 - Fees, stock tax, futures tax, and slippage are applied by the backtest engine
