@@ -75,12 +75,21 @@ export function orderLineMayTakePointer(opts: {
     drawingHit?: DrawingHit;
     drawingBusy?: boolean; // 有畫圖物件選取中（第二版還含顯示中的量測）
     inGrip?: boolean; // 游標在委託線的價格標籤上（價格軸區，見 inOrderLabelArea）
+    // 價格軸上：游標下有畫圖物件的價格標籤
+    drawingLabelAtPointer?: boolean;
+    // 價格軸上：委託線原本的價位附近有畫圖物件的價格標籤 — 兩個標籤會被
+    // lightweight-charts 的防重疊推開，委託標籤實際顯示的位置已不在原價位，
+    // 原價位上看到的可能是畫圖的標籤。拿不到推開後的位置，就不從價格軸接手
+    drawingLabelNearOrder?: boolean;
 }): boolean {
     if (opts.drawingArmed || opts.defaultPrevented) return false;
     if (opts.drawingHit === 'selected') return false;
-    if (opts.inGrip) return true;
+    if (opts.inGrip) return !opts.drawingLabelAtPointer && !opts.drawingLabelNearOrder;
     return !opts.drawingHit && !opts.drawingBusy;
 }
+
+// 價格軸標籤的高度（約）：兩個標籤中心距離小於這個就會重疊、被推開
+export const AXIS_LABEL_BAND_PX = 20;
 
 // 游標是否在委託線價格標籤所在的價格軸區（host 內 x 座標）。只有價格軸
 // 本身，不含繪圖區 — 畫圖物件只畫在繪圖區，兩者不會重疊
@@ -122,6 +131,8 @@ export interface ChartDrawingsApi {
     // 物件選取中
     drawingAt: (ev: { clientX: number; clientY: number }) => DrawingHit;
     drawingBusy: () => boolean;
+    // 畫圖物件的價格軸標籤是否在 clientY 附近（band 像素內）
+    drawingLabelNear: (clientY: number, band?: number) => boolean;
 }
 
 export function useChartDrawings(opts: {
@@ -668,6 +679,12 @@ export function useChartDrawings(opts: {
         if (!picked) return null;
         return picked.drawing.id === sel ? 'selected' : 'other';
     }, []);
+    const drawingLabelNear = useCallback((clientY: number, band = AXIS_LABEL_BAND_PX) => {
+        const layer = layerRef.current;
+        const pt = layer?.pointOf({ clientX: 0, clientY });
+        if (!layer || !pt) return false;
+        return layer.axisLabelYs().some((y) => Math.abs(y - pt.y) < band);
+    }, []);
     const drawingBusy = useCallback(() => !!stateRef.current.selectedId, []);
 
     const focusChart = useCallback(() => {
@@ -683,6 +700,7 @@ export function useChartDrawings(opts: {
         focusChart,
         drawingAt,
         drawingBusy,
+        drawingLabelNear,
         drawings,
         selected,
         select,

@@ -254,6 +254,25 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
 
     // 只有水平線有標籤：斜線與方框沒有單一價位可標，硬標一個（例如端點）
     // 反而會在拖曳時跳來跳去。繪製中的水平線也標，跟游標十字線一樣即時。
+    // 畫圖物件價格軸標籤的 y（pane 座標）：委託線拖曳判斷用 — 標籤在
+    // 游標下時標籤屬於畫圖，委託線不能接手
+    axisLabelYs(): number[] {
+        const series = this._series;
+        if (!series) return [];
+        const out: number[] = [];
+        const prices: number[] = [];
+        for (const d of this.state.drawings) {
+            if (d.tool === 'horizontal' && !d.hidden && d.anchors[0]) prices.push(d.anchors[0].price);
+        }
+        const draft = this.state.draft;
+        if (draft?.tool === 'horizontal' && draft.anchors[0]) prices.push(draft.anchors[0].price);
+        for (const p of prices) {
+            const y = series.priceToCoordinate(p);
+            if (y !== null) out.push(y);
+        }
+        return out;
+    }
+
     priceAxisViews(): readonly ISeriesPrimitiveAxisView[] {
         const series = this._series;
         if (!series) return NO_AXIS_VIEWS;
