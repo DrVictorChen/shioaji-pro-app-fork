@@ -109,8 +109,9 @@ it('replaying the customer\'s fills live (rows netted by the projection) shows t
         rows = applyPositionFill(rows, { key: `${t.order.id}:${d.seq}`, tradeId: t.order.id, account, code: 'MXFI6',
             action: t.order.action, quantity: d.quantity, price: d.price, ts: d.ts, condition: '', openClose: 'Auto' }, 50)!;
     }
-    // The projection nets the Auto buy against the sell row's average: one Sell 1 @ 45552.5 row.
-    expect(rows.map(r => [r.direction, r.quantity, r.price])).toEqual([['Sell', 1, 45552.5]]);
+    // The projection nets the Auto buy FIFO (#85): the oldest sell lot closes,
+    // leaving the broker's Sell 1 @ 45559 row rather than the 45552.5 average.
+    expect(rows.map(r => [r.direction, r.quantity, r.price])).toEqual([['Sell', 1, 45559]]);
     const { bar, label } = await render(rows.map(r => ({ ...r, last_price: 45532 })), contract, customerFills());
     expect(bar).toContain('"空"," ","1"');
     expect(bar).toContain('45,559');

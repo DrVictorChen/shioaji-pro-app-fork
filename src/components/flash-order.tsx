@@ -889,8 +889,8 @@ export function FlashOrder({
                         className={`${styles.flatBtn} ${armed ? '' : styles.disabledCell}`}
                         title={pos.safeExit
                             ? market === 'S'
-                                ? `平倉 ${fmtStockLots(Math.abs(pos.net))}（整張市價、零股以漲跌停價限價）`
-                                : `市價平倉 ${Math.abs(pos.net)}`
+                                ? `平倉 ${maskMoney(fmtStockLots(Math.abs(pos.net)), privMoney)}（整張市價、零股以漲跌停價限價）`
+                                : `市價平倉 ${maskMoney(String(Math.abs(pos.net)), privMoney)}`
                             : '持倉方向或交易條件不明，請使用持倉面板確認'}
                         disabled={!pos.safeExit || !armed || !activeAccount}
                         onClick={() => void flatten()}
@@ -909,8 +909,8 @@ export function FlashOrder({
             {pos && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
-                        title={market === 'S' ? `${Math.abs(pos.net).toLocaleString()} 股（含零股）` : undefined}>
-                        {pos.net > 0 ? '多' : '空'} {market === 'S' ? fmtStockLots(Math.abs(pos.net)) : Math.abs(pos.net)}
+                        title={market === 'S' && !privMoney ? `${Math.abs(pos.net).toLocaleString()} 股（含零股）` : undefined}>
+                        {pos.net > 0 ? '多' : '空'} {maskMoney(market === 'S' ? fmtStockLots(Math.abs(pos.net)) : String(Math.abs(pos.net)), privMoney)}
                     </span>
                     <span>@ {fmtPrice(pos.avg)}</span>
                     {(pos.mixed || pos.twoWay || pos.stale) && (
