@@ -50,7 +50,7 @@ jobs:
           這不代表失敗。
 
           - 公開檢查（`CI / checks`、`web-build`）已照常執行，merge 只需要它們綠燈。
-          - 維護者 review 過程式碼後，會加上 **`run-desktop-ci`** label 觸發完整 desktop CI
+          - 維護者 review 過程式碼、Approve 目前 head 後，會加上 **`run-desktop-ci`** label 觸發完整 desktop CI
             （`desktop-agent-ci-fork`），結果會出現在這個 PR 的 checks。
           - 之後每次 push 新 commit，label 會自動移除，需要維護者重新 review 再加一次。
 

@@ -16,14 +16,16 @@ CI 以唯讀 deploy key 拉取。GitHub 不會把 secrets 提供給 fork PR，
 | `CI / checks`（tsc＋vitest＋vite build） | 自動（首次貢獻者需維護者按一次 Approve and run） | **是** |
 | `web-build`（不含私有模組的開源 build） | 自動 | 否 |
 | `desktop-agent-ci / combined-agent` | 顯示 **skipped**（不是失敗），summary 會說明原因 | 否 |
-| `desktop-agent-ci-fork`＋status `desktop-agent-ci (maintainer-approved)` | 維護者 review 後加上 `run-desktop-ci` label 才執行 | 否（維護者判斷） |
+| `desktop-agent-ci-fork`＋status `desktop-agent-ci (maintainer-approved)` | 維護者 review、Approve 目前 head 後加上 `run-desktop-ci` label 才執行 | 否（維護者判斷） |
 
 1. 你開 PR 後，公開檢查會照常跑；請先讓 `CI / checks` 綠燈。
-2. 維護者**逐行 review** 你的變更後，加上 `run-desktop-ci` label，
-   對「加 label 當下的 commit」跑完整 desktop CI（Linux／Windows），
-   結果會出現在 PR 的 checks。
+2. 維護者**逐行 review** 你的變更、對目前 head 送出 Approve review 後，
+   加上 `run-desktop-ci` label，對「加 label 當下的 commit」跑完整 desktop CI
+   （Linux／Windows），結果以 commit status 出現在 PR 的 checks。
 3. 之後你每 push 一次新 commit，label 都會**自動移除**，需要維護者重新
-   review 再加一次。這是刻意的：避免 review 後被換成未審查的程式碼。
+   review、Approve 新 head 再加一次。這是刻意的：避免 review 後被換成未審查
+   的程式碼。已在執行中的舊 commit build 不會因新 push 取消，但它的結果只
+   掛在那個舊 commit 上，不代表新 head 通過。
 
 你不需要、也不會拿到私有模組的存取權；純前端／web 的修改在本機
 `pnpm build && pnpm test` 即可完整驗證。
@@ -35,16 +37,32 @@ CI 以唯讀 deploy key 拉取。GitHub 不會把 secrets 提供給 fork PR，
 環境執行。惡意 PR 有能力外流私有原始碼或 deploy key，這是「用私有模組測
 外部程式碼」本質上無法消除的風險。所以：
 
-- 加 label 前完整 review diff，特別注意 `package.json`／`pnpm-lock.yaml`、
-  新依賴、`build.rs`、測試檔、任何網路存取與 `.github/` 變更。
-- label 只代表核准**當下那個 commit**；新 push 會自動撤銷。
+1. 完整 review diff，特別注意 `package.json`／`pnpm-lock.yaml`、
+   新依賴、`build.rs`、測試檔、任何網路存取與 `.github/` 變更。
+2. 對**目前的 head commit** 送出 **Approve** review（PR 頁 Files changed →
+   Review changes → Approve）。
+3. 再加上 `run-desktop-ci` label。
+
+workflow 會先檢查（不執行 PR 程式碼）：加 label 的人必須有 write／maintain／
+admin 權限（Triage 或 bot 不行），且此人對「加 label 當下的 head SHA」最新
+一筆有效 review 是 APPROVED。任一不符 → label 自動移除、head SHA 上出現
+failure status、job summary 說明原因。這把核准綁到你實際 review 過的
+commit：若你 review 完 A、對方在你加 label 前推了 B，B 沒有你的 Approve，
+不會執行。
+
+- label 只代表核准**當下那個 commit**；新 push 會自動撤銷（若撤銷 API 失敗，
+  `revoke-approval` job 會紅燈並要求手動移除）。
 - 若曾對可疑 PR 加過 label，請輪換 `AGENT_SSH_KEY` deploy key。
 
 已做的防護：workflow／overlay action／私有 SHA pin 一律取自 `main`（PR 改不到）；
-checkout 不保留 credentials；SSH key 只存在 overlay 那一個 step；build job 的
-`GITHUB_TOKEN` 只有 `contents: read`；untrusted 模式不使用 pnpm cache，
-降低在 `main` scope 寫入被污染 cache 的機會（無法完全排除，因 runner 上的程式
-理論上可取得 cache token；`release.yml` 會讀 main 的 cache）。
+checkout 不保留 credentials；SSH key 只存在 overlay 那一個 step（刪檔不是
+機密隔離邊界，runner 記憶體仍有 secret）；build job 的 `GITHUB_TOKEN` 只有
+`contents: read`；untrusted 模式不使用 pnpm cache。依 GitHub 現行規則，
+`pull_request_target` 等低信任觸發對 default branch scope 的 cache 只有唯讀，
+無法寫入被 `release.yml` 讀取的 main cache（見 [Dependency caching — cache
+access for low-trust workflow triggers](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#cache-access-for-low-trust-workflow-triggers)）。
+`actions/checkout` 在 `pull_request_target` 下預設拒絕 checkout fork 程式碼，
+只有 fork 路徑在上述檢查通過後才以 `allow-unsafe-pr-checkout: true` 開啟。
 
 ---
 
@@ -55,11 +73,18 @@ checkout 不保留 credentials；SSH key 只存在 overlay 那一個 step；buil
 - The private desktop CI (`combined-agent`) is **skipped** on fork PRs because it
   needs a read-only deploy key for the private desktop modules. A job summary
   explains this.
-- After reviewing the code, a maintainer adds the **`run-desktop-ci`** label. A
-  `pull_request_target` workflow then builds the exact head SHA present at label
-  time with the private overlay and reports the commit status
-  `desktop-agent-ci (maintainer-approved)`.
-- Any new push removes the label automatically; re-review and re-label to run again.
+- After reviewing the code, a maintainer submits an **Approve** review on the
+  current head and then adds the **`run-desktop-ci`** label. A
+  `pull_request_target` workflow first verifies (without running PR code) that the
+  labeler has write/maintain/admin permission and an APPROVED review whose
+  `commit_id` equals the head SHA at label time; otherwise it removes the label and
+  posts a failure status. If the gate passes, it builds that exact SHA with the
+  private overlay and reports the commit status `desktop-agent-ci (maintainer-approved)`.
+- Any new push removes the label automatically; re-review, re-approve and re-label to
+  run again. An already-approved build of an older SHA is not cancelled by a new
+  push; its result only applies to that older SHA.
+- `pull_request_target` has read-only access to default-branch caches, so the
+  fork path cannot poison caches used by `release.yml`.
 - Residual risk (maintainers): the PR's code runs with the private modules on disk
   and the deploy key in runner memory, so a malicious PR could exfiltrate them.
   Review before labeling; rotate the deploy key if a suspicious PR was ever labeled.

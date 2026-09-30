@@ -94,7 +94,8 @@ test coverage 門檻、quality metrics 等。落地時更新本節。
   同 PR 的舊 run，但手動執行、main push 與其他 PR 不互相取消。
 - 步驟定義在 reusable workflow `desktop-agent-build.yml`。外部 fork PR 拿不到
   secrets，`combined-agent` 會 skip（fork-notice 寫 summary）；維護者 review
-  後加 `run-desktop-ci` label，由 `desktop-agent-ci-fork.yml`
+  並對目前 head 送出 Approve review 後加 `run-desktop-ci` label（gate 驗證
+  加 label 者為 write+ 且其 APPROVED review 綁定該 SHA），由 `desktop-agent-ci-fork.yml`
   （`pull_request_target`）對加 label 當下的 head SHA 跑同一套步驟，結果以
   commit status `desktop-agent-ci (maintainer-approved)` 回報；新 push 自動
   移除 label。安全設計與殘餘風險見 [CONTRIBUTING.md](../CONTRIBUTING.md)。
