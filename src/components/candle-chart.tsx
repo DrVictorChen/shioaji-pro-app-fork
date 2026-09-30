@@ -36,7 +36,7 @@ import {
 } from 'lucide-react';
 import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
-    ORDER_GRIP_PX,
+    inOrderLabelArea,
     orderLineMayTakePointer,
     useChartDrawings,
     type ChartDrawingsApi,
@@ -1320,17 +1320,19 @@ export function CandleChart({
             !!(e.target as HTMLElement | null)?.closest?.('[data-drawing-overlay]');
 
         // 委託線能不能接手這一下（見 orderLineMayTakePointer）。右側把手
-        // 區＝價格軸加上它左邊 ORDER_GRIP_PX，委託標籤就在那裡
+        // 區＝價格軸上委託線自己的價格標籤（不含繪圖區）
         const mayTake = (e: MouseEvent) => {
             const d = drawingsRef.current;
             const rect = host.getBoundingClientRect();
             const axis = chartRef.current?.priceScale('right').width() ?? 60;
+            const onLabel = inOrderLabelArea(e.clientX - rect.left, rect.width, axis);
             return orderLineMayTakePointer({
                 drawingArmed: drawingArmedRef.current,
                 defaultPrevented: e.defaultPrevented,
-                drawingHit: d?.drawingAt(e) ?? null,
+                // 價格軸上沒有畫圖物件（只畫在繪圖區）；線端的命中容差不算
+                drawingHit: onLabel ? null : (d?.drawingAt(e) ?? null),
                 drawingBusy: d?.drawingBusy() ?? false,
-                inGrip: e.clientX - rect.left >= rect.width - axis - ORDER_GRIP_PX,
+                inGrip: onLabel,
             });
         };
 

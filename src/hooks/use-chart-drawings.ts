@@ -88,8 +88,9 @@ function claimKeyboard(token: object) {
 // 瀏覽模式下畫圖物件與委託線重疊時，使用者以為在拖畫圖、放開卻送出
 // 改價 — 所以：
 // - 游標下是「選取中」的畫圖物件：委託線絕不接手
-// - 游標下有畫圖物件，或有物件選取中／量測顯示中：委託線只能從右側
-//   把手區（委託標籤、靠價格軸那一段）拖，線的其他部分交給畫圖
+// - 游標下有畫圖物件，或有物件選取中／量測顯示中：委託線只能從它自己
+//   的價格標籤（價格軸上的「買1 47,000」標籤）拖；繪圖區裡的任何一段都
+//   交給畫圖 — 繪圖區內不設把手帶，畫圖物件延伸到那裡時一樣不會被搶走
 // - 游標下什麼畫圖都沒有、也沒選取：照舊整條線都能拖
 export type DrawingHit = 'selected' | 'other' | null;
 
@@ -98,7 +99,7 @@ export function orderLineMayTakePointer(opts: {
     defaultPrevented: boolean;
     drawingHit?: DrawingHit;
     drawingBusy?: boolean; // 有畫圖物件選取中，或量測結果顯示中
-    inGrip?: boolean; // 游標在委託線右側把手區
+    inGrip?: boolean; // 游標在委託線的價格標籤上（價格軸區，見 inOrderLabelArea）
 }): boolean {
     if (opts.drawingArmed || opts.defaultPrevented) return false;
     if (opts.drawingHit === 'selected') return false;
@@ -106,8 +107,11 @@ export function orderLineMayTakePointer(opts: {
     return !opts.drawingHit && !opts.drawingBusy;
 }
 
-// 委託線右側把手區的寬度（價格軸左邊這麼多像素，加上價格軸本身）
-export const ORDER_GRIP_PX = 90;
+// 游標是否在委託線價格標籤所在的價格軸區（host 內 x 座標）。只有價格軸
+// 本身，不含繪圖區 — 畫圖物件只畫在繪圖區，兩者不會重疊
+export function inOrderLabelArea(xInHost: number, hostWidth: number, axisWidth: number): boolean {
+    return axisWidth > 0 && xInHost >= hostWidth - axisWidth;
+}
 
 // 鍵盤焦點是否在這張圖（圖表本體或它的左側工具列）上。Delete／Backspace
 // 只在這時作用 — 「最後操作的圖表」不夠：選取物件後點了別的面板的按鈕，

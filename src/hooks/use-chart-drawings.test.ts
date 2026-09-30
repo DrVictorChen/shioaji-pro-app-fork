@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     chartHasFocus,
+    inOrderLabelArea,
     orderLineMayTakePointer,
     toolShortcutOf,
     undoKeyOf,
@@ -705,6 +706,22 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         expect(orderLineMayTakePointer({ ...base, drawingHit: 'other', inGrip: true })).toBe(true);
         expect(orderLineMayTakePointer({ ...base, drawingBusy: true })).toBe(false);
         expect(orderLineMayTakePointer({ ...base, drawingBusy: true, inGrip: true })).toBe(true);
+    });
+
+    it('未選取的畫圖物件延伸到價格軸前的繪圖區、與委託線重疊：委託線不接手；只有價格軸上的委託標籤可以拖', () => {
+        const hostWidth = 1000;
+        const axis = 70;
+        const base = { drawingArmed: false, defaultPrevented: false, drawingHit: 'other' as const };
+        // 舊版的 90px 把手帶（價格軸左邊）現在屬於繪圖區
+        for (const x of [hostWidth - axis - 89, hostWidth - axis - 30, hostWidth - axis - 1]) {
+            expect(inOrderLabelArea(x, hostWidth, axis)).toBe(false);
+            expect(orderLineMayTakePointer({ ...base, inGrip: inOrderLabelArea(x, hostWidth, axis) })).toBe(false);
+        }
+        // 價格軸上的委託標籤
+        expect(inOrderLabelArea(hostWidth - axis + 5, hostWidth, axis)).toBe(true);
+        expect(orderLineMayTakePointer({ ...base, inGrip: true })).toBe(true);
+        // 沒有畫圖時照舊整條線都能拖
+        expect(orderLineMayTakePointer({ drawingArmed: false, defaultPrevented: false, drawingHit: null })).toBe(true);
     });
 
     it('drawingAt：游標下的畫圖物件是選取中的還是其他的', async () => {
