@@ -15,7 +15,7 @@ import type {
     SignalSeries, StrategyIntent,
 } from './schema';
 
-export const CORE_REQUEST_SCHEMA_VERSION = 'backtest-core-v1';
+export const CORE_REQUEST_SCHEMA_VERSION = 'backtest-core-v2';
 
 // ---------------------------------------------------------------------------
 // Request
@@ -104,6 +104,22 @@ export interface IntentStream {
 export type StrategyProduct = SignalPlan | IntentStream;
 
 /**
+ * Strategy source run by the core's own script step (backtest-spec-v2.1 §8):
+ * a Signal DSL source becomes a signal plan (entry quantity `quantity` for
+ * every asset); a stateful / target-portfolio source runs at every decision.
+ * Cores that cannot execute ECMAScript reject it.
+ */
+export interface SourceStrategy {
+    kind: 'source';
+    authoringStyle: 'signal' | 'stateful' | 'target-portfolio';
+    source: string;
+    params: Record<string, number>;
+    quantity: number;
+}
+
+export type CoreStrategy = StrategyProduct | SourceStrategy;
+
+/**
  * - 'portfolio': sequential shared-capital engine (research runs, extended
  *   Signal DSL, stateful and target-portfolio strategies).
  * - 'vector': the single-asset legacy vector engine used by the panel's
@@ -119,7 +135,7 @@ export interface CoreRequest {
     universe: CoreUniverse;
     /** Keyed by asset id; every universe asset must be present (empty arrays = never observed). */
     bars: Record<string, PortfolioBarsInput>;
-    strategy: StrategyProduct;
+    strategy: CoreStrategy;
     capital: number;
     execution: {
         defaults: PortfolioExecutionConfig;
@@ -129,8 +145,12 @@ export interface CoreRequest {
     risk: PortfolioRiskLimits;
     /** Close every open position at the final available close. */
     liquidateAtEnd: boolean;
-    /** Compute research-v1 metrics for this bar interval ('1d', '5m', '1h', ...); null skips them. */
-    research: { interval: string } | null;
+    /**
+     * Compute research metrics for this bar interval ('1d', '5m', '1h', ...);
+     * null skips them. `periodsPerYear` annualizes Sharpe / Sortino (CHANGE-9:
+     * the caller derives it from the session calendar, spec §4.9).
+     */
+    research: { interval: string; periodsPerYear: number } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,13 +187,26 @@ export type PortfolioResultRecord = Omit<PortfolioResult, 'legacyResult'> & {
     legacyResult: BtResultRecord | null;
 };
 
+/**
+ * Run identity (CHANGE-6): SHA-256 hex of the RFC 8785 canonical JSON of the
+ * request as given, of each asset's bars, and of the strategy source (null
+ * unless the strategy is a source). `engineVersion` is the behaviour version.
+ */
+export interface RunIdentity {
+    engineVersion: string;
+    requestHash: string;
+    dataHashes: Record<string, string>;
+    sourceHash: string | null;
+}
+
 export interface CoreResult {
     /** Sequential portfolio result; null in 'vector' mode. */
     portfolio: PortfolioResultRecord | null;
     /** Panel / persisted trade view: trades, cumulative PnL curve and legacy metrics. */
     result: BtResultRecord;
-    /** research-v1 metrics; null when `request.research` is null. */
+    /** Research metrics; null when `request.research` is null. */
     research: ResearchMetricsRecord | null;
+    identity: RunIdentity;
 }
 
 export interface CoreErrorCause {
