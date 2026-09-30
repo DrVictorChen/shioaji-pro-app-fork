@@ -125,7 +125,8 @@ export function isCoreErrorCode(value: unknown): value is CoreErrorCode {
 
 /** zh-TW text of one error code, without time/asset context. */
 export function coreErrorText(code: CoreErrorCode, params: MessageParams = {}): string {
-    return render(table.errors[code], params);
+    // A replayed recording may carry a code this table does not know; show the code itself.
+    return render(Object.hasOwn(table.errors, code) ? table.errors[code] : code, params);
 }
 
 /** Reason code and exact persisted message of a simulated order rejection. */
