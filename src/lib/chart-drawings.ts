@@ -204,12 +204,30 @@ if (typeof window !== 'undefined') {
     });
 }
 
-function persist() {
+// 落地節流：拖曳、拉透明度滑桿時每個 mousemove 都會改 store。畫面照常
+// 即時更新（emit），localStorage 最多每 WRITE_THROTTLE_MS 寫一次 — 每寫
+// 一次其他視窗就要重新解析整份 JSON。
+const WRITE_THROTTLE_MS = 300;
+let writeTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function flushDrawingWrites() {
+    if (writeTimer === null) return;
+    clearTimeout(writeTimer);
+    writeTimer = null;
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
     } catch {
         // 配額滿或隱私模式 — 本次 session 仍然可用，只是不落地
     }
+}
+
+if (typeof window !== 'undefined') {
+    // 還在節流窗內就關視窗 — 最後一筆不能丟
+    window.addEventListener('pagehide', flushDrawingWrites);
+}
+
+function persist() {
+    writeTimer ??= setTimeout(flushDrawingWrites, WRITE_THROTTLE_MS);
     emit();
 }
 
@@ -264,12 +282,18 @@ function newId(): string {
     return `dw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+// 每個商品鍵的上限。整份 store 是一個 localStorage 項目，無上限地長下去
+// 每次寫入與跨視窗解析都會變慢，也會吃掉其他設定的配額。
+export const MAX_DRAWINGS_PER_SYMBOL = 200;
+
+// 已達上限回傳 null — 呼叫端的工具列會先把畫圖按鈕停用
 export function addDrawing(
     key: string,
     tool: DrawingTool,
     anchors: DrawingAnchor[],
     style: DrawingStyle,
-): Drawing {
+): Drawing | null {
+    if ((store[key]?.length ?? 0) >= MAX_DRAWINGS_PER_SYMBOL) return null;
     const drawing: Drawing = {
         id: newId(),
         tool,
@@ -323,6 +347,8 @@ export function clearDrawings(key: string) {
 
 // 測試用 — 清乾淨 module state 與 localStorage
 export function __resetDrawingsForTest() {
+    if (writeTimer !== null) clearTimeout(writeTimer);
+    writeTimer = null;
     store = {};
     settings = DEFAULT_SETTINGS;
     try {

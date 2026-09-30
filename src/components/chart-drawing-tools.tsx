@@ -20,7 +20,12 @@ import {
 } from 'lucide-react';
 import { useState, type ComponentType } from 'react';
 import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
-import { DRAWING_PALETTE, DRAWING_TOOLS, type DrawingTool } from '../lib/chart-drawings';
+import {
+    DRAWING_PALETTE,
+    DRAWING_TOOLS,
+    MAX_DRAWINGS_PER_SYMBOL,
+    type DrawingTool,
+} from '../lib/chart-drawings';
 import * as styles from './chart-drawing-tools.css';
 
 const WIDTHS = [1, 2, 3, 4];
@@ -40,6 +45,8 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
     // 方框才有填色可調
     const showsFill = selected ? selected.tool === 'box' : api.tool === 'box';
     const isHorizontal = selected?.tool === 'horizontal';
+    const full = api.drawings.length >= MAX_DRAWINGS_PER_SYMBOL;
+    const fullHint = `此商品已達 ${MAX_DRAWINGS_PER_SYMBOL} 個畫圖物件上限，請先刪除部分物件`;
 
     return (
         <div className={styles.rail} title='畫圖／瀏覽模式'>
@@ -59,9 +66,12 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
                 return (
                     <button
                         key={t.tool}
-                        className={styles.railBtn[api.tool === t.tool ? 'armed' : 'normal']}
-                        title={`${t.label} — ${t.hint}`}
+                        className={
+                            styles.railBtn[api.tool === t.tool ? 'armed' : full ? 'disabled' : 'normal']
+                        }
+                        title={full ? fullHint : `${t.label} — ${t.hint}`}
                         aria-label={t.label}
+                        disabled={full && api.tool !== t.tool}
                         onClick={() => api.setTool(api.tool === t.tool ? null : t.tool)}
                     >
                         <Icon size={13} />
@@ -220,9 +230,10 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
                         {selected.hidden ? <EyeOff size={13} /> : <Eye size={13} />}
                     </button>
                     <button
-                        className={styles.railBtn.normal}
-                        title='複製'
+                        className={styles.railBtn[full ? 'disabled' : 'normal']}
+                        title={full ? fullHint : '複製'}
                         aria-label='複製'
+                        disabled={full}
                         onClick={api.duplicate}
                     >
                         <Copy size={13} />

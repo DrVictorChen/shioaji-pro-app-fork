@@ -8,7 +8,9 @@ import {
     drawingSymbolKey,
     DRAWING_PALETTE,
     duplicateDrawing,
+    flushDrawingWrites,
     getDrawings,
+    MAX_DRAWINGS_PER_SYMBOL,
     removeDrawing,
     updateDrawing,
     type DrawingAnchor,
@@ -66,8 +68,9 @@ describe('商品鍵：期貨連續月與月份合約共用', () => {
 
 describe('畫圖物件的增刪改', () => {
     it('新增後可依商品鍵讀回，並落地到 localStorage', () => {
-        const d = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        const d = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
         expect(getDrawings('TXF')).toEqual([d]);
+        flushDrawingWrites();
         expect(JSON.parse(store.get('sj-pro-chart-drawings')!)).toEqual({ TXF: [d] });
     });
 
@@ -81,15 +84,15 @@ describe('畫圖物件的增刪改', () => {
 
     it('樣式是複本 — 之後改預設樣式不會回頭改到已建立的物件', () => {
         const style = { ...DEFAULT_DRAWING_STYLE };
-        const d = addDrawing('TXF', 'trend', anchors, style);
+        const d = addDrawing('TXF', 'trend', anchors, style)!;
         style.color = '#ff0000';
         expect(getDrawings('TXF')[0]!.style.color).toBe(d.style.color);
         expect(getDrawings('TXF')[0]!.style.color).not.toBe('#ff0000');
     });
 
     it('更新只動指定的物件，其餘保持同一個參考', () => {
-        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
-        const b = addDrawing('TXF', 'box', anchors, DEFAULT_DRAWING_STYLE);
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'box', anchors, DEFAULT_DRAWING_STYLE)!;
         updateDrawing('TXF', a.id, { style: { ...a.style, color: '#ff7043' } });
         const list = getDrawings('TXF');
         expect(list[0]!.style.color).toBe('#ff7043');
@@ -97,13 +100,13 @@ describe('畫圖物件的增刪改', () => {
     });
 
     it('刪除後不再讀得到', () => {
-        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
         removeDrawing('TXF', a.id);
         expect(getDrawings('TXF')).toEqual([]);
     });
 
     it('複製沿用樣式、套用呼叫端給的偏移，id 不同', () => {
-        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
         const copy = duplicateDrawing('TXF', a.id, (x) => ({ time: x.time + 300, price: x.price - 5 }))!;
         expect(copy.id).not.toBe(a.id);
         expect(copy.style).toEqual(a.style);
@@ -113,7 +116,7 @@ describe('畫圖物件的增刪改', () => {
     });
 
     it('一鍵清除保留鎖定的物件 — 鎖定的用意就是防誤刪', () => {
-        const keep = addDrawing('TXF', 'horizontal', [anchors[0]!], DEFAULT_DRAWING_STYLE);
+        const keep = addDrawing('TXF', 'horizontal', [anchors[0]!], DEFAULT_DRAWING_STYLE)!;
         addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
         updateDrawing('TXF', keep.id, { locked: true });
         clearDrawings('TXF');
@@ -136,7 +139,39 @@ describe('畫圖物件的增刪改', () => {
             removeItem: () => {},
         });
         expect(() => addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)).not.toThrow();
+        expect(() => flushDrawingWrites()).not.toThrow();
         expect(getDrawings('TXF')).toHaveLength(1);
+    });
+
+    it('拖曳時連續改動只在節流窗結束寫一次 localStorage，畫面仍即時更新', () => {
+        vi.useFakeTimers();
+        try {
+            const setItem = vi.fn((k: string, v: string) => void store.set(k, v));
+            vi.stubGlobal('localStorage', { getItem: () => null, setItem, removeItem: () => {} });
+            const d = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+            for (let i = 1; i <= 50; i++) {
+                updateDrawing('TXF', d.id, { anchors: [anchors[0]!, { time: 2000, price: 25100 + i }] });
+            }
+            expect(getDrawings('TXF')[0]!.anchors[1]!.price).toBe(25150);
+            expect(setItem).not.toHaveBeenCalled();
+            vi.runAllTimers();
+            expect(setItem).toHaveBeenCalledTimes(1);
+            expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF[0].anchors[1].price).toBe(25150);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('每個商品有數量上限，超過就不再新增（複製也一樣）', () => {
+        for (let i = 0; i < MAX_DRAWINGS_PER_SYMBOL; i++) {
+            addDrawing('TXF', 'horizontal', [anchors[0]!], DEFAULT_DRAWING_STYLE);
+        }
+        const first = getDrawings('TXF')[0]!;
+        expect(addDrawing('TXF', 'horizontal', [anchors[0]!], DEFAULT_DRAWING_STYLE)).toBeNull();
+        expect(duplicateDrawing('TXF', first.id, (a) => a)).toBeNull();
+        expect(getDrawings('TXF')).toHaveLength(MAX_DRAWINGS_PER_SYMBOL);
+        // 其他商品不受影響
+        expect(addDrawing('2330', 'horizontal', [anchors[0]!], DEFAULT_DRAWING_STYLE)).not.toBeNull();
     });
 });
 
