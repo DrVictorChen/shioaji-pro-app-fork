@@ -849,7 +849,7 @@ export function FlashOrder({
                 >
                     ＋
                 </button>
-                {market === 'S' && <span className={styles.qtyUnit}>{odd ? '股' : '張'}</span>}
+                <span className={styles.qtyUnit}>{market === 'F' ? '口' : odd ? '股' : '張'}</span>
                 <OrderSettingsButton
                     market={market}
                     settings={flashSettings}
@@ -879,6 +879,7 @@ export function FlashOrder({
                     summary={flashOrderSummary(flashSettings, market, accountShort)}
                     ariaLabel='閃電下單設定'
                     onOpenChange={open => { settingsOpenRef.current = open; }}
+                    align='panel'
                 />
                 <span className={styles.rowBreak} aria-hidden />
                 <button
