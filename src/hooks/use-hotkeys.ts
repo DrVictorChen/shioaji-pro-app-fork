@@ -40,8 +40,13 @@ export function useHotkeys({
         // 之間就跑掉，太早）還沒被算成一下的 Esc，一律清除武裝。
         const onEscCapture = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
+            // 先同步結清上一個 Esc：它沒被算成一下（被元件吃掉、擋下）就清除
+            // 武裝 — 不能只靠下面的計時器，連續按鍵時下一個 keydown 可能比
+            // 計時器先到
+            if (current && countedSeq < current.n) resetEscCancelArm();
             const n = ++seq;
             current = { e, n };
+            // 次要的清理：之後沒有再按 Esc 時，也別讓這一下留下的武裝一直掛著
             setTimeout(() => {
                 // 這一下沒被算，而且之後也沒有新的一下被算 → 清除武裝
                 if (countedSeq < n) resetEscCancelArm();
