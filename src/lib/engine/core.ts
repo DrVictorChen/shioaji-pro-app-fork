@@ -237,7 +237,12 @@ export type CoreResponse = { ok: true; result: CoreResult } | { ok: false; error
 /** Trading sessions in Taiwan wall-clock 'HH:MM'; close < open is an overnight session. */
 export interface SessionCalendar {
     name: string;
-    sessions: { open: string; close: string }[];
+    /**
+     * `closeGrace`: minutes after a day session's close whose bars still
+     * belong to the close (merged into the close label), e.g. 3 for TWSE
+     * indices whose official close is published at 13:31–13:33.
+     */
+    sessions: { open: string; close: string; closeGrace?: number }[];
     /** Weekday dates that are not trading days. */
     holidays: string[];
     /** Weekend dates that are trading days (make-up days). */
