@@ -208,6 +208,8 @@
       "event": {
         "type": "tick",
         "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 100
       },
@@ -258,6 +260,8 @@
       "event": {
         "type": "intentResult",
         "ts": 1003,
+        "env": "simulation",
+        "serverId": "local-a",
         "key": "g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
@@ -267,6 +271,8 @@
       "event": {
         "type": "intentResult",
         "ts": 1004,
+        "env": "simulation",
+        "serverId": "local-a",
         "key": "g1/L2/entry/0/1",
         "outcome": "accepted",
         "orderId": "o2"
@@ -276,6 +282,8 @@
       "event": {
         "type": "deal",
         "ts": 1005,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o1",
         "eventId": null,
         "seq": "a1",
@@ -321,6 +329,8 @@
       "event": {
         "type": "deal",
         "ts": 1006,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o1",
         "eventId": null,
         "seq": "a1",
@@ -349,6 +359,8 @@
       "event": {
         "type": "deal",
         "ts": 1007,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o1",
         "eventId": null,
         "seq": "a2",
@@ -379,6 +391,8 @@
       "event": {
         "type": "tick",
         "ts": 1008,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 99.5
       },
@@ -400,6 +414,8 @@
       "event": {
         "type": "intentResult",
         "ts": 1009,
+        "env": "simulation",
+        "serverId": "local-a",
         "key": "g1/L1/tp/0/2",
         "outcome": "accepted",
         "orderId": "x1"
@@ -409,6 +425,8 @@
       "event": {
         "type": "intentResult",
         "ts": 1010,
+        "env": "simulation",
+        "serverId": "local-a",
         "key": "g1/L1/tp/0/3",
         "outcome": "accepted",
         "orderId": "x2"
@@ -418,6 +436,8 @@
       "event": {
         "type": "deal",
         "ts": 1011,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "x1",
         "eventId": null,
         "seq": "b1",
@@ -448,6 +468,8 @@
       "event": {
         "type": "deal",
         "ts": 1012,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "x2",
         "eventId": null,
         "seq": "b2",
@@ -479,6 +501,8 @@
       "event": {
         "type": "tick",
         "ts": 1013,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 99.5
       },
@@ -488,6 +512,8 @@
       "event": {
         "type": "intentResult",
         "ts": 1014,
+        "env": "simulation",
+        "serverId": "local-a",
         "key": "g1/L3/entry/0/4",
         "outcome": "accepted",
         "orderId": "o3"
@@ -497,6 +523,8 @@
       "event": {
         "type": "order",
         "ts": 1015,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o3",
         "op": "Cancel",
         "failed": false
@@ -518,6 +546,8 @@
       "event": {
         "type": "tick",
         "ts": 1016,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 100
       },

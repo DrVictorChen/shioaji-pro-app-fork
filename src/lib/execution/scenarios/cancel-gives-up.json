@@ -1,10 +1,10 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "grid-unknown-freezes-level",
-  "description": "An unknown grid submit freezes only that level; other levels keep cycling.",
+  "name": "cancel-gives-up",
+  "description": "P1-2: cancels refused before sending are retried at most 3 times, then an issue asks for manual handling; the program stays stopping.",
   "covers": [
-    "grid",
-    "unknown"
+    "stop",
+    "cancel"
   ],
   "steps": [
     {
@@ -79,39 +79,6 @@
                 "unprotected": 0,
                 "cycles": 0,
                 "detail": null
-              },
-              {
-                "id": "L2",
-                "side": "Buy",
-                "qty": 1,
-                "entry": {
-                  "type": "limit",
-                  "price": 98,
-                  "order": {
-                    "priceType": "LMT",
-                    "timeInForce": "ROD",
-                    "octype": "New"
-                  }
-                },
-                "exit": {
-                  "type": "takeProfit",
-                  "price": 99,
-                  "order": {
-                    "priceType": "LMT",
-                    "timeInForce": "ROD",
-                    "octype": "Cover"
-                  }
-                },
-                "phase": "idle",
-                "check": null,
-                "recross": [],
-                "pending": null,
-                "orders": [],
-                "position": 0,
-                "entryFilled": 0,
-                "unprotected": 0,
-                "cycles": 0,
-                "detail": null
               }
             ],
             "generator": {
@@ -124,7 +91,7 @@
                 "type": "abs",
                 "value": 1
               },
-              "count": 2,
+              "count": 1,
               "direction": "down",
               "qty": 1,
               "takeProfit": {
@@ -189,15 +156,6 @@
             "leg": "entry",
             "role": "entry",
             "price": 99
-          },
-          {
-            "kind": "place",
-            "key": "g1/L2/entry/0/1",
-            "action": "Buy",
-            "qty": 1,
-            "leg": "entry",
-            "role": "entry",
-            "price": 98
           }
         ]
       }
@@ -209,63 +167,43 @@
         "env": "simulation",
         "serverId": "local-a",
         "key": "g1/L1/entry/0/0",
-        "outcome": "unknown"
+        "outcome": "accepted",
+        "orderId": "o1"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1004,
+        "id": "c1004",
+        "command": {
+          "op": "stop",
+          "programId": "g1",
+          "version": 1
+        }
       },
       "expect": {
-        "programs": {
-          "g1": {
-            "levels": {
-              "L1": {
-                "phase": "unknown"
-              },
-              "L2": {
-                "phase": "working"
-              }
-            }
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/1"
           }
-        }
+        ]
       }
     },
     {
       "event": {
         "type": "intentResult",
-        "ts": 1004,
-        "env": "simulation",
-        "serverId": "local-a",
-        "key": "g1/L2/entry/0/1",
-        "outcome": "accepted",
-        "orderId": "o2"
-      }
-    },
-    {
-      "event": {
-        "type": "deal",
         "ts": 1005,
         "env": "simulation",
         "serverId": "local-a",
-        "orderId": "o2",
-        "eventId": null,
-        "seq": "a1",
-        "account": {
-          "brokerId": "F002000",
-          "accountId": "1234567"
-        },
-        "code": "TXFJ6",
-        "action": "Buy",
-        "qty": 1,
-        "price": 98
+        "key": "g1/L1/entry/0/0/cancel/1",
+        "outcome": "notSent",
+        "detail": "killSwitch"
       },
       "expect": {
-        "intents": [
-          {
-            "kind": "place",
-            "key": "g1/L2/tp/0/2",
-            "action": "Sell",
-            "qty": 1,
-            "leg": "tp",
-            "role": "exit",
-            "price": 99
-          }
+        "notices": [
+          "cancelFailed"
         ]
       }
     },
@@ -277,6 +215,76 @@
         "serverId": "local-a",
         "code": "TXFR1",
         "price": 100
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/2"
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1007,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "g1/L1/entry/0/0/cancel/2",
+        "outcome": "notSent",
+        "detail": "killSwitch"
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1008,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/3"
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1009,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "g1/L1/entry/0/0/cancel/3",
+        "outcome": "notSent",
+        "detail": "killSwitch"
+      },
+      "expect": {
+        "notices": [
+          "issue.cancelGaveUp"
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1010,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "status": "stopping"
+          }
+        }
       }
     }
   ]

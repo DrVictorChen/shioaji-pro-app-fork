@@ -25,6 +25,13 @@
 // - Grids: each entry fill places an equal take-profit exit at once
 //   (partial fills included); a cycle completes when the entry is terminal and
 //   the position is flat; `rearmAfterExit` returns the level to idle.
+// - Sources: tick / heartbeat / order / deal / intentResult events carry the
+//   env + serverId they came from. Ticks and heartbeats count only when that
+//   is the live connection; reports and results only ever match programs
+//   bound to that same env + serverId.
+// - Prices compare as fixed-point integers (PRICE_SCALE).
+// - Cancels are tracked per slot (CancelState); a stopping program becomes
+//   stopped only when no order is active any more.
 
 import {
     EXECUTION_SCHEMA_VERSION,
@@ -42,15 +49,19 @@ import {
     type OrderProgram,
     type OrderSlot,
     type OrderSpec,
+    PRICE_SCALE,
     type ReconcileEvent,
     type RestoreReason,
     type Side,
+    type Source,
     type StepResult,
     type TouchCondition,
 } from './model';
 
 export const ORPHAN_DEAL_LIMIT = 200;
+export const ORPHAN_ORDER_LIMIT = 200;
 export const ISSUE_LIMIT = 50;
+export const MAX_CANCEL_ATTEMPTS = 3;
 
 export function initialState(): EngineState {
     return {
@@ -59,6 +70,7 @@ export function initialState(): EngineState {
         lastActivity: null,
         lastPrices: {},
         orphanDeals: [],
+        orphanOrders: [],
         programs: [],
     };
 }
@@ -72,8 +84,11 @@ interface Ctx {
 
 const opposite = (side: Side): Side => side === 'Buy' ? 'Sell' : 'Buy';
 
+/** Price → fixed-point integer (PRICE_SCALE units), the only form prices are compared in. */
+export const fixed = (price: number): number => Math.round(price * PRICE_SCALE);
+
 export const isPast = (condition: TouchCondition, trigger: number, price: number) =>
-    (condition === 'below' && price <= trigger) || (condition === 'above' && price >= trigger);
+    (condition === 'below' && fixed(price) <= fixed(trigger)) || (condition === 'above' && fixed(price) >= fixed(trigger));
 
 const isActive = (slot: OrderSlot) => slot.status === 'pendingSubmit' || slot.status === 'working';
 
@@ -85,6 +100,13 @@ function envMatches(s: EngineState, p: OrderProgram): boolean {
     return canEvaluate(s) && s.conn.env === p.binding.env && s.conn.serverId === p.binding.serverId;
 }
 
+/** The event came from the environment that is live right now. */
+function fromLive(s: EngineState, e: Source): boolean {
+    return canEvaluate(s) && s.conn.env === e.env && s.conn.serverId === e.serverId;
+}
+
+const boundTo = (p: OrderProgram, e: Source) => p.binding.env === e.env && p.binding.serverId === e.serverId;
+
 function notice(ctx: Ctx, code: string, p: OrderProgram | null, levelId: string | null, detail: string) {
     ctx.notices.push({ code, programId: p?.id ?? null, levelId, detail });
 }
@@ -95,11 +117,19 @@ function addIssue(ctx: Ctx, p: OrderProgram, code: string, detail: string) {
     notice(ctx, `issue.${code}`, p, null, detail);
 }
 
-function updateHolds(s: EngineState) {
+const HOLD_REASON = { disconnected: 'disconnected', unknownEnv: 'unknownEnv', envMismatch: 'envSwitched' } as const;
+
+function updateHolds(ctx: Ctx) {
+    const s = ctx.s;
     for (const p of s.programs) {
+        const was = p.hold;
         p.hold = !s.conn.live ? 'disconnected'
             : s.conn.env === null || s.conn.serverId === null ? 'unknownEnv'
                 : envMatches(s, p) ? null : 'envMismatch';
+        if (p.hold !== was) {
+            if (p.hold !== null) notice(ctx, 'held', p, null, HOLD_REASON[p.hold]);
+            else notice(ctx, 'released', p, null, was ?? '');
+        }
     }
 }
 
@@ -141,7 +171,7 @@ function emitPlace(ctx: Ctx, p: OrderProgram, lv: Level, role: 'entry' | 'exit',
     const key = `${p.id}/${lv.id}/${leg}/${lv.cycles}/${p.intentSeq}`;
     p.intentSeq += 1;
     lv.orders.push({ key, role, leg, cycle: lv.cycles, qty, status: 'pendingSubmit', orderId: null, filled: 0,
-        fills: {}, fillTs: {}, detail: null, acknowledged: false });
+        fills: {}, fillTs: {}, detail: null, acknowledged: false, cancel: null });
     const b = p.binding;
     ctx.intents.push({ kind: 'place', key, programId: p.id, levelId: lv.id, version: p.version, role, leg,
         env: b.env, serverId: b.serverId, account: b.account, orderCode: b.contract.orderCode,
@@ -153,10 +183,38 @@ function emitPlace(ctx: Ctx, p: OrderProgram, lv: Level, role: 'entry' | 'exit',
 
 function emitCancel(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot): boolean {
     if (!envMatches(ctx.s, p) || !slot.orderId) return false;
+    const attempts = (slot.cancel?.attempts ?? 0) + 1;
+    const key = `${slot.key}/cancel/${attempts}`;
+    slot.cancel = { key, status: 'pendingSubmit', attempts, detail: null };
     const b = p.binding;
-    ctx.intents.push({ kind: 'cancel', key: `${slot.key}/cancel`, programId: p.id, levelId: lv.id, version: p.version,
+    ctx.intents.push({ kind: 'cancel', key, programId: p.id, levelId: lv.id, version: p.version,
         env: b.env, serverId: b.serverId, account: b.account, orderId: slot.orderId });
+    p.updatedAt = ctx.ts;
     return true;
+}
+
+/** Stopping program: cancel every working entry not yet asked to cancel;
+ * with `retry`, also resend failed / unknown cancels (bounded). */
+function ensureCancels(ctx: Ctx, p: OrderProgram, retry: boolean) {
+    if (p.status !== 'stopping' || !envMatches(ctx.s, p)) return;
+    for (const lv of p.levels) {
+        for (const slot of lv.orders) {
+            if (slot.role !== 'entry' || slot.status !== 'working' || !slot.orderId) continue;
+            const c = slot.cancel;
+            if (c === null) emitCancel(ctx, p, lv, slot);
+            else if (retry && (c.status === 'failed' || c.status === 'unknown') && c.attempts < MAX_CANCEL_ATTEMPTS) {
+                emitCancel(ctx, p, lv, slot);
+            }
+        }
+    }
+}
+
+function cancelFailed(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, detail: string) {
+    const c = slot.cancel!;
+    c.status = 'failed';
+    c.detail = detail;
+    notice(ctx, 'cancelFailed', p, lv.id, `${slot.key}: ${detail}`);
+    if (c.attempts >= MAX_CANCEL_ATTEMPTS) addIssue(ctx, p, 'cancelGaveUp', `${slot.key}: ${c.attempts} cancel attempts failed`);
 }
 
 /** Fire one touch leg (or a user 送出). */
@@ -257,7 +315,9 @@ function settle(ctx: Ctx, p: OrderProgram, lv: Level) {
 
 function refreshStopping(p: OrderProgram) {
     if (p.status !== 'stopping') return;
-    const busy = p.levels.some(lv => lv.orders.some(o => isActive(o)) || (lv.position > 0 && lv.phase !== 'disabled'));
+    // an unacknowledged unknown submit may be live at the broker: not stopped yet
+    const busy = p.levels.some(lv => lv.orders.some(o => isActive(o) || (o.status === 'unknown' && !o.acknowledged))
+        || (lv.position > 0 && lv.phase !== 'disabled'));
     if (!busy) p.status = 'stopped';
 }
 
@@ -272,9 +332,9 @@ function markRestore(p: OrderProgram, reason: RestoreReason) {
 
 // ---- events ----
 
-function noteActivity(ctx: Ctx) {
+function noteActivity(ctx: Ctx, e: Source) {
     const s = ctx.s;
-    if (!canEvaluate(s)) return;
+    if (!fromLive(s, e)) return; // a late event of another environment says nothing about this one
     if (s.lastActivity !== null) {
         const gap = ctx.ts - s.lastActivity;
         for (const p of s.programs) {
@@ -286,8 +346,8 @@ function noteActivity(ctx: Ctx) {
 
 function onTick(ctx: Ctx, e: Extract<ExecEvent, { type: 'tick' }>) {
     const s = ctx.s;
-    noteActivity(ctx);
-    if (e.simtrade || !Number.isFinite(e.price) || e.price <= 0 || !canEvaluate(s)) return;
+    noteActivity(ctx, e);
+    if (e.simtrade || !Number.isFinite(e.price) || e.price <= 0 || !fromLive(s, e)) return;
     s.lastPrices[e.code] = e.price;
     for (const p of s.programs) {
         if (p.binding.contract.quoteCode !== e.code || p.hold !== null) continue;
@@ -318,14 +378,14 @@ function onTick(ctx: Ctx, e: Extract<ExecEvent, { type: 'tick' }>) {
                     if (past && lv.phase !== 'done') { fire(ctx, p, lv, leg.name, e.price); break; }
                 }
             } else if (p.status === 'running' && lv.phase === 'idle' && lv.entry.type === 'limit') {
-                const eligible = lv.side === 'Buy' ? e.price > lv.entry.price : e.price < lv.entry.price;
+                const eligible = lv.side === 'Buy' ? fixed(e.price) > fixed(lv.entry.price) : fixed(e.price) < fixed(lv.entry.price);
                 if (eligible) limitCandidates.push(lv);
             }
         }
         if (limitCandidates.length) {
             const working = p.levels.filter(lv => cycleSlots(lv, 'entry').some(isActive)).length;
             const cap = p.risk.maxWorkingEntries === null ? Infinity : Math.max(0, p.risk.maxWorkingEntries - working);
-            const dist = (lv: Level) => Math.abs(e.price - (lv.entry.type === 'limit' ? lv.entry.price : e.price));
+            const dist = (lv: Level) => Math.abs(fixed(e.price) - fixed(lv.entry.type === 'limit' ? lv.entry.price : e.price));
             const ordered = limitCandidates
                 .map((lv, i) => ({ lv, i }))
                 .sort((a, b) => dist(a.lv) - dist(b.lv) || a.i - b.i)
@@ -333,13 +393,14 @@ function onTick(ctx: Ctx, e: Extract<ExecEvent, { type: 'tick' }>) {
             for (const { lv } of ordered) fire(ctx, p, lv, 'entry', e.price);
         }
         for (const lv of p.levels) ensureExits(ctx, p, lv);
+        ensureCancels(ctx, p, true);
     }
 }
 
 function checkBounds(ctx: Ctx, p: OrderProgram, price: number) {
     const b = p.bounds;
-    const action = b.upper !== null && price > b.upper ? b.onBreakUpper
-        : b.lower !== null && price < b.lower ? b.onBreakLower : 'none';
+    const action = b.upper !== null && fixed(price) > fixed(b.upper) ? b.onBreakUpper
+        : b.lower !== null && fixed(price) < fixed(b.lower) ? b.onBreakLower : 'none';
     if (action === 'pause') {
         p.status = 'paused';
         p.pauseReason = 'boundBreak';
@@ -362,7 +423,7 @@ function onConnection(ctx: Ctx, e: ConnectionEvent) {
     if (!now) {
         if (before || s.conn.downSince === null) s.conn.downSince = ctx.ts;
         if (before) s.lastPrices = {};
-        updateHolds(s);
+        updateHolds(ctx);
         return;
     }
     const switched = s.conn.lastEvalEnv !== null
@@ -378,27 +439,33 @@ function onConnection(ctx: Ctx, e: ConnectionEvent) {
     s.conn.lastEvalEnv = s.conn.env;
     s.conn.lastEvalServerId = s.conn.serverId;
     s.lastActivity = ctx.ts;
-    updateHolds(s);
-    // exits deferred while held (grid fills seen during a disconnect) go out now
+    updateHolds(ctx);
+    // exits deferred while held (grid fills seen during a disconnect) go out now,
+    // and cancels a stopping program could not send / confirm are (re)sent
     for (const p of s.programs) {
         if (p.hold !== null) continue;
         for (const lv of p.levels) { ensureExits(ctx, p, lv); settle(ctx, p, lv); }
+        ensureCancels(ctx, p, true);
     }
 }
 
-function findSlotByKey(s: EngineState, key: string) {
+/** Result of a place (slot key) or cancel (cancel key), within its source environment only. */
+function findSlotByKey(s: EngineState, key: string, src: Source) {
     for (const p of s.programs) {
+        if (!boundTo(p, src)) continue;
         for (const lv of p.levels) {
             const slot = lv.orders.find(o => o.key === key);
-            if (slot) return { p, lv, slot };
+            if (slot) return { p, lv, slot, cancel: false };
+            const c = lv.orders.find(o => o.cancel?.key === key);
+            if (c) return { p, lv, slot: c, cancel: true };
         }
     }
     return null;
 }
 
-function findSlotByOrderId(s: EngineState, orderId: string) {
+function findSlotByOrderId(s: EngineState, orderId: string, src: Source) {
     for (const p of s.programs) {
-        if (!envMatches(s, p)) continue; // reports come from the connected environment only
+        if (!boundTo(p, src)) continue; // a report only matches its own environment's programs
         for (const lv of p.levels) {
             const slot = lv.orders.find(o => o.orderId === orderId);
             if (slot) return { p, lv, slot };
@@ -407,17 +474,36 @@ function findSlotByOrderId(s: EngineState, orderId: string) {
     return null;
 }
 
+/** Apply reports that raced the order id becoming known (deals, then order events). */
+function drainOrphans(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot) {
+    const s = ctx.s;
+    const mine = (e: Source & { orderId: string }) => e.orderId === slot.orderId && boundTo(p, e);
+    const deals = s.orphanDeals.filter(d => mine(d.deal));
+    s.orphanDeals = s.orphanDeals.filter(d => !mine(d.deal));
+    for (const d of deals) applyDeal(ctx, p, lv, slot, d.deal);
+    const orders = s.orphanOrders.filter(o => mine(o.order));
+    s.orphanOrders = s.orphanOrders.filter(o => !mine(o.order));
+    for (const o of orders) applyOrder(ctx, p, lv, slot, o.order);
+}
+
 function onIntentResult(ctx: Ctx, e: IntentResultEvent) {
-    const hit = findSlotByKey(ctx.s, e.key);
-    if (!hit || hit.slot.status !== 'pendingSubmit') return; // duplicate or stale result
+    const hit = findSlotByKey(ctx.s, e.key, e);
+    if (!hit) return;
     const { p, lv, slot } = hit;
+    if (hit.cancel) {
+        const c = slot.cancel!;
+        if (c.key !== e.key || c.status !== 'pendingSubmit') return; // stale attempt / duplicate
+        if (e.outcome === 'accepted') c.status = 'requested';
+        else if (e.outcome === 'notSent') cancelFailed(ctx, p, lv, slot, e.detail ?? 'notSent');
+        else { c.status = 'unknown'; c.detail = e.detail ?? 'unknown'; }
+        refreshStopping(p);
+        return;
+    }
+    if (slot.status !== 'pendingSubmit') return; // duplicate or stale result
     if (e.outcome === 'accepted' && e.orderId) {
         slot.orderId = e.orderId;
         slot.status = slot.filled >= slot.qty ? 'filled' : 'working';
-        // deals that raced the response
-        const mine = ctx.s.orphanDeals.filter(d => d.deal.orderId === e.orderId);
-        ctx.s.orphanDeals = ctx.s.orphanDeals.filter(d => d.deal.orderId !== e.orderId);
-        for (const d of mine) applyDeal(ctx, p, lv, slot, d.deal);
+        drainOrphans(ctx, p, lv, slot);
     } else if (e.outcome === 'notSent') {
         slot.status = 'notSent';
         slot.detail = e.detail ?? 'notSent';
@@ -429,17 +515,36 @@ function onIntentResult(ctx: Ctx, e: IntentResultEvent) {
     }
     ensureExits(ctx, p, lv);
     settle(ctx, p, lv);
+    ensureCancels(ctx, p, false); // an entry accepted after stop must be cancelled too
     refreshStopping(p);
 }
 
-function onOrder(ctx: Ctx, e: OrderEvent) {
-    const hit = findSlotByOrderId(ctx.s, e.orderId);
-    if (!hit) return;
-    const { p, lv, slot } = hit;
+function applyOrder(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, e: OrderEvent) {
+    if (e.op === 'Cancel') {
+        if (e.failed) {
+            if (slot.cancel && slot.cancel.status !== 'confirmed' && slot.cancel.status !== 'failed' && isActive(slot)) {
+                cancelFailed(ctx, p, lv, slot, e.detail ?? 'cancelFailed');
+            }
+            return;
+        }
+        if (slot.cancel) slot.cancel.status = 'confirmed';
+    }
     const ended = (e.op === 'New' && e.failed) || (e.op === 'Cancel' && !e.failed);
     if (!ended || !isActive(slot)) return;
     slot.status = slot.filled >= slot.qty ? 'filled' : 'ended';
     if (slot.status === 'ended') slot.detail = e.detail ?? (e.failed ? 'failed' : 'cancelled');
+}
+
+function onOrder(ctx: Ctx, e: OrderEvent) {
+    const hit = findSlotByOrderId(ctx.s, e.orderId, e);
+    if (!hit) {
+        // e.g. a New failure reported before the submit result: keep it for the binding
+        ctx.s.orphanOrders.push({ order: e, ts: ctx.ts });
+        if (ctx.s.orphanOrders.length > ORPHAN_ORDER_LIMIT) ctx.s.orphanOrders.splice(0, ctx.s.orphanOrders.length - ORPHAN_ORDER_LIMIT);
+        return;
+    }
+    const { p, lv, slot } = hit;
+    applyOrder(ctx, p, lv, slot, e);
     settle(ctx, p, lv);
     refreshStopping(p);
 }
@@ -510,7 +615,7 @@ function applyDeal(ctx: Ctx, p: OrderProgram, lv: Level, slot: OrderSlot, d: Dea
 }
 
 function onDeal(ctx: Ctx, e: DealEvent) {
-    const hit = findSlotByOrderId(ctx.s, e.orderId);
+    const hit = findSlotByOrderId(ctx.s, e.orderId, e);
     if (!hit) {
         ctx.s.orphanDeals.push({ deal: e, ts: ctx.ts });
         if (ctx.s.orphanDeals.length > ORPHAN_DEAL_LIMIT) ctx.s.orphanDeals.splice(0, ctx.s.orphanDeals.length - ORPHAN_DEAL_LIMIT);
@@ -534,11 +639,17 @@ function onReconcile(ctx: Ctx, e: ReconcileEvent) {
                 const row = slot.orderId
                     ? e.orders.find(o => o.orderId === slot.orderId)
                     : e.orders.find(o => o.intentKey === slot.key);
-                if (slot.status === 'unknown' && !slot.acknowledged) {
+                if (slot.status === 'pendingSubmit' && !slot.orderId && row) {
+                    // the listing answered before the submit result did
+                    slot.orderId = row.orderId;
+                    slot.status = 'working';
+                    drainOrphans(ctx, p, lv, slot);
+                } else if (slot.status === 'unknown' && !slot.acknowledged) {
                     if (row) {
                         slot.orderId = row.orderId;
                         slot.status = 'working';
                         slot.detail = 'reconciled';
+                        drainOrphans(ctx, p, lv, slot);
                     } else if (e.complete) {
                         slot.status = 'notSent';
                         slot.detail = 'reconciledNotSent';
@@ -562,6 +673,7 @@ function onReconcile(ctx: Ctx, e: ReconcileEvent) {
                 if (isActive(slot) && row.status !== 'working') {
                     slot.status = slot.filled >= slot.qty ? 'filled' : 'ended';
                     if (slot.status === 'ended') slot.detail = 'reconciledEnded';
+                    if (slot.cancel) slot.cancel.status = 'confirmed';
                 }
                 touched = true;
             }
@@ -571,6 +683,7 @@ function onReconcile(ctx: Ctx, e: ReconcileEvent) {
                 settle(ctx, p, lv);
             }
         }
+        ensureCancels(ctx, p, false);
         refreshStopping(p);
     }
 }
@@ -587,12 +700,14 @@ function onRestore(ctx: Ctx) {
                     slot.status = 'unknown';
                     slot.detail = 'restart: submit outcome unknown';
                 }
+                // a cancel may or may not have left: resend it once live again (cancels are safe to repeat)
+                if (slot.cancel?.status === 'pendingSubmit') slot.cancel.status = 'unknown';
             }
             settle(ctx, p, lv);
         }
         markRestore(p, 'restart');
     }
-    updateHolds(s);
+    updateHolds(ctx);
 }
 
 // ---- commands ----
@@ -625,10 +740,8 @@ function startStop(ctx: Ctx, p: OrderProgram) {
             lv.detail = 'stopped';
             continue;
         }
-        for (const slot of cycleSlots(lv, 'entry')) {
-            if (slot.status === 'working') emitCancel(ctx, p, lv, slot);
-        }
     }
+    ensureCancels(ctx, p, false);
     refreshStopping(p);
 }
 
@@ -647,8 +760,9 @@ function onCommand(ctx: Ctx, e: CommandEvent) {
         p.pauseReason = null;
         p.createdAt = ctx.ts;
         p.updatedAt = ctx.ts;
+        p.hold = null;
         s.programs.push(p);
-        updateHolds(s);
+        updateHolds(ctx);
         notice(ctx, 'created', p, null, p.kind);
         return;
     }
@@ -743,7 +857,7 @@ export function step(state: EngineState, event: ExecEvent): StepResult {
     const ctx: Ctx = { s, intents: [], notices: [], ts: event.ts };
     switch (event.type) {
         case 'tick': onTick(ctx, event); break;
-        case 'heartbeat': noteActivity(ctx); break;
+        case 'heartbeat': noteActivity(ctx, event); break;
         case 'connection': onConnection(ctx, event); break;
         case 'intentResult': onIntentResult(ctx, event); break;
         case 'order': onOrder(ctx, event); break;
@@ -753,6 +867,6 @@ export function step(state: EngineState, event: ExecEvent): StepResult {
         case 'command': onCommand(ctx, event); break;
     }
     for (const p of s.programs) refreshStopping(p);
-    updateHolds(s);
+    updateHolds(ctx);
     return { state: s, intents: ctx.intents, notices: ctx.notices };
 }

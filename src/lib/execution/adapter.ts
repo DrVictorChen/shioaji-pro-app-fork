@@ -127,7 +127,7 @@ function slotFromExit(programId: string, levelId: string, exit: BracketExit): Or
     const leg = exit.kind === 'stop' ? 'stop' : 'take';
     return { key: `${programId}/${levelId}/${leg}/0/legacy`, role: 'exit', leg, cycle: 0, qty: exit.quantity,
         status: EXIT_STATUS[exit.status], orderId: exit.orderId ?? null, filled: exit.filled, fills: { ...exit.fills },
-        fillTs: { ...(exit.fillTs ?? {}) }, detail: exit.detail ?? null, acknowledged: !!exit.acknowledged };
+        fillTs: { ...(exit.fillTs ?? {}) }, detail: exit.detail ?? null, acknowledged: !!exit.acknowledged, cancel: null };
 }
 
 /** A bracket plan (and, when armed, its OCO trigger pair) as one program.
@@ -146,7 +146,7 @@ export function programFromBracket(plan: BracketPlan, pair: TriggerOrder[] = [])
         key: `${programId}/L1/entry/0/ext`, role: 'entry', leg: 'entry', cycle: 0, qty: plan.quantity,
         status: plan.entryClosed ? (plan.filled >= plan.quantity ? 'filled' : 'ended') : 'working',
         orderId: plan.orderId, filled: plan.filled, fills: { ...plan.fills }, fillTs: { ...(plan.fillTs ?? {}) },
-        detail: null, acknowledged: false,
+        detail: null, acknowledged: false, cancel: null,
     };
     const orders: OrderSlot[] = [entry];
     let position = filled;

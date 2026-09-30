@@ -141,6 +141,8 @@
       "event": {
         "type": "tick",
         "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 100
       },
@@ -162,6 +164,8 @@
       "event": {
         "type": "deal",
         "ts": 1003,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o1",
         "eventId": null,
         "seq": "a1",
@@ -190,6 +194,8 @@
       "event": {
         "type": "intentResult",
         "ts": 1004,
+        "env": "simulation",
+        "serverId": "local-a",
         "key": "g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"

@@ -189,6 +189,8 @@
       "event": {
         "type": "tick",
         "ts": 5003,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 94
       },

@@ -208,6 +208,9 @@
         "serverId": "local-a"
       },
       "expect": {
+        "notices": [
+          "held"
+        ],
         "programs": {
           "t1": {
             "hold": "envMismatch",
@@ -220,6 +223,8 @@
       "event": {
         "type": "tick",
         "ts": 2001,
+        "env": "production",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 90
       },
@@ -326,6 +331,8 @@
       "event": {
         "type": "tick",
         "ts": 2003,
+        "env": "production",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 90
       },
@@ -382,6 +389,8 @@
       "event": {
         "type": "tick",
         "ts": 3001,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 90
       },
@@ -407,6 +416,34 @@
       "event": {
         "type": "intentResult",
         "ts": 3002,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "p1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "po1"
+      },
+      "expect": {
+        "programs": {
+          "p1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "status": "pendingSubmit"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 3003,
+        "env": "production",
+        "serverId": "local-a",
         "key": "p1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "po1"
@@ -431,7 +468,9 @@
     {
       "event": {
         "type": "deal",
-        "ts": 3003,
+        "ts": 3004,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "po1",
         "eventId": null,
         "seq": "s1",
@@ -452,6 +491,42 @@
                 "orders": [
                   {
                     "filled": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 3005,
+        "env": "production",
+        "serverId": "local-a",
+        "orderId": "po1",
+        "eventId": null,
+        "seq": "s1",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Sell",
+        "qty": 1,
+        "price": 90
+      },
+      "expect": {
+        "programs": {
+          "p1": {
+            "levels": {
+              "L1": {
+                "phase": "done",
+                "orders": [
+                  {
+                    "filled": 1,
+                    "status": "filled"
                   }
                 ]
               }

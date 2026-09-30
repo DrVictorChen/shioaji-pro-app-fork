@@ -109,6 +109,8 @@
       "event": {
         "type": "tick",
         "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 99
       },
@@ -161,6 +163,8 @@
       "event": {
         "type": "tick",
         "ts": 5002,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 95
       }
@@ -216,6 +220,8 @@
       "event": {
         "type": "deal",
         "ts": 5004,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o9",
         "eventId": null,
         "seq": "x1",
@@ -248,6 +254,8 @@
       "event": {
         "type": "tick",
         "ts": 5005,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 90
       }

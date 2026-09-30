@@ -131,6 +131,8 @@
       "event": {
         "type": "deal",
         "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o-entry",
         "eventId": "e1",
         "seq": "s1",
@@ -149,6 +151,8 @@
       "event": {
         "type": "deal",
         "ts": 1003,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o-entry",
         "eventId": "e1b",
         "seq": "s1",
@@ -177,6 +181,8 @@
       "event": {
         "type": "deal",
         "ts": 1004,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o-entry",
         "eventId": "e2",
         "seq": null,
@@ -209,6 +215,8 @@
       "event": {
         "type": "deal",
         "ts": 1005,
+        "env": "simulation",
+        "serverId": "local-a",
         "orderId": "o-entry",
         "eventId": "e2",
         "seq": null,

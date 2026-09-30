@@ -1,9 +1,10 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "trigger-fire-once",
-  "description": "A stop trigger fires once when price touches, then completes on fill; later ticks send nothing.",
+  "name": "cancel-after-late-accept",
+  "description": "P1-2: an entry still awaiting its submit result at stop time is cancelled as soon as it is accepted.",
   "covers": [
-    "trigger"
+    "stop",
+    "cancel"
   ],
   "steps": [
     {
@@ -23,8 +24,8 @@
         "command": {
           "op": "create",
           "program": {
-            "id": "t1",
-            "kind": "trigger",
+            "id": "g1",
+            "kind": "grid",
             "binding": {
               "env": "simulation",
               "serverId": "local-a",
@@ -48,19 +49,26 @@
             "levels": [
               {
                 "id": "L1",
-                "side": "Sell",
+                "side": "Buy",
                 "qty": 1,
                 "entry": {
-                  "type": "touch",
-                  "condition": "below",
-                  "price": 100,
+                  "type": "limit",
+                  "price": 99,
                   "order": {
-                    "priceType": "MKT",
-                    "timeInForce": "IOC",
-                    "octype": "Auto"
+                    "priceType": "LMT",
+                    "timeInForce": "ROD",
+                    "octype": "New"
                   }
                 },
-                "exit": null,
+                "exit": {
+                  "type": "takeProfit",
+                  "price": 100,
+                  "order": {
+                    "priceType": "LMT",
+                    "timeInForce": "ROD",
+                    "octype": "Cover"
+                  }
+                },
                 "phase": "idle",
                 "check": null,
                 "recross": [],
@@ -73,9 +81,36 @@
                 "detail": null
               }
             ],
-            "generator": null,
+            "generator": {
+              "type": "ladder",
+              "anchor": {
+                "type": "fixed",
+                "price": 99
+              },
+              "spacing": {
+                "type": "abs",
+                "value": 1
+              },
+              "count": 1,
+              "direction": "down",
+              "qty": 1,
+              "takeProfit": {
+                "type": "abs",
+                "value": 1
+              },
+              "order": {
+                "priceType": "LMT",
+                "timeInForce": "ROD",
+                "octype": "New"
+              },
+              "exitOrder": {
+                "priceType": "LMT",
+                "timeInForce": "ROD",
+                "octype": "Cover"
+              }
+            },
             "cycle": {
-              "rearmAfterExit": false,
+              "rearmAfterExit": true,
               "maxCycles": null,
               "partialFill": "immediate"
             },
@@ -100,22 +135,6 @@
             "updatedAt": 0
           }
         }
-      },
-      "expect": {
-        "notices": [
-          "created"
-        ],
-        "programs": {
-          "t1": {
-            "status": "running",
-            "hold": null,
-            "levels": {
-              "L1": {
-                "phase": "idle"
-              }
-            }
-          }
-        }
       }
     },
     {
@@ -125,73 +144,37 @@
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
-        "price": 101
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 1003,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
         "price": 100
       },
       "expect": {
         "intents": [
           {
             "kind": "place",
-            "key": "t1/L1/entry/0/0",
-            "action": "Sell",
+            "key": "g1/L1/entry/0/0",
+            "action": "Buy",
             "qty": 1,
             "leg": "entry",
             "role": "entry",
-            "price": null,
-            "env": "simulation",
-            "serverId": "local-a",
-            "orderCode": "TXFJ6",
-            "account": {
-              "accountType": "F",
-              "brokerId": "F002000",
-              "accountId": "1234567"
-            },
-            "version": 1
+            "price": 99
           }
-        ],
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "working",
-                "orders": [
-                  {
-                    "status": "pendingSubmit",
-                    "key": "t1/L1/entry/0/0"
-                  }
-                ]
-              }
-            }
-          }
-        }
+        ]
       }
     },
     {
       "event": {
-        "type": "tick",
-        "ts": 1004,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 99
+        "type": "command",
+        "ts": 1003,
+        "id": "c1003",
+        "command": {
+          "op": "stop",
+          "programId": "g1",
+          "version": 1
+        }
       },
       "expect": {
         "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "working"
-              }
-            }
+          "g1": {
+            "status": "stopping"
           }
         }
       }
@@ -199,77 +182,44 @@
     {
       "event": {
         "type": "intentResult",
-        "ts": 1005,
+        "ts": 1004,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "t1/L1/entry/0/0",
+        "key": "g1/L1/entry/0/0",
         "outcome": "accepted",
         "orderId": "o1"
       },
       "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/1",
+            "orderId": "o1"
+          }
+        ],
         "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "working",
-                "orders": [
-                  {
-                    "status": "working",
-                    "orderId": "o1"
-                  }
-                ]
-              }
-            }
+          "g1": {
+            "status": "stopping"
           }
         }
       }
     },
     {
       "event": {
-        "type": "deal",
-        "ts": 1006,
+        "type": "order",
+        "ts": 1005,
         "env": "simulation",
         "serverId": "local-a",
         "orderId": "o1",
-        "eventId": null,
-        "seq": "s1",
-        "account": {
-          "brokerId": "F002000",
-          "accountId": "1234567"
-        },
-        "code": "TXFJ6",
-        "action": "Sell",
-        "qty": 1,
-        "price": 99
+        "op": "Cancel",
+        "failed": false
       },
       "expect": {
         "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "done",
-                "entryFilled": 0,
-                "cycles": 1,
-                "orders": [
-                  {
-                    "status": "filled",
-                    "filled": 1
-                  }
-                ]
-              }
-            }
+          "g1": {
+            "status": "stopped"
           }
         }
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 1007,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 90
       }
     }
   ]

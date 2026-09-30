@@ -1,10 +1,11 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "grid-unknown-freezes-level",
-  "description": "An unknown grid submit freezes only that level; other levels keep cycling.",
+  "name": "cancel-tracking-retry",
+  "description": "P1-2: stop tracks each cancel; a failed cancel keeps the program stopping and is retried with a new key on the next tick; a cancel in flight at a crash is resent after reconnect; stopped only once the cancel is confirmed.",
   "covers": [
-    "grid",
-    "unknown"
+    "stop",
+    "cancel",
+    "restart"
   ],
   "steps": [
     {
@@ -79,39 +80,6 @@
                 "unprotected": 0,
                 "cycles": 0,
                 "detail": null
-              },
-              {
-                "id": "L2",
-                "side": "Buy",
-                "qty": 1,
-                "entry": {
-                  "type": "limit",
-                  "price": 98,
-                  "order": {
-                    "priceType": "LMT",
-                    "timeInForce": "ROD",
-                    "octype": "New"
-                  }
-                },
-                "exit": {
-                  "type": "takeProfit",
-                  "price": 99,
-                  "order": {
-                    "priceType": "LMT",
-                    "timeInForce": "ROD",
-                    "octype": "Cover"
-                  }
-                },
-                "phase": "idle",
-                "check": null,
-                "recross": [],
-                "pending": null,
-                "orders": [],
-                "position": 0,
-                "entryFilled": 0,
-                "unprotected": 0,
-                "cycles": 0,
-                "detail": null
               }
             ],
             "generator": {
@@ -124,7 +92,7 @@
                 "type": "abs",
                 "value": 1
               },
-              "count": 2,
+              "count": 1,
               "direction": "down",
               "qty": 1,
               "takeProfit": {
@@ -189,15 +157,6 @@
             "leg": "entry",
             "role": "entry",
             "price": 99
-          },
-          {
-            "kind": "place",
-            "key": "g1/L2/entry/0/1",
-            "action": "Buy",
-            "qty": 1,
-            "leg": "entry",
-            "role": "entry",
-            "price": 98
           }
         ]
       }
@@ -209,17 +168,42 @@
         "env": "simulation",
         "serverId": "local-a",
         "key": "g1/L1/entry/0/0",
-        "outcome": "unknown"
+        "outcome": "accepted",
+        "orderId": "o1"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1004,
+        "id": "c1004",
+        "command": {
+          "op": "stop",
+          "programId": "g1",
+          "version": 1
+        }
       },
       "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/1",
+            "orderId": "o1"
+          }
+        ],
         "programs": {
           "g1": {
+            "status": "stopping",
             "levels": {
               "L1": {
-                "phase": "unknown"
-              },
-              "L2": {
-                "phase": "working"
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "pendingSubmit",
+                      "attempts": 1
+                    }
+                  }
+                ]
               }
             }
           }
@@ -229,54 +213,192 @@
     {
       "event": {
         "type": "intentResult",
-        "ts": 1004,
+        "ts": 1005,
         "env": "simulation",
         "serverId": "local-a",
-        "key": "g1/L2/entry/0/1",
-        "outcome": "accepted",
-        "orderId": "o2"
+        "key": "g1/L1/entry/0/0/cancel/1",
+        "outcome": "accepted"
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "status": "working",
+                    "cancel": {
+                      "status": "requested"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
     },
     {
       "event": {
-        "type": "deal",
-        "ts": 1005,
+        "type": "order",
+        "ts": 1006,
         "env": "simulation",
         "serverId": "local-a",
-        "orderId": "o2",
-        "eventId": null,
-        "seq": "a1",
-        "account": {
-          "brokerId": "F002000",
-          "accountId": "1234567"
-        },
-        "code": "TXFJ6",
-        "action": "Buy",
-        "qty": 1,
-        "price": 98
+        "orderId": "o1",
+        "op": "Cancel",
+        "failed": true
+      },
+      "expect": {
+        "notices": [
+          "cancelFailed"
+        ],
+        "programs": {
+          "g1": {
+            "status": "stopping",
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "status": "working",
+                    "cancel": {
+                      "status": "failed"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tick",
+        "ts": 1007,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 100
       },
       "expect": {
         "intents": [
           {
-            "kind": "place",
-            "key": "g1/L2/tp/0/2",
-            "action": "Sell",
-            "qty": 1,
-            "leg": "tp",
-            "role": "exit",
-            "price": 99
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/2",
+            "orderId": "o1"
+          }
+        ]
+      }
+    },
+    {
+      "restart": {
+        "ts": 5000
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "status": "stopping",
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "unknown",
+                      "attempts": 2
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 5001,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "cancel",
+            "key": "g1/L1/entry/0/0/cancel/3",
+            "orderId": "o1"
           }
         ]
       }
     },
     {
       "event": {
-        "type": "tick",
-        "ts": 1006,
+        "type": "intentResult",
+        "ts": 5002,
         "env": "simulation",
         "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 100
+        "key": "g1/L1/entry/0/0/cancel/3",
+        "outcome": "accepted"
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 5003,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "g1/L1/entry/0/0/cancel/2",
+        "outcome": "accepted"
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "cancel": {
+                      "status": "requested",
+                      "attempts": 3
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "order",
+        "ts": 5004,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o1",
+        "op": "Cancel",
+        "failed": false
+      },
+      "expect": {
+        "programs": {
+          "g1": {
+            "status": "stopped",
+            "levels": {
+              "L1": {
+                "phase": "done",
+                "orders": [
+                  {
+                    "status": "ended",
+                    "cancel": {
+                      "status": "confirmed"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
     }
   ]

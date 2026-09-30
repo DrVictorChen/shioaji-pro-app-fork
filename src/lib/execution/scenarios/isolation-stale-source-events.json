@@ -1,10 +1,11 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "restore-send-and-cancel",
-  "description": "#144: 送出 re-checks price (unpast needs allowUnpast) and stale versions are refused; 取消 removes a plain trigger.",
+  "name": "isolation-stale-source-events",
+  "description": "P0-1: ticks / heartbeats / reports carry their source env; a late simulation tick after switching to production never drives a production program, and a production result never binds a simulation slot.",
   "covers": [
-    "#144",
-    "version"
+    "env",
+    "isolation",
+    "source"
   ],
   "steps": [
     {
@@ -105,16 +106,113 @@
     },
     {
       "event": {
-        "type": "command",
+        "type": "tick",
         "ts": 1002,
-        "id": "c1002",
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 99
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "t1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null,
+            "env": "simulation"
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1003,
+        "env": "production",
+        "serverId": "local-a",
+        "key": "t1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "x"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "status": "pendingSubmit",
+                    "orderId": null
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "intentResult",
+        "ts": 1004,
+        "env": "simulation",
+        "serverId": "local-a",
+        "key": "t1/L1/entry/0/0",
+        "outcome": "accepted",
+        "orderId": "o1"
+      },
+      "expect": {
+        "programs": {
+          "t1": {
+            "levels": {
+              "L1": {
+                "orders": [
+                  {
+                    "status": "working",
+                    "orderId": "o1"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "connection",
+        "ts": 2000,
+        "live": true,
+        "env": "production",
+        "serverId": "local-a"
+      },
+      "expect": {
+        "notices": [
+          "held"
+        ],
+        "programs": {
+          "t1": {
+            "hold": "envMismatch"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 2001,
+        "id": "c2001",
         "command": {
           "op": "create",
           "program": {
-            "id": "t3",
+            "id": "p1",
             "kind": "trigger",
             "binding": {
-              "env": "simulation",
+              "env": "production",
               "serverId": "local-a",
               "account": {
                 "accountType": "F",
@@ -136,12 +234,12 @@
             "levels": [
               {
                 "id": "L1",
-                "side": "Buy",
-                "qty": 2,
+                "side": "Sell",
+                "qty": 1,
                 "entry": {
                   "type": "touch",
-                  "condition": "above",
-                  "price": 120,
+                  "condition": "below",
+                  "price": 100,
                   "order": {
                     "priceType": "MKT",
                     "timeInForce": "IOC",
@@ -191,26 +289,82 @@
       }
     },
     {
-      "restart": {
-        "ts": 5000
+      "event": {
+        "type": "tick",
+        "ts": 2002,
+        "env": "simulation",
+        "serverId": "local-a",
+        "code": "TXFR1",
+        "price": 90
+      },
+      "expect": {
+        "programs": {
+          "p1": {
+            "levels": {
+              "L1": {
+                "phase": "idle"
+              }
+            }
+          }
+        },
+        "state": {
+          "lastPrices": {}
+        }
       }
     },
     {
       "event": {
-        "type": "connection",
-        "ts": 5001,
-        "live": true,
+        "type": "heartbeat",
+        "ts": 2003,
         "env": "simulation",
         "serverId": "local-a"
+      },
+      "expect": {
+        "state": {
+          "lastActivity": 2000
+        }
       }
     },
     {
       "event": {
         "type": "tick",
-        "ts": 5002,
-        "env": "simulation",
+        "ts": 2004,
+        "env": "production",
         "serverId": "local-a",
         "code": "TXFR1",
+        "price": 99
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "p1/L1/entry/0/0",
+            "action": "Sell",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null,
+            "env": "production"
+          }
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 2005,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o1",
+        "eventId": null,
+        "seq": "s1",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Sell",
+        "qty": 1,
         "price": 99
       },
       "expect": {
@@ -218,140 +372,16 @@
           "t1": {
             "levels": {
               "L1": {
-                "phase": "needsConfirm"
-              }
-            }
-          },
-          "t3": {
-            "levels": {
-              "L1": {
-                "phase": "idle",
-                "check": null
+                "phase": "done",
+                "orders": [
+                  {
+                    "filled": 1
+                  }
+                ]
               }
             }
           }
         }
-      }
-    },
-    {
-      "event": {
-        "type": "command",
-        "ts": 5003,
-        "id": "c5003",
-        "command": {
-          "op": "resolvePending",
-          "programId": "t1",
-          "version": 7,
-          "levelId": "L1",
-          "choice": "send"
-        }
-      },
-      "expect": {
-        "notices": [
-          "rejected.staleVersion"
-        ]
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 5004,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 101
-      }
-    },
-    {
-      "event": {
-        "type": "command",
-        "ts": 5005,
-        "id": "c5005",
-        "command": {
-          "op": "resolvePending",
-          "programId": "t1",
-          "version": 1,
-          "levelId": "L1",
-          "choice": "send"
-        }
-      },
-      "expect": {
-        "notices": [
-          "rejected.unpast"
-        ],
-        "programs": {
-          "t1": {
-            "version": 1,
-            "levels": {
-              "L1": {
-                "phase": "needsConfirm"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "command",
-        "ts": 5006,
-        "id": "c5006",
-        "command": {
-          "op": "resolvePending",
-          "programId": "t1",
-          "version": 1,
-          "levelId": "L1",
-          "choice": "send",
-          "allowUnpast": true
-        }
-      },
-      "expect": {
-        "intents": [
-          {
-            "kind": "place",
-            "key": "t1/L1/entry/0/0",
-            "action": "Sell",
-            "qty": 1,
-            "leg": "entry",
-            "role": "entry",
-            "price": null,
-            "version": 2
-          }
-        ],
-        "programs": {
-          "t1": {
-            "version": 2,
-            "levels": {
-              "L1": {
-                "phase": "working",
-                "pending": null
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 5007,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 121
-      },
-      "expect": {
-        "intents": [
-          {
-            "kind": "place",
-            "key": "t3/L1/entry/0/0",
-            "action": "Buy",
-            "qty": 2,
-            "leg": "entry",
-            "role": "entry",
-            "price": null
-          }
-        ]
       }
     }
   ]

@@ -62,6 +62,11 @@ export interface OrderSpec {
 
 export type TouchCondition = 'below' | 'above'; // fire when last <= / >= price
 
+/** Prices are compared as fixed-point integers (1e-4 units, rounded at the
+ * boundary) so a trigger computed as 0.1 + 0.2 still equals a 0.3 quote. JSON
+ * stays numeric; both cores use exactly this conversion. */
+export const PRICE_SCALE = 10_000;
+
 /** How a level opens its position. */
 export type EntryRule =
     /** Virtual level: watch price, send `order` when it touches (觸價). */
@@ -88,6 +93,18 @@ export type ExitSpec =
 
 export type LegName = 'entry' | 'stop' | 'take' | 'tp';
 
+/** Cancel request tracking for a working order (stop / bound break). A
+ * program is not stopped until every cancel is confirmed or the order ended
+ * otherwise. Cancels are safe to repeat: failed or unknown ones are retried
+ * (new key per attempt) on the next tick / reconnect, at most
+ * MAX_CANCEL_ATTEMPTS times. */
+export interface CancelState {
+    key: string;
+    status: 'pendingSubmit' | 'requested' | 'confirmed' | 'failed' | 'unknown';
+    attempts: number;
+    detail: string | null;
+}
+
 export type SlotStatus =
     | 'pendingSubmit' // intent journaled and emitted, no result yet
     | 'working' // broker accepted
@@ -113,6 +130,7 @@ export interface OrderSlot {
     fillTs: Record<string, number>;
     detail: string | null;
     acknowledged: boolean;
+    cancel: CancelState | null;
 }
 
 export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'resume' | 'unknownNotSent';
@@ -283,6 +301,11 @@ export interface BufferedDeal {
     ts: number;
 }
 
+export interface BufferedOrder {
+    order: OrderEvent;
+    ts: number;
+}
+
 export interface EngineState {
     schema: typeof EXECUTION_SCHEMA_VERSION;
     conn: ConnectionState;
@@ -292,25 +315,32 @@ export interface EngineState {
     lastPrices: Record<string, number>;
     /** Deals whose order id is not yet known (report raced the response). */
     orphanDeals: BufferedDeal[];
+    /** Order reports (e.g. New failed) whose order id is not yet known. */
+    orphanOrders: BufferedOrder[];
     programs: OrderProgram[];
 }
 
 // ---- events in ----
 
-export interface TickEvent { type: 'tick'; ts: number; code: string; price: number; simtrade?: boolean }
-export interface HeartbeatEvent { type: 'heartbeat'; ts: number }
+/** Every market / order / deal / result event names the environment it came
+ * from. The executor routes and matches strictly by it — never by "whatever
+ * is connected now" — so a late simulation tick can never drive production. */
+export interface Source { env: Env; serverId: string }
+
+export interface TickEvent extends Source { type: 'tick'; ts: number; code: string; price: number; simtrade?: boolean }
+export interface HeartbeatEvent extends Source { type: 'heartbeat'; ts: number }
 export interface ConnectionEvent { type: 'connection'; ts: number; live: boolean; env: Env | null; serverId: string | null }
-export interface IntentResultEvent {
+export interface IntentResultEvent extends Source {
     type: 'intentResult'; ts: number; key: string;
     outcome: 'accepted' | 'notSent' | 'unknown';
     orderId?: string; detail?: string;
 }
-export interface OrderEvent {
+export interface OrderEvent extends Source {
     type: 'order'; ts: number; orderId: string;
     op: 'New' | 'Cancel' | 'UpdatePrice' | 'UpdateQty';
     failed: boolean; detail?: string;
 }
-export interface DealEvent {
+export interface DealEvent extends Source {
     type: 'deal'; ts: number; orderId: string;
     eventId: string | null; seq: string | null;
     account: { brokerId: string; accountId: string } | null;

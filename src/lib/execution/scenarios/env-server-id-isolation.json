@@ -112,6 +112,9 @@
         "serverId": "local-b"
       },
       "expect": {
+        "notices": [
+          "held"
+        ],
         "programs": {
           "t1": {
             "hold": "envMismatch"
@@ -123,6 +126,8 @@
       "event": {
         "type": "tick",
         "ts": 2001,
+        "env": "simulation",
+        "serverId": "local-b",
         "code": "TXFR1",
         "price": 90
       }

@@ -30,7 +30,8 @@ function run(events: ExecEvent[], start: EngineState = initialState()) {
 
 const live = (ts: number): ExecEvent => ({ type: 'connection', ts, live: true, env: 'simulation', serverId: 'https://127.0.0.1:9999' });
 const create = (ts: number, program: OrderProgram): ExecEvent => ({ type: 'command', ts, id: `c${ts}`, command: { op: 'create', program } });
-const tick = (ts: number, price: number, code = 'TXFR1'): ExecEvent => ({ type: 'tick', ts, code, price });
+const SRC = { env: 'simulation' as const, serverId: 'https://127.0.0.1:9999' };
+const tick = (ts: number, price: number, code = 'TXFR1'): ExecEvent => ({ type: 'tick', ts, ...SRC, code, price });
 
 const trigger = (over: Partial<TriggerOrder>): TriggerOrder => ({
     id: 'tg-1', code: 'TXFR1', condition: 'below', price: 100, action: 'Sell', quantity: 2, kind: 'stop',
@@ -127,7 +128,7 @@ describe('bracket adapter', () => {
         for (const f of fills) web = applyEntryFill(web, f, 1);
         const program = programFromBracket(plan())!;
         const r = run([live(1), create(2, program), ...fills.map((f, i): ExecEvent => ({
-            type: 'deal', ts: 3 + i, orderId: f.orderId, eventId: f.eventId, seq: f.seq,
+            type: 'deal', ts: 3 + i, ...SRC, orderId: f.orderId, eventId: f.eventId, seq: f.seq,
             account: { brokerId: 'F002000', accountId: '1234567' }, code: 'TXFJ6', action: 'Buy', qty: f.quantity, price: 100, fillTs: f.ts,
         }))]);
         const level = r.state.programs[0]!.levels[0]!;
@@ -139,7 +140,7 @@ describe('bracket adapter', () => {
         const fired = run([tick(10, 94)], r.state);
         expect(fired.intents).toHaveLength(1);
         expect(fired.intents[0]).toMatchObject({ action: 'Sell', qty: protectionQuantity(web), leg: 'stop', order: { octype: 'Cover' } });
-        const late = run([{ type: 'deal', ts: 11, orderId: 'o-entry', eventId: 'e3', seq: 's3',
+        const late = run([{ type: 'deal', ts: 11, ...SRC, orderId: 'o-entry', eventId: 'e3', seq: 's3',
             account: { brokerId: 'F002000', accountId: '1234567' }, code: 'TXFJ6', action: 'Buy', qty: 1, price: 100 }], fired.state);
         const webAfter = applyEntryFill({ ...web, exit: { status: 'sending', kind: 'stop', quantity: 2, filled: 0, fills: {}, at: 1 } },
             { orderId: 'o-entry', key: 'o-entry:s3', quantity: 1 }, 2);

@@ -120,6 +120,8 @@
       "event": {
         "type": "tick",
         "ts": 5002,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 99
       },
@@ -166,6 +168,8 @@
       "event": {
         "type": "tick",
         "ts": 5004,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 98
       }

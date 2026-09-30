@@ -106,6 +106,8 @@
       "event": {
         "type": "tick",
         "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 90,
         "simtrade": true
@@ -115,6 +117,8 @@
       "event": {
         "type": "tick",
         "ts": 1003,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 0
       }
@@ -123,6 +127,8 @@
       "event": {
         "type": "tick",
         "ts": 1004,
+        "env": "simulation",
+        "serverId": "local-a",
         "code": "TXFR1",
         "price": 99
       },

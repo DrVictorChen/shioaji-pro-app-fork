@@ -1,9 +1,9 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "trigger-not-sent-no-resend",
-  "description": "An intent refused before any broker request disables the level; it is never resent.",
+  "name": "fixed-point-price-compare",
+  "description": "P2-2 / Q1: prices compare as 1e-4 fixed point: a trigger at 0.1 + 0.2 fires on a 0.3 quote in both directions.",
   "covers": [
-    "notSent"
+    "price"
   ],
   "steps": [
     {
@@ -23,7 +23,94 @@
         "command": {
           "op": "create",
           "program": {
-            "id": "t1",
+            "id": "a",
+            "kind": "trigger",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Buy",
+                "qty": 1,
+                "entry": {
+                  "type": "touch",
+                  "condition": "above",
+                  "price": 0.30000000000000004,
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Auto"
+                  }
+                },
+                "exit": null,
+                "phase": "idle",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1002,
+        "id": "c1002",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "b",
             "kind": "trigger",
             "binding": {
               "env": "simulation",
@@ -53,7 +140,7 @@
                 "entry": {
                   "type": "touch",
                   "condition": "below",
-                  "price": 100,
+                  "price": 0.3,
                   "order": {
                     "priceType": "MKT",
                     "timeInForce": "IOC",
@@ -105,17 +192,17 @@
     {
       "event": {
         "type": "tick",
-        "ts": 1002,
+        "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
-        "price": 99
+        "price": 0.2999
       },
       "expect": {
         "intents": [
           {
             "kind": "place",
-            "key": "t1/L1/entry/0/0",
+            "key": "b/L1/entry/0/0",
             "action": "Sell",
             "qty": 1,
             "leg": "entry",
@@ -127,38 +214,25 @@
     },
     {
       "event": {
-        "type": "intentResult",
-        "ts": 1003,
-        "env": "simulation",
-        "serverId": "local-a",
-        "key": "t1/L1/entry/0/0",
-        "outcome": "notSent",
-        "detail": "killSwitch"
-      },
-      "expect": {
-        "notices": [
-          "notSent"
-        ],
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "disabled",
-                "detail": "killSwitch"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
         "type": "tick",
         "ts": 1004,
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
-        "price": 98
+        "price": 0.3
+      },
+      "expect": {
+        "intents": [
+          {
+            "kind": "place",
+            "key": "a/L1/entry/0/0",
+            "action": "Buy",
+            "qty": 1,
+            "leg": "entry",
+            "role": "entry",
+            "price": null
+          }
+        ]
       }
     }
   ]

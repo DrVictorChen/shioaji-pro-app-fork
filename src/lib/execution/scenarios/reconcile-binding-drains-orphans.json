@@ -1,9 +1,11 @@
 {
   "schema": "execution-conformance-v1",
-  "name": "trigger-fire-once",
-  "description": "A stop trigger fires once when price touches, then completes on fill; later ticks send nothing.",
+  "name": "reconcile-binding-drains-orphans",
+  "description": "P1-3: when reconcile binds an order id by idempotency key, deals and order reports buffered for it are applied.",
   "covers": [
-    "trigger"
+    "orphan",
+    "reconcile",
+    "restart"
   ],
   "steps": [
     {
@@ -100,22 +102,6 @@
             "updatedAt": 0
           }
         }
-      },
-      "expect": {
-        "notices": [
-          "created"
-        ],
-        "programs": {
-          "t1": {
-            "status": "running",
-            "hold": null,
-            "levels": {
-              "L1": {
-                "phase": "idle"
-              }
-            }
-          }
-        }
       }
     },
     {
@@ -125,17 +111,7 @@
         "env": "simulation",
         "serverId": "local-a",
         "code": "TXFR1",
-        "price": 101
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 1003,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 100
+        "price": 99
       },
       "expect": {
         "intents": [
@@ -146,88 +122,15 @@
             "qty": 1,
             "leg": "entry",
             "role": "entry",
-            "price": null,
-            "env": "simulation",
-            "serverId": "local-a",
-            "orderCode": "TXFJ6",
-            "account": {
-              "accountType": "F",
-              "brokerId": "F002000",
-              "accountId": "1234567"
-            },
-            "version": 1
+            "price": null
           }
-        ],
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "working",
-                "orders": [
-                  {
-                    "status": "pendingSubmit",
-                    "key": "t1/L1/entry/0/0"
-                  }
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 1004,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 99
-      },
-      "expect": {
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "working"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "event": {
-        "type": "intentResult",
-        "ts": 1005,
-        "env": "simulation",
-        "serverId": "local-a",
-        "key": "t1/L1/entry/0/0",
-        "outcome": "accepted",
-        "orderId": "o1"
-      },
-      "expect": {
-        "programs": {
-          "t1": {
-            "levels": {
-              "L1": {
-                "phase": "working",
-                "orders": [
-                  {
-                    "status": "working",
-                    "orderId": "o1"
-                  }
-                ]
-              }
-            }
-          }
-        }
+        ]
       }
     },
     {
       "event": {
         "type": "deal",
-        "ts": 1006,
+        "ts": 1003,
         "env": "simulation",
         "serverId": "local-a",
         "orderId": "o1",
@@ -243,13 +146,53 @@
         "price": 99
       },
       "expect": {
+        "state": {
+          "orphanDeals": [
+            {
+              "deal": {
+                "orderId": "o1"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "restart": {
+        "ts": 5000
+      }
+    },
+    {
+      "event": {
+        "type": "reconcile",
+        "ts": 5001,
+        "account": {
+          "accountType": "F",
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "env": "simulation",
+        "serverId": "local-a",
+        "orders": [
+          {
+            "intentKey": "t1/L1/entry/0/0",
+            "orderId": "o1",
+            "status": "working",
+            "qty": 1,
+            "deals": []
+          }
+        ],
+        "complete": true
+      },
+      "expect": {
+        "state": {
+          "orphanDeals": []
+        },
         "programs": {
           "t1": {
             "levels": {
               "L1": {
                 "phase": "done",
-                "entryFilled": 0,
-                "cycles": 1,
                 "orders": [
                   {
                     "status": "filled",
@@ -260,16 +203,6 @@
             }
           }
         }
-      }
-    },
-    {
-      "event": {
-        "type": "tick",
-        "ts": 1007,
-        "env": "simulation",
-        "serverId": "local-a",
-        "code": "TXFR1",
-        "price": 90
       }
     }
   ]
