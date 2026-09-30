@@ -131,16 +131,6 @@ export interface CoreRequest {
     liquidateAtEnd: boolean;
     /** Compute research-v1 metrics for this bar interval ('1d', '5m', '1h', ...); null skips them. */
     research: { interval: string } | null;
-    /**
-     * Notional multiplier of the reporting views, independent of `execution`:
-     * the `result` trade projection of a single-asset 'portfolio' run and the
-     * research turnover of a 'vector' run use it. Callers pass the panel cost
-     * multiplier (the existing worker's `CostConfig.multiplier`), which may
-     * differ from the execution multiplier. Multi-asset projections use each
-     * asset's effective execution multiplier; fills, PnL and every portfolio
-     * number always use execution.
-     */
-    resultMultiplier: number;
 }
 
 // ---------------------------------------------------------------------------
