@@ -15,13 +15,19 @@ const m = vi.hoisted(() => ({
     place: vi.fn(), addTrigger: vi.fn(), notify: vi.fn(),
     click: [] as ((p: unknown) => void)[],
     accounts: [] as Account[],
+    roundClose: 100 as number | null,
+    oddClose: 100 as number | null,
 }));
 vi.mock('../lib/trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: async () => {}, updateOrderPrice: async () => {} }));
 vi.mock('../lib/trigger-engine', () => ({ addTrigger: m.addTrigger, removeTrigger: vi.fn(), useTriggers: () => [] }));
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined,
     useAccounts: () => ({ loaded: true, accounts: m.accounts, selectedStock: m.accounts[0], selectedFutures: m.accounts[2] }) }));
-vi.mock('../hooks/use-stream', () => ({ useQuote: (code: string) => ({ tick: { code, date: '2026/09/30', time: '11:00:00', close: 100, volume: 1 }, seq: 1, lastDir: 0, flashSeq: 0 }) }));
+vi.mock('../hooks/use-stream', () => ({ useQuote: (code: string | null, o?: { oddLot?: boolean }) => {
+    if (!code) return undefined;
+    const close = o?.oddLot ? m.oddClose : m.roundClose;
+    return close === null ? undefined : { tick: { code, date: '2026/09/30', time: '11:00:00', close, volume: 1 }, seq: 1, lastDir: 0, flashSeq: 0 };
+} }));
 vi.mock('../lib/chart-history', () => ({ fetchChartHistory: async () => ({ candles: [], exhausted: true }), nextChartHistoryRevision: () => 1 }));
 vi.mock('lightweight-charts', async () => {
     const h = await import('./chart-session.test-harness');
@@ -71,6 +77,7 @@ beforeEach(() => {
     m.notify.mockReset();
     m.click.length = 0;
     m.accounts = [S1, S2, F1];
+    m.roundClose = 100; m.oddClose = 100;
     (globalThis as any).localStorage.setItem('sj-pro-chart-order-defaults', '{}');
 });
 afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
@@ -185,5 +192,31 @@ describe('chart order settings button', () => {
         await clickChart();
         expect(m.place).not.toHaveBeenCalled();
         expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('固定帳號已不可用') });
+    });
+
+    it('odd-lot stop/take pick their side from the odd-lot price, not the round-lot one', async () => {
+        // round-lot last 105 and odd-lot last 95 straddle the click at 100
+        m.roundClose = 105; m.oddClose = 95;
+        await mount({ contract: stk, orderSettings: { S: { qty: 300, lot: 'IntradayOdd', orderType: 'ROD', octype: 'Auto' } }, onOrderSettingsChange: vi.fn() });
+        await act(async () => { button(view.root, '停損').props.onClick(); });
+        await clickChart();
+        // 100 is ABOVE the odd-lot price → a buy stop on a rise (round-lot would say below/sell)
+        expect(m.addTrigger.mock.calls[0]![0]).toMatchObject({ condition: 'above', action: 'Buy', orderLot: 'IntradayOdd', quantity: 300 });
+        await act(async () => { button(view.root, '停利').props.onClick(); });
+        await clickChart();
+        expect(m.addTrigger.mock.calls[1]![0]).toMatchObject({ condition: 'above', action: 'Sell', kind: 'take' });
+        // alerts keep the round-lot price
+        await act(async () => { button(view.root, '警示').props.onClick(); });
+        await clickChart();
+        expect(m.addTrigger.mock.calls[2]![0]).toMatchObject({ condition: 'below', kind: 'alert' });
+    });
+
+    it('odd-lot stop without any odd-lot trade yet is refused with 等待零股行情', async () => {
+        m.oddClose = null;
+        await mount({ contract: stk, orderSettings: { S: { qty: 300, lot: 'IntradayOdd', orderType: 'ROD', octype: 'Auto' } }, onOrderSettingsChange: vi.fn() });
+        await act(async () => { button(view.root, '停損').props.onClick(); });
+        await clickChart();
+        expect(m.addTrigger).not.toHaveBeenCalled();
+        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('等待零股行情') });
     });
 });

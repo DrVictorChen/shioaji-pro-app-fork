@@ -329,6 +329,14 @@ export function CandleChart({
     const contractRef = useRef(contract);
     contractRef.current = contract;
     const lastPriceRef = useRef<number | null>(null);
+    // 零股停損停利：觸價引擎看零股成交價，建立時判斷在現價上方／下方也必須
+    // 用零股成交價（#204），否則兩市場價格分處觸發價兩側時方向會判反
+    const oddChartQuote = useQuote(
+        orderMarket === 'S' && orderSettings.lot === 'IntradayOdd' ? contract.code : null,
+        { oddLot: true },
+    );
+    const oddLastRef = useRef<number | null>(null);
+    oddLastRef.current = oddChartQuote?.tick && Number(oddChartQuote.tick.close) > 0 ? Number(oddChartQuote.tick.close) : null;
 
     // legend readout — crosshair position when hovering, latest bar otherwise
     const fmtLegendVal = (v: number, precision?: number) =>
@@ -435,6 +443,7 @@ export function CandleChart({
             const settings = orderSettingsRef.current;
             const qty = settings.qty;
             const last = lastPriceRef.current;
+            const oddLast = oddLastRef.current;
             const odd = market === 'S' && settings.lot === 'IntradayOdd';
             const view = orderAccountRef.current;
             const account: Account | undefined = view.active;
@@ -466,15 +475,18 @@ export function CandleChart({
                 return;
             }
             // stop / take triggers — direction inferred from click vs last
-            if (last === null) {
+            // alerts stay on the round-lot price; odd-lot stops/takes decide
+            // their side from the odd-lot trade price they will fire on
+            const ref = m !== 'alert' && odd ? oddLast : last;
+            if (ref === null) {
                 notify({
                     kind: 'err',
                     title: '無法掛觸價單',
-                    body: '尚未收到即時成交價',
+                    body: m !== 'alert' && odd ? '等待零股行情：尚未收到盤中零股成交價' : '尚未收到即時成交價',
                 });
                 return;
             }
-            const below = price <= last;
+            const below = price <= ref;
             if (m === 'alert') {
                 addTrigger({
                     code: c.code,
