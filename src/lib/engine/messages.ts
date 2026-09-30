@@ -78,6 +78,7 @@ export const CORE_MESSAGE_TABLE = {
         RISK_INVALID_FILL_PRICE: { reason: 'invalid-fill-price', message: '滑價後成交價必須大於 0' },
         RISK_LIMIT_NOT_REACHED: { reason: 'limit-not-reached', message: '下一根可用 K 棒未觸及限價' },
         RISK_UNAVAILABLE_BAR: { reason: 'unavailable-bar', message: '缺 K 或停牌，等待下一個可成交 open' },
+        RISK_FINAL_BAR_UNAVAILABLE: { reason: 'unavailable-bar', message: '最後一根缺 K 或停牌，部位未平倉並以最後收盤估值' },
     },
     riskReasonLabels: {
         'gross-leverage': '槓桿／資金不足',
