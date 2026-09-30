@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
     serverSim: undefined as boolean | undefined,
     serverTrades: undefined as unknown[] | undefined,
     serverRows: [] as { order: { id: string; custom_field?: string } }[],
+    cancelRows: [] as { order: { id: string; custom_field?: string } }[],
+    fetchRefresh: [] as boolean[],
+    authTrades: undefined as unknown[] | undefined,
+    authFail: 0,
 }));
 vi.mock('./trade', () => ({
     notify: mocks.notify,
@@ -34,11 +38,20 @@ vi.mock('./trade', () => ({
     },
 }));
 vi.mock('./shioaji', () => ({
-    cancelOrders: (ids: string[], onSettled?: unknown, beforeSend?: unknown) => mocks.cancel(ids, onSettled, beforeSend),
+    // 以伺服器列刪單：記下刪的是哪一列
+    cancelVerifiedOrder: async (row: { order: { id: string; custom_field?: string } }, _account: unknown, opts?: { beforeSend?: () => void; onResponse?: unknown }) => {
+        mocks.cancelRows.push(row);
+        const r = (await mocks.cancel([row.order.id], undefined, opts?.beforeSend, opts?.onResponse))?.[0];
+        if (r?.status === 'rejected') throw r.reason;
+        return r?.value ?? row;
+    },
     // 送出前的新鮮讀取：/info 回報目前伺服器的模擬／正式；委託快取回報目前的委託列
     fetchInfo: async () => { if (!mocks.info) throw new Error('down'); return { ...mocks.info, simulation: mocks.serverSim ?? mocks.info.simulation }; },
     // 伺服器委託快取：送出過的委託（依 id，較新的委託列狀態覆蓋）
-    fetchTrades: async () => {
+    fetchTrades: async (_type: unknown, _account: unknown, opts?: { refresh?: boolean }) => {
+        mocks.fetchRefresh.push(opts?.refresh ?? true);
+        if (opts?.refresh === true && mocks.authFail > 0) { mocks.authFail--; throw new Error('refresh failed'); }
+        if (opts?.refresh === true && mocks.authTrades) return mocks.authTrades;
         if (mocks.serverTrades) return mocks.serverTrades;
         const byId = new Map<string, unknown>();
         for (const t of [...mocks.serverRows, ...(mocks.trades as { order: { id: string } }[])]) byId.set(t.order.id, t);
@@ -54,7 +67,7 @@ vi.mock('./server-info-store', () => ({
     subscribeServerInfo: (l: () => void) => { mocks.infoListener = l; return () => undefined; },
 }));
 vi.mock('./runtime', () => ({ getApiBase: () => mocks.base }));
-vi.mock('./stream', () => ({ getQuote: (code: string, odd = false) => mocks.quotes.get(`${code}:${odd}`), streamConnectionEpoch: () => mocks.epoch, getLastHeartbeat: () => mocks.heartbeat, HEARTBEAT_PERIOD_MS: 30_000 }));
+vi.mock('./stream', () => ({ getQuote: (code: string, odd = false) => mocks.quotes.get(`${code}:${odd}`), streamConnectionEpoch: () => mocks.epoch, getLastHeartbeat: () => mocks.heartbeat, HEARTBEAT_PERIOD_MS: 30_000, subscribeStatusStore: () => () => undefined }));
 vi.mock('./quote-ownership', () => ({ retainContractQuotes: () => () => undefined }));
 vi.mock('./main-window-commands', () => ({
     isMainWindow: () => mocks.main,
@@ -66,6 +79,7 @@ vi.mock('./utils/ticksize', () => ({ stepPrice: (_c: unknown, p: number, d: numb
 import { isTerminalPhase } from './odd-spread-exec';
 import {
     acceptHedge,
+    setAuthRetryBaseForTest,
     currentGen,
     addClickLock,
     clearClickLock,
@@ -141,6 +155,10 @@ beforeEach(() => {
     mocks.serverSim = undefined;
     mocks.serverTrades = undefined;
     mocks.serverRows = [];
+    mocks.cancelRows = [];
+    mocks.fetchRefresh = [];
+    mocks.authTrades = undefined;
+    mocks.authFail = 0;
     mocks.quotes.clear();
     mocks.quotes.set('2330:false', { bidask: { code: '2330', date: '2026/09/30', time: '10:00:00', bid_price: ['1080'], bid_volume: [100], ask_price: ['1085'], ask_volume: [100] } });
     mocks.cancel.mockResolvedValue([{ status: 'fulfilled', value: {} }]);
@@ -744,4 +762,70 @@ it('改價後仍以標記對上同一筆委託，之後的成交照常', async (
     await flush();
     expect(record().state.slots.slice(0, 2).map(s => s.filled)).toEqual([380, 620]);
     expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
+});
+
+it('sidecar 重啟後新程序快取是空的：身分一換就做權威讀取（refresh:true），斷線期間的成交照樣接到並送第二腳', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    startSpreadExecution(req());
+    await flush();
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    // 重啟：新程序的快取是空的；權威讀取才看得到斷線期間的成交（換了新 id）
+    mocks.epoch = 2;
+    mocks.serverTrades = [];
+    mocks.authTrades = [trade('N1', 1095, 380, 380, 'Filled', tags[0]), trade('N2', 1090, 620, 620, 'Filled', tags[1])];
+    mocks.fetchRefresh = [];
+    await reconcile();
+    await flush();
+    expect(mocks.fetchRefresh[0]).toBe(true);
+    expect(record().state.slots.slice(0, 2).map(x => [x.orderId, x.filled])).toEqual([['N1', 380], ['N2', 620]]);
+    expect(mocks.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 1085, 1]);
+    // 同一身分之後的例行對帳用 refresh:false
+    mocks.fetchRefresh = [];
+    await reconcile();
+    expect(mocks.fetchRefresh).toEqual([false]);
+});
+
+it('權威讀取失敗 → 退避重試直到成功', async () => {
+    setAuthRetryBaseForTest(5);
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    startSpreadExecution(req());
+    await flush();
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    mocks.epoch = 2;
+    mocks.serverTrades = [];
+    mocks.authTrades = [trade('N1', 1095, 380, 380, 'Filled', tags[0]), trade('N2', 1090, 620, 620, 'Filled', tags[1])];
+    mocks.authFail = 2;
+    mocks.fetchRefresh = [];
+    await reconcile();
+    expect(record().state.slots[0]!.filled).toBe(0);
+    await new Promise(r => setTimeout(r, 60)); // 5ms、10ms 兩次重試
+    await flush();
+    expect(mocks.fetchRefresh.filter(x => x).length).toBeGreaterThanOrEqual(3);
+    expect(record().state.slots[0]).toMatchObject({ orderId: 'N1', filled: 380 });
+    setAuthRetryBaseForTest(1000);
+});
+
+it('刪單以剛讀到的伺服器列送出：本地舊列（屬於別筆）不影響，刪到的是我們這一筆', async () => {
+    let n = 0;
+    mocks.place.mockImplementation(async (_c: unknown, a: string, price: number, quantity: number) => trade(`T${++n}`, price, quantity, 0, 'Submitted', undefined, 'IntradayOdd', a));
+    const id = startSpreadExecution(req());
+    await flush();
+    await flush();
+    const tags = [tagOf('odd:0'), tagOf('odd:1')];
+    // 本地 trading-state：X 是別筆委託 Y 的舊列；伺服器：X 是我們的（帶標記）
+    mocks.epoch = 2;
+    mocks.trades = [{ ...trade('X', 1095, 380, 0, 'Submitted', undefined), order: { ...trade('X', 1095, 380, 0, 'Submitted', undefined).order, seqno: 'seqY', ordno: 'ordY' } } as unknown as AccountedTrade];
+    mocks.authTrades = [trade('X', 1095, 380, 0, 'Submitted', tags[0]), trade('N2', 1090, 620, 0, 'Submitted', tags[1])];
+    mocks.serverTrades = mocks.authTrades;
+    await reconcile();
+    await flush();
+    expect(record().state.slots[0]!.orderId).toBe('X');
+    spreadExecAction(id, { type: 'cancel' });
+    await flush();
+    await flush();
+    expect(mocks.cancelRows.map(r => [r.order.id, r.order.custom_field])).toEqual([['X', tags[0]], ['N2', tags[1]]]);
 });

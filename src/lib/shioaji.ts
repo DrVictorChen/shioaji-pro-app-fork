@@ -895,6 +895,54 @@ export function cancelOrder(
     return observeCancel(tradeId, requestOpts, batch, beforeSend).finally(() => batch?.arrive());
 }
 
+/**
+ * Cancel an order identified by a row the caller has just read from the server
+ * (POST /order/trades on the current sidecar, under the caller's verified server
+ * identity). Unlike cancelOrder, nothing is resolved through the App's local
+ * trading-state rows: a stale local row carrying the same trade_id (e.g. a trade
+ * id reused by another order after a sidecar restart) can never redirect the
+ * cancel. The trade_id and the quantities used for confirmation all come from
+ * the supplied server row; confirmation reads the same sidecar's cache.
+ */
+export function cancelVerifiedOrder(
+    row: Trade,
+    account: Account,
+    opts?: { beforeSend?: () => void; onResponse?: (res: Response) => void },
+): Promise<Trade> {
+    const tradeId = row.order.id;
+    return observeTradeMutation(tradeId, async () => {
+        const base = getApiBase();
+        const refuse = (message: string): never => { throw Object.assign(new Error(message), { mutationNotStarted: true }); };
+        if (!tradeId) refuse('缺少委託編號，未送出刪單');
+        const type = account.account_type as 'S' | 'F';
+        const signed = () => getAccountState().accounts.some(a => a.signed && a.account_type === type
+            && a.broker_id === account.broker_id && a.account_id === account.account_id);
+        if (!signed()) refuse('缺少已驗證的委託帳戶，未送出刪單');
+        if (opts?.beforeSend) {
+            try {
+                opts.beforeSend();
+            } catch (e) {
+                throw Object.assign(e instanceof Error ? e : new Error(String(e)), { mutationNotStarted: true });
+            }
+        }
+        if (base !== getApiBase()) refuse('伺服器已切換，未送出刪單');
+        await apiPost<Trade>('/api/v1/order/cancel_order', { trade_id: tradeId }, opts?.onResponse ? { onResponse: opts.onResponse } : undefined);
+        const { trade } = await verifyCancellation(row, account, {
+            scope: base,
+            // The row came from this sidecar's own cache just now: its cache is the reference.
+            cacheTrusted: () => true,
+            locallyCancelled: () => false,
+            guard: () => {
+                if (base !== getApiBase()) throw new Error('刪單後伺服器已切換');
+                if (!signed()) throw new Error('刪單後委託帳戶已不可用');
+            },
+            readTrades: refresh => fetchTrades(type, account, { refresh }),
+            readHealth: () => fetchTradeCacheHealth(type, account),
+        });
+        return markConfirmedCancellation({ ...trade, account });
+    });
+}
+
 /** Cancel several orders: every request is sent first, then each account's
  *  cancels share one authoritative confirmation read (refresh:true) instead of
  *  one per order. Used by every batch path (flash 全刪, 鋪單全撤, 全部刪單,

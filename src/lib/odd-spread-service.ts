@@ -42,9 +42,9 @@ import {
     restoreAfterReload,
 } from './odd-spread-exec';
 import { retainContractQuotes } from './quote-ownership';
-import { cancelOrders, fetchInfo, fetchTrades } from './shioaji';
+import { cancelVerifiedOrder, fetchInfo, fetchTrades } from './shioaji';
 import { checkInstance, instanceFromResponse, type InstanceCheck } from './server-instance';
-import { getLastHeartbeat, getQuote, HEARTBEAT_PERIOD_MS, streamConnectionEpoch } from './stream';
+import { getLastHeartbeat, getQuote, HEARTBEAT_PERIOD_MS, streamConnectionEpoch, subscribeStatusStore } from './stream';
 import { notify, placeQuickOrder } from './trade';
 import { getTradingState, subscribeTradingState } from './trading-state';
 import { candidateTrades, reconcileEvents, slotTag, tradeReport } from './odd-spread-reconcile';
@@ -295,15 +295,17 @@ function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands']
             return;
         }
         void (async () => {
-            // 以伺服器目前的委託快取確認這個編號就是我們這一筆（標記相符）；
-            // 編號被別的委託重用就不刪
+            // 以伺服器目前的委託列確認這個編號就是我們這一筆（標記相符）；編號被別的委託
+            // 重用就不刪。快取裡沒有（例如重啟後尚未載入）就讀一次權威委託列。
+            let row: Trade | undefined;
             try {
-                const rows = await fetchTrades('S', rec.account, { refresh: false });
-                const row = rows.find(t => t.order.id === c.orderId);
-                if (!row || row.order.custom_field !== tag) return refuse('委託編號與本單標記不符，未刪單（待重新接回）');
+                const find = (rows: Trade[]) => rows.find(t => t.order.id === c.orderId);
+                row = find(await fetchTrades('S', rec.account, { refresh: false }))
+                    ?? find(await fetchTrades('S', rec.account, { refresh: true }));
             } catch (e) {
                 return refuse(`無法確認委託（${e instanceof Error ? e.message : String(e)}）`);
             }
+            if (!row || row.order.custom_field !== tag || currentGen() !== gen) return refuse('委託編號與本單標記不符，未刪單（待重新接回）');
             // 伺服器驗證放在最後，之後只剩送出本身
             const { problem, instance } = await verifyServer(rec, gen);
             if (problem) return refuse(problem);
@@ -312,7 +314,10 @@ function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands']
                 if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未刪單`);
                 if (currentGen() !== gen) throw new Error('伺服器身分已變更，未刪單');
             };
-            const results = await cancelOrders([c.orderId], undefined, beforeSend, watch.onResponse).catch((e: unknown) => [{ status: 'rejected' as const, reason: e }]);
+            // 以剛驗證的伺服器列刪單：編號、序號與數量都來自這一列，不經 App 本地委託列解析
+            const verified = row;
+            const results: PromiseSettledResult<Trade>[] = await cancelVerifiedOrder(verified, rec.account, { beforeSend, onResponse: watch.onResponse })
+                .then(t => [{ status: 'fulfilled' as const, value: t }], (e: unknown) => [{ status: 'rejected' as const, reason: e }]);
             if (watch.mismatch()) {
                 suspectInstance();
                 return refuse('刪單回應來自不同的伺服器程序，結果不明；請核對委託');
@@ -427,12 +432,12 @@ interface FreshRows {
 }
 const freshByAccount = new Map<string, FreshRows>();
 
-async function fetchFresh(account: Account): Promise<FreshRows | null> {
+async function fetchFresh(account: Account, refresh = false): Promise<FreshRows | null> {
     const gen = currentGen();
     if (gen === null) return null;
     let rows: Trade[];
     try {
-        rows = await fetchTrades('S', account, { refresh: false });
+        rows = await fetchTrades('S', account, { refresh });
     } catch {
         return null;
     }
@@ -444,6 +449,30 @@ async function fetchFresh(account: Account): Promise<FreshRows | null> {
 
 let reconciling = false;
 let reconcileAgain = false;
+// 每個帳戶在「目前身分」下是否已做過一次權威讀取（refresh:true）。sidecar 重啟／新登入
+// 後，程序內快取可能是空的或缺了斷線期間的成交；身分一換（含重新連線、重新整理）就
+// 先做一次權威讀取，失敗則退避重試。例行對帳仍用 refresh:false。
+const authGen = new Map<string, string>();
+const authRetry = new Map<string, { delay: number; timer: ReturnType<typeof setTimeout> | null }>();
+export const AUTH_RETRY_BASE_MS = 1000;
+const AUTH_RETRY_MAX_MS = 30_000;
+let authRetryBase = AUTH_RETRY_BASE_MS;
+
+function scheduleAuthRetry(key: string) {
+    const st = authRetry.get(key) ?? { delay: authRetryBase, timer: null };
+    if (st.timer) return;
+    st.timer = setTimeout(() => {
+        st.timer = null;
+        void reconcile();
+    }, st.delay);
+    st.delay = Math.min(AUTH_RETRY_MAX_MS, st.delay * 2);
+    authRetry.set(key, st);
+}
+
+/** 需要權威讀取：還有任何不是券商確認終態的委託（在途、結果不明、刪單量對不上…） */
+function needsAuthoritative(r: SpreadExecRecord): boolean {
+    return !allBrokerFinal(r.state) || r.state.slots.some(x => x.cancelState === 'unknown');
+}
 
 /** 以剛讀到的伺服器委託列對帳（唯一標記；sidecar 重啟換 id 時重新接回）。併發呼叫會合併。 */
 export async function reconcile(): Promise<void> {
@@ -457,9 +486,21 @@ export async function reconcile(): Promise<void> {
             reconcileAgain = false;
             const accounts = new Map<string, Account>();
             for (const r of records) if (r.state.started && !isSettled(r) && envMatches(r.env)) accounts.set(flashAccountKey(r.account), r.account);
-            for (const account of accounts.values()) {
-                const snap = await fetchFresh(account);
-                if (!snap) continue;
+            for (const [key, account] of accounts) {
+                const gen = currentGen();
+                const needAuth = gen !== null && authGen.get(key) !== gen
+                    && records.some(r => accountMatches(r.account, account) && r.state.started && needsAuthoritative(r));
+                const snap = await fetchFresh(account, needAuth);
+                if (!snap) {
+                    if (needAuth) scheduleAuthRetry(key);
+                    continue;
+                }
+                if (needAuth) {
+                    authGen.set(key, snap.gen);
+                    const st = authRetry.get(key);
+                    if (st?.timer) clearTimeout(st.timer);
+                    authRetry.delete(key);
+                }
                 const claimed = trustedIds(snap.gen);
                 for (const rec of records) {
                     if (!rec.state.started || !envMatches(rec.env) || !accountMatches(rec.account, account)) continue;
@@ -562,6 +603,8 @@ export function startOddSpreadService() {
     // 委託列有更新只當作「該去伺服器讀一次」的訊號
     subscribeTradingState(() => { void reconcile(); });
     subscribeServerInfo(() => resumeHeld());
+    // 串流重新連線（身分改變）→ 對帳（會先做一次權威讀取）
+    subscribeStatusStore(() => { void reconcile(); });
     resumeHeld();
     // 接回後以總量重算一次（例如重新發出因重新整理遺失回應的多餘補單刪單）
     for (const r of records) if (!isSettled(r)) update(r.id, { type: 'refresh' });
@@ -772,12 +815,19 @@ export function hedgeUnitLabel(leg: LegKind, quantity: number): string {
 }
 
 // 測試用
+export function setAuthRetryBaseForTest(ms: number) {
+    authRetryBase = ms;
+}
+
 export function resetOddSpreadServiceForTest() {
     for (const id of [...releases.keys()]) releaseQuotes(id);
     records = [];
     started = false;
     listeners.clear();
     freshByAccount.clear();
+    authGen.clear();
+    for (const st of authRetry.values()) if (st.timer) clearTimeout(st.timer);
+    authRetry.clear();
     reconciling = false;
     reconcileAgain = false;
     instanceSuspect = false;

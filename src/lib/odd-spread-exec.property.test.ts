@@ -34,6 +34,7 @@ import { describe, expect, it } from 'vitest';
 import {
     execReduce,
     initExec,
+    isBrokerFinal,
     isLive,
     restoreAfterReload,
     type ExecCommand,
@@ -73,6 +74,8 @@ interface BrokerOrder {
     cancelReq: boolean;
     topUp: boolean;
     hidden: boolean;
+    /** 新程序的快取裡有沒有這筆（重啟後要權威讀取才載入） */
+    inCache: boolean;
     /** 委託列目前看到的快照 */
     seen: { status: string; filled: number; cancelled: number; price: number };
 }
@@ -162,7 +165,7 @@ function simulate(seed: number) {
         if (trueSim !== bound.simulation) fail(`(m) order ${c.key} created in the other mode`);
         const o: BrokerOrder = {
             key: c.key, id: newId(), tag: slotTag(TAG_BASE, c.key), leg: c.leg, action: c.action, price: c.price, qty: c.quantity,
-            filled: 0, cancelled: 0, status: 'live', cancelReq: false, topUp: !startKeys.has(c.key), hidden: false,
+            filled: 0, cancelled: 0, status: 'live', cancelReq: false, topUp: !startKeys.has(c.key), hidden: false, inCache: true,
             seen: { status: 'PendingSubmit', filled: 0, cancelled: 0, price: c.price },
         };
         see(o);
@@ -200,16 +203,27 @@ function simulate(seed: number) {
         else held.push(e);
     };
     // 讀委託列（新程序的列、帶讀取當下的身分）
-    const fetchListing = () => {
-        snapshot = book.filter(o => !o.hidden).map(tradeOf);
+    let authGenH: string | null = null;
+    let authFailures = 0;
+    let authPending = false;
+    const fetchListing = (refresh = false) => {
+        if (refresh) for (const o of book) o.inCache = true;
+        snapshot = book.filter(o => !o.hidden && o.inCache).map(tradeOf);
         const g = identity();
         for (const t of snapshot) stamps.set(t, g);
     };
     // 服務每次對帳都先向伺服器（目前的程序）讀一次委託列，帶讀取當下的身分
     const reconcile = () => {
         if (!envOk()) return;
-        fetchListing();
         const gen = identity();
+        // 身分一換、且有在途或結果不明的委託 → 先做權威讀取（可能失敗，下次再試）
+        const needAuth = gen !== null && authGenH !== gen && s.slots.some(x => !isBrokerFinal(x) || x.cancelState === 'unknown');
+        if (needAuth) {
+            if (chance(0.2)) { authFailures++; authPending = true; return; } // 服務會退避重試
+            authPending = false;
+            fetchListing(true);
+            authGenH = gen;
+        } else fetchListing(false);
         const trusted = new Set(gen === null ? [] : s.slots.filter(x => x.orderId && x.idGen === gen).map(x => x.orderId!));
         for (const e of reconcileEvents({ tagBase: TAG_BASE, code: '2330', account: ACC, state: s }, snapshot, trusted, gen, t => stamps.get(t) ?? null)) reduce(e);
     };
@@ -380,6 +394,8 @@ function simulate(seed: number) {
             // sidecar 重啟：委託換 id、舊 id 可能被別人的（仍在委託中的）委託重用；新程序可能
             // 是另一個模式；前端要過一段時間才察覺（期間身分不變、HTTP 已打到新程序）
             failInFlight();
+            // 新程序：快取裡沒有斷線前的委託，要權威讀取才載入
+            for (const o of book) o.inCache = false;
             if (chance(0.25)) trueSim = !trueSim;
             else trueSim = bound.simulation;
             for (const o of ours()) {
@@ -388,7 +404,7 @@ function simulate(seed: number) {
                 if (chance(0.4)) {
                     const foreign: BrokerOrder = {
                         key: null, id: old, leg: o.leg, action: o.action, price: o.price, qty: o.qty, filled: chance(0.5) ? o.qty : 0,
-                        cancelled: 0, status: 'live', cancelReq: false, topUp: false, hidden: false,
+                        cancelled: 0, status: 'live', cancelReq: false, topUp: false, hidden: false, inCache: true,
                         seen: { status: 'Submitted', filled: 0, cancelled: 0, price: o.price },
                     };
                     if (foreign.filled >= foreign.qty) foreign.status = 'filled';
@@ -441,7 +457,7 @@ function simulate(seed: number) {
         reconcile();
         reduce({ type: 'refresh' });
         if (JSON.stringify(s) !== before) did = true;
-        if (!did && !outbox.length && !http.length) break;
+        if (!did && !outbox.length && !http.length && !authPending) break;
     }
     const L = () => log.join('\n');
 
@@ -485,7 +501,8 @@ function simulate(seed: number) {
     for (const o of ours()) {
         const slot = s.slots.find(x => x.key === o.key);
         if (!slot) fail(`(c) untracked ${o.key}`);
-        if (slot!.orderId !== o.id) fail(`(c) ${o.key} bound to ${slot!.orderId}, broker id ${o.id}\n${L()}`);
+        // 券商確認終態的委託不再變動，不必換成新程序的 id；其他的必須以目前 id 追蹤
+        if (!isBrokerFinal(slot!) && slot!.orderId !== o.id) fail(`(c) ${o.key} bound to ${slot!.orderId}, broker id ${o.id}\n${L()}`);
         if (slot!.filled !== o.filled) fail(`(c) ${o.key} filled ${slot!.filled} vs ${o.filled}`);
         if (o.status === 'live' && !isLive(slot!)) fail(`(c) live ${o.key} not tracked as live`);
     }
