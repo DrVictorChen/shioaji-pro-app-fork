@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+    anchorCount,
+    DEFAULT_FIB_LEVELS,
+    drawingLabel,
+    fibLevelsOf,
+    MAX_TEXT_LENGTH,
+    moveDrawing,
+    removeDrawings,
+    replaceDrawings,
+    setDrawingsLocked,
     __resetDrawingsForTest,
     addDrawing,
     clearDrawings,
@@ -417,5 +426,121 @@ describe('設定寫入節流', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('第一期：新物件類型、舊資料相容、圖層順序', () => {
+    const KEY = 'sj-pro-chart-drawings';
+    const saved = () => JSON.parse(store.get(KEY)!) as Record<string, { id: string }[]>;
+
+    it('#218 存下來的舊物件（沒有 name／text／levels）照常載入', () => {
+        store.set(
+            KEY,
+            JSON.stringify({
+                TXF: [
+                    {
+                        id: 'old',
+                        tool: 'trend',
+                        anchors: [
+                            { time: 1, price: 2 },
+                            { time: 3, price: 4 },
+                        ],
+                        style: { color: '#2962ff', width: 2, dash: 'solid', fillOpacity: 0.12 },
+                        locked: false,
+                        hidden: false,
+                        createdAt: 1,
+                    },
+                ],
+            }),
+        );
+        reloadDrawingsFromStorage();
+        const d = getDrawings('TXF')[0]!;
+        expect(d).toMatchObject({ id: 'old', tool: 'trend', style: { color: '#2962ff' } });
+        expect(d.name).toBeUndefined();
+        expect(drawingLabel(d)).toBe('趨勢線');
+    });
+
+    it('新工具的控制點數：垂直線／文字 1、平行通道 3、斐波那契 2', () => {
+        expect(anchorCount('vertical')).toBe(1);
+        expect(anchorCount('text')).toBe(1);
+        expect(anchorCount('channel')).toBe(3);
+        expect(anchorCount('fib')).toBe(2);
+        expect(sanitizeDrawing({ id: 'c', tool: 'channel', anchors: [{ time: 1, price: 1 }, { time: 2, price: 2 }] })).toBeNull();
+    });
+
+    it('文字截斷、斐波那契比例清理、名稱修剪；非文字物件不帶 text', () => {
+        const t = sanitizeDrawing({
+            id: 't',
+            tool: 'text',
+            anchors: [{ time: 1, price: 1 }],
+            text: 'x'.repeat(MAX_TEXT_LENGTH + 50),
+            name: '  支撐  ',
+        })!;
+        expect(t.text).toHaveLength(MAX_TEXT_LENGTH);
+        expect(t.name).toBe('支撐');
+        const f = sanitizeDrawing({
+            id: 'f',
+            tool: 'fib',
+            anchors: [
+                { time: 1, price: 1 },
+                { time: 2, price: 2 },
+            ],
+            levels: [1, 0.5, 'x', 0.5, 99, NaN, 0],
+        })!;
+        expect(f.levels).toEqual([0, 0.5, 1]);
+        expect(fibLevelsOf(sanitizeDrawing({ ...f, levels: 'bad' })!)).toEqual(DEFAULT_FIB_LEVELS);
+        expect(sanitizeDrawing({ id: 'h', tool: 'horizontal', anchors: [{ time: 1, price: 1 }], text: 'no' })!.text).toBeUndefined();
+    });
+
+    it('設定：收藏、每組最後用的工具、磁吸、物件列表都驗證過', () => {
+        const s = sanitizeSettings({
+            favorites: ['trend', 'bogus', 'measure', 'trend'],
+            groupLast: { lines: 'vertical', shapes: 'trend', measure: 'measure' },
+            magnet: 'yes',
+            objectListOpen: true,
+        });
+        expect(s.favorites).toEqual(['trend', 'measure']);
+        expect(s.groupLast).toEqual({ lines: 'vertical', measure: 'measure' });
+        expect(s.magnet).toBe(false);
+        expect(s.objectListOpen).toBe(true);
+        expect(sanitizeSettings({}).favorites).toEqual([]);
+    });
+
+    it('調整圖層：移動後寫出新順序；對方同時新增的物件保留在後面', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const c = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        moveDrawing('TXF', c.id, 0);
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([c.id, a.id, b.id]);
+        // 對方視窗（還是舊順序）加了 z
+        store.set(KEY, JSON.stringify({ TXF: [...saved().TXF!, { ...a, id: 'z' }] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([c.id, a.id, b.id, 'z']);
+        flushDrawingWrites();
+        expect(saved().TXF!.map((d) => d.id)).toEqual([c.id, a.id, b.id, 'z']);
+    });
+
+    it('多選刪除保留鎖定的；全部鎖定／解鎖；整份換掉依物件記差異', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        updateDrawing('TXF', b.id, { locked: true });
+        removeDrawings('TXF', [a.id, b.id]);
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([b.id]);
+        setDrawingsLocked('TXF', false);
+        expect(getDrawings('TXF')[0]!.locked).toBe(false);
+        setDrawingsLocked('TXF', true);
+        expect(getDrawings('TXF')[0]!.locked).toBe(true);
+        const c = { ...getDrawings('TXF')[0]!, id: 'c' };
+        replaceDrawings('TXF', [...getDrawings('TXF'), c]);
+        flushDrawingWrites();
+        expect(saved().TXF!.map((d) => d.id)).toEqual([b.id, 'c']);
+    });
+
+    it('複製保留文字與斐波那契比例', () => {
+        const t = addDrawing('TXF', 'text', [anchors[0]!], DEFAULT_DRAWING_STYLE, { text: '支撐' })!;
+        const f = addDrawing('TXF', 'fib', anchors, DEFAULT_DRAWING_STYLE, { levels: [0, 0.5, 1] })!;
+        expect(duplicateDrawing('TXF', t.id, (a) => a)!.text).toBe('支撐');
+        expect(duplicateDrawing('TXF', f.id, (a) => a)!.levels).toEqual([0, 0.5, 1]);
     });
 });

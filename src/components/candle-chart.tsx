@@ -112,7 +112,8 @@ import {
 } from '../lib/utils/kbars';
 import { roundToTick } from '../lib/utils/ticksize';
 import * as styles from './candle-chart.css';
-import { ChartDrawingTools } from './chart-drawing-tools';
+import { ChartDrawingOverlays, ChartDrawingTools, ChartObjectList } from './chart-drawing-tools';
+import { toolDef } from '../lib/chart-drawings';
 import { AsyncStatus } from './async-status';
 import * as panel from './panel.css';
 
@@ -1303,8 +1304,12 @@ export function CandleChart({
             return null;
         };
 
+        // 畫圖的浮動工具列／文字框蓋在委託線上時，那一下屬於它們
+        const onOverlay = (e: MouseEvent) =>
+            !!(e.target as HTMLElement | null)?.closest?.('[data-drawing-overlay]');
+
         const hover = (e: MouseEvent) => {
-            if (dragging) return;
+            if (dragging || onOverlay(e)) return;
             // 武裝畫圖工具時委託線不接手，游標交給畫圖（十字）
             if (drawingArmedRef.current) {
                 if (host.style.cursor === 'ns-resize') host.style.cursor = '';
@@ -1314,7 +1319,7 @@ export function CandleChart({
         };
 
         const down = (e: MouseEvent) => {
-            if (e.button !== 0) return;
+            if (e.button !== 0 || onOverlay(e)) return;
             // 「委託線優先」只在瀏覽模式：武裝畫圖工具時這一下屬於畫圖，
             // 在委託價附近畫線不能變成改價；別的 handler 已經接手的一下
             // 也不能同時拖畫圖又送出改價
@@ -1422,6 +1427,10 @@ export function CandleChart({
         tradeArmed: mode !== 'observe',
         onEnterDrawingMode: () => setMode('observe'),
         themeMode: baseMode(themeSettings),
+        getBars: () => barsRef.current,
+        // 量測換算損益：期貨／選擇權＝口數 × 乘數；股票＝張數 × 1000 股
+        // （零股＝股數）。不知道乘數時不顯示損益
+        pnlPerPoint: drawingPnlPerPoint(contract, orderMarket, orderSettings),
     });
     drawingArmedRef.current = drawings.tool !== null;
 
@@ -1816,13 +1825,7 @@ export function CandleChart({
                 )}
                 {mode === 'observe' && drawings.tool && (
                     <div className={styles.drawHint}>
-                        畫圖模式 ·{' '}
-                        {drawings.tool === 'horizontal'
-                            ? '點擊價位放置水平線'
-                            : drawings.tool === 'box'
-                              ? '點兩下決定方框的兩個對角'
-                              : '點兩下決定起點與終點'}
-                        （Esc 取消）
+                        畫圖模式 · {toolDef(drawings.tool).label}：{DRAW_HINT[drawings.tool]}（Esc 取消）
                     </div>
                 )}
                 {(workingOrders.length > 0 ||
@@ -1955,8 +1958,36 @@ export function CandleChart({
                         </div>
                     );
                 })}
+                <ChartDrawingOverlays api={drawings} />
             </div>
+            <ChartObjectList api={drawings} />
             </div>
         </div>
     );
+}
+
+const DRAW_HINT: Record<string, string> = {
+    horizontal: '點擊價位放置水平線',
+    vertical: '點擊時間放置垂直線',
+    trend: '點兩下決定起點與終點',
+    ray: '點兩下決定起點與方向',
+    extended: '點兩下決定斜率',
+    channel: '點兩下畫基準線，第三下決定通道寬度',
+    box: '點兩下決定方框的兩個對角',
+    fib: '點兩下：起點（1）到終點（0）',
+    text: '點一下放置文字，輸入後按 Enter',
+    measure: '點兩下量測價差、K 棒數與時間',
+};
+
+function drawingPnlPerPoint(
+    contract: ContractBase,
+    market: ChartOrderMarket | null | undefined,
+    s: ChartOrderSettings,
+): number | null {
+    if (market === 'F') {
+        const mult = (contract as { multiplier?: number }).multiplier;
+        return mult && mult > 0 ? mult * s.qty : null;
+    }
+    if (market === 'S') return s.qty * (s.lot === 'IntradayOdd' ? 1 : 1000);
+    return null;
 }

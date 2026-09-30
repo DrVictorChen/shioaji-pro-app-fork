@@ -12,23 +12,81 @@ import type { ContractBase } from './types/contract';
 
 export type DrawingTool =
     | 'horizontal' // 水平線：單一價位，橫貫整個 pane
+    | 'vertical' // 垂直線：單一時間，縱貫整個 pane
     | 'trend' // 趨勢線：兩點之間的線段
     | 'ray' // 射線：由起點經第二點向右無限延伸
     | 'extended' // 延伸線：兩點決定斜率，向左右無限延伸
-    | 'box'; // 方框：兩個對角決定的矩形
+    | 'channel' // 平行通道：兩點決定基準線，第三點決定平行線的價差
+    | 'box' // 方框：兩個對角決定的矩形
+    | 'fib' // 斐波那契回撤：兩點（起點＝1、終點＝0）間的比例價位
+    | 'text'; // 文字註記：錨定在時間／價格上的文字框
 
-export const DRAWING_TOOLS: { tool: DrawingTool; label: string; hint: string }[] = [
-    { tool: 'horizontal', label: '水平線', hint: '支撐、壓力、前高前低（點一下）' },
-    { tool: 'trend', label: '趨勢線', hint: '兩點決定的線段' },
-    { tool: 'ray', label: '射線', hint: '由起點經第二點向右延伸' },
-    { tool: 'extended', label: '延伸線', hint: '兩點決定斜率，向左右延伸' },
-    { tool: 'box', label: '方框', hint: '兩個對角決定的區域' },
+// 工具列分組。部位工具（第二期）還沒有工具，工具列不顯示空的組。
+export type DrawingGroup = 'lines' | 'shapes' | 'fib' | 'notes' | 'measure' | 'position';
+
+export const DRAWING_GROUPS: { group: DrawingGroup; label: string }[] = [
+    { group: 'lines', label: '線條' },
+    { group: 'shapes', label: '形狀' },
+    { group: 'fib', label: '斐波那契' },
+    { group: 'notes', label: '文字註記' },
+    { group: 'measure', label: '量測' },
+    { group: 'position', label: '部位工具' },
 ];
 
-// 需要兩個控制點的工具；水平線只要一個
-export function anchorCount(tool: DrawingTool): 1 | 2 {
-    return tool === 'horizontal' ? 1 : 2;
+// 量測不是存下來的物件（量完就清），但在工具列上跟畫圖工具並列
+export type DrawingToolId = DrawingTool | 'measure';
+
+export interface DrawingToolDef {
+    tool: DrawingToolId;
+    group: DrawingGroup;
+    label: string;
+    hint: string;
+    // Alt＋字母（用 KeyboardEvent.code 判斷 — macOS 的 Option 會把
+    // e.key 變成特殊符號）
+    shortcut?: string;
 }
+
+export const DRAWING_TOOL_DEFS: DrawingToolDef[] = [
+    { tool: 'trend', group: 'lines', label: '趨勢線', hint: '兩點決定的線段', shortcut: 'T' },
+    { tool: 'ray', group: 'lines', label: '射線', hint: '由起點經第二點向右延伸' },
+    { tool: 'extended', group: 'lines', label: '延伸線', hint: '兩點決定斜率，向左右延伸' },
+    { tool: 'horizontal', group: 'lines', label: '水平線', hint: '支撐、壓力、前高前低（點一下）', shortcut: 'H' },
+    { tool: 'vertical', group: 'lines', label: '垂直線', hint: '標記時間點（點一下）', shortcut: 'V' },
+    { tool: 'channel', group: 'lines', label: '平行通道', hint: '兩點畫基準線，第三點決定通道寬度', shortcut: 'P' },
+    { tool: 'box', group: 'shapes', label: '方框', hint: '兩個對角決定的區域', shortcut: 'R' },
+    { tool: 'fib', group: 'fib', label: '斐波那契回撤', hint: '起點到終點的回撤比例價位', shortcut: 'F' },
+    { tool: 'text', group: 'notes', label: '文字註記', hint: '點一下放置文字，雙擊可編輯', shortcut: 'N' },
+    { tool: 'measure', group: 'measure', label: '價差量測', hint: '點兩下量點數、漲跌幅、K 棒數與時間（Esc 或點一下清除）', shortcut: 'M' },
+];
+
+export function toolDef(tool: DrawingToolId): DrawingToolDef {
+    return DRAWING_TOOL_DEFS.find((d) => d.tool === tool)!;
+}
+
+// 存下來的物件工具（不含量測）
+export const DRAWING_TOOLS = DRAWING_TOOL_DEFS.filter(
+    (d): d is DrawingToolDef & { tool: DrawingTool } => d.tool !== 'measure',
+);
+
+export function isDrawingTool(v: unknown): v is DrawingTool {
+    return typeof v === 'string' && DRAWING_TOOLS.some((t) => t.tool === v);
+}
+
+// 每種工具的控制點數
+export function anchorCount(tool: DrawingToolId): 1 | 2 | 3 {
+    switch (tool) {
+        case 'horizontal':
+        case 'vertical':
+        case 'text':
+            return 1;
+        case 'channel':
+            return 3;
+        default:
+            return 2;
+    }
+}
+
+export const DEFAULT_FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 
 export interface DrawingAnchor {
     time: number; // UTC 秒（與 lightweight-charts 的 UTCTimestamp 同一刻度）
@@ -39,7 +97,7 @@ export interface DrawingStyle {
     color: string; // 線色（#rrggbb）
     width: number; // 線寬 1–4
     dash: 'solid' | 'dashed';
-    fillOpacity: number; // 方框填色透明度 0–1（其他工具不使用）
+    fillOpacity: number; // 方框／通道／斐波那契的填色透明度 0–1
 }
 
 export interface Drawing {
@@ -50,6 +108,18 @@ export interface Drawing {
     locked: boolean; // 鎖定：不可拖曳、改價、刪除（仍可選取與改樣式）
     hidden: boolean; // 隱藏：不繪製，但仍保存
     createdAt: number;
+    name?: string; // 物件列表裡的名稱（沒設就用工具名稱）
+    text?: string; // 文字註記的內容
+    levels?: number[]; // 斐波那契的比例（沒設就用 DEFAULT_FIB_LEVELS）
+}
+
+export const MAX_TEXT_LENGTH = 200;
+export const MAX_NAME_LENGTH = 40;
+
+export function drawingLabel(d: Pick<Drawing, 'tool' | 'name' | 'text'>): string {
+    if (d.name) return d.name;
+    if (d.tool === 'text' && d.text) return d.text.split('\n')[0]!.slice(0, 24);
+    return toolDef(d.tool).label;
 }
 
 // TradingView 風格的固定色盤 — 不跟主題走，使用者選什麼就是什麼，
@@ -95,18 +165,32 @@ export type DrawingThemeMode = 'dark' | 'light';
 export const TOOL_DEFAULT_COLORS: Record<DrawingThemeMode, Record<DrawingTool, string>> = {
     dark: {
         horizontal: '#ff7a2f',
+        vertical: '#ff7a2f',
         trend: '#9b87f5',
         ray: '#9b87f5',
         extended: '#9b87f5',
+        channel: '#9b87f5',
         box: '#9aa3b5',
+        fib: '#3bc9db',
+        text: '#b197fc',
     },
     light: {
         horizontal: '#e8590c',
+        vertical: '#e8590c',
         trend: '#6741d9',
         ray: '#6741d9',
         extended: '#6741d9',
+        channel: '#6741d9',
         box: '#6b7280',
+        fib: '#0c8599',
+        text: '#7048e8',
     },
+};
+
+// 價差量測（暫時的覆蓋層，不存檔）的顏色
+export const MEASURE_COLORS: Record<DrawingThemeMode, string> = {
+    dark: '#4c8dff',
+    light: '#1c64f2',
 };
 
 // 新物件除了顏色以外的預設（線寬、線型、方框填色）
@@ -121,6 +205,14 @@ export interface DrawingSettings {
     defaultStyle: DrawingBaseStyle;
     // 使用者挑過的顏色，依工具記住；沒挑過的工具用 TOOL_DEFAULT_COLORS
     toolColors: Partial<Record<DrawingTool, string>>;
+    // 磁吸：畫點與拖曳控制點時貼齊最近 K 棒的開高低收
+    magnet: boolean;
+    // ★ 釘在工具列上的工具
+    favorites: DrawingToolId[];
+    // 每組最後用的工具（組按鈕顯示它、點一下直接武裝它）
+    groupLast: Partial<Record<DrawingGroup, DrawingToolId>>;
+    // 右側物件列表是否展開
+    objectListOpen: boolean;
 }
 
 const DEFAULT_SETTINGS: DrawingSettings = {
@@ -131,6 +223,11 @@ const DEFAULT_SETTINGS: DrawingSettings = {
         fillOpacity: DEFAULT_DRAWING_STYLE.fillOpacity,
     },
     toolColors: {},
+    magnet: false,
+    // 預設不釘：工具列在預設版面（矮面板）要放得下全部分組與下方操作
+    favorites: [],
+    groupLast: {},
+    objectListOpen: false,
 };
 
 // 某個工具的下一個新物件樣式：使用者挑過的顏色優先，否則依主題取預設色
@@ -201,8 +298,8 @@ export function sanitizeDrawing(v: unknown): Drawing | null {
     if (!v || typeof v !== 'object') return null;
     const d = v as Record<string, unknown>;
     if (typeof d.id !== 'string' || !d.id || typeof d.tool !== 'string') return null;
-    const tool = DRAWING_TOOLS.find((t) => t.tool === d.tool)?.tool;
-    if (!tool) return null;
+    if (!isDrawingTool(d.tool)) return null;
+    const tool = d.tool;
     if (!Array.isArray(d.anchors) || d.anchors.length !== anchorCount(tool)) return null;
     const anchors: DrawingAnchor[] = [];
     for (const a of d.anchors as unknown[]) {
@@ -226,7 +323,27 @@ export function sanitizeDrawing(v: unknown): Drawing | null {
         locked: d.locked === true,
         hidden: d.hidden === true,
         createdAt: typeof d.createdAt === 'number' && Number.isFinite(d.createdAt) ? d.createdAt : 0,
+        ...(typeof d.name === 'string' && d.name.trim()
+            ? { name: d.name.trim().slice(0, MAX_NAME_LENGTH) }
+            : {}),
+        ...(tool === 'text'
+            ? { text: typeof d.text === 'string' ? d.text.slice(0, MAX_TEXT_LENGTH) : '' }
+            : {}),
+        ...(tool === 'fib' ? sanitizeLevels(d.levels) : {}),
     };
+}
+
+// 斐波那契比例：有限數值、-5～5、去重排序、最多 16 個；壞掉就不帶（用預設）
+export function sanitizeLevels(v: unknown): { levels?: number[] } {
+    if (!Array.isArray(v)) return {};
+    const out = [...new Set(v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x >= -5 && x <= 5))]
+        .sort((a, b) => a - b)
+        .slice(0, 16);
+    return out.length ? { levels: out } : {};
+}
+
+export function fibLevelsOf(d: Pick<Drawing, 'levels'>): number[] {
+    return d.levels?.length ? d.levels : DEFAULT_FIB_LEVELS;
 }
 
 export function sanitizeSettings(v: unknown): DrawingSettings {
@@ -239,6 +356,17 @@ export function sanitizeSettings(v: unknown): DrawingSettings {
             if (isDrawingColor(c)) toolColors[tool] = c;
         }
     }
+    const toolIds = new Set<string>(DRAWING_TOOL_DEFS.map((t) => t.tool));
+    const favorites = Array.isArray(o.favorites)
+        ? [...new Set(o.favorites.filter((t): t is DrawingToolId => typeof t === 'string' && toolIds.has(t)))]
+        : DEFAULT_SETTINGS.favorites;
+    const groupLast: Partial<Record<DrawingGroup, DrawingToolId>> = {};
+    if (o.groupLast && typeof o.groupLast === 'object') {
+        for (const def of DRAWING_TOOL_DEFS) {
+            const v = (o.groupLast as Record<string, unknown>)[def.group];
+            if (v === def.tool) groupLast[def.group] = def.tool;
+        }
+    }
     return {
         shareContinuousMonth:
             typeof o.shareContinuousMonth === 'boolean'
@@ -246,6 +374,10 @@ export function sanitizeSettings(v: unknown): DrawingSettings {
                 : DEFAULT_SETTINGS.shareContinuousMonth,
         defaultStyle: sanitizeBaseStyle(o.defaultStyle, DEFAULT_SETTINGS.defaultStyle),
         toolColors,
+        magnet: o.magnet === true,
+        favorites,
+        groupLast,
+        objectListOpen: o.objectListOpen === true,
     };
 }
 
@@ -302,6 +434,8 @@ function emit() {
 // 寫出去的改動」。兩個視窗在節流窗內各改同一商品的不同物件，兩邊的
 // 改動都會留下；只有同一個物件兩邊都改時，較晚寫出的那一方勝出。
 const pending = new Map<string, Map<string, Drawing | null>>();
+// 本視窗調整過圖層順序的商品：記下想要的 id 順序，疊上對方版本時照排
+const pendingOrder = new Map<string, string[]>();
 
 function record(key: string, id: string, d: Drawing | null) {
     let ops = pending.get(key);
@@ -313,7 +447,7 @@ function record(key: string, id: string, d: Drawing | null) {
 }
 
 function applyPending(base: Store): Store {
-    if (!pending.size) return base;
+    if (!pending.size && !pendingOrder.size) return base;
     const out: Store = { ...base };
     for (const [key, ops] of pending) {
         const list = [...(out[key] ?? [])];
@@ -329,6 +463,15 @@ function applyPending(base: Store): Store {
         }
         if (list.length) out[key] = list;
         else delete out[key];
+    }
+    for (const [key, order] of pendingOrder) {
+        const list = out[key];
+        if (!list) continue;
+        const rank = new Map(order.map((id, i) => [id, i]));
+        // 本視窗排過的依本視窗順序；對方新加的（不在排序裡）保持在原位之後
+        const known = list.filter((d) => rank.has(d.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+        const unknown = list.filter((d) => !rank.has(d.id));
+        out[key] = [...known, ...unknown];
     }
     return out;
 }
@@ -363,7 +506,7 @@ export function flushDrawingWrites() {
         clearTimeout(writeTimer);
         writeTimer = null;
     }
-    if (!pending.size) return;
+    if (!pending.size && !pendingOrder.size) return;
     // 讀最新版本再疊上本視窗的改動 — 別的視窗剛寫入、storage 事件還沒
     // 送到這裡時，也不會把對方的物件蓋掉
     const next = applyPending(loadStore());
@@ -380,6 +523,7 @@ export function flushDrawingWrites() {
         return;
     }
     pending.clear();
+    pendingOrder.clear();
     if (saveError) {
         saveError = false;
         emit();
@@ -496,6 +640,7 @@ export function addDrawing(
     tool: DrawingTool,
     anchors: DrawingAnchor[],
     style: DrawingStyle,
+    extra?: Pick<Drawing, 'text' | 'levels' | 'name'>,
 ): Drawing | null {
     if ((store[key]?.length ?? 0) >= MAX_DRAWINGS_PER_SYMBOL) return null;
     const drawing: Drawing = {
@@ -506,6 +651,9 @@ export function addDrawing(
         locked: false,
         hidden: false,
         createdAt: Date.now(),
+        ...(extra?.name ? { name: extra.name } : {}),
+        ...(tool === 'text' ? { text: extra?.text ?? '' } : {}),
+        ...(tool === 'fib' && extra?.levels ? { levels: [...extra.levels] } : {}),
     };
     store = { ...store, [key]: [...(store[key] ?? []), drawing] };
     record(key, drawing.id, drawing);
@@ -520,8 +668,57 @@ function commit(key: string, next: Drawing[]) {
     for (const d of before) if (!ids.has(d.id)) record(key, d.id, null);
     const prev = new Map(before.map((d) => [d.id, d]));
     for (const d of next) if (prev.get(d.id) !== d) record(key, d.id, d);
+    // 共同物件的相對順序變了（調整圖層）— 記下想要的順序
+    const common = (list: Drawing[], other: Map<string, unknown> | Set<string>) =>
+        list.filter((d) => other.has(d.id)).map((d) => d.id);
+    const a = common(before, ids);
+    const b = common(next, prev);
+    if (a.length !== b.length || a.some((id, i) => id !== b[i])) {
+        pendingOrder.set(key, next.map((d) => d.id));
+    }
     store = { ...store, [key]: next };
     persist();
+}
+
+// 整份換掉（復原／重做、多選操作）— 依物件記錄差異，跨視窗照樣合併
+export function replaceDrawings(key: string, next: Drawing[]) {
+    const before = store[key] ?? EMPTY;
+    if (before === next) return;
+    commit(key, next);
+}
+
+// 調整圖層：把 id 移到 toIndex（陣列尾端＝最上層）
+export function moveDrawing(key: string, id: string, toIndex: number) {
+    const list = store[key];
+    const from = list?.findIndex((d) => d.id === id) ?? -1;
+    if (!list || from < 0) return;
+    const to = Math.max(0, Math.min(list.length - 1, toIndex));
+    if (to === from) return;
+    const next = [...list];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item!);
+    commit(key, next);
+}
+
+// 全部鎖定／解鎖（ids 省略＝整個商品）
+export function setDrawingsLocked(key: string, locked: boolean, ids?: readonly string[]) {
+    const list = store[key];
+    if (!list) return;
+    const pick = ids ? new Set(ids) : null;
+    if (!list.some((d) => (!pick || pick.has(d.id)) && d.locked !== locked)) return;
+    commit(
+        key,
+        list.map((d) => ((!pick || pick.has(d.id)) && d.locked !== locked ? { ...d, locked } : d)),
+    );
+}
+
+// 一次刪多個（多選刪除）；鎖定的保留
+export function removeDrawings(key: string, ids: readonly string[]) {
+    const list = store[key];
+    if (!list) return;
+    const drop = new Set(ids);
+    const next = list.filter((d) => !drop.has(d.id) || d.locked);
+    if (next.length !== list.length) commit(key, next);
 }
 
 export function updateDrawing(key: string, id: string, patch: Partial<Omit<Drawing, 'id'>>) {
@@ -551,7 +748,11 @@ export function duplicateDrawing(
 ): Drawing | null {
     const source = (store[key] ?? []).find((d) => d.id === id);
     if (!source) return null;
-    return addDrawing(key, source.tool, source.anchors.map(shift), source.style);
+    return addDrawing(key, source.tool, source.anchors.map(shift), source.style, {
+        text: source.text,
+        levels: source.levels,
+        name: source.name,
+    });
 }
 
 // 隱藏的物件點不到，取消選取後就只能從這裡找回來
@@ -581,6 +782,7 @@ export function __resetDrawingsForTest() {
     writeTimer = null;
     settingsTimer = null;
     pending.clear();
+    pendingOrder.clear();
     saveError = false;
     saveErrorNoticePending = false;
     store = {};
