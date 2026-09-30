@@ -203,6 +203,15 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
                                 >
                                     清除全部
                                 </button>
+                                {api.drawings.some((d) => d.hidden) && (
+                                    <button
+                                        className={styles.chip.normal}
+                                        title='隱藏的物件點不到，從這裡把它們全部顯示回來'
+                                        onClick={api.showAll}
+                                    >
+                                        顯示全部
+                                    </button>
+                                )}
                             </span>
                         </span>
                     </>

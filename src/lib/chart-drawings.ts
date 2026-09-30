@@ -355,6 +355,14 @@ export function duplicateDrawing(
     return addDrawing(key, source.tool, source.anchors.map(shift), source.style);
 }
 
+// 隱藏的物件點不到，取消選取後就只能從這裡找回來
+export function showAllDrawings(key: string) {
+    const list = store[key];
+    if (!list?.some((d) => d.hidden)) return;
+    store = { ...store, [key]: list.map((d) => (d.hidden ? { ...d, hidden: false } : d)) };
+    persist(key);
+}
+
 // 一鍵清除目前商品所有畫圖 — 鎖定的物件保留（鎖定的用意就是防誤刪）
 export function clearDrawings(key: string) {
     const list = store[key];

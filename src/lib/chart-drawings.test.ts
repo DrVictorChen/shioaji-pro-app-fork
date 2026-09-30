@@ -13,6 +13,7 @@ import {
     MAX_DRAWINGS_PER_SYMBOL,
     reloadDrawingsFromStorage,
     removeDrawing,
+    showAllDrawings,
     updateDrawing,
     type DrawingAnchor,
 } from './chart-drawings';
@@ -221,5 +222,14 @@ describe('跨視窗同步', () => {
         store.set('sj-pro-chart-drawings', JSON.stringify({}));
         reloadDrawingsFromStorage();
         expect(getDrawings('TXF')).toEqual([]);
+    });
+});
+
+describe('顯示全部', () => {
+    it('把隱藏的物件全部顯示回來，其餘屬性不變', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        updateDrawing('TXF', a.id, { hidden: true, locked: true });
+        showAllDrawings('TXF');
+        expect(getDrawings('TXF')[0]).toMatchObject({ id: a.id, hidden: false, locked: true });
     });
 });

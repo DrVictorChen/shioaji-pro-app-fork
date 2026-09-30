@@ -13,6 +13,7 @@ import {
     duplicateDrawing,
     removeDrawing,
     setDrawingSettings,
+    showAllDrawings,
     updateDrawing,
     useDrawings,
     useDrawingSettings,
@@ -62,6 +63,7 @@ export interface ChartDrawingsApi {
     duplicate: () => void;
     remove: () => void;
     clearAll: () => void;
+    showAll: () => void;
     // 水平線可直接輸入精確價格（拖曳只能拖到游標所在的價位）
     setSelectedPrice: (price: number) => void;
     symbolKey: string;
@@ -517,6 +519,8 @@ export function useChartDrawings(opts: {
         setSelectedId(null);
     }, []);
 
+    const showAll = useCallback(() => showAllDrawings(stateRef.current.symbolKey), []);
+
     const setShareContinuousMonth = useCallback((v: boolean) => {
         setDrawingSettings({ shareContinuousMonth: v });
     }, []);
@@ -546,6 +550,7 @@ export function useChartDrawings(opts: {
         duplicate,
         remove,
         clearAll,
+        showAll,
         setSelectedPrice,
         symbolKey,
         shareContinuousMonth: settings.shareContinuousMonth,
