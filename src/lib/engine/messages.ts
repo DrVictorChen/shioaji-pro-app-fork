@@ -66,6 +66,8 @@ export const CORE_MESSAGE_TABLE = {
         MODE_UNSUPPORTED: '{mode} 模式不支援: {detail}',
         INTENT_STREAM_UNKNOWN_TIME: 'intent stream 含有不在決策時間軸上的紀錄: {time}',
         STRATEGY_SCRIPT_FAILED: '策略執行失敗: {detail}',
+        STRATEGY_LOOKAHEAD: '策略讀取了未來的 K 棒資料：{assetId} 的 {name} 在第 {index} 根（由 0 起算）的訊號會被之後的 K 棒改變。訊號只能用當根與之前的資料計算（例如不要讀 close[i + 1]、不要用整段資料的最高價、長度或平均）',
+        STRATEGY_LOOKAHEAD_OFFSET: 'ta.offset 的位移是 {n}：負數會讀到未來的 K 棒。位移必須是 0 或正數（例如 ta.offset(close, 1) 取前一根）',
         SCRIPT_UNKNOWN_ASSET: 'universe 外商品: {asset}',
         SCRIPT_COLLECTOR_INVALID: '{name}() 參數無效: {problem}',
         SCRIPT_SIZE_INVALID: 'position.{kind}() 數值無效',
