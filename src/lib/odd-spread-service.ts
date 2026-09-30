@@ -42,8 +42,8 @@ import {
     restoreAfterReload,
 } from './odd-spread-exec';
 import { retainContractQuotes } from './quote-ownership';
-import { cancelOrders } from './shioaji';
-import { getQuote, streamConnectionEpoch } from './stream';
+import { cancelOrders, fetchInfo, fetchTrades } from './shioaji';
+import { getLastHeartbeat, getQuote, HEARTBEAT_PERIOD_MS, streamConnectionEpoch } from './stream';
 import { notify, placeQuickOrder } from './trade';
 import { getTradingState, subscribeTradingState } from './trading-state';
 import { candidateTrades, reconcileEvents, slotTag, tradeReport } from './odd-spread-reconcile';
@@ -251,59 +251,97 @@ function announce(rec: SpreadExecRecord, before: ExecState) {
     }
 }
 
+/**
+ * 送出前以新鮮讀取確認伺服器沒換：
+ * - 串流身分可判定且與指令產生時相同（含最近的心跳）；
+ * - 重新讀 /api/v1/info（不看快取），API base 與模擬／正式都與開始時相同。
+ * sidecar 重啟後、前端還沒察覺串流中斷前，新程序可能已在同一埠回應；/info 的
+ * 模式比對擋下跨模式送單。（SDK 若在 /info 提供程序 instance id，可在此一併比對。）
+ */
+async function verifyServer(rec: SpreadExecRecord, gen: string | null): Promise<string | null> {
+    if (gen === null || currentGen() !== gen) return '伺服器連線不穩或已重啟（身分無法確認）';
+    if (!envMatches(rec.env)) return ENV_PAUSED_TEXT;
+    let info;
+    try {
+        info = await fetchInfo();
+    } catch (e) {
+        return `無法確認伺服器（${e instanceof Error ? e.message : String(e)}）`;
+    }
+    if (getApiBase() !== rec.env.base || info.simulation !== rec.env.simulation) return ENV_PAUSED_TEXT;
+    if (currentGen() !== gen) return '伺服器身分已變更';
+    return null;
+}
+
 function run(rec: SpreadExecRecord, c: ReturnType<typeof execReduce>['commands'][number]) {
+    const gen = currentGen();
     if (c.kind === 'cancel') {
         const slot = rec.state.slots.find(s => s.key === c.key);
-        const gen = currentGen();
+        const tag = slotTag(rec.tagBase, c.key);
+        const refuse = (error: string) => update(rec.id, { type: 'cancelResult', key: c.key, ok: false, error });
         if (!envMatches(rec.env) || gen === null || slot?.orderId !== c.orderId || slot.idGen !== gen) {
-            update(rec.id, { type: 'cancelResult', key: c.key, ok: false, error: !envMatches(rec.env) ? ENV_PAUSED_TEXT : '委託編號待重新接回（伺服器已重啟或連線中斷）' });
+            refuse(!envMatches(rec.env) ? ENV_PAUSED_TEXT : '委託編號待重新接回（伺服器已重啟或連線中斷）');
             return;
         }
-        // 送出刪單前最後一刻再比對完整環境（API base＋模擬／正式）與伺服器身分
-        const beforeSend = () => {
-            if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未刪單`);
-            if (currentGen() !== gen) throw new Error('伺服器身分已變更，未刪單');
-        };
-        void cancelOrders([c.orderId], undefined, beforeSend).then(
-            (results) => {
-                const r = results[0];
-                const ok = r?.status === 'fulfilled';
-                const error = !r ? '沒有回應' : r.status === 'rejected' ? (r.reason instanceof Error ? r.reason.message : String(r.reason)) : undefined;
-                if (!ok) notify({ kind: 'err', title: '整零價差：刪單失敗', body: `${rec.contract.code}：${error}；原單可能仍會成交，請在面板再按「取消」重試` });
-                update(rec.id, { type: 'cancelResult', key: c.key, ok, ...(error ? { error } : {}) });
-            },
-            (e: unknown) => update(rec.id, { type: 'cancelResult', key: c.key, ok: false, error: e instanceof Error ? e.message : String(e) }),
-        );
+        void (async () => {
+            const problem = await verifyServer(rec, gen);
+            if (problem) return refuse(problem);
+            // 以伺服器目前的委託快取確認這個編號就是我們這一筆（標記相符）；
+            // 編號被別的委託重用就不刪
+            try {
+                const rows = await fetchTrades('S', rec.account, { refresh: false });
+                const row = rows.find(t => t.order.id === c.orderId);
+                if (!row || row.order.custom_field !== tag) return refuse('委託編號與本單標記不符，未刪單（待重新接回）');
+            } catch (e) {
+                return refuse(`無法確認委託（${e instanceof Error ? e.message : String(e)}）`);
+            }
+            // 送出刪單前最後一刻再比對完整環境（API base＋模擬／正式）與伺服器身分
+            const beforeSend = () => {
+                if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未刪單`);
+                if (currentGen() !== gen) throw new Error('伺服器身分已變更，未刪單');
+            };
+            const results = await cancelOrders([c.orderId], undefined, beforeSend).catch((e: unknown) => [{ status: 'rejected' as const, reason: e }]);
+            const r = results[0];
+            const ok = r?.status === 'fulfilled';
+            const error = !r ? '沒有回應' : r.status === 'rejected' ? (r.reason instanceof Error ? r.reason.message : String(r.reason)) : undefined;
+            if (!ok) notify({ kind: 'err', title: '整零價差：刪單失敗', body: `${rec.contract.code}：${error}；原單可能仍會成交，請在面板再按「取消」重試` });
+            update(rec.id, { type: 'cancelResult', key: c.key, ok, ...(error ? { error } : {}) });
+        })();
         return;
     }
-    const genAtSend = currentGen();
-    void placeQuickOrder(rec.contract, c.action, c.price, c.quantity, {
-        account: rec.account,
-        source: 'auto',
-        customField: slotTag(rec.tagBase, c.key),
-        ...(c.leg === 'odd' ? { orderLot: 'IntradayOdd' as const } : {}),
-        // 送出前最後一刻再確認環境：不同就不送（mutationNotStarted）
-        beforeSend: () => { if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未送出`); },
-    }).then(
-        (trade) => {
+    const failPlace = (msg: string) => {
+        notify({ kind: 'err', title: `整零價差：${c.leg === 'odd' ? '零股' : '整股'}委託未送出`, body: msg });
+        update(rec.id, { type: 'placeFailed', key: c.key, error: msg });
+    };
+    void (async () => {
+        const problem = await verifyServer(rec, gen);
+        if (problem) return failPlace(problem);
+        try {
+            const trade = await placeQuickOrder(rec.contract, c.action, c.price, c.quantity, {
+                account: rec.account,
+                source: 'auto',
+                customField: slotTag(rec.tagBase, c.key),
+                ...(c.leg === 'odd' ? { orderLot: 'IntradayOdd' as const } : {}),
+                // 送出前最後一刻再確認環境與伺服器身分：不同就不送（mutationNotStarted）
+                beforeSend: () => {
+                    if (!envMatches(rec.env)) throw new Error(`${ENV_PAUSED_TEXT}，未送出`);
+                    if (currentGen() !== gen) throw new Error('伺服器身分已變更，未送出');
+                },
+            });
             // 回應期間伺服器身分變了 → 這個 id 不可信（之後以標記接回）
             const g = currentGen();
-            update(rec.id, { type: 'placed', key: c.key, orderId: trade.order.id, gen: g !== null && g === genAtSend ? g : null });
+            update(rec.id, { type: 'placed', key: c.key, orderId: trade.order.id, gen: g !== null && g === gen ? g : null });
             update(rec.id, { type: 'report', key: c.key, ...tradeReport(trade) });
             reconcile();
-        },
-        (error: unknown) => {
+        } catch (error) {
             const notStarted = !!(error && typeof error === 'object' && 'mutationNotStarted' in error);
             const msg = error instanceof Error ? error.message : String(error);
-            if (notStarted) {
-                notify({ kind: 'err', title: `整零價差：${c.leg === 'odd' ? '零股' : '整股'}委託未送出`, body: msg });
-                update(rec.id, { type: 'placeFailed', key: c.key, error: msg });
-            } else {
+            if (notStarted) failPlace(msg);
+            else {
                 update(rec.id, { type: 'placeUnknown', key: c.key, error: msg });
                 reconcile();
             }
-        },
-    );
+        }
+    })();
 }
 
 // 本頁面的隨機身分：重新整理後舊頁面取得的委託編號一律不信任（以標記重新接回）
@@ -316,7 +354,9 @@ const PAGE_ID = Math.random().toString(36).slice(2, 10);
  */
 export function currentGen(): string | null {
     const epoch = streamConnectionEpoch();
-    return epoch < 0 ? null : `${PAGE_ID}|${getApiBase()}|${epoch}`;
+    // 心跳超過兩個週期沒來 → 串流可能已斷而尚未察覺，身分視為無法判定
+    if (epoch < 0 || Date.now() - getLastHeartbeat() > 2 * HEARTBEAT_PERIOD_MS) return null;
+    return `${PAGE_ID}|${getApiBase()}|${epoch}`;
 }
 
 /** 目前身分下取得、可信的委託編號（標記對帳時不可被別的委託占用） */
@@ -329,13 +369,19 @@ function trustedIds(gen: string | null): Set<string> {
 
 const target = (rec: SpreadExecRecord) => ({ tagBase: rec.tagBase, code: rec.contract.code, account: rec.account, state: rec.state });
 
+// 每一列第一次被看到時的伺服器身分：舊快照裡的列不能把 id 授予新身分
+// （trading-state 更新時會換新的列物件，沒變的列保留原本的身分）
+const rowStamps = new WeakMap<object, string | null>();
+
 /** 委託列 → 各筆執行的成交回報（以唯一標記對帳；sidecar 重啟換 id 時重新接回） */
 export function reconcile(trades: AccountedTrade[] = getTradingState().trades) {
     const gen = currentGen();
+    for (const t of trades) if (!rowStamps.has(t)) rowStamps.set(t, gen);
+    const rowGen = (t: object) => rowStamps.get(t) ?? null;
     const claimed = trustedIds(gen);
     for (const rec of records) {
         if (!rec.state.started || !envMatches(rec.env)) continue;
-        for (const e of reconcileEvents(target(rec), trades, claimed, gen)) update(rec.id, e);
+        for (const e of reconcileEvents(target(rec), trades, claimed, gen, rowGen)) update(rec.id, e);
     }
 }
 
@@ -358,7 +404,7 @@ export function claimOrder(id: string, key: string, orderId: string) {
     }
     if (!candidateOrders(id, key).some(t => t.order.id === orderId)) return;
     const slot = rec.state.slots.find(s => s.key === key);
-    update(id, { type: 'placed', key, orderId, gen: currentGen(), rebind: !!slot?.orderId });
+    update(id, { type: 'placed', key, orderId, gen: currentGen(), rebind: !!slot?.orderId, userClaimed: true });
     reconcile();
 }
 
@@ -434,9 +480,14 @@ export interface StartSpreadRequest {
     env: ExecEnv;
 }
 
-export function liveExecutionFor(code: string, account: Account | undefined): SpreadExecRecord | undefined {
-    return records.find(r => r.contract.code === code && accountMatches(r.account, account) && r.state.started && !isTerminalPhase(r.state.phase));
+/** 需要先處理、會擋下同商品同帳戶新價差單的執行：未結束，或還有結果不明（含使用者
+ * 標記「未送出」但券商未確認）的委託——那筆若其實有送出，事後接回會與新單同時補單 */
+export function blockingExecutionFor(code: string, account: Account | undefined): SpreadExecRecord | undefined {
+    return records.find(r => r.contract.code === code && accountMatches(r.account, account) && r.state.started
+        && (!isTerminalPhase(r.state.phase) || r.state.slots.some(s => s.status === 'unknown')));
 }
+
+export const liveExecutionFor = blockingExecutionFor;
 
 export function hasLiveSpreadExecution(): boolean {
     return records.some(r => r.state.started && !isTerminalPhase(r.state.phase));
@@ -447,7 +498,12 @@ export function startSpreadExecution(req: StartSpreadRequest): string {
     const unavailable = oddSpreadExecUnavailable();
     if (unavailable) throw new Error(unavailable);
     startOddSpreadService();
-    if (liveExecutionFor(req.contract.code, req.account)) throw new Error('此商品已有執行中的價差單（含結果未確認的委託），請先處理');
+    const blocking = blockingExecutionFor(req.contract.code, req.account);
+    if (blocking) {
+        throw new Error(isTerminalPhase(blocking.state.phase)
+            ? '較早的價差單還有標記「未送出」但券商未確認的委託；請先在該筆核對，確認沒有送出後按「確認沒有送出，結束追蹤」'
+            : '此商品已有執行中的價差單（含結果未確認的委託），請先處理');
+    }
     if (!envMatches(req.env)) throw new Error('確認期間伺服器或模擬／正式環境已切換，未送出，請重新確認');
     const env = req.env;
     const now = Date.now();
@@ -469,16 +525,24 @@ export function startSpreadExecution(req: StartSpreadRequest): string {
 }
 
 /** 使用者確認補單（數量與價格凍結在確認當下）；缺口已變、環境不符就不送，回 false */
-export function acceptHedge(id: string, quantity: number, orders: LegOrder[]): boolean {
+export interface FrozenHedge {
+    version: number;
+    leg: LegKind;
+    action: 'Buy' | 'Sell';
+    quantity: number;
+    orders: LegOrder[];
+}
+
+export function acceptHedge(id: string, frozen: FrozenHedge): boolean {
     const rec = records.find(r => r.id === id);
     if (!rec || !envMatches(rec.env)) return false;
     const before = rec.state;
-    update(id, { type: 'hedgeAccept', quantity, orders });
+    update(id, { type: 'hedgeAccept', ...frozen });
     const after = records.find(r => r.id === id)?.state;
     return !!after && after !== before && !after.pendingHedge;
 }
 
-export function spreadExecAction(id: string, event: Extract<ExecEvent, { type: 'cancel' | 'hedgeDecline' | 'resolveUnknown' }>) {
+export function spreadExecAction(id: string, event: Extract<ExecEvent, { type: 'cancel' | 'hedgeDecline' | 'resolveUnknown' | 'abandonUnknown' }>) {
     const rec = records.find(r => r.id === id);
     if (!rec) return;
     if (!envMatches(rec.env)) {
@@ -514,7 +578,9 @@ const getRecords = () => records;
 
 /** 此商品／帳戶所有未關閉（或重新需要處理）的執行，新的在前 */
 export function executionsFor(all: SpreadExecRecord[], code: string, account: Account | undefined): SpreadExecRecord[] {
-    return all.filter(r => r.contract.code === code && accountMatches(r.account, account) && r.state.started && !r.dismissed).reverse();
+    // 已關閉的執行若仍會擋下新單（還有結果不明的委託），照樣列出讓使用者處理
+    return all.filter(r => r.contract.code === code && accountMatches(r.account, account) && r.state.started
+        && (!r.dismissed || r.state.slots.some(x => x.status === 'unknown'))).reverse();
 }
 
 /** 面板顯示：此商品／帳戶每一筆需要看／處理的執行（含較早的） */

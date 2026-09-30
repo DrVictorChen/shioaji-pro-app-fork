@@ -213,6 +213,8 @@ export function OddSpreadView({
     );
 
     const liveExecs = execs.filter(r => r.state.started && !isTerminalPhase(r.state.phase));
+    // 已結束但還有標記「未送出」、券商未確認的委託：擋下新單（那筆若其實有送出會與新單同時補單）
+    const provisional = execs.some(r => r.state.started && isTerminalPhase(r.state.phase) && r.state.slots.some(x => x.status === 'unknown'));
     const running = liveExecs.length > 0;
     const execPaused = execs.some(isPaused);
 
@@ -221,6 +223,7 @@ export function OddSpreadView({
         if (execUnavailable) return '請在主視窗執行';
         if (!live) return '行情或交易狀態未連線';
         if (!account) return '沒有可用的證券帳戶';
+        if (provisional && !running) return '先確認較早的未送出委託';
         if (running) return liveExecs.some(isPaused) ? '執行暫停（環境已切換）' : liveExecs.some(r => r.state.phase === 'unknown') ? '有委託結果未確認' : '價差單執行中';
         if (busy) return '確認中';
         if (q.block === 'inventory' && inventoryShares === null) return '庫存未知';
@@ -656,8 +659,8 @@ function SpreadCard({ q, blocked, privMoney, onExecute }: { q: SpreadQuote; bloc
 async function confirmHedge(rec: SpreadExecRecord) {
     const p = rec.state.pendingHedge;
     if (!p) return;
-    // 凍結確認內容：數量與每筆價格；確認後缺口若變了就不送、請使用者重新確認
-    const quantity = p.quantity;
+    // 凍結確認內容：版本、腳、方向、數量與每筆價格；確認後待補內容變了就不送、請使用者重新確認
+    const { version, leg, action, quantity } = p;
     const orders = (refreshHedgeOrders(rec.id) ?? p.orders).map(o => ({ ...o }));
     if (orders.length === 0 || orders.reduce((a, o) => a + o.quantity, 0) !== quantity) {
         notify({ kind: 'err', title: '整零價差：無法補單', body: '目前沒有足夠的對手報價，請稍後再試或手動處理' });
@@ -677,7 +680,7 @@ async function confirmHedge(rec: SpreadExecRecord) {
         }).catch(() => false);
         if (!ok) return;
     }
-    if (!acceptHedge(rec.id, quantity, orders)) {
+    if (!acceptHedge(rec.id, { version, leg, action, quantity, orders })) {
         notify({ kind: 'err', title: '整零價差：補單未送出', body: '確認期間缺口或環境已變更，這筆沒有送出，請依最新狀態重新確認' });
     }
 }
@@ -733,7 +736,19 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
             )}
             {marked.length > 0 && (
                 <span className={styles.execDetail}>
-                    已標記未送出：{marked.map(slotText).join('、')}（暫定；若委託列出現這筆會自動接回並重新計算）
+                    已標記未送出：{marked.map(slotText).join('、')}（暫定；若委託列出現這筆會自動接回並重新計算。在確認前，同商品不能開始新的價差單）
+                    <button
+                        className={styles.smallBtn}
+                        disabled={paused}
+                        title='已在券商委託查詢確認這些委託確實不存在：結束追蹤，之後就算出現也不再接回'
+                        onClick={() => {
+                            if (window.confirm('確認已在券商委託查詢核對過，這些委託確實沒有送出？結束追蹤後，就算之後出現也不會再接回或補單。')) {
+                                for (const x of marked) spreadExecAction(rec.id, { type: 'abandonUnknown', key: x.key });
+                            }
+                        }}
+                    >
+                        確認沒有送出，結束追蹤
+                    </button>
                 </span>
             )}
             {cancelFailed.length > 0 && (
@@ -750,7 +765,7 @@ function ExecStatus({ rec, paused }: { rec: SpreadExecRecord; paused: boolean })
                 {p && (
                     <>
                         <button className={styles.smallBtnPrimary} disabled={paused} onClick={() => void confirmHedge(rec)}>以最新價補單</button>
-                        <button className={styles.smallBtn} disabled={paused} title='不補單，保留未配對部位自行處理' onClick={() => spreadExecAction(rec.id, { type: 'hedgeDecline' })}>取消</button>
+                        <button className={styles.smallBtn} disabled={paused} title='不補單，保留未配對部位自行處理' onClick={() => spreadExecAction(rec.id, { type: 'hedgeDecline', version: p.version })}>取消</button>
                     </>
                 )}
                 {unknown.length > 0 && (

@@ -4,11 +4,11 @@
 // 對帳規則：
 // - 委託列中「完全相同標記」且商品／帳戶／方向／價量／單位都相同的唯一一筆，就是
 //   這筆委託；id 與已知不同（sidecar 重啟後 trade_id 換了）→ 以新 id 重新接回。
-// - 沒找到標記時，只有在「同一個伺服器身分」（串流連線世代）取得的 id 才可信：
-//   依 id 找到、且標記相符（或該列沒有標記）才採用回報；身分變了或無法判定時
-//   舊 id 不信任（可能被別的委託重用），等標記出現或使用者在面板指定。
-// - 以標記或可信 id 認出的委託，價格／數量可能已被正常改單，只要求商品、帳戶、
-//   方向、單位相同。
+// - 只以唯一標記對帳：沒有標記（例如投影把標記丟了）的列一律不自動採用——sidecar
+//   重啟後舊編號可能被別筆委託重用，前端也無法在串流斷線前察覺；改列為候選由使用者
+//   在面板指定。
+// - 只有在「目前伺服器身分」下讀到的列才能把 id 授予目前身分（舊快照不行）。
+// - 以標記認出的委託，價格／數量可能已被正常改單，只要求商品、帳戶、方向、單位相同。
 // - 同一標記對到多列（不應發生）→ 不接回，避免猜錯。
 //
 // 回報帶累計成交、券商狀態與刪單量（刪單量讓「回讀仍 Submitted、刪單量已涵蓋全部」
@@ -81,8 +81,17 @@ export function sameOrder(rec: Pick<ReconcileTarget, 'code' | 'account'>, slot: 
  * 依委託列產生一筆執行的對帳事件。claimed：其他委託已使用的 id（會就地更新）；
  * gen：目前的 sidecar 世代。
  */
-export function reconcileEvents(rec: ReconcileTarget, trades: TradeLike[], claimed: Set<string>, gen: string | null): ExecEvent[] {
+export function reconcileEvents(
+    rec: ReconcileTarget,
+    trades: TradeLike[],
+    claimed: Set<string>,
+    gen: string | null,
+    /** 這一列是在哪個伺服器身分下取得的；省略＝目前身分（剛讀的委託列） */
+    rowGen: (t: TradeLike) => string | null | undefined = () => gen,
+): ExecEvent[] {
     const events: ExecEvent[] = [];
+    // 舊快照（其他身分下讀到的列）不能把 id 授予目前身分
+    const fresh = (t: TradeLike) => gen !== null && rowGen(t) === gen;
     for (const slot of rec.state.slots) {
         if (slot.status === 'unsent' || slot.local) continue;
         const tag = slotTag(rec.tagBase, slot.key);
@@ -92,17 +101,24 @@ export function reconcileEvents(rec: ReconcileTarget, trades: TradeLike[], claim
             const t = tagged[0]!;
             if (t.order.id !== slot.orderId || slot.idGen !== gen) {
                 if (claimed.has(t.order.id) && t.order.id !== slot.orderId) continue;
-                events.push({ type: 'placed', key: slot.key, orderId: t.order.id, gen, rebind: !!slot.orderId });
-                claimed.add(t.order.id);
+                if (fresh(t)) {
+                    events.push({ type: 'placed', key: slot.key, orderId: t.order.id, gen, rebind: !!slot.orderId });
+                    claimed.add(t.order.id);
+                } else if (!slot.orderId) {
+                    // 第一次對上但來源身分不明：記下 id、不給可信身分（之後以新鮮的列確認）
+                    events.push({ type: 'placed', key: slot.key, orderId: t.order.id, gen: null });
+                } else if (t.order.id !== slot.orderId) {
+                    continue; // 舊快照的 id 不取代，也不採用其回報
+                }
             }
             events.push({ type: 'report', key: slot.key, ...tradeReport(t) });
             continue;
         }
-        if (tagged.length > 1) continue;
-        // 沒有標記可對：只信任同一伺服器身分取得的 id（身分無法判定時一律不信任），
-        // 且標記不可矛盾；id 可信時價格／數量可能已被改
-        if (slot.orderId && gen !== null && slot.idGen === gen) {
-            const t = trades.find(x => x.order.id === slot.orderId);
+        // 沒有唯一標記可對：不以委託編號或內容猜（編號可能被重啟後的別筆委託重用、
+        // 標記被投影丟掉的列無法區分），交給使用者在面板指定。使用者指定過的委託，
+        // 只在同一伺服器身分內、以新鮮的列按編號對帳
+        if (slot.userClaimed && slot.orderId && gen !== null && slot.idGen === gen) {
+            const t = trades.find(x => x.order.id === slot.orderId && fresh(x));
             if (t && (!t.order.custom_field || t.order.custom_field === tag) && sameInstrument(rec, slot, t)) {
                 events.push({ type: 'report', key: slot.key, ...tradeReport(t) });
             }

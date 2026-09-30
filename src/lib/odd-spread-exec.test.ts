@@ -91,13 +91,13 @@ describe('sequential：零股成交後再送整股', () => {
         const r = run(SELL_ODD, oddFilled, ctx);
         expect(places(r.commands)).toHaveLength(2);
         expect(r.state.phase).toBe('hedgeDecision');
-        expect(r.state.pendingHedge).toEqual({ leg: 'round', action: 'Buy', quantity: 1, reason: '價格已偏離計畫價超過 2 檔', orders: [{ price: 1100, quantity: 1 }] });
+        expect(r.state.pendingHedge).toEqual({ leg: 'round', action: 'Buy', quantity: 1, reason: '價格已偏離計畫價超過 2 檔', orders: [{ price: 1100, quantity: 1 }], version: 1 });
         // 以最新價補單
-        const accept = execReduce(r.state, { type: 'hedgeAccept', quantity: 1, orders: [{ price: 1105, quantity: 1 }] }, ctx);
+        const accept = execReduce(r.state, { type: 'hedgeAccept', version: 1, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1105, quantity: 1 }] }, ctx);
         expect(accept.commands).toEqual([{ kind: 'place', key: 'round:2', leg: 'round', action: 'Buy', price: 1105, quantity: 1 }]);
         expect(accept.state.phase).toBe('roundPending');
         // 或取消：保留未配對、結束
-        const decline = execReduce(r.state, { type: 'hedgeDecline' }, ctx);
+        const decline = execReduce(r.state, { type: 'hedgeDecline', version: 1 }, ctx);
         expect(decline.commands).toEqual([]);
         expect(decline.state.phase).toBe('failed');
         expect(execSummary(decline.state).unhedgedShares).toBe(1000);
@@ -325,7 +325,7 @@ describe('終態後的晚到成交', () => {
             { type: 'report', key: 'odd:0', filled: 999, status: 'filled' },
             { type: 'report', key: 'odd:1', filled: 1, status: 'cancelled' },
             { type: 'report', key: 'odd:2', filled: 0, status: 'cancelled' },
-            { type: 'hedgeDecline' },
+            { type: 'hedgeDecline', version: 1 },
         ], ctx);
         expect(r.state.phase).toBe('failed');
         expect(r.state.waived.round).toBe(1);
@@ -454,7 +454,7 @@ describe('第四輪：總量模型', () => {
             { type: 'report', key: 'round:2', filled: 1, status: 'filled' },
             { type: 'report', key: 'odd:0', filled: 380, status: 'filled' },
             { type: 'report', key: 'odd:1', filled: 0, status: 'cancelled', cancelled: 620 },
-            { type: 'hedgeAccept', quantity: 620, orders: [{ price: 1090, quantity: 620 }] },
+            { type: 'hedgeAccept', version: 1, leg: 'odd', action: 'Sell', quantity: 620, orders: [{ price: 1090, quantity: 620 }] },
             { type: 'placed', key: 'odd:3', orderId: 'H' },
         ]);
         expect(potentialOf(r.state, 'odd')).toBe(1000);
@@ -541,13 +541,18 @@ describe('第五輪：券商回讀型態與補單確認', () => {
         expect(r.state.pendingHedge?.quantity).toBe(1);
         // 使用者確認了 1 張；確認期間晚到成交讓缺口變 2 張（此處以直接改狀態模擬重算後的新缺口）
         const grown = { ...r.state, pendingHedge: { ...r.state.pendingHedge!, quantity: 2 } };
-        const stale = execReduce(grown, { type: 'hedgeAccept', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx);
+        const v = r.state.pendingHedge!.version;
+        const stale = execReduce(grown, { type: 'hedgeAccept', version: v, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx);
         expect(stale.commands).toEqual([]);
         expect(stale.state).toBe(grown);
         // 數量不符或委託總量不符都不送
-        expect(execReduce(r.state, { type: 'hedgeAccept', quantity: 1, orders: [{ price: 1100, quantity: 2 }] }, ctx).commands).toEqual([]);
+        expect(execReduce(r.state, { type: 'hedgeAccept', version: v, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 2 }] }, ctx).commands).toEqual([]);
         // 相符 → 只送確認的那一份
-        const ok = execReduce(r.state, { type: 'hedgeAccept', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx);
+        // 版本、腳或方向不同都不送（例如待補改成賣 1 股零股，舊確認不能拿來用）
+        expect(execReduce(r.state, { type: 'hedgeAccept', version: v + 1, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx).commands).toEqual([]);
+        expect(execReduce(r.state, { type: 'hedgeAccept', version: v, leg: 'odd', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx).commands).toEqual([]);
+        expect(execReduce(r.state, { type: 'hedgeAccept', version: v, leg: 'round', action: 'Sell', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx).commands).toEqual([]);
+        const ok = execReduce(r.state, { type: 'hedgeAccept', version: v, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx);
         expect(ok.commands).toEqual([{ kind: 'place', key: 'round:3', leg: 'round', action: 'Buy', price: 1100, quantity: 1 }]);
     });
 
@@ -582,6 +587,56 @@ describe('第六輪：委託編號只在同一伺服器身分可信', () => {
         gen = null;
         const none = execReduce(re.state, { type: 'placed', key: 'odd:1', orderId: 'B2', gen: null, rebind: true }, ctx);
         expect(none.commands).toEqual([]);
+    });
+});
+
+describe('第七輪：補單版本、放棄追蹤、零股拆單', () => {
+    it('待補內容換腳／方向／數量就換版本；舊版本的確認與拒絕都無效', () => {
+        const plan: ExecPlan = { ...SELL_ODD, mode: 'simultaneous' };
+        const ctx = ctxOf(() => ({ ok: false, reason: 'x', orders: [{ price: 1100, quantity: 1 }] }));
+        const r = run(plan, [
+            { type: 'start' },
+            { type: 'report', key: 'odd:0', filled: 380, status: 'filled' },
+            { type: 'report', key: 'odd:1', filled: 620, status: 'filled' },
+            { type: 'report', key: 'round:2', filled: 0, status: 'cancelled', cancelled: 1 },
+        ], ctx);
+        const p1 = r.state.pendingHedge!;
+        expect(p1).toMatchObject({ leg: 'round', action: 'Buy', quantity: 1 });
+        // 同內容重算 → 版本不變
+        const same = execReduce(r.state, { type: 'refresh' }, ctx);
+        expect(same.state.pendingHedge!.version).toBe(p1.version);
+        // 待補改成賣 1 股零股（此處直接改狀態模擬重算結果）→ 舊確認不能送
+        const switched = { ...r.state, pendingHedge: { leg: 'odd' as const, action: 'Sell' as const, quantity: 1, reason: 'y', orders: [{ price: 1095, quantity: 1 }], version: p1.version + 1 } };
+        expect(execReduce(switched, { type: 'hedgeAccept', version: p1.version, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] }, ctx).commands).toEqual([]);
+        expect(execReduce(switched, { type: 'hedgeDecline', version: p1.version }, ctx).state).toBe(switched);
+    });
+
+    it('零股補單超過 999 股自動拆筆（總量不變）', () => {
+        const plan: ExecPlan = { ...LOTS2, mode: 'simultaneous' };
+        const r = run(plan, [
+            { type: 'start' },
+            { type: 'report', key: 'round:3', filled: 2, status: 'filled' },
+            { type: 'report', key: 'odd:0', filled: 0, status: 'cancelled', cancelled: 999 },
+            { type: 'report', key: 'odd:1', filled: 0, status: 'cancelled', cancelled: 999 },
+            { type: 'report', key: 'odd:2', filled: 0, status: 'cancelled', cancelled: 2 },
+        ]);
+        const p = r.state.pendingHedge!;
+        expect(p).toMatchObject({ leg: 'odd', quantity: 2000 });
+        const ok = execReduce(r.state, { type: 'hedgeAccept', version: p.version, leg: 'odd', action: 'Sell', quantity: 2000, orders: [{ price: 1095, quantity: 2000 }] }, ctxOf());
+        expect(ok.commands.map(c => c.kind === 'place' && c.quantity)).toEqual([999, 999, 2]);
+    });
+
+    it('「確認沒有送出，結束追蹤」只對已標記未送出的委託有效，之後不再接回', () => {
+        const r = run(SELL_ODD, [
+            { type: 'start' },
+            { type: 'placeUnknown', key: 'odd:0', error: 'timeout' },
+            { type: 'abandonUnknown', key: 'odd:0' }, // 還沒標記 → 無效
+        ]);
+        expect(r.state.slots[0]!.status).toBe('unknown');
+        const m = run(SELL_ODD, [{ type: 'resolveUnknown', key: 'odd:0' }, { type: 'abandonUnknown', key: 'odd:0' }], ctxOf(), r.state);
+        expect(m.state.slots[0]).toMatchObject({ status: 'failed', local: true, abandoned: true });
+        const late = execReduce(m.state, { type: 'placed', key: 'odd:0', orderId: 'X' }, ctxOf());
+        expect(late.state).toBe(m.state);
     });
 });
 

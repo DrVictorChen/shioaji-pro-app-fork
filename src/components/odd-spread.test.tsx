@@ -246,7 +246,7 @@ it('未配對待處理：列出原因與最新價，可以最新價補單或取�
             { key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'filled', filled: 380 },
             { key: 'odd:1', leg: 'odd', action: 'Sell', price: 1090, quantity: 620, status: 'filled', filled: 620 },
         ],
-        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '價格已偏離計畫價超過 2 檔（1,085 → 1,100）', orders: [{ price: 1100, quantity: 1 }] },
+        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '價格已偏離計畫價超過 2 檔（1,085 → 1,100）', orders: [{ price: 1100, quantity: 1 }], version: 3 },
     });
     await render({ execs: [exec] });
     const all = text(view.root);
@@ -255,9 +255,9 @@ it('未配對待處理：列出原因與最新價，可以最新價補單或取�
     expect(all).toContain('超過 2 檔');
     expect(button('買整賣零').props.disabled).toBe(true);
     await act(async () => { button('以最新價補單').props.onClick(); });
-    expect(mocks.accept).toHaveBeenCalledWith('os-1', 1, [{ price: 1100, quantity: 1 }]);
+    expect(mocks.accept).toHaveBeenCalledWith('os-1', { version: 3, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] });
     await act(async () => { buttons().find(b => text(b) === '取消')!.props.onClick(); });
-    expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'hedgeDecline' });
+    expect(mocks.action).toHaveBeenCalledWith('os-1', { type: 'hedgeDecline', version: 3 });
 });
 
 it('結果不明：說明哪筆、禁止再執行，可在核對後標記未送出', async () => {
@@ -359,7 +359,7 @@ it('同商品有多筆需要處理的執行：每筆各自顯示與操作', asyn
     const older = { ...rec({
         phase: 'hedgeDecision',
         slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status: 'filled', filled: 1000 }],
-        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '補單未成交（被拒或已刪除）', orders: [] },
+        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: '補單未成交（被拒或已刪除）', orders: [], version: 4 },
     }), id: 'os-old' };
     const newer = { ...rec({ phase: 'failed', slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'cancelled', filled: 0 }] }), id: 'os-new' };
     await render({ execs: [newer, older] });
@@ -367,7 +367,7 @@ it('同商品有多筆需要處理的執行：每筆各自顯示與操作', asyn
     expect(all).toContain('補單未成交（被拒或已刪除）');
     expect(all).toContain('未完成');
     await act(async () => { buttons().find(b => text(b) === '取消')!.props.onClick(); });
-    expect(mocks.action).toHaveBeenCalledWith('os-old', { type: 'hedgeDecline' });
+    expect(mocks.action).toHaveBeenCalledWith('os-old', { type: 'hedgeDecline', version: 4 });
     await act(async () => { button('關閉').props.onClick(); });
     expect(mocks.dismiss).toHaveBeenCalledWith('os-new');
 });
@@ -409,16 +409,29 @@ it('補單確認：以確認當下的數量與價格送；缺口已變則不送�
     const exec = rec({
         phase: 'hedgeDecision',
         slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 1000, status: 'filled', filled: 1000 }],
-        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: 'x', orders: [{ price: 1100, quantity: 1 }] },
+        pendingHedge: { leg: 'round', action: 'Buy', quantity: 1, reason: 'x', orders: [{ price: 1100, quantity: 1 }], version: 3 },
     });
     mocks.accept.mockReturnValueOnce(false);
     await render({ execs: [exec] });
     await act(async () => { button('以最新價補單').props.onClick(); });
-    expect(mocks.accept).toHaveBeenCalledWith('os-1', 1, [{ price: 1100, quantity: 1 }]);
+    expect(mocks.accept).toHaveBeenCalledWith('os-1', { version: 3, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] });
     expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間缺口或環境已變更');
     // 建議委託總量與缺口不符 → 不送
     mocks.refresh.mockReturnValue([{ price: 1100, quantity: 2 }]);
     mocks.accept.mockClear();
     await act(async () => { button('以最新價補單').props.onClick(); });
     expect(mocks.accept).not.toHaveBeenCalled();
+});
+
+it('較早執行還有標記「未送出」但未確認的委託：擋下新單、可確認沒有送出並結束追蹤', async () => {
+    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn(), confirm: () => true });
+    const old = { ...rec({
+        phase: 'failed',
+        slots: [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1095, quantity: 380, status: 'unknown', filled: 0, markedUnsent: true }],
+    }), id: 'os-old' };
+    await render({ execs: [old] });
+    expect(button('先確認較早的未送出委託').props.disabled).toBe(true);
+    expect(text(view.root)).toContain('在確認前，同商品不能開始新的價差單');
+    await act(async () => { button('確認沒有送出，結束追蹤').props.onClick(); });
+    expect(mocks.action).toHaveBeenCalledWith('os-old', { type: 'abandonUnknown', key: 'odd:0' });
 });

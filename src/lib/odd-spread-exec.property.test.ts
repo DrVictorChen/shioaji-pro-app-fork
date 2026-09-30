@@ -101,18 +101,28 @@ function simulate(seed: number) {
     let envSteps = 0;
     const envOk = () => env.base === bound.base && env.simulation === bound.simulation;
 
-    // 伺服器身分（串流連線世代）
+    // 伺服器身分（串流連線世代）。sidecar 重啟後有一段「前端還沒察覺」的時間：身分仍是
+    // 舊的，但 HTTP 已打到新程序（可能已是另一個模式）
     let page = 0;
     let epoch = 1;
     let streamDownSteps = 0;
+    let detectSteps = 0;
+    let trueSim = bound.simulation; // 伺服器實際的模式
     const identity = (): string | null => (streamDownSteps > 0 ? null : `p${page}e${epoch}`);
+    // App 端的委託列快照：每一列帶讀取時的身分；重啟後舊快照仍可能留著
+    let snapshot: TradeLike[] = [];
+    const stamps = new Map<TradeLike, string | null>();
+    let wrongMarked = false;
+    let staleConfirms = 0;
+    let serverRefusals = 0;
+    let openConfirm: { version: number; leg: LegKind; action: 'Buy' | 'Sell'; quantity: number; orders: { price: number; quantity: number }[] } | null = null;
 
     let s: ExecState = initExec(plan);
     let idSeq = 0;
     const book: BrokerOrder[] = []; // 我們的與別人的委託（同一個 id 空間）
     const ours = () => book.filter(o => o.key !== null);
     let http: ExecEvent[] = [];
-    let outbox: ExecCommand[] = [];
+    let outbox: { c: ExecCommand; gen: string | null }[] = [];
     let held: ExecEvent[] = [];
     const sentKeys: string[] = [];
     const startKeys = new Set<string>();
@@ -149,6 +159,7 @@ function simulate(seed: number) {
     const fail = (msg: string) => expect.fail(`${msg}\n${log.join('\n')}`);
 
     const createAtBroker = (c: Extract<ExecCommand, { kind: 'place' }>): BrokerOrder => {
+        if (trueSim !== bound.simulation) fail(`(m) order ${c.key} created in the other mode`);
         const o: BrokerOrder = {
             key: c.key, id: newId(), tag: slotTag(TAG_BASE, c.key), leg: c.leg, action: c.action, price: c.price, qty: c.quantity,
             filled: 0, cancelled: 0, status: 'live', cancelReq: false, topUp: !startKeys.has(c.key), hidden: false,
@@ -167,7 +178,7 @@ function simulate(seed: number) {
         if (foreignCancelled > 0) fail('(x) cancelled a foreign order');
     };
 
-    const reduce = (e: ExecEvent) => {
+    const reduce = (e: ExecEvent): ExecCommand[] => {
         const res = execReduce(s, e, ctx);
         s = res.state;
         log.push(`${e.type}${'key' in e ? ` ${e.key}` : ''}${e.type === 'placed' ? ` ${e.orderId} gen=${e.gen}` : ''} → ${s.phase} ${res.commands.map(c => `${c.kind}:${c.key}${c.kind === 'cancel' ? `@${c.orderId}` : ''}`).join(',')}`);
@@ -177,25 +188,36 @@ function simulate(seed: number) {
                 if (!started) startKeys.add(c.key);
                 if (c.leg === 'odd') oddPlaced += c.quantity;
             }
-            outbox.push(c);
+            if (c.kind === 'place' && c.leg === 'odd' && c.quantity > 999) fail(`odd order over 999 shares: ${c.quantity}`);
+            outbox.push({ c, gen: identity() });
         }
         check();
+        return res.commands;
     };
     // 服務層：環境不符時回報保留
     const feed = (e: ExecEvent) => {
         if (envOk()) reduce(e);
         else held.push(e);
     };
+    // 讀委託列（新程序的列、帶讀取當下的身分）
+    const fetchListing = () => {
+        snapshot = book.filter(o => !o.hidden).map(tradeOf);
+        const g = identity();
+        for (const t of snapshot) stamps.set(t, g);
+    };
     const reconcile = () => {
         if (!envOk()) return;
         const gen = identity();
         const trusted = new Set(gen === null ? [] : s.slots.filter(x => x.orderId && x.idGen === gen).map(x => x.orderId!));
-        const listing = book.filter(o => !o.hidden).map(tradeOf);
-        for (const e of reconcileEvents({ tagBase: TAG_BASE, code: '2330', account: ACC, state: s }, listing, trusted, gen)) reduce(e);
+        for (const e of reconcileEvents({ tagBase: TAG_BASE, code: '2330', account: ACC, state: s }, snapshot, trusted, gen, t => stamps.get(t) ?? null)) reduce(e);
     };
-    const execOne = (c: ExecCommand) => {
+    // 服務層送出前的新鮮檢查：身分與指令產生時相同、重新讀 /info 的模式相同
+    const serverOk = (gen: string | null) => envOk() && gen !== null && identity() === gen && trueSim === bound.simulation;
+    const execOne = ({ c, gen: genAtCmd }: { c: ExecCommand; gen: string | null }) => {
         if (c.kind === 'place') {
-            if (!envOk()) { http.push({ type: 'placeFailed', key: c.key, error: 'env' }); return; }
+            if (!serverOk(genAtCmd)) { serverRefusals++; http.push({ type: 'placeFailed', key: c.key, error: 'server check' }); return; }
+            // 券商：零股每筆上限 999 股
+            if (c.leg === 'odd' && c.quantity > 999) { http.push({ type: 'placeFailed', key: c.key, error: '>999' }); return; }
             const genAtSend = identity();
             const roll = r();
             if (roll < 0.6) {
@@ -211,8 +233,14 @@ function simulate(seed: number) {
         } else {
             // 服務層防線：身分無法判定或與取得 id 時不同 → 不送刪單
             const slot = s.slots.find(x => x.key === c.key);
-            if (!envOk() || identity() === null || slot?.idGen !== identity()) {
+            if (!serverOk(genAtCmd) || slot?.idGen !== identity()) {
                 http.push({ type: 'cancelResult', key: c.key, ok: false, error: 'untrusted id' });
+                return;
+            }
+            // 刪單前讀伺服器（新程序）委託快取：這個編號的列必須帶本單標記
+            const row = book.find(x => x.id === c.orderId);
+            if (!row || row.tag !== slotTag(TAG_BASE, c.key)) {
+                http.push({ type: 'cancelResult', key: c.key, ok: false, error: 'tag mismatch' });
                 return;
             }
             // 券商依指令帶的 id 找單
@@ -226,15 +254,15 @@ function simulate(seed: number) {
         }
     };
     const loseInFlight = () => {
-        for (const c of outbox) if (c.kind === 'place' && envOk() && chance(0.5)) createAtBroker(c);
+        for (const { c, gen } of outbox) if (c.kind === 'place' && serverOk(gen) && chance(0.5)) createAtBroker(c);
         outbox = [];
         http = [];
     };
     const failInFlight = () => {
         const next: ExecEvent[] = [];
-        for (const c of outbox) {
+        for (const { c, gen } of outbox) {
             if (c.kind === 'place') {
-                if (chance(0.5)) createAtBroker(c);
+                if (serverOk(gen) && chance(0.5)) createAtBroker(c);
                 next.push({ type: 'placeUnknown', key: c.key, error: 'sidecar restart' });
             } else next.push({ type: 'cancelResult', key: c.key, ok: false, error: 'sidecar restart' });
         }
@@ -255,6 +283,7 @@ function simulate(seed: number) {
     const streamBack = () => {
         epoch++;
         log.push(`stream live e${epoch}`);
+        fetchListing();
         if (envOk()) {
             reduce({ type: 'refresh' });
             reconcile();
@@ -265,11 +294,17 @@ function simulate(seed: number) {
     started = true;
     for (let step = 0; step < 160; step++) {
         if (envSteps > 0 && --envSteps === 0) {
-            env = { ...bound };
+            env = { ...bound, simulation: trueSim };
             log.push('env back');
             replayHeld();
         }
-        if (streamDownSteps > 0 && --streamDownSteps === 0) streamBack();
+        if (detectSteps > 0 && --detectSteps === 0) {
+            // 前端察覺串流中斷；/info 也更新快取的模式
+            streamDownSteps = 1 + Math.floor(r() * 8);
+            env = { ...env, simulation: trueSim };
+            log.push(`restart detected (stream down ${streamDownSteps})`);
+            if (envOk() && held.length) replayHeld(); // 服務在伺服器資訊更新時處理保留的回報
+        } else if (streamDownSteps > 0 && --streamDownSteps === 0) streamBack();
         const roll = r();
         const live = ours().filter(o => o.status === 'live');
         if (roll < 0.13 && outbox.length) {
@@ -293,19 +328,42 @@ function simulate(seed: number) {
             o.hidden = !o.hidden; // 委託列暫時漏列
         } else if (roll < 0.64 && book.length) {
             see(pick(book), chance(0.3));
+            if (chance(0.7)) fetchListing(); // 否則用舊快照對帳
             reconcile();
         } else if (roll < 0.68 && envOk()) {
             feed({ type: 'cancel' });
         } else if (roll < 0.72 && envOk()) {
             const cand = s.slots.filter(x => x.status === 'unknown' && !x.markedUnsent && (sloppy || !ours().some(o => o.key === x.key)));
-            if (cand.length) feed({ type: 'resolveUnknown', key: pick(cand).key });
-        } else if (roll < 0.78 && envOk() && s.pendingHedge) {
+            if (cand.length) {
+                const k = pick(cand).key;
+                if (ours().some(o => o.key === k)) wrongMarked = true;
+                feed({ type: 'resolveUnknown', key: k });
+            }
+            // 核對後確認真的沒送出 → 結束追蹤（只對券商端確實沒有的）
+            const marked = s.slots.filter(x => x.status === 'unknown' && x.markedUnsent && !ours().some(o => o.key === x.key));
+            if (marked.length && chance(0.3)) feed({ type: 'abandonUnknown', key: pick(marked).key });
+        } else if (roll < 0.74 && s.pendingHedge && !openConfirm) {
+            // 打開補單確認視窗：凍結當下看到的內容（之後才按確認，期間待補內容可能改變）
             const p = s.pendingHedge;
-            if (chance(0.65) && p.orders.reduce((a, o) => a + o.quantity, 0) === p.quantity) {
-                feed({ type: 'hedgeAccept', quantity: p.quantity, orders: p.orders });
-            } else {
+            if (p.orders.reduce((a, o) => a + o.quantity, 0) === p.quantity) openConfirm = { version: p.version, leg: p.leg, action: p.action, quantity: p.quantity, orders: p.orders.map(o => ({ ...o })) };
+        } else if (roll < 0.78 && envOk() && (openConfirm || s.pendingHedge)) {
+            if (openConfirm && chance(0.65)) {
+                const f = openConfirm;
+                openConfirm = null;
+                const stale = !s.pendingHedge || s.pendingHedge.version !== f.version;
+                const cmds = reduce({ type: 'hedgeAccept', ...f });
+                const places = cmds.filter(c => c.kind === 'place');
+                if (stale) {
+                    staleConfirms++;
+                    if (places.length) fail('stale confirmation was accepted');
+                }
+                if (places.some(c => c.kind === 'place' && (c.leg !== f.leg || c.action !== f.action))) fail('hedge sent a different leg than confirmed');
+                if (places.reduce((a, c) => a + (c.kind === 'place' ? c.quantity : 0), 0) > f.quantity) fail('hedge sent more than confirmed');
+            } else if (s.pendingHedge) {
+                const p = s.pendingHedge;
+                openConfirm = null;
                 waivedT[p.leg] += p.quantity; // 使用者明確放棄的量
-                feed({ type: 'hedgeDecline' });
+                reduce({ type: 'hedgeDecline', version: p.version });
             }
         } else if (roll < 0.82) {
             // App 重新整理：新頁面身分
@@ -318,9 +376,11 @@ function simulate(seed: number) {
                 reconcile();
             }
         } else if (roll < 0.86) {
-            // sidecar 重啟：委託換 id、舊 id 可能被別人的（仍在委託中的）委託重用；
-            // 串流中斷 → 身分無法判定一段時間後才換新世代
+            // sidecar 重啟：委託換 id、舊 id 可能被別人的（仍在委託中的）委託重用；新程序可能
+            // 是另一個模式；前端要過一段時間才察覺（期間身分不變、HTTP 已打到新程序）
             failInFlight();
+            if (chance(0.25)) trueSim = !trueSim;
+            else trueSim = bound.simulation;
             for (const o of ours()) {
                 const old = o.id;
                 o.id = newId();
@@ -335,15 +395,20 @@ function simulate(seed: number) {
                     book.push(foreign);
                 }
             }
-            streamDownSteps = 1 + Math.floor(r() * 10);
-            log.push(`sidecar restart (stream down ${streamDownSteps})`);
-            // 串流恢復前就可能讀到新程序的委託列（身分仍為無法判定）
-            if (chance(0.5)) reconcile();
-        } else if (roll < 0.88 && streamDownSteps === 0) {
+            detectSteps = Math.floor(r() * 4);
+            if (detectSteps === 0) {
+                streamDownSteps = 1 + Math.floor(r() * 10);
+                env = { ...env, simulation: trueSim };
+                if (envOk() && held.length) replayHeld();
+            }
+            log.push(`sidecar restart sim=${trueSim} (detect after ${detectSteps})`);
+            // 察覺前後都可能讀到新程序的委託列
+            if (chance(0.5)) { fetchListing(); reconcile(); }
+        } else if (roll < 0.88 && streamDownSteps === 0 && detectSteps === 0) {
             // 不重啟的串流中斷：id 仍有效，但身分會換
             streamDownSteps = 1 + Math.floor(r() * 5);
             log.push(`stream blip (${streamDownSteps})`);
-        } else if (roll < 0.91 && envOk()) {
+        } else if (roll < 0.91 && envOk() && detectSteps === 0) {
             env = chance(0.5) ? { base: 'b2', simulation: true } : { base: 'b1', simulation: false };
             envSteps = 3 + Math.floor(r() * 6);
             log.push(`env switch ${env.base}/${env.simulation}`);
@@ -351,9 +416,17 @@ function simulate(seed: number) {
     }
 
     // ---- 靜止：環境與串流回來、不再成交；指令、回應、刪單生效、委託列全部跑完 ----
-    if (!envOk()) { env = { ...bound }; log.push('env back'); replayHeld(); }
+    // 伺服器回到原模式（若重啟成另一模式，再重啟一次回來）、前端都已察覺
+    if (trueSim !== bound.simulation || detectSteps > 0) {
+        trueSim = bound.simulation;
+        detectSteps = 0;
+        streamDownSteps = 1;
+        log.push('restart back to bound mode');
+    }
+    if (!envOk() || held.length) { env = { ...bound }; log.push('env back'); replayHeld(); }
     if (streamDownSteps > 0) { streamDownSteps = 0; streamBack(); }
     for (const o of book) o.hidden = false;
+    fetchListing();
     for (let guard = 0; guard < 300; guard++) {
         let did = false;
         while (outbox.length) { execOne(outbox.shift()!); did = true; }
@@ -362,6 +435,7 @@ function simulate(seed: number) {
             if (o.cancelReq && o.status === 'live') { o.status = 'cancelled'; o.cancelled = o.qty - o.filled; did = true; }
         }
         for (const o of book) see(o);
+        fetchListing();
         const before = JSON.stringify(s);
         reconcile();
         reduce({ type: 'refresh' });
@@ -386,7 +460,7 @@ function simulate(seed: number) {
         const pot = filledT(leg) + liveRemT(leg);
         const topUpFilled = ours().filter(x => x.leg === leg && x.topUp).reduce((a, x) => a + x.filled, 0);
         // (b) 補單造成的超額成交：不允許
-        if (!sloppy && Math.min(filledT(leg) - needMax, topUpFilled) > 0) fail(`(b) ${leg} over-hedged: filled ${filledT(leg)} need ${needMax}`);
+        if (!wrongMarked && Math.min(filledT(leg) - needMax, topUpFilled) > 0) fail(`(b) ${leg} over-hedged: filled ${filledT(leg)} need ${needMax}`);
         // (s) 仍在委託中的多餘補單，每一筆本身都必須已刪（或刪單失敗、已通知）
         if (pot > needMax) {
             for (const x of ours().filter(y => y.leg === leg && y.topUp && y.status === 'live')) {
@@ -397,9 +471,13 @@ function simulate(seed: number) {
         // (l) 另一腳確定、缺口未被明確放棄 → 已補、或等使用者決定
         const determined = liveRemT(o) === 0;
         const gap = needMin - pot - waivedT[leg];
-        if (!sloppy && determined && gap > 0) {
-            const trulyUnknown = s.slots.some(x => x.status === 'unknown' && !x.markedUnsent && !ours().some(b => b.key === x.key));
-            if (!(s.pendingHedge?.leg === leg || trulyUnknown)) fail(`(l) ${leg} gap ${gap} neither hedged nor awaiting user\n${JSON.stringify(s.slots)}`);
+        if (!wrongMarked && determined && gap > 0) {
+            // 只有「真的沒送到券商」的結果不明委託才算在等使用者，而且要能解釋這個缺口：
+            // 在這一腳、剩餘量涵蓋缺口，或在另一腳（讓另一腳在執行器看來尚未確定）
+            const trulyUnknown = s.slots.filter(x => x.status === 'unknown' && !x.markedUnsent && !ours().some(b => b.key === x.key));
+            const unknownOnLeg = trulyUnknown.filter(x => x.leg === leg).reduce((acc, x) => acc + x.quantity - x.filled, 0);
+            const explains = unknownOnLeg >= gap || trulyUnknown.some(x => x.leg === o);
+            if (!(s.pendingHedge?.leg === leg || explains)) fail(`(l) ${leg} gap ${gap} neither hedged nor awaiting user\n${JSON.stringify(s.slots)}`);
         }
     }
     // (c) 追蹤
@@ -420,13 +498,15 @@ function simulate(seed: number) {
         lateFail: ours().some(o => o.status === 'failed'),
         foreignLive: book.some(o => o.key === null && o.status === 'live'),
         waived: waivedT.odd + waivedT.round > 0,
+        staleConfirms,
+        serverRefusals,
     };
 }
 
 describe('整零價差：隨機事件序列的不變式（獨立 oracle）', () => {
-    it('3,000 組固定種子', { timeout: 120_000 }, () => {
-        const seen = { topUps: 0, restarts: 0, blips: 0, env: 0, lateFail: 0, foreignLive: 0, waived: 0, modes: new Set<string>(), phases: new Set<string>() };
-        for (let seed = 1; seed <= 3000; seed++) {
+    it('6,000 組固定種子', { timeout: 120_000 }, () => {
+        const seen = { topUps: 0, restarts: 0, blips: 0, env: 0, lateFail: 0, foreignLive: 0, waived: 0, staleConfirms: 0, serverRefusals: 0, modes: new Set<string>(), phases: new Set<string>() };
+        for (let seed = 1; seed <= 6000; seed++) {
             const res = simulate(seed);
             seen.modes.add(res.mode);
             seen.phases.add(res.phase);
@@ -437,6 +517,8 @@ describe('整零價差：隨機事件序列的不變式（獨立 oracle）', () 
             if (res.lateFail) seen.lateFail++;
             if (res.foreignLive) seen.foreignLive++;
             if (res.waived) seen.waived++;
+            seen.staleConfirms += res.staleConfirms;
+            seen.serverRefusals += res.serverRefusals;
         }
         // 確實涵蓋到各種情況
         expect(seen.modes.size).toBe(2);
@@ -448,6 +530,8 @@ describe('整零價差：隨機事件序列的不變式（獨立 oracle）', () 
         expect(seen.lateFail).toBeGreaterThan(500);
         expect(seen.foreignLive).toBeGreaterThan(300);
         expect(seen.waived).toBeGreaterThan(100);
+        expect(seen.staleConfirms).toBeGreaterThan(10); // 確認視窗開著時待補內容改變
+        expect(seen.serverRefusals).toBeGreaterThan(100); // 重啟察覺前被新鮮檢查擋下的送單
     });
 });
 
@@ -472,9 +556,17 @@ describe('對帳：唯一標記與伺服器身分', () => {
         expect(reconcileEvents(rec, [tr('OLD', undefined, 300)], new Set(), null)).toEqual([]);
         expect(reconcileEvents(rec, [tr('OLD', 'oxyz00', 300)], new Set(), 'g1')).toEqual([]);
     });
-    it('同一身分、標記被投影丟掉 → 以可信 id 採用（改過價也認得）；標記矛盾則不採用', () => {
-        expect(reconcileEvents(rec, [tr('OLD', undefined, 7, 102)], new Set(), 'g0')).toEqual([{ type: 'report', key: 'odd:0', filled: 7, status: 'working', cancelled: 0 }]);
-        expect(reconcileEvents(rec, [tr('OLD', 'oxyz00', 7)], new Set(), 'g0')).toEqual([]);
+    it('沒有標記的列一律不自動採用（即使 id 相同、同一身分）；使用者指定過的才以 id 對帳', () => {
+        expect(reconcileEvents(rec, [tr('OLD', undefined, 7, 102)], new Set(), 'g0')).toEqual([]);
+        const claimedRec = { ...rec, state: { ...state, slots: [{ ...slot, userClaimed: true }] } };
+        expect(reconcileEvents(claimedRec, [tr('OLD', undefined, 7, 102)], new Set(), 'g0')).toEqual([{ type: 'report', key: 'odd:0', filled: 7, status: 'working', cancelled: 0 }]);
+        expect(reconcileEvents(claimedRec, [tr('OLD', undefined, 7)], new Set(), 'g1')).toEqual([]);
+        expect(reconcileEvents(claimedRec, [tr('OLD', 'oxyz00', 7)], new Set(), 'g0')).toEqual([]);
+    });
+    it('舊身分時讀到的列（舊快照）不能把 id 授予目前身分', () => {
+        const staleRow = tr('NEW', tag, 5);
+        expect(reconcileEvents(rec, [staleRow], new Set(), 'g1', () => 'g0')).toEqual([]);
+        expect(reconcileEvents(rec, [staleRow], new Set(), 'g1', () => 'g1')[0]).toMatchObject({ type: 'placed', orderId: 'NEW', gen: 'g1' });
     });
     it('同一標記對到多列 → 不接回', () => {
         expect(reconcileEvents(rec, [tr('A', tag), tr('B', tag)], new Set(), 'g1')).toEqual([]);
