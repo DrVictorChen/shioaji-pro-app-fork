@@ -34,7 +34,7 @@ import {
     Star,
     X,
 } from 'lucide-react';
-import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     inOrderLabelArea,
     orderLineMayTakePointer,
@@ -82,6 +82,7 @@ import type { IndicatorPoint } from '../lib/indicators';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
 import { canUpdateOrderPrice } from '../lib/odd-lot';
+import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
 import {
@@ -1299,16 +1300,53 @@ export function CandleChart({
     // 拖曳 effect 宣告在畫圖 hook 之前，靠這個 ref 讀最新狀態
     const drawingArmedRef = useRef(false);
     const drawingsRef = useRef<ChartDrawingsApi | null>(null);
+    const cancelOrderDragRef = useRef<() => boolean>(() => false);
+    const orderDragContext = `${contract.security_type}:${contract.code}:${tf.minutes}:${dayOnly}:${historySeq}`;
+    const orderDragContextRef = useRef(orderDragContext);
+    orderDragContextRef.current = orderDragContext;
+    // 舊委託線被重建前也要還原／解除拖曳；render 後、effect 前的事件由 context 核對阻擋。
+    useLayoutEffect(() => { cancelOrderDragRef.current(); }, [orderDragContext, orderKey, themeKey]);
 
     // drag an order line to modify its price
     useEffect(() => {
         const host = hostRef.current;
         if (!host) return;
-        let dragging: { trade: Trade; line: IPriceLine; price: number } | null =
+        let sequence = 0;
+        let dragging: { trade: Trade; line: IPriceLine; price: number; originalPrice: number; sequence: number; drawingSequence: number; context: string } | null =
             null;
         // active document listeners — removed on unmount if a drag is live
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: (() => void) | null = null;
+
+        const releasePointer = () => {
+            if (activeMove) document.removeEventListener('mousemove', activeMove, true);
+            if (activeUp) document.removeEventListener('mouseup', activeUp, true);
+            activeMove = null;
+            activeUp = null;
+            window.removeEventListener('keydown', escape, true);
+            chartRef.current?.applyOptions({ handleScroll: true, handleScale: true });
+            if (host.style.cursor === 'ns-resize') host.style.cursor = '';
+        };
+        const cancel = () => {
+            sequence++;
+            const d = dragging;
+            dragging = null;
+            if (!d) return false;
+            // cleanup 時圖表可能已移除；仍必須釋放 document listeners。
+            try { d.line.applyOptions({ price: d.originalPrice }); } catch { /* series 已釋放 */ }
+            releasePointer();
+            return true;
+        };
+        cancelOrderDragRef.current = cancel;
+        const current = (d: NonNullable<typeof dragging>) => dragging === d && d.sequence === sequence &&
+            d.drawingSequence === drawingsRef.current?.interactionSequence() && d.context === orderDragContextRef.current;
+        const escape = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || !dragging) return;
+            drawingsRef.current?.onInteraction();
+            cancel();
+            e.preventDefault();
+            resetEscCancelArm();
+        };
 
         const yOf = (e: MouseEvent) =>
             e.clientY - host.getBoundingClientRect().top;
@@ -1369,6 +1407,8 @@ export function CandleChart({
             // 也不能同時拖畫圖又送出改價
             const hit = findNear(yOf(e));
             if (!hit || !mayTake(e)) return;
+            // 價格軸把手可接手，但不能與未結束的畫圖拖曳／文字／量測共存。
+            drawingsRef.current?.prepareOrderDrag();
             e.preventDefault();
             e.stopPropagation();
             chartRef.current?.applyOptions({
@@ -1379,11 +1419,17 @@ export function CandleChart({
                 trade: hit.trade,
                 line: hit.line,
                 price: hit.line.options().price,
+                originalPrice: hit.line.options().price,
+                sequence: ++sequence,
+                drawingSequence: drawingsRef.current?.interactionSequence() ?? -1,
+                context: orderDragContextRef.current,
             };
+            const session = dragging;
 
             const move = (ev: MouseEvent) => {
                 const series = candleSeriesRef.current;
-                if (!series || !dragging) return;
+                if (!series || dragging !== session) return;
+                if (!current(session)) { cancel(); return; }
                 const raw = series.coordinateToPrice(yOf(ev));
                 if (raw === null) return;
                 const np = roundToTick(contractRef.current, Number(raw));
@@ -1391,16 +1437,13 @@ export function CandleChart({
                 dragging.line.applyOptions({ price: np });
             };
             const up = () => {
-                document.removeEventListener('mousemove', move, true);
-                document.removeEventListener('mouseup', up, true);
-                activeMove = null;
-                activeUp = null;
-                chartRef.current?.applyOptions({
-                    handleScroll: true,
-                    handleScale: true,
-                });
+                // 遲到的舊 mouseup 不得接手新拖曳，更不能送出舊的改價。
+                if (dragging !== session) return;
+                if (!current(session)) { cancel(); return; }
+                releasePointer();
                 const d = dragging;
                 dragging = null;
+                sequence++;
                 if (!d) return;
                 const orig =
                     d.trade.status.modified_price || d.trade.order.price;
@@ -1430,18 +1473,17 @@ export function CandleChart({
             document.addEventListener('mouseup', up, true);
             activeMove = move;
             activeUp = up;
+            window.addEventListener('keydown', escape, true);
         };
 
         host.addEventListener('mousedown', down, true); // capture: beat chart pan
         host.addEventListener('mousemove', hover, true);
         return () => {
+            cancel();
+            cancelOrderDragRef.current = () => false;
             host.removeEventListener('mousedown', down, true);
             host.removeEventListener('mousemove', hover, true);
-            // unmounted mid-drag — drop the document listeners too
-            if (activeMove) {
-                document.removeEventListener('mousemove', activeMove, true);
-            }
-            if (activeUp) document.removeEventListener('mouseup', activeUp, true);
+            window.removeEventListener('keydown', escape, true);
         };
     }, []);
 
@@ -1462,6 +1504,7 @@ export function CandleChart({
         seriesRef: candleSeriesRef,
         getTimes: () => barTimesRef.current,
         tradeArmed: mode !== 'observe',
+        onInvalidateInteraction: () => cancelOrderDragRef.current(),
         onEnterDrawingMode: () => {
             modeRef.current = 'observe';
             setMode('observe');

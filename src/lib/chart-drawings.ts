@@ -629,7 +629,16 @@ type OrderMove = { id: string; after: string | null; revision: Revision };
 type OrderOps = Map<string, OrderMove[]>;
 // 撤銷是原 writer 對確切墓碑版本的操作，不隨物件的後續 writer 改變。
 type TombstoneRestore = { writer: string; tombstone: Tombstone };
-type TombstoneRestores = Map<string, Map<string, TombstoneRestore>>;
+type TombstoneRestores = Map<string, Map<string, Map<Revision, TombstoneRestore>>>;
+
+function recordRestore(restores: TombstoneRestores, key: string, id: string, restore: TombstoneRestore) {
+    const ids = restores.get(key) ?? new Map<string, Map<Revision, TombstoneRestore>>();
+    const versions = ids.get(id) ?? new Map<Revision, TombstoneRestore>();
+    // 重做的新墓碑不可覆蓋尚未成功落地的舊墓碑撤銷。
+    versions.set(tombRevision(restore.tombstone), restore);
+    ids.set(id, versions);
+    restores.set(key, ids);
+}
 
 function isTombstoneRestore(v: unknown): v is TombstoneRestore {
     if (!v || typeof v !== 'object') return false;
@@ -680,10 +689,16 @@ function loadJournals(): Journal[] {
             const restores: TombstoneRestores = new Map();
             for (const [key, byId] of Object.entries(raw.restores ?? {})) {
                 if (!byId || typeof byId !== 'object') continue;
-                for (const [id, restore] of Object.entries(byId)) if (isTombstoneRestore(restore)) {
-                    const ids = restores.get(key) ?? new Map<string, TombstoneRestore>();
-                    ids.set(id, restore);
-                    restores.set(key, ids);
+                for (const [id, value] of Object.entries(byId)) {
+                    // 相容舊日誌的單筆撤銷；新日誌依墓碑 revision 累積。
+                    if (isTombstoneRestore(value)) recordRestore(restores, key, id, value);
+                    else if (value && typeof value === 'object') {
+                        for (const [revision, restore] of Object.entries(value)) {
+                            if (isTombstoneRestore(restore) && revision === tombRevision(restore.tombstone)) {
+                                recordRestore(restores, key, id, restore);
+                            }
+                        }
+                    }
                 }
             }
             for (const [key, byId] of Object.entries(raw.ops ?? {})) {
@@ -697,10 +712,8 @@ function loadJournals(): Journal[] {
                             // 相容舊格式，但不把撤銷附回物件內容。
                             const legacy = (v as { restoreTombstone?: unknown }).restoreTombstone;
                             const restore = { writer: drawingRevision(d).split(':')[1]!, tombstone: legacy };
-                            if (isTombstoneRestore(restore) && !restores.get(key)?.has(id)) {
-                                const ids = restores.get(key) ?? new Map<string, TombstoneRestore>();
-                                ids.set(id, restore);
-                                restores.set(key, ids);
+                            if (isTombstoneRestore(restore) && !restores.get(key)?.get(id)?.has(tombRevision(restore.tombstone))) {
+                                recordRestore(restores, key, id, restore);
                             }
                             m.set(id, d);
                         }
@@ -826,7 +839,7 @@ function record(key: string, id: string, op: Op) {
 }
 
 function restoreTombstones(tombs: Tombs, restores: TombstoneRestores) {
-    for (const [key, byId] of restores) for (const [id, restore] of byId) {
+    for (const [key, byId] of restores) for (const [id, versions] of byId) for (const restore of versions.values()) {
         const current = tombs[key]?.[id];
         const original = restore.tombstone;
         // 只撤銷歷史操作已核對的那一版；遠端新刪除或 writer 聯集仍優先。
@@ -970,7 +983,8 @@ function writeDrawingsNow(view?: { base: Store; tombs: Tombs; journals: Journal[
     if (!view) acceptRemoteChanges(base, tombs, journals);
     const snapshot = new Map([...pending].map(([k, ops]) => [k, new Map(ops)]));
     const orderSnap = new Map(pendingOrder);
-    const restoreSnap = new Map([...pendingRestores].map(([k, restores]) => [k, new Map(restores)]));
+    const restoreSnap: TombstoneRestores = new Map([...pendingRestores].map(([k, ids]) =>
+        [k, new Map([...ids].map(([id, versions]) => [id, new Map(versions)]))]));
     const next = applyOps(base, snapshot, tombs, orderSnap, restoreSnap);
     const journalSettings = journals.some((j) => Object.keys(j.settingRevisions).length)
         ? loadSettingsView(journals) : undefined;
@@ -1005,7 +1019,12 @@ function writeDrawingsNow(view?: { base: Store; tombs: Tombs; journals: Journal[
     for (const [key, restores] of restoreSnap) {
         const cur = pendingRestores.get(key);
         if (!cur) continue;
-        for (const [id, restore] of restores) if (cur.get(id) === restore) cur.delete(id);
+        for (const [id, versions] of restores) {
+            const current = cur.get(id);
+            if (!current) continue;
+            for (const [revision, restore] of versions) if (current.get(revision) === restore) current.delete(revision);
+            if (!current.size) cur.delete(id);
+        }
         if (!cur.size) pendingRestores.delete(key);
     }
     if (journalSettings) acceptSettingsView(journalSettings);
@@ -1097,7 +1116,8 @@ export function writeDrawingJournal() {
     const journal = {
         at: Date.now(),
         ops,
-        restores: Object.fromEntries([...pendingRestores].map(([key, ids]) => [key, Object.fromEntries(ids)])),
+        restores: Object.fromEntries([...pendingRestores].map(([key, ids]) =>
+            [key, Object.fromEntries([...ids].map(([id, versions]) => [id, Object.fromEntries(versions)]))])),
         order,
         settings: pickSettings(settings, pendingSettingKeys),
         settingRevisions: pendingSettingRevisions(),
@@ -1459,9 +1479,7 @@ function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs, restores?:
         const stamped = { ...d, updatedAt: now, revision: nextRevision() };
         const restoreTombstone = restores?.get(d.id);
         if (restoreTombstone !== undefined) {
-            const ids = pendingRestores.get(key) ?? new Map<string, TombstoneRestore>();
-            ids.set(d.id, { writer: activeWriter, tombstone: restoreTombstone });
-            pendingRestores.set(key, ids);
+            recordRestore(pendingRestores, key, d.id, { writer: activeWriter, tombstone: restoreTombstone });
         }
         record(key, d.id, stamped);
         return stamped;

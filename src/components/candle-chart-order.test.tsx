@@ -21,18 +21,23 @@ const m = vi.hoisted(() => ({
     oddClose: 100 as number | null,
     drawingBusy: false,
     skipDisarm: false,
+    skipInvalidate: false,
+    updatePrice: vi.fn(),
+    dragEvents: false,
+    dragHost: null as EventTarget | null,
+    lines: [] as { options: () => { price: number }; applyOptions: (p: { price: number }) => void }[],
 }));
 vi.mock('../hooks/use-chart-drawings', async (importOriginal) => {
     const real = await importOriginal<typeof import('../hooks/use-chart-drawings')>();
     return { ...real, useChartDrawings: (...args: Parameters<typeof real.useChartDrawings>) => {
         const api = real.useChartDrawings({ ...args[0], onEnterDrawingMode: () => {
             if (!m.skipDisarm) args[0].onEnterDrawingMode();
-        } });
+        }, onInvalidateInteraction: () => !m.skipInvalidate && (args[0].onInvalidateInteraction?.() ?? false) });
         return { ...api, drawingBusy: () => m.drawingBusy || api.drawingBusy() };
     } };
 });
 vi.mock('../lib/trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
-vi.mock('../lib/shioaji', () => ({ cancelOrder: async () => {}, updateOrderPrice: async () => {} }));
+vi.mock('../lib/shioaji', () => ({ cancelOrder: async () => {}, updateOrderPrice: m.updatePrice }));
 vi.mock('../lib/trigger-engine', () => ({ addTrigger: m.addTrigger, removeTrigger: vi.fn(), useTriggers: () => [] }));
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined,
     useAccounts: () => ({ loaded: true, accounts: m.accounts, selectedStock: m.accounts[0], selectedFutures: m.accounts[2] }) }));
@@ -51,7 +56,17 @@ vi.mock('lightweight-charts', async () => {
             if (p === 'subscribeClick') return (cb: (p: unknown) => void) => { m.click.push(cb); };
             if (p === 'addSeries') return (type: { kind: string }) => {
                 const s = h.makeSeries(type.kind);
-                return new Proxy(s, { get: (t, q) => (q === 'coordinateToPrice' ? () => 100 : t[q as keyof typeof t]) });
+                return new Proxy(s, { get: (t, q) => {
+                    if (q === 'coordinateToPrice') return (y: number) => m.dragEvents ? y : 100;
+                    if (q === 'priceToCoordinate' && m.dragEvents) return (p: number) => p;
+                    if (q === 'createPriceLine' && m.dragEvents) return (options: { price: number }) => {
+                        const opts = { ...options };
+                        const line = { options: () => opts, applyOptions: (p: { price: number }) => Object.assign(opts, p) };
+                        m.lines.push(line);
+                        return line;
+                    };
+                    return t[q as keyof typeof t];
+                } });
             };
             return inner[p];
         } });
@@ -61,7 +76,7 @@ vi.mock('lightweight-charts', async () => {
 
 import { CandleChart } from './candle-chart';
 import { ChartDrawingTools, ChartDrawingOverlays, ChartObjectList, DrawingSettingsDialog, Popover, TextEditor } from './chart-drawing-tools';
-import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE } from '../lib/chart-drawings';
+import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE, DRAWING_TOOL_DEFS } from '../lib/chart-drawings';
 import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
 
 const S1 = { account_type: 'S', broker_id: 'B', account_id: '1111121', signed: true, person_id: '', username: '' } as Account;
@@ -77,7 +92,18 @@ const button = (root: ReactTestInstance, label: string) => root.findAll(n => n.t
 const flush = async () => { for (let i = 0; i < 6; i++) await act(async () => {}); };
 async function mount(props: Record<string, unknown>) {
     await act(async () => {
-        view = create(createElement(CandleChart, props as any), { createNodeMock: () => ({ clientWidth: 800, clientHeight: 400, getBoundingClientRect: () => ({ width: 800, height: 400, left: 0, top: 0 }), addEventListener() {}, removeEventListener() {}, contains: () => true, hasAttribute: () => true, focus() {}, style: {} }) });
+        view = create(createElement(CandleChart, props as any), { createNodeMock: () => {
+            const events = new EventTarget();
+            const node = { clientWidth: 800, clientHeight: 400, getBoundingClientRect: () => ({ width: 800, height: 400, left: 0, top: 0 }),
+                addEventListener: (name: string, cb: EventListener, capture?: boolean) => {
+                    if (!m.dragEvents) return;
+                    if (name === 'mousedown') m.dragHost = events;
+                    events.addEventListener(name, cb, capture);
+                },
+                removeEventListener: events.removeEventListener.bind(events), contains: () => true, hasAttribute: () => true,
+                focus: () => { if (m.dragEvents) (document as any).activeElement = node; }, style: {} };
+            return node;
+        } });
     });
     await flush();
 }
@@ -103,6 +129,9 @@ beforeEach(() => {
     m.roundClose = 100; m.oddClose = 100;
     m.drawingBusy = false;
     m.skipDisarm = false;
+    m.skipInvalidate = false;
+    m.dragEvents = false; m.dragHost = null; m.lines.length = 0;
+    m.updatePrice.mockReset().mockResolvedValue(undefined);
     __resetDrawingsForTest();
     (globalThis as any).localStorage.setItem('sj-pro-chart-order-defaults', '{}');
 });
@@ -110,6 +139,187 @@ afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlob
 
 describe('chart order settings button', () => {
     const drawingApi = () => view.root.findByType(ChartDrawingTools).props.api as ChartDrawingsApi;
+
+    async function orderDrag() {
+        m.dragEvents = true;
+        const windowEvents = new EventTarget();
+        const documentEvents = new EventTarget();
+        const upHandlers: EventListener[] = [];
+        const saved = { wa: window.addEventListener, wr: window.removeEventListener, da: document.addEventListener, dr: document.removeEventListener, active: document.activeElement, hidden: document.hidden };
+        window.addEventListener = windowEvents.addEventListener.bind(windowEvents);
+        window.removeEventListener = windowEvents.removeEventListener.bind(windowEvents);
+        document.addEventListener = ((name: string, handler: EventListener, options?: boolean) => {
+            if (name === 'mouseup') upHandlers.push(handler);
+            documentEvents.addEventListener(name, handler, options);
+        }) as typeof document.addEventListener;
+        document.removeEventListener = documentEvents.removeEventListener.bind(documentEvents);
+        onTestFinished(() => {
+            window.addEventListener = saved.wa; window.removeEventListener = saved.wr;
+            document.addEventListener = saved.da; document.removeEventListener = saved.dr;
+            (document as any).activeElement = saved.active;
+            (document as any).hidden = saved.hidden;
+        });
+        const trade = { contract: stk, order: { id: 'drag-order', action: 'Buy', price: 100, quantity: 1 },
+            status: { status: 'Submitted', deal_quantity: 0, cancel_quantity: 0, modified_price: 0 } };
+        await mount({ contract: stk, trades: [trade] });
+        const mouse = (type: string, y: number) => Object.assign(new Event(type, { cancelable: true }), { button: 0, clientX: 790, clientY: y });
+        const line = m.lines.find(l => l.options().price === 100)!;
+        expect(line).toBeDefined();
+        const start = async () => {
+            await act(async () => { m.dragHost!.dispatchEvent(mouse('mousedown', 100)); });
+            await act(async () => { documentEvents.dispatchEvent(mouse('mousemove', 105)); });
+            expect(line.options().price).toBe(105);
+        };
+        const release = () => act(async () => { documentEvents.dispatchEvent(mouse('mouseup', 105)); });
+        const key = (k: Record<string, unknown>) => {
+            const e = Object.assign(new Event('keydown', { cancelable: true }), k);
+            windowEvents.dispatchEvent(e);
+            return e;
+        };
+        return { line, start, release, key, windowEvents, documentEvents, trade, upHandlers };
+    }
+
+    it('委託線正常拖曳放開只送出一次改價', async () => {
+        const drag = await orderDrag();
+        await drag.start(); await drag.release(); await drag.release();
+        expect(m.updatePrice).toHaveBeenCalledExactlyOnceWith('drag-order', 105);
+    });
+
+    it.each([
+        ...DRAWING_TOOL_DEFS.filter(d => d.shortcut).map(d => `Alt+${d.shortcut}`),
+        'Ctrl+Z', 'Ctrl+Shift+Z', 'Ctrl+Y', 'Delete', 'Backspace',
+        '工具按鈕', '游標按鈕', 'Esc', 'blur', 'pointercancel', 'pagehide', 'hidden', '換商品', '換週期',
+        'UI PointerDown', 'UI KeyDown', 'API', 'undo', 'redo',
+    ])('委託線拖曳中%s使拖曳作廢並立即恢復原價，遲到放開不改價', async (entry) => {
+        const drag = await orderDrag();
+        await drag.start();
+        const sequence = drawingApi().interactionSequence();
+        await act(async () => {
+            if (entry.startsWith('Alt+')) drag.key({ key: entry.at(-1)!.toLowerCase(), code: `Key${entry.at(-1)}`, altKey: true });
+            else if (entry.startsWith('Ctrl+')) drag.key({ key: entry.at(-1)!.toLowerCase(), code: `Key${entry.at(-1)}`, ctrlKey: true, shiftKey: entry.includes('Shift') });
+            else if (entry === 'Delete' || entry === 'Backspace') drag.key({ key: entry });
+            else if (entry === 'Esc') drag.key({ key: 'Escape' });
+            else if (entry === 'blur') drag.windowEvents.dispatchEvent(new Event('blur'));
+            else if (entry === 'pointercancel') drag.documentEvents.dispatchEvent(new Event('pointercancel'));
+            else if (entry === 'pagehide') drag.windowEvents.dispatchEvent(new Event('pagehide'));
+            else if (entry === 'hidden') { Object.assign(document, { hidden: true }); drag.documentEvents.dispatchEvent(new Event('visibilitychange')); }
+            else if (entry === '換商品') view.update(createElement(CandleChart, { contract: { ...stk, code: '2317' }, trades: [drag.trade] } as any));
+            else if (entry === '換週期') button(view.root, '1m').props.onClick();
+            else if (entry.startsWith('UI ')) {
+                const target = view.root.findByType(ChartDrawingTools).findAllByType('button')[0]!;
+                capture(target, entry === 'UI PointerDown' ? 'PointerDown' : 'KeyDown');
+            } else if (entry === '工具按鈕') view.root.findByType(ChartDrawingTools).findAllByType('button')[1]!.props.onClick();
+            else if (entry === '游標按鈕') view.root.findAllByProps({ 'aria-label': '游標' }).find(n => n.type === 'button')!.props.onClick();
+            else if (entry === 'undo') drawingApi().undo();
+            else if (entry === 'redo') drawingApi().redo();
+            else drawingApi().setMagnet(true);
+        });
+        expect(drawingApi().interactionSequence()).toBeGreaterThan(sequence);
+        expect(drag.line.options().price).toBe(100);
+        await drag.release();
+        expect(m.updatePrice).not.toHaveBeenCalled();
+    });
+
+    it('取消回呼遺漏時，放開仍核對畫圖序號並還原原價', async () => {
+        const drag = await orderDrag();
+        await drag.start();
+        m.skipInvalidate = true;
+        await act(async () => drawingApi().setMagnet(true));
+        expect(drag.line.options().price).toBe(105);
+        await drag.release();
+        expect(drag.line.options().price).toBe(100);
+        expect(m.updatePrice).not.toHaveBeenCalled();
+    });
+
+    it('舊拖曳的延遲 mouseup 不影響新拖曳，也不送出舊改價', async () => {
+        const drag = await orderDrag();
+        await drag.start();
+        const lateUp = drag.upHandlers.at(-1)!;
+        await act(async () => drawingApi().onInteraction());
+        expect(drag.line.options().price).toBe(100);
+        await drag.start();
+        await act(async () => { lateUp(new Event('mouseup')); });
+        expect(drag.line.options().price).toBe(105);
+        expect(m.updatePrice).not.toHaveBeenCalled();
+        await drag.release();
+        expect(m.updatePrice).toHaveBeenCalledExactlyOnceWith('drag-order', 105);
+    });
+
+    it.each(DRAWING_TOOL_DEFS.map(d => d.tool))('委託線拖曳中切換 %s 工具，立即還原且不改價', async tool => {
+        const drag = await orderDrag();
+        await drag.start();
+        await act(async () => drawingApi().setTool(tool));
+        expect(drag.line.options().price).toBe(100);
+        await drag.release();
+        expect(m.updatePrice).not.toHaveBeenCalled();
+    });
+
+    it('卸載圖表取消委託線拖曳，排隊的舊 mouseup 不送改價', async () => {
+        const drag = await orderDrag();
+        await drag.start();
+        const lateUp = drag.upHandlers.at(-1)!;
+        await act(async () => view.unmount());
+        expect(drag.line.options().price).toBe(100);
+        await act(async () => { lateUp(new Event('mouseup')); });
+        expect(m.updatePrice).not.toHaveBeenCalled();
+    });
+
+    it('彈出畫圖選單的原生 Esc 即使先於 UI capture，也取消委託線拖曳', async () => {
+        const drag = await orderDrag();
+        const onClose = vi.fn();
+        let ui!: ReactTestRenderer;
+        await act(async () => { ui = create(createElement(Popover, { anchor: null, label: '工具選單', onClose,
+            onInteraction: drawingApi().onInteraction, children: createElement('button', {}, '工具') })); });
+        try {
+            await drag.start();
+            await act(async () => { drag.key({ key: 'Escape' }); });
+            expect(onClose).toHaveBeenCalled();
+            expect(drag.line.options().price).toBe(100);
+            await drag.release();
+            expect(m.updatePrice).not.toHaveBeenCalled();
+        } finally { await act(async () => ui.unmount()); }
+    });
+
+    it('畫圖鍵盤 listener 先註冊時，取消委託拖曳的 Esc 仍被吃掉，不流入 Esc×2 刪單', async () => {
+        const drag = await orderDrag();
+        await act(async () => drawingApi().setTool('horizontal'));
+        await act(async () => drawingApi().setTool(null));
+        await drag.start();
+        let escape!: Event;
+        await act(async () => { escape = drag.key({ key: 'Escape' }); });
+        expect(escape.defaultPrevented).toBe(true);
+        expect(drag.line.options().price).toBe(100);
+        await drag.release();
+        expect(m.updatePrice).not.toHaveBeenCalled();
+    });
+
+    it.each(['工具列', '物件列表', '浮動工具列', '文字編輯框', '設定對話框', '彈出工具選單']
+        .flatMap(surface => (['PointerDown', 'KeyDown'] as const).map(kind => [surface, kind] as const)))
+    ('委託線拖曳中%s的%s同步還原原價並取消改價', async (surface, kind) => {
+        const drag = await orderDrag();
+        let drawing!: NonNullable<ReturnType<typeof addDrawing>>;
+        await act(async () => { drawing = addDrawing('2330', 'text', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!; });
+        if (surface === '物件列表') await act(async () => drawingApi().setObjectListOpen(true));
+        const api = drawingApi();
+        const overlayApi = { ...api, selected: drawing, selectedList: [drawing], selectedIds: [drawing.id], selectionBox: { left: 10, top: 10, right: 50, bottom: 50 }, hostSize: { width: 800, height: 400 } };
+        let ui: ReactTestRenderer | undefined;
+        if (!['工具列', '物件列表'].includes(surface)) await act(async () => {
+            ui = create(surface === '浮動工具列' ? createElement(ChartDrawingOverlays, { api: overlayApi })
+                : surface === '文字編輯框' ? createElement(TextEditor, { initial: '原文', box: { left: 0, top: 0 }, onCommit: api.commitText, onInteraction: api.onInteraction })
+                : surface === '設定對話框' ? createElement(DrawingSettingsDialog, { api, drawing, onClose: vi.fn() })
+                : createElement(Popover, { anchor: null, label: '工具選單', onClose: vi.fn(), onInteraction: api.onInteraction, children: createElement('button', {}, '工具') }));
+        });
+        try {
+            await drag.start();
+            const root = surface === '工具列' ? view.root.findByType(ChartDrawingTools)
+                : surface === '物件列表' ? view.root.findByType(ChartObjectList) : ui!.root;
+            const target = surface === '文字編輯框' ? root.findByType('textarea') : root.findAllByType('button')[0]!;
+            await act(async () => capture(target, kind));
+            expect(drag.line.options().price).toBe(100);
+            await drag.release();
+            expect(m.updatePrice).not.toHaveBeenCalled();
+        } finally { if (ui) await act(async () => ui!.unmount()); }
+    });
 
     it.each(['點價買', '點價賣'].flatMap(side => ['隱藏', '顯示', '鎖定', '解鎖', '刪除', '收起物件列表', '清除全部'].map(action => [side, action])))
     ('武裝%s後操作%s，capture 先解除武裝且後續空白點擊不下單', async (side, action) => {

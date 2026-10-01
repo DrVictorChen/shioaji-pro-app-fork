@@ -178,6 +178,8 @@ export interface ChartDrawingsApi {
     // UI 根節點的 capture 防線；序號也供下單入口核對本次武裝。
     onInteraction: () => void;
     interactionSequence: () => number;
+    // 委託線接手前，同步結束畫圖互動並接手鍵盤。
+    prepareOrderDrag: () => void;
     tool: DrawingToolId | null;
     setTool: (t: DrawingToolId | null) => void;
     drawings: Drawing[];
@@ -272,6 +274,9 @@ export function useChartDrawings(opts: {
     // 使用者動了左側工具列 = 要回畫圖／瀏覽模式，請頂端解除交易模式。
     // 兩種模式一次只能有一種生效。
     onEnterDrawingMode: () => void;
+    // 所有互動失效入口（含 context／失焦）同步取消委託線拖曳；
+    // 回傳是否取消了拖曳，供 Esc 吃掉本次取消按鍵。
+    onInvalidateInteraction?: () => boolean;
     // 新物件的預設色依主題挑（深色底與淺色底同一色相的深淺不同）
     themeMode?: DrawingThemeMode;
     // 量測換算損益：每一點價差值多少錢（目前下單數量 × 乘數），不知道就 null
@@ -313,7 +318,7 @@ export function useChartDrawings(opts: {
     const dragIdsRef = useRef<readonly string[]>([]);
     const finishTextRef = useRef<() => void>(() => {});
     const cancelTextRef = useRef<(remoteIds?: ReadonlySet<string>) => void>(() => {});
-    const cancelInteractionsRef = useRef<(submitText?: boolean) => void>(() => {});
+    const cancelInteractionsRef = useRef<(submitText?: boolean, invalidate?: boolean) => void>(() => {});
     const historyBusyRef = useRef(false);
     const operationSequenceRef = useRef(0);
     const pendingHistoryRef = useRef<{ sequence: number; step: HistoryStep } | null>(null);
@@ -343,12 +348,19 @@ export function useChartDrawings(opts: {
     const onEnterDrawingModeRef = useRef(opts.onEnterDrawingMode);
     onEnterDrawingModeRef.current = opts.onEnterDrawingMode;
     const interactionSequenceRef = useRef(0);
-    const enterDrawingMode = useCallback(() => {
+    const onInvalidateInteractionRef = useRef(opts.onInvalidateInteraction);
+    onInvalidateInteractionRef.current = opts.onInvalidateInteraction;
+    const invalidateInteraction = useCallback(() => {
         interactionSequenceRef.current++;
+        return onInvalidateInteractionRef.current?.() ?? false;
+    }, []);
+    const enterDrawingMode = useCallback(() => {
+        const canceledOrderDrag = invalidateInteraction();
         // 同一個滑鼠／鍵盤事件內的 chart click 不能等 React render 才解除武裝。
         stateRef.current.tradeArmed = false;
         onEnterDrawingModeRef.current();
-    }, []);
+        return canceledOrderDrag;
+    }, [invalidateInteraction]);
     const interactionSequence = useCallback(() => interactionSequenceRef.current, []);
     // 設定與物件交易各有單一入口，程式呼叫也一律使武裝序號失效。
     const setDrawingSettings = useCallback((patch: Partial<DrawingSettings>) => {
@@ -591,7 +603,9 @@ export function useChartDrawings(opts: {
     }, [beginOperation, writer]);
     cancelTextRef.current = cancelText;
 
-    const cancelInteractions = useCallback((submitText = false) => {
+    const cancelInteractions = useCallback((submitText = false, invalidate = true) => {
+        if (invalidate) invalidateInteraction();
+        else onInvalidateInteractionRef.current?.();
         beginOperation();
         cancelDragRef.current?.();
         if (submitText) finishTextRef.current();
@@ -607,7 +621,7 @@ export function useChartDrawings(opts: {
         const host = hostRef.current;
         if (host && ['grab', 'move', 'pointer', 'crosshair'].includes(host.style.cursor)) host.style.cursor = '';
         pushState();
-    }, [beginOperation, cancelText, clearMeasure, hostRef, pushState]);
+    }, [beginOperation, cancelText, clearMeasure, hostRef, pushState, invalidateInteraction]);
     cancelInteractionsRef.current = cancelInteractions;
 
     // 切換商品時清掉選取、繪製中的物件、量測與復原紀錄 — 殘留的 draft
@@ -1127,7 +1141,9 @@ export function useChartDrawings(opts: {
     // 點擊，武裝點價買賣時按 Delete 也不會刪到剛才選著的畫圖物件
     useLayoutEffect(() => {
         if (!tradeArmed) return;
-        cancelInteractionsRef.current(true);
+        // 交易模式已用目前畫圖序號武裝；收起畫圖不是另一次畫圖操作。
+        // 委託拖曳仍要取消，但不能使剛建立的點價武裝失效。
+        cancelInteractionsRef.current(true, false);
     }, [tradeArmed]);
 
     // ── 鍵盤 ─────────────────────────────────────────────────────────
@@ -1199,7 +1215,13 @@ export function useChartDrawings(opts: {
             if (e.key === 'Escape') {
                 // 已被 modal 的 Esc 收走就不重複處理
                 if (e.defaultPrevented) return;
-                enterDrawingMode();
+                const canceledOrderDrag = enterDrawingMode();
+                // 若本 listener 早於委託拖曳的 Esc listener，取消時會移除
+                // 後者；這裡仍須吃掉 Esc，不能流入 Esc×2 全刪單。
+                if (canceledOrderDrag) {
+                    e.preventDefault();
+                    resetEscCancelArm();
+                }
                 // 畫圖 UI 用掉的 Esc 一律吃掉（preventDefault）並清掉 Esc×2
                 // 的「第一下」：use-hotkeys 看到 defaultPrevented 就不算，也
                 // 不會跟更早的一下湊成兩下。連按兩下 Esc 確保取消畫圖是很
@@ -1611,10 +1633,16 @@ export function useChartDrawings(opts: {
         if (!host.hasAttribute('tabindex')) host.tabIndex = -1;
         host.focus({ preventScroll: true });
     }, [hostRef]);
+    const prepareOrderDrag = useCallback(() => {
+        cancelInteractionsRef.current(true);
+        claimKeyboard(token);
+        focusChart();
+    }, [token, focusChart]);
 
     return {
         onInteraction: enterDrawingMode,
         interactionSequence,
+        prepareOrderDrag,
         tool,
         setTool: setToolChecked,
         drawings,

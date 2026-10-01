@@ -69,7 +69,7 @@ describe('圖表實例 writer', () => {
         if (path === 'wrong-writer') {
             const [name, raw] = [...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))!;
             const journal = JSON.parse(raw);
-            journal.restores.TXF[d.id].writer = 'chart-b';
+            (Object.values(journal.restores.TXF[d.id])[0] as { writer: string }).writer = 'chart-b';
             store.set(name, JSON.stringify(journal));
         }
         vi.resetModules();
@@ -98,7 +98,7 @@ describe('圖表實例 writer', () => {
         writeDrawingJournal();
         const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
         expect(journal.ops.TXF?.[d.id]).toBeUndefined();
-        expect(journal.restores.TXF[d.id].writer).toBe('chart-a');
+        expect(Object.values(journal.restores.TXF[d.id])[0]).toMatchObject({ writer: 'chart-a' });
         write.mockRestore();
         vi.resetModules();
         const fresh = await import('./chart-drawings');
@@ -112,7 +112,7 @@ describe('圖表實例 writer', () => {
         } finally { fresh.__resetDrawingsForTest(); }
     });
 
-    it.each(['same-window', 'other-window'] as const)('A 復原寫入失敗，B 再編輯後關窗日誌重開仍保留物件（%s）', async (path) => {
+    it.each(['same-window', 'other-window', 'legacy-journal'] as const)('A 復原寫入失敗，B 再編輯後關窗日誌重開仍保留物件（%s）', async (path) => {
         const a = 'chart-a';
         const b = 'chart-b';
         const { d, history } = withDrawingWriter(a, deletedDrawing);
@@ -136,6 +136,12 @@ describe('圖表實例 writer', () => {
         expect(api.getDrawings('TXF')[0]?.name).toBe('B 的後續編輯');
         api.writeDrawingJournal();
         write.mockRestore();
+        if (path === 'legacy-journal') {
+            const [name, raw] = [...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))!;
+            const journal = JSON.parse(raw);
+            journal.restores.TXF[d.id] = Object.values(journal.restores.TXF[d.id])[0];
+            store.set(name, JSON.stringify(journal));
+        }
         vi.resetModules();
         const fresh = await import('./chart-drawings');
         fresh.__setDrawingLocksForTest(null);
@@ -161,6 +167,45 @@ describe('圖表實例 writer', () => {
         flushDrawingWrites();
         return { d, history };
     }
+
+    it.each(['sj-pro-chart-drawings', 'sj-pro-chart-drawing-tombstones'].flatMap(failKey =>
+        ['retry', 'journal'].map(path => ({ failKey, path }))))
+    ('持續 $failKey 寫入失敗時復原→重做→復原，$path 後仍撤銷原墓碑', async ({ failKey, path }) => {
+        const { d, history } = deletedDrawing();
+        const originalSet = localStorage.setItem;
+        const write = vi.spyOn(localStorage, 'setItem').mockImplementation((k, v) => {
+            if (k === failKey) throw new Error('QuotaExceededError');
+            originalSet(k, v);
+        });
+        try {
+            for (const side of ['undo', 'redo', 'undo'] as const) {
+                const applied = vi.fn();
+                applyDrawingHistory(history[side]()!, applied);
+                expect(applied).toHaveBeenCalledWith(true);
+                flushDrawingWrites();
+                expect(drawingsSaveFailed()).toBe(true);
+                expect(getDrawings('TXF').map(x => x.id)).toEqual(side === 'redo' ? [] : [d.id]);
+            }
+            if (path === 'journal') {
+                writeDrawingJournal();
+                const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
+                expect(Object.keys(journal.restores.TXF[d.id])).toHaveLength(2);
+            }
+        } finally { write.mockRestore(); }
+        let fresh: typeof import('./chart-drawings') | undefined;
+        if (path === 'journal') {
+            vi.resetModules();
+            fresh = await import('./chart-drawings');
+            fresh.__setDrawingLocksForTest(null);
+        }
+        const api = fresh ?? { flushDrawingWrites, reloadDrawingsFromStorage, getDrawings };
+        try {
+            api.flushDrawingWrites();
+            api.reloadDrawingsFromStorage();
+            expect(api.getDrawings('TXF').map(x => x.id)).toEqual([d.id]);
+            expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[d.id]).toBeUndefined();
+        } finally { fresh?.__resetDrawingsForTest(); }
+    });
 
     it.each(['sj-pro-chart-drawings', 'sj-pro-chart-drawing-tombstones'] as const)('復原刪除寫入 %s 配額失敗後，物件與墓碑撤銷一起保留並重試', (failKey) => {
         const { d, history } = deletedDrawing();
@@ -210,7 +255,7 @@ describe('圖表實例 writer', () => {
             const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
             expect(journal.ops.TXF[d.id]).toMatchObject({ id: d.id });
             expect(journal.ops.TXF[d.id].restoreTombstone).toBeUndefined();
-            expect(journal.restores.TXF[d.id]).toMatchObject({ writer: expect.any(String), tombstone: { revision: expect.any(String) } });
+            expect(Object.values(journal.restores.TXF[d.id])[0]).toMatchObject({ writer: expect.any(String), tombstone: { revision: expect.any(String) } });
         }
         write.mockRestore();
         if (path === 'journal') {

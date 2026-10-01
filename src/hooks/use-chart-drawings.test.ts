@@ -1411,6 +1411,29 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         await act(async () => api().setTool(null));
         expect(api().drawingBusy()).toBe(false);
     });
+
+    it.each(['draft', 'drag', 'text', 'measure'] as const)('委託線接手前同步結束畫圖 %s，兩種互動不可共存', async (interaction) => {
+        const api = await setup();
+        if (interaction === 'drag') {
+            await act(async () => { addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1120, price: 25100 }], DEFAULT_DRAWING_STYLE); });
+            await down(0, 200);
+        } else {
+            await act(async () => api().setTool(interaction === 'draft' ? 'trend' : interaction));
+            await down(0, 200);
+            if (interaction === 'measure') await down(20, 100);
+        }
+        expect(api().drawingBusy()).toBe(true);
+        const sequence = api().interactionSequence();
+        await act(async () => {
+            api().prepareOrderDrag();
+            expect(api().drawingBusy()).toBe(false);
+            expect(api().interactionSequence()).toBeGreaterThan(sequence);
+        });
+        expect(api().tool).toBeNull();
+        expect(api().editingTextId).toBeNull();
+        expect(api().selectedIds).toEqual([]);
+        expect(docL.has('mouseup')).toBe(false);
+    });
     const key = async (k: Record<string, unknown>) => {
         const e = {
             key: '',
@@ -1932,7 +1955,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(getDrawings('TXF')[1]).toMatchObject(remoteY);
     });
 
-    it.each(['chart', 'edit-text', 'rename', 'undo', 'redo', 'owner'] as const)('%s 接手拖曳會撤回中途座標並封住遲到事件', async (ending) => {
+    it.each(['chart', 'edit-text', 'rename', 'undo', 'redo', 'owner', 'order'] as const)('%s 接手拖曳會撤回中途座標並封住遲到事件', async (ending) => {
         const api = await setup();
         let x!: Drawing;
         let text!: Drawing;
@@ -1954,6 +1977,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
             if (ending === 'rename') api().rename(x.id, '改名');
             if (ending === 'undo') api().undo();
             if (ending === 'redo') api().redo();
+            if (ending === 'order') api().prepareOrderDrag();
         });
         await act(async () => { lateUp(ev(50, 100)); flushDrawingWrites(); reloadDrawingsFromStorage(); });
         expect(getDrawings('TXF').find((d) => d.id === x.id)!.anchors).toEqual(x.anchors);
