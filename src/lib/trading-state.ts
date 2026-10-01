@@ -1,5 +1,6 @@
 import { canTrade } from './account-tradable';
 import { createAccountQuery } from './account-query';
+import { getServerModeVersion, knownServerInfo } from './server-info-store';
 import { onTradeMutation } from './trade-mutations';
 import { useEffect, useSyncExternalStore } from 'react';
 import { getAccountState, refreshAccounts, useAccounts } from './account-store';
@@ -309,15 +310,19 @@ function mergeOrders(account: Account, trades: Trade[], accounts: Account[], pro
 // refresh without letting many accounts burst past it.
 export const ACCOUNT_READ_CONCURRENCY = 2;
 
-/** Mode discovery may make unsigned accounts queryable after an initial
- * empty/partial read. Wait for that read, then bypass only its cooldown. */
+/** Mode discovery/reconnect invalidates old reads. Wait for them, bypass
+ * their cooldown, and repeat if this refresh also outlives a mode version. */
 let modeRefresh: Promise<void> | null = null;
 export function refreshTradingStateForModeChange(): Promise<void> {
     if (modeRefresh) return modeRefresh;
     modeRefresh = (async () => {
         if (inFlight) await inFlight;
-        for (const key of queryScopes) nextRefreshAt[key] = 0;
-        await refreshTradingState();
+        do {
+            const version = getServerModeVersion();
+            for (const key of queryScopes) nextRefreshAt[key] = 0;
+            await refreshTradingState();
+            if (getServerModeVersion() === version || typeof knownServerInfo()?.simulation !== 'boolean') break;
+        } while (true);
     })().finally(() => { modeRefresh = null; });
     return modeRefresh;
 }

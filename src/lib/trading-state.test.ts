@@ -95,6 +95,26 @@ it('mode discovery rereads positions, orders and funds despite the initial snaps
     expect([mocks.positions, mocks.trades, mocks.balance].map(fn => fn.mock.calls.length)).toEqual(calls.map(n => n + 1));
 });
 
+it('retries a mode-change snapshot if production reconnects while it is still reading', async () => {
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    const calls = [mocks.positions, mocks.trades, mocks.balance].map(fn => fn.mock.calls.length);
+    const pending = deferred<ReturnType<typeof baseline>[]>();
+    mocks.positions.mockImplementationOnce(() => pending.promise);
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingStateForModeChange(); });
+    await flush();
+    info.forgetServerInfo('http://fixture.invalid');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    expect(store.refreshTradingStateForModeChange()).toBe(run);
+    pending.resolve([baseline()]);
+    await act(async () => { await run; });
+    expect(mocks.positions).toHaveBeenCalledTimes(calls[0]! + 2);
+    expect(mocks.trades).toHaveBeenCalledTimes(calls[1]! + 1);
+    expect(mocks.balance).toHaveBeenCalledTimes(calls[2]! + 1);
+    expect(store.getTradingState().queries.positions.needsReconcile).toBe(false);
+});
+
 it('mode discovery during an initial read waits for it and then queries newly tradable accounts', async () => {
     vi.advanceTimersByTime(1600);
     const pending = deferred<ReturnType<typeof baseline>[]>();

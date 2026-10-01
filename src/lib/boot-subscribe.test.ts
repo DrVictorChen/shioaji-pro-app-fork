@@ -73,11 +73,66 @@ describe('subscribeTradeReports', () => {
         await subscribeTradeReports();
         expect(mocks.subscribe).not.toHaveBeenCalled();
         mocks.simulation = true;
+        mocks.version += 1;
         mocks.modeChanged!();
         await vi.waitFor(() => expect(mocks.subscribe.mock.calls).toEqual([[unsigned]]));
         expect(mocks.snapshots).toHaveBeenCalledOnce();
         mocks.modeChanged!(); // ordinary /info refresh does not resubscribe
         expect(mocks.accounts).toHaveBeenCalledTimes(2);
+        expect(mocks.snapshots).toHaveBeenCalledOnce();
+    });
+
+    it.each([false, true])('rechecks reports and snapshots after mode %s → unknown → same mode', async simulation => {
+        mocks.simulation = simulation;
+        await subscribeTradeReports();
+        mocks.simulation = undefined;
+        mocks.version += 1;
+        mocks.modeChanged!();
+        await Promise.resolve();
+        expect(mocks.accounts).toHaveBeenCalledOnce();
+        expect(mocks.snapshots).not.toHaveBeenCalled();
+
+        mocks.health.mockResolvedValue(health('NotSubscribed'));
+        mocks.simulation = simulation;
+        mocks.version += 1;
+        mocks.modeChanged!();
+        await vi.waitFor(() => expect(mocks.subscribe.mock.calls).toEqual([[stock], [futures]]));
+        expect(mocks.accounts).toHaveBeenCalledTimes(2);
+        expect(mocks.snapshots).toHaveBeenCalledOnce();
+        mocks.modeChanged!();
+        expect(mocks.accounts).toHaveBeenCalledTimes(2);
+        expect(mocks.snapshots).toHaveBeenCalledOnce();
+    });
+
+    it('queues recovery when production reconnects during an old health read', async () => {
+        mocks.simulation = false;
+        await subscribeTradeReports();
+        const pending = deferred();
+        mocks.health.mockImplementationOnce(() => pending.promise.then(() => health('NotSubscribed')));
+        const run = subscribeTradeReports();
+        const discarded = expect(run).rejects.toThrow('模式已變更');
+        await vi.waitFor(() => expect(mocks.health).toHaveBeenCalledTimes(3));
+        mocks.simulation = undefined;
+        mocks.version += 1;
+        mocks.modeChanged!();
+        mocks.simulation = false;
+        mocks.version += 1;
+        mocks.modeChanged!();
+        mocks.health.mockResolvedValue(health('NotSubscribed'));
+        pending.resolve();
+        await discarded;
+        await vi.waitFor(() => expect(mocks.subscribe.mock.calls).toEqual([[stock], [futures]]));
+        expect(mocks.accounts).toHaveBeenCalledTimes(3);
+        expect(mocks.snapshots).toHaveBeenCalledOnce();
+    });
+
+    it('rechecks a new mode version even when its available value stays production', async () => {
+        mocks.simulation = false;
+        await subscribeTradeReports();
+        mocks.health.mockResolvedValue(health('NotSubscribed'));
+        mocks.version += 1;
+        mocks.modeChanged!();
+        await vi.waitFor(() => expect(mocks.subscribe.mock.calls).toEqual([[stock], [futures]]));
         expect(mocks.snapshots).toHaveBeenCalledOnce();
     });
 

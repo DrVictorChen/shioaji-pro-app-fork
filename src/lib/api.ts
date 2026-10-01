@@ -208,12 +208,10 @@ export async function apiPost<T>(
     body: unknown,
     opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void },
 ): Promise<T> {
-    // Cover every subscription route, including quote/capability replay.
+    // Trade reports are account-scoped; market-data subscriptions are not.
     // Loading the native transport (or serializing the body) can outlive a
     // mode change, even when the final mode is the same as the initial one.
-    const subscriptionVersion = path === '/api/v1/auth/subscribe_trade'
-        || /^\/api\/v1\/stream\/(?:subscribe|unsubscribe)(?:\/|$)/.test(path)
-        ? getServerModeVersion() : undefined;
+    const subscriptionVersion = path === '/api/v1/auth/subscribe_trade' ? getServerModeVersion() : undefined;
     const beforeDispatch = () => {
         if (subscriptionVersion !== undefined && getServerModeVersion() !== subscriptionVersion) {
             throw Object.assign(new Error('訂閱期間伺服器模式已變更，未送出請求；請重新訂閱'),

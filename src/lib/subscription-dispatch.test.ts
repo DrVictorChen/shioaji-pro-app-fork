@@ -4,6 +4,8 @@ import type { ServerInfo } from './shioaji';
 
 const m = vi.hoisted(() => ({
     accounts: [] as Account[], nativeFetch: vi.fn(), loading: vi.fn(), desktop: true,
+    register: vi.fn(), ensure: vi.fn(), place: vi.fn(),
+    tick: undefined as ((tick: { code: string; close: number }) => void) | undefined,
 }));
 vi.mock('./runtime', () => ({ getApiBase: () => '', get isTauri() { return m.desktop; }, EXPECTED_SERVER_VERSION: '' }));
 vi.mock('./account-store', () => ({
@@ -11,9 +13,26 @@ vi.mock('./account-store', () => ({
     loadAccountsShared: async () => m.accounts,
 }));
 vi.mock('./features', () => ({ agentModule: null }));
-vi.mock('./trading-state', () => ({ refreshTradingStateForModeChange: vi.fn() }));
-vi.mock('./trade', () => ({ notify: vi.fn() }));
-vi.mock('./stream', () => ({}));
+vi.mock('./trading-state', () => ({ refreshTradingStateForModeChange: vi.fn(), getTradingState: () => ({ positions: [] }) }));
+vi.mock('./trade', () => ({ notify: vi.fn(), placeQuickOrder: m.place }));
+vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
+vi.mock('./protection-env', () => ({
+    currentProtectionEnv: () => {
+        const simulation = info.knownServerInfo()?.simulation;
+        return simulation === undefined ? null : `|${simulation ? 'simulation' : 'production'}`;
+    },
+    onProtectionEnvChange: (listener: () => void) => info.subscribeServerInfo(listener),
+    envBase: (env: string) => env.slice(0, env.lastIndexOf('|')),
+    reportEnvMatches: () => true,
+    refreshProtectionEnv: async () => undefined, watchProtectionEnv: () => undefined,
+}));
+vi.mock('./stream', () => ({
+    registerSubscription: m.register, unregisterSubscription: vi.fn(),
+    getStreamStatus: () => 'live', isStreamOwner: () => true,
+    subscribeStatusStore: () => () => undefined, subscribeStreamOwner: () => () => undefined,
+    onOrderEvent: () => () => undefined, onOddLotTick: () => () => undefined, onStreamEvent: () => () => undefined,
+    onAnyTick: (callback: typeof m.tick) => { m.tick = callback; return () => undefined; },
+}));
 vi.mock('./tauri', () => ({}));
 vi.mock('./window-role', () => ({}));
 vi.mock('./frontend-ready', () => ({}));
@@ -102,7 +121,8 @@ const paths = [
     ...['calculated_index', 'index_contribution', 'industry_contribution', 'index_components', 'scanner']
         .flatMap(capability => ['subscribe', 'unsubscribe'].map(action => `/api/v1/stream/${action}/${capability}`)),
 ];
-it.each(paths)('rechecks the mode at native dispatch for %s', async path => {
+it('rechecks the mode at native dispatch for account-scoped trade subscriptions', async () => {
+    const path = '/api/v1/auth/subscribe_trade';
     const pending = api.apiPost(path, {});
     const rejected = expect(pending).rejects.toThrow('已變更');
     await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
@@ -113,21 +133,76 @@ it.each(paths)('rechecks the mode at native dispatch for %s', async path => {
     expect(m.nativeFetch).not.toHaveBeenCalled();
 });
 
-it.each(paths)('rechecks the mode after browser request serialization for %s', async path => {
+it('rechecks the mode after browser serialization for account-scoped trade subscriptions', async () => {
+    const path = '/api/v1/auth/subscribe_trade';
     m.desktop = false;
     await expect(api.apiPost(path, { toJSON() { mode(false); return {}; } })).rejects.toThrow('已變更');
     expect(fetch).not.toHaveBeenCalled();
     expect(m.nativeFetch).not.toHaveBeenCalled();
 });
 
-it('does not retry a capability subscription rejected at dispatch after a mode change', async () => {
-    const pending = shioaji.subscribeMarketSignal('suspend', 'TSE');
-    const rejected = expect(pending).rejects.toMatchObject({ subscriptionNotStarted: true });
+it.each(paths.slice(1))('sends account-independent %s even if the mode changes during native loading', async path => {
+    const pending = api.apiPost(path, {});
     await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
     mode(false);
+    mode(true);
     release();
-    await rejected;
+    await pending;
+    expect(m.nativeFetch).toHaveBeenCalledOnce();
+});
+
+it.each(paths.slice(1))('sends account-independent %s even if the mode changes during browser serialization', async path => {
+    m.desktop = false;
+    await api.apiPost(path, { toJSON() { mode(false); return {}; } });
+    expect(fetch).toHaveBeenCalledOnce();
     expect(m.nativeFetch).not.toHaveBeenCalled();
+});
+
+it.each([true, false])('keeps a restored protection trigger Tick subscribed as unknown mode becomes %s', async simulation => {
+    const contract = { code: 'TXFR1', target_code: 'TXFJ6', security_type: 'FUT', exchange: 'TAIFEX' };
+    m.accounts[0]!.signed = true;
+    const rows = new Map([['sj-pro-triggers', JSON.stringify([{
+        id: 'restored-stop', code: contract.code, orderCode: contract.target_code,
+        kind: 'stop', condition: 'below', price: 48000, action: 'Sell', quantity: 1,
+        env: `|${simulation ? 'simulation' : 'production'}`, account: m.accounts[0],
+    }])]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => rows.get(key) ?? null,
+        setItem: (key: string, value: string) => { rows.set(key, value); } });
+    vi.stubGlobal('navigator', {}); // main-window executor fallback; no App involved
+    vi.stubGlobal('location', { search: '' });
+    m.ensure.mockResolvedValue(contract);
+    m.nativeFetch.mockImplementation(async () => new Response('{"success":true}'));
+    m.place.mockImplementation(async (...args: unknown[]) => {
+        (args[4] as { beforeSend?: () => void } | undefined)?.beforeSend?.();
+        return { order: { id: 'exit' }, status: { status: 'PendingSubmit' } };
+    });
+    mode(undefined);
+    const engine = await import('./trigger-engine');
+    engine.startTriggerEngine();
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    mode(simulation); // syncQuotes sees an existing hold while native import waits
+    release();
+    await vi.waitFor(() => expect(m.register).toHaveBeenCalledOnce());
+    expect(m.nativeFetch).toHaveBeenCalledOnce();
+    expect(m.nativeFetch.mock.calls[0]![0]).toBe('/api/v1/stream/subscribe');
+    expect(m.register.mock.calls[0]![0]).toMatchObject({ code: contract.code, quote_type: 'Tick' });
+    m.tick!({ code: contract.code, close: 48300 });
+    m.tick!({ code: contract.code, close: 47900 });
+    await vi.waitFor(() => expect(m.place).toHaveBeenCalledOnce());
+    expect(m.place.mock.calls[0]![0]).toMatchObject(contract);
+});
+
+it.each(['Tick', 'BidAsk', 'Quote'] as const)('subscribes and registers %s after mode discovery during native loading', async quoteType => {
+    mode(undefined);
+    const contract = { code: '2330', security_type: 'STK' as const, exchange: 'TSE' as const, target_code: null };
+    m.nativeFetch.mockImplementation(async () => new Response('{"success":true}'));
+    const pending = shioaji.subscribeQuote(contract, quoteType);
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    mode(true);
+    release();
+    await expect(pending).resolves.toEqual({ success: true });
+    expect(m.nativeFetch).toHaveBeenCalledOnce();
+    expect(m.register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: contract.code, quote_type: quoteType }));
 });
 
 it.each(paths)('sends a subscription request when the mode stays current for %s', async path => {

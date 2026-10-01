@@ -55,7 +55,7 @@ import { FAST_START_SCHEDULE, pollDelay } from './poll-until';
 import { setServerIdentityVerified } from './server-identity';
 import { logNotice, notify } from './trade';
 import { isChildWindow } from './window-role';
-import { knownServerInfo, subscribeServerInfo } from './server-info-store';
+import { getServerModeVersion, knownServerInfo, subscribeServerInfo } from './server-info-store';
 
 let booted = false;
 let tradingStarted = false;
@@ -490,15 +490,17 @@ let tradeSubscriptionInFlight: Promise<void> | null = null;
 let stopTradeSubscriptionMode: (() => void) | undefined;
 let tradeSubscriptionModeQueued = false;
 export function subscribeTradeReports(): Promise<void> {
-    // Install only once subscriptions are actually used (main window). A
-    // late /info must revisit accounts skipped while the mode was unknown.
+    // Install only once subscriptions are actually used (main window).
+    // A new known version must recover even after same-mode reconnects;
+    // ordinary /info refreshes keep the version and need no new queries.
     if (!stopTradeSubscriptionMode) {
-        let simulation = knownServerInfo()?.simulation === true;
+        let version = getServerModeVersion();
         stopTradeSubscriptionMode = subscribeServerInfo(() => {
-            const next = knownServerInfo()?.simulation === true;
-            if (next === simulation) return;
-            simulation = next;
-            if (next) void refreshTradingStateForModeChange();
+            const next = getServerModeVersion();
+            if (next === version) return;
+            version = next;
+            if (typeof knownServerInfo()?.simulation !== 'boolean') return;
+            void refreshTradingStateForModeChange();
             if (tradeSubscriptionInFlight) tradeSubscriptionModeQueued = true;
             else void subscribeTradeReports().catch(() => undefined);
         });
@@ -532,7 +534,9 @@ export function subscribeTradeReports(): Promise<void> {
         tradeSubscriptionInFlight = null;
         if (tradeSubscriptionModeQueued) {
             tradeSubscriptionModeQueued = false;
-            void subscribeTradeReports().catch(() => undefined);
+            if (typeof knownServerInfo()?.simulation === 'boolean') {
+                void subscribeTradeReports().catch(() => undefined);
+            }
         }
     }).catch(() => undefined);
     return run;
