@@ -74,12 +74,12 @@ describe('圖表實例 writer', () => {
             expect(applied).toHaveBeenLastCalledWith(true);
             const tomb = JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF[drawing.id];
             expect(tomb.writers).toEqual([a]);
-            expect(remote).toHaveBeenCalledExactlyOnceWith('TXF');
+            expect(remote).toHaveBeenCalledExactlyOnceWith('TXF', new Set([drawing.id]));
             remote.mockClear();
             withDrawingWriter(a, () => applyDrawingHistory(history.redo()!, applied));
             queue.shift()!();
             expect(drawingRevision(getDrawings('TXF')[0]!).split(':')[1]).toBe(a);
-            expect(remote).toHaveBeenCalledExactlyOnceWith('TXF');
+            expect(remote).toHaveBeenCalledExactlyOnceWith('TXF', new Set([drawing.id]));
             expect(own).not.toHaveBeenCalled();
         } finally { stopRemote(); stopOwn(); }
     });

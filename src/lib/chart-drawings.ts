@@ -700,8 +700,8 @@ type Op = Drawing | Tombstone;
 const pending = new Map<string, Map<string, Op>>();
 // 只重放實際移動的物件，不覆蓋遠端對其他物件的排序。
 const pendingOrder: OrderOps = new Map();
-// 同視窗各圖表也必須看見彼此尚未落地的寫入；保留每個 writer 的最新 counter。
-const localWrites = new Map<string, Map<string, Revision>>();
+// 同視窗各圖表也必須看見彼此尚未落地的寫入；依 writer、物件保留最新 counter。
+const localWrites = new Map<string, Map<string, Map<string, Revision>>>();
 
 function record(key: string, id: string, op: Op) {
     let ops = pending.get(key);
@@ -712,8 +712,10 @@ function record(key: string, id: string, op: Op) {
     ops.set(id, op);
     const revision = isTombstone(op) ? tombRevision(op) : drawingRevision(op);
     const writer = revision.split(':')[1]!;
-    const writes = localWrites.get(key) ?? new Map<string, Revision>();
-    if ((writes.get(writer) ?? '') < revision) writes.set(writer, revision);
+    const writes = localWrites.get(key) ?? new Map<string, Map<string, Revision>>();
+    const ids = writes.get(writer) ?? new Map<string, Revision>();
+    if ((ids.get(id) ?? '') < revision) ids.set(id, revision);
+    writes.set(writer, ids);
     localWrites.set(key, writes);
     if (isTombstone(op)) {
         const moves = pendingOrder.get(key)?.filter((m) => m.id !== id);
@@ -1020,16 +1022,23 @@ export function getDrawings(key: string): Drawing[] {
 }
 
 // 未落地的拖曳可直接還原原物件與 revision；已寫出去則發布取消版本。
-export function cancelDrawingChanges(key: string, originals: Drawing[]) {
+export function cancelDrawingChanges(key: string, originals: Drawing[], remoteIds: ReadonlySet<string> = new Set()) {
     const tombs = loadTombs();
     const journals = loadJournals();
     const base = loadView(tombs, journals);
-    const { changed } = acceptRemoteChanges(base, tombs, journals);
-    if (changed.has(key)) {
-        store = applyPending(base, tombs);
-        emit();
-        return getDrawings(key);
+    const { changed, changedIds } = acceptRemoteChanges(base, tombs, journals);
+    const conflicts = new Set([...remoteIds, ...(changedIds.get(key) ?? [])]);
+    // 同物件的遠端版本接手；同批互動的其他物件仍須撤回中途寫入。
+    for (const original of originals) {
+        const op = pending.get(key)?.get(original.id);
+        if (conflicts.has(original.id) && op && !isTombstone(op) && drawingRevision(op).split(':')[1] === activeWriter) {
+            pending.get(key)?.delete(original.id);
+        }
     }
+    const moves = pendingOrder.get(key)?.filter((m) => !conflicts.has(m.id) || m.revision.split(':')[1] !== activeWriter);
+    if (moves?.length) pendingOrder.set(key, moves);
+    else pendingOrder.delete(key);
+    if (changed.has(key) || remoteIds.size) store = applyPending(base, tombs);
     const restore = new Map(originals.map((d) => [d.id, d]));
     const current = getDrawings(key);
     const written = new Map((base[key] ?? []).map((d) => [d.id, d]));
@@ -1037,6 +1046,9 @@ export function cancelDrawingChanges(key: string, originals: Drawing[]) {
     const next = current.map((d) => {
         const original = restore.get(d.id);
         if (!original || tombs[key]?.[d.id] !== undefined) return d;
+        // 對方待寫或已落地的版本保留；本地較新的日誌若遮住了遠端，
+        // 仍要發布取消版本，不能把本地中途座標當成遠端勝出。
+        if (conflicts.has(d.id) && drawingRevision(d).split(':')[1] !== activeWriter) return d;
         const saved = written.get(d.id);
         if (saved && drawingRevision(saved) > drawingRevision(original)) {
             syncCancel.add(d.id);
@@ -1055,13 +1067,14 @@ export function cancelDrawingChanges(key: string, originals: Drawing[]) {
     return getDrawings(key);
 }
 
-const remoteListeners = new Map<(key: string) => void, string>();
-const observedRemoteWrites = new Map<string, Map<string, string>>();
-export function subscribeDrawingRemoteChanges(listener: (key: string) => void, writer = WINDOW_ID) {
+const remoteListeners = new Map<(key: string, ids: ReadonlySet<string>) => void, string>();
+type RemoteToken = { id: string; revision: Revision };
+const observedRemoteWrites = new Map<string, Map<string, Map<string, RemoteToken>>>();
+export function subscribeDrawingRemoteChanges(listener: (key: string, ids: ReadonlySet<string>) => void, writer = WINDOW_ID) {
     if (!observedRemoteWrites.has(writer)) {
         const tombs = loadTombs();
         observedRemoteWrites.set(writer, new Map([...remoteWritesOf(loadView(tombs), tombs, loadJournals(), writer)]
-            .map(([key, writes]) => [key, writes.signature])));
+            .map(([key, writes]) => [key, writes.tokens])));
     }
     remoteListeners.set(listener, writer);
     return () => {
@@ -1077,52 +1090,59 @@ export function getDrawingHistoryStart(): number {
 
 // 合併前也掃主項目與每份日誌；本視窗的較新版本不能遮蔽遠端寫入。
 function remoteWritesOf(base: Store, tombs: Tombs, journals = loadJournals(), ownWriter = activeWriter) {
-    const all = new Map<string, { tokens: Set<string>; latest: number }>();
-    const put = (key: string, token: string, revision: Revision, writer = revision.split(':')[1]!) => {
+    const all = new Map<string, { tokens: Map<string, RemoteToken>; latest: number }>();
+    const put = (key: string, token: string, id: string, revision: Revision, writer = revision.split(':')[1]!) => {
         observeRevision(revision);
         if (writer === ownWriter) return;
         // 本 module 已觀察的圖表寫入用 writer counter 表示，落地／日誌合併
         // 不再算一次新改動，也不因舊主項目的消失誤清別張圖的新歷史。
-        if (token !== 'local' && revision <= (localWrites.get(key)?.get(writer) ?? '')) return;
-        const writes = all.get(key) ?? { tokens: new Set<string>(), latest: 0 };
-        writes.tokens.add(`${token}:${writer}:${revision}`);
+        if (token !== 'local' && revision <= (localWrites.get(key)?.get(writer)?.get(id) ?? '')) return;
+        const writes = all.get(key) ?? { tokens: new Map<string, RemoteToken>(), latest: 0 };
+        // revision 留在 token 中：主項目與舊日誌的同物件版本都要被觀察。
+        writes.tokens.set(`${token}:${id}:${writer}:${revision}`, { id, revision });
         writes.latest = Math.max(writes.latest, Number(revision.split(':')[0]));
         all.set(key, writes);
     };
     for (const source of [loadStore({}), base]) {
-        for (const [key, list] of Object.entries(source)) for (const d of list) put(key, d.id, drawingRevision(d));
+        for (const [key, list] of Object.entries(source)) for (const d of list) put(key, d.id, d.id, drawingRevision(d));
     }
     const tomb = (key: string, id: string, t: Tombstone) => {
-        for (const writer of tombWriters(t)) put(key, `tomb:${id}`, tombRevision(t), writer);
+        for (const writer of tombWriters(t)) put(key, `tomb:${id}`, id, tombRevision(t), writer);
     };
     for (const [key, ids] of Object.entries(tombs)) for (const [id, t] of Object.entries(ids)) tomb(key, id, t);
     for (const j of journals) {
         for (const [key, ops] of j.ops) for (const [id, op] of ops) {
             if (isTombstone(op)) tomb(key, id, op);
-            else put(key, id, drawingRevision(op));
+            else put(key, id, id, drawingRevision(op));
         }
-        for (const [key, moves] of j.order) for (const m of moves) put(key, `order:${m.id}`, m.revision);
+        for (const [key, moves] of j.order) for (const m of moves) put(key, `order:${m.id}`, m.id, m.revision);
     }
-    for (const [key, writes] of localWrites) for (const [writer, revision] of writes) put(key, 'local', revision, writer);
+    for (const [key, writes] of localWrites) for (const [writer, ids] of writes) {
+        for (const [id, revision] of ids) put(key, 'local', id, revision, writer);
+    }
     return new Map([...all].map(([key, writes]) => [key, {
-        signature: JSON.stringify([...writes.tokens].sort()), latest: writes.latest,
+        tokens: writes.tokens, latest: writes.latest,
     }]));
 }
 function rememberRemoteWrites(base: Store, tombs: Tombs) {
     for (const writer of new Set([WINDOW_ID, ...observedRemoteWrites.keys()])) {
         observedRemoteWrites.set(writer, new Map([...remoteWritesOf(base, tombs, loadJournals(), writer)]
-            .map(([key, writes]) => [key, writes.signature])));
+            .map(([key, writes]) => [key, writes.tokens])));
     }
 }
 function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
-    const results = new Map<string, { changed: Set<string>; writes: ReturnType<typeof remoteWritesOf> }>();
+    const results = new Map<string, { changed: Set<string>; changedIds: Map<string, Set<string>>; writes: ReturnType<typeof remoteWritesOf> }>();
     for (const writer of new Set([activeWriter, ...observedRemoteWrites.keys(), ...remoteListeners.values()])) {
         const writes = remoteWritesOf(base, tombs, journals, writer);
         const observed = observedRemoteWrites.get(writer);
-        const changed = new Set([...writes].filter(([key, product]) =>
-            observed?.get(key) !== product.signature).map(([key]) => key));
-        observedRemoteWrites.set(writer, new Map([...writes].map(([key, product]) => [key, product.signature])));
-        results.set(writer, { changed, writes });
+        const changedIds = new Map<string, Set<string>>();
+        for (const [key, product] of writes) {
+            const ids = new Set([...product.tokens].filter(([token]) => !observed?.get(key)?.has(token)).map(([, op]) => op.id));
+            if (ids.size) changedIds.set(key, ids);
+        }
+        const changed = new Set(changedIds.keys());
+        observedRemoteWrites.set(writer, new Map([...writes].map(([key, product]) => [key, product.tokens])));
+        results.set(writer, { changed, changedIds, writes });
     }
     // 同步的勝負仍按 revision／墓碑處理；墓碑必須保留自己的刪除並取聯集。
     for (const [key, ops] of pending) {
@@ -1139,7 +1159,7 @@ function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
         if (!ops.size) pending.delete(key);
     }
     const result = results.get(activeWriter)!;
-    for (const [listener, writer] of remoteListeners) for (const key of results.get(writer)!.changed) listener(key);
+    for (const [listener, writer] of remoteListeners) for (const [key, ids] of results.get(writer)!.changedIds) listener(key, ids);
     return result;
 }
 

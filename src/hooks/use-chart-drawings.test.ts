@@ -29,6 +29,7 @@ import { useHotkeys } from './use-hotkeys';
 import { AXIS_LABEL_H, axisLabelBox } from '../lib/chart-drawing-layer';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { drawingRevision } from '../lib/chart-drawing-revision';
+import { ChartDrawingOverlays } from '../components/chart-drawing-tools';
 
 const remoteRevision = (d: Drawing) => `${(Number(drawingRevision(d).split(':')[0]) + 100).toString().padStart(16, '0')}:remote`;
 
@@ -1110,6 +1111,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
     let currentContext = '1:false';
     let tradeArmed = false;
     let beforeContextEffect: (() => void) | null = null;
+    let renderEditor = false;
     let receiveApi: (v: ChartDrawingsApi) => void;
     const inside = { tagName: 'CANVAS' };
     const scope = { contains: (n: unknown) => n === inside };
@@ -1158,8 +1160,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
     ];
     function V2Probe({ receive }: { receive: (v: ChartDrawingsApi) => void }) {
         useLayoutEffect(() => { beforeContextEffect?.(); }, [currentContract, currentContext]);
-        receive(
-            useChartDrawings({
+        const api = useChartDrawings({
                 contract: currentContract,
                 contextKey: currentContext,
                 hostRef: refs.host,
@@ -1170,9 +1171,11 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
                 onEnterDrawingMode: () => {},
                 pnlPerPoint: 200,
                 getBars: () => v2Bars,
-            }),
-        );
-        return null;
+            });
+        receive(api);
+        return renderEditor ? createElement(ChartDrawingOverlays, {
+            api: { ...api, editBox: api.editingTextId ? { left: 0, top: 0, right: 10, bottom: 10 } : null },
+        }) : null;
     }
 
     beforeEach(() => {
@@ -1185,6 +1188,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         currentContext = '1:false';
         tradeArmed = false;
         beforeContextEffect = null;
+        renderEditor = false;
         vi.stubGlobal('document', {
             activeElement: inside,
             addEventListener: (t: string, l: L) => docL.set(t, l),
@@ -1539,6 +1543,109 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(api().drawings).toHaveLength(0); // 復原的是第一筆文字
     });
 
+    it.each([false, true])('圖表 mousedown 先於文字失焦，仍提交輸入且只記一步（新建=%s）', async (created) => {
+        const api = await setup();
+        if (created) {
+            await act(async () => api().setTool('text'));
+            await down(50, 200);
+        } else {
+            await act(async () => { addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' }); });
+            await act(async () => api().editText(api().drawings[0]!.id));
+        }
+        const id = api().editingTextId!;
+        const blur = api().commitText;
+        await act(async () => api().updateTextDraft('修改後的文字'));
+        // 真實瀏覽器 focus() 同步觸發輸入框 blur；mousedown handler 先執行。
+        Object.assign(host, { focus: () => blur('修改後的文字') });
+        try {
+            await down(700, 350);
+            await act(async () => { blur('修改後的文字'); flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(api().editingTextId).toBeNull();
+            expect(getDrawings('TXF').find((d) => d.id === id)?.text).toBe('修改後的文字');
+            expect(api().canUndo).toBe(true);
+            await act(async () => api().undo());
+            expect(getDrawings('TXF').map((d) => d.text)).toEqual(created ? [] : ['原文']);
+            expect(api().canUndo).toBe(false);
+        } finally { delete (host as typeof host & { focus?: () => void }).focus; }
+    });
+
+    const textEndings = ['chart', 'tool', 'trade', 'blur', 'pointercancel', 'pagehide', 'hidden', 'symbol', 'shared-symbol', 'period', 'session', 'refresh', 'unmount'] as const;
+    it.each(textEndings.flatMap((ending) => [false, true].map((created) => [ending, created] as const)))(
+        '真實文字框輸入後 %s：使用者結束提交、context／卸載取消（新建=%s）', async (ending, created) => {
+            renderEditor = true;
+            const api = await setup();
+            if (created) {
+                await act(async () => api().setTool('text'));
+                await down(50, 200);
+            } else {
+                await act(async () => { addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' }); });
+                await act(async () => api().editText(api().drawings[0]!.id));
+            }
+            await act(async () => roots.at(-1)!.root.findByType('textarea').props.onChange({ target: { value: '使用者輸入' } }));
+            const staleBlur = roots.at(-1)!.root.findByType('textarea').props.onBlur;
+            if (ending === 'chart') await down(700, 350);
+            else await changeContext(ending, api);
+            await act(async () => { staleBlur(); flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            const canceled = ['symbol', 'shared-symbol', 'period', 'session', 'refresh', 'unmount'].includes(ending);
+            expect(getDrawings('TXF').map((d) => d.text)).toEqual(canceled ? created ? [] : ['原文'] : ['使用者輸入']);
+        },
+    );
+
+    it.each(['update', 'delete', 'move'] as const)('另一圖表 %s Y，X 的文字框仍可提交', async (operation) => {
+        renderEditor = true;
+        const api = await setup();
+        let other!: ChartDrawingsApi;
+        await mount({ receive: (v) => (other = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+        let x!: Drawing;
+        let y!: Drawing;
+        await act(async () => {
+            x = addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+            y = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
+            flushDrawingWrites();
+            api().rename(x.id, 'X');
+        });
+        await act(async () => api().editText(x.id));
+        const editor = roots[roots.length - 2]!;
+        await act(async () => editor.root.findByType('textarea').props.onChange({ target: { value: '繼續輸入' } }));
+        await act(async () => {
+            if (operation === 'update') other.rename(y.id, '遠端 Y');
+            if (operation === 'delete') other.removeOne(y.id);
+            if (operation === 'move') other.reorder(y.id, 0);
+        });
+        expect(api().editingTextId).toBe(x.id);
+        expect(api().canUndo).toBe(false);
+        await act(async () => editor.root.findByType('textarea').props.onBlur());
+        expect(getDrawings('TXF').find((d) => d.id === x.id)?.text).toBe('繼續輸入');
+        await act(async () => api().undo());
+        expect(getDrawings('TXF').find((d) => d.id === x.id)?.text).toBe('原文');
+        if (operation === 'update') expect(getDrawings('TXF').find((d) => d.id === y.id)?.name).toBe('遠端 Y');
+        if (operation === 'delete') expect(getDrawings('TXF').some((d) => d.id === y.id)).toBe(false);
+        if (operation === 'move') expect(getDrawings('TXF')[0]!.id).toBe(y.id);
+    });
+
+    it.each([false, true])('另一圖表修改同一文字物件，舊文字框失焦不得蓋掉對方待寫版本（新建=%s）', async (created) => {
+        renderEditor = true;
+        const api = await setup();
+        let other!: ChartDrawingsApi;
+        await mount({ receive: (v) => (other = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+        if (created) {
+            await act(async () => api().setTool('text'));
+            await down(50, 200);
+        } else {
+            await act(async () => { addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' }); });
+            await act(async () => api().editText(api().drawings[0]!.id));
+        }
+        const id = api().editingTextId!;
+        const editor = roots[roots.length - 2]!;
+        await act(async () => editor.root.findByType('textarea').props.onChange({ target: { value: '本地草稿' } }));
+        const staleBlur = editor.root.findByType('textarea').props.onBlur;
+        await act(async () => other.setText(id, '另一圖表的文字'));
+        expect(api().editingTextId).toBeNull();
+        await act(async () => { staleBlur(); flushDrawingWrites(); reloadDrawingsFromStorage(); });
+        expect(getDrawings('TXF').find((d) => d.id === id)?.text).toBe('另一圖表的文字');
+        expect(api().canUndo).toBe(false);
+    });
+
     it('斐波那契設定：改選項會驗證、連續拉色帶合併成一步復原', async () => {
         const api = await setup();
         const f = addDrawing('TXF', 'fib', [{ time: 1000, price: 1 }, { time: 1060, price: 2 }], DEFAULT_DRAWING_STYLE)!;
@@ -1567,7 +1674,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect([25090, 25110, 25080, 25100]).toContain(d.anchors[1]!.price);
     });
 
-    it('拖曳期間其他 writer 新增物件，中止拖曳並清除歷史，保留新增物件', async () => {
+    it('拖曳期間其他 writer 新增物件，拖曳繼續並保留新增物件', async () => {
         const api = await setup();
         addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
         await act(async () => {});
@@ -1575,11 +1682,183 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         // 拖曳中另一個本地操作新增了一條線
         const theirs = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
         await up(50, 150);
-        expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25000, 24800]);
-        expect(api().canUndo).toBe(false);
+        expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25050, 24800]);
+        expect(api().canUndo).toBe(true);
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
         expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25000, 24800]);
         expect(api().drawings.some((d) => d.id === theirs.id)).toBe(true);
+    });
+
+    it.each(['pending', 'persisted', 'journal'] as const)('另一圖表修改 Y 不中止正在拖曳的 X（%s）', async (path) => {
+        vi.useFakeTimers();
+        try {
+            const api = await setup();
+            let other!: ChartDrawingsApi;
+            await mount({ receive: (v) => (other = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+            await act(async () => {
+                api().setTool('horizontal');
+            });
+            await down(50, 200);
+            const x = api().drawings[0]!;
+            let y!: Drawing;
+            await act(async () => {
+                y = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
+                flushDrawingWrites();
+                api().rename(x.id, 'X');
+            });
+            expect(api().canUndo).toBe(true);
+            await down(50, 200);
+            await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+            expect(getDrawings('TXF')[0]!.anchors[0]!.price).toBe(25050);
+            await act(async () => {
+                if (path === 'persisted') flushDrawingWrites();
+                if (path === 'journal') writeDrawingJournal();
+                other.rename(y.id, 'Y 遠端修改');
+            });
+            expect(api().canUndo).toBe(false);
+            expect(docL.has('mousemove')).toBe(true);
+            expect(docL.has('mouseup')).toBe(true);
+            await up(50, 100);
+            expect(getDrawings('TXF')[0]!.anchors[0]!.price).toBe(25100);
+            await act(async () => api().undo());
+            await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(getDrawings('TXF')[0]!.anchors).toEqual(x.anchors);
+            expect(getDrawings('TXF')[1]!.name).toBe('Y 遠端修改');
+        } finally { vi.useRealTimers(); }
+    });
+
+    it.each(['pending', 'persisted', 'journal'] as const)('Esc 取消 X 時才讀到遠端 Y，仍撤銷 X 中途座標（%s）', async (path) => {
+        const api = await setup();
+        let x!: Drawing;
+        let y!: Drawing;
+        await act(async () => {
+            x = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE)!;
+            y = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
+            flushDrawingWrites();
+        });
+        await down(50, 200);
+        await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+        await act(async () => {
+            if (path === 'persisted') flushDrawingWrites();
+            if (path === 'journal') writeDrawingJournal();
+        });
+        const remoteY = { ...y, name: '遠端 Y', revision: remoteRevision(y) };
+        const savedX = JSON.parse(store.get('sj-pro-chart-drawings')!).TXF[0];
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [savedX, remoteY] }));
+        await key({ key: 'Escape' });
+        await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+        expect(getDrawings('TXF')[0]!.anchors).toEqual(x.anchors);
+        expect(getDrawings('TXF')[1]).toMatchObject(remoteY);
+    });
+
+    it.each(['chart', 'edit-text', 'rename', 'undo', 'redo', 'owner'] as const)('%s 接手拖曳會撤回中途座標並封住遲到事件', async (ending) => {
+        const api = await setup();
+        let x!: Drawing;
+        let text!: Drawing;
+        await act(async () => {
+            x = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE)!;
+            text = addDrawing('TXF', 'text', [{ time: 1000, price: 24900 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+            flushDrawingWrites();
+        });
+        await down(50, 200);
+        const lateUp = docL.get('mouseup')!;
+        await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+        if (ending === 'chart') await down(700, 350);
+        else if (ending === 'owner') {
+            let other!: ChartDrawingsApi;
+            await mount({ receive: (v) => (other = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+            await act(async () => other.setTool('vertical'));
+        } else await act(async () => {
+            if (ending === 'edit-text') api().editText(text.id);
+            if (ending === 'rename') api().rename(x.id, '改名');
+            if (ending === 'undo') api().undo();
+            if (ending === 'redo') api().redo();
+        });
+        await act(async () => { lateUp(ev(50, 100)); flushDrawingWrites(); reloadDrawingsFromStorage(); });
+        expect(getDrawings('TXF').find((d) => d.id === x.id)!.anchors).toEqual(x.anchors);
+        expect(docL.has('mouseup')).toBe(false);
+    });
+
+    it('遠端低 revision 改 X，本地拖曳日誌不能讓中途座標留下', async () => {
+        vi.useFakeTimers();
+        try {
+            const api = await setup();
+            let x!: Drawing;
+            await act(async () => {
+                x = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE)!;
+                flushDrawingWrites();
+            });
+            await down(50, 200);
+            await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+            await act(async () => writeDrawingJournal());
+            const remote = { ...x, name: '低 revision 遠端', revision: '0000000000000001:remote' };
+            store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [remote] }));
+            await act(async () => reloadDrawingsFromStorage());
+            await up(50, 100);
+            await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(getDrawings('TXF')[0]!.anchors).toEqual(x.anchors);
+            expect(docL.has('mouseup')).toBe(false);
+            expect(api().canUndo).toBe(false);
+        } finally { vi.useRealTimers(); }
+    });
+
+    it.each(['pending', 'persisted', 'journal'] as const)('多選拖曳 X、Y，另一圖表刪 X 時也撤回 Y 的中途座標（%s）', async (path) => {
+        vi.useFakeTimers();
+        try {
+            const api = await setup();
+            let other!: ChartDrawingsApi;
+            await mount({ receive: (v) => (other = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+            let x!: Drawing;
+            let y!: Drawing;
+            await act(async () => {
+                x = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE)!;
+                y = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
+                flushDrawingWrites();
+            });
+            await down(50, 200);
+            await up(50, 200);
+            await down(50, 400, { shiftKey: true });
+            expect(api().selectedIds).toEqual([x.id, y.id]);
+            const lateUp = docL.get('mouseup')!;
+            await act(async () => docL.get('mousemove')?.(ev(50, 350)));
+            expect(getDrawings('TXF').map((d) => d.anchors[0]!.price)).toEqual([25050, 24850]);
+            await act(async () => {
+                if (path === 'persisted') flushDrawingWrites();
+                if (path === 'journal') writeDrawingJournal();
+                other.removeOne(x.id);
+            });
+            expect(docL.has('mouseup')).toBe(false);
+            await act(async () => { lateUp(ev(50, 300)); flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(getDrawings('TXF').map((d) => d.id)).toEqual([y.id]);
+            expect(getDrawings('TXF')[0]!.anchors).toEqual(y.anchors);
+            expect(api().canUndo).toBe(false);
+        } finally { vi.useRealTimers(); }
+    });
+
+    it.each(['pending', 'persisted', 'journal'] as const)('另一圖表尚未落地地修改同一個 X，取消拖曳保留對方版本（%s）', async (path) => {
+        vi.useFakeTimers();
+        try {
+            const api = await setup();
+            let other!: ChartDrawingsApi;
+            await mount({ receive: (v) => (other = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+            let x!: Drawing;
+            await act(async () => {
+                x = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE)!;
+                flushDrawingWrites();
+            });
+            await down(50, 200);
+            await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+            await act(async () => {
+                if (path === 'persisted') flushDrawingWrites();
+                if (path === 'journal') writeDrawingJournal();
+                other.setAnchor(x.id, 0, { price: 24900 });
+            });
+            expect(docL.has('mouseup')).toBe(false);
+            await up(50, 100);
+            await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(getDrawings('TXF')[0]!.anchors[0]!.price).toBe(24900);
+            expect(api().canUndo).toBe(false);
+        } finally { vi.useRealTimers(); }
     });
 
     it.each([false, true])('拖曳途中遠端改同物件，不再寫入或建立歷史（墓碑=%s）', async (deleted) => {

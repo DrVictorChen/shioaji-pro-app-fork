@@ -699,6 +699,7 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
                 <TextEditor
                     key={api.editingTextId}
                     initial={api.drawings.find((d) => d.id === api.editingTextId)?.text ?? ''}
+                    onDraftChange={api.updateTextDraft}
                     box={api.editBox}
                     onCommit={api.commitText}
                 />
@@ -713,10 +714,12 @@ export function TextEditor({
     initial,
     box,
     onCommit,
+    onDraftChange,
 }: {
     initial: string;
     box: { left: number; top: number };
     onCommit: (text: string | null) => void;
+    onDraftChange?: (text: string) => void;
 }) {
     const [value, setValue] = useState(initial);
     const done = useRef(false);
@@ -742,7 +745,7 @@ export function TextEditor({
             placeholder='輸入文字，Enter 完成'
             rows={Math.min(6, Math.max(1, value.split('\n').length))}
             onMouseDown={(e) => e.stopPropagation()}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => { setValue(e.target.value); onDraftChange?.(e.target.value); }}
             onBlur={() => finish(value)}
             onKeyDown={(e) => {
                 if (isImeKey(e)) return;
@@ -803,8 +806,8 @@ export function DrawingSettingsDialog({
     const dialogRef = useRef<HTMLDivElement | null>(null);
     // 遠端勝出時先同步封住所有事件，再關閉；unmount 期間的 blur 也不能寫舊值。
     const invalidated = useRef(false);
-    useEffect(() => subscribeDrawingRemoteChanges((key) => {
-        if (key !== sourceApi.symbolKey) return;
+    useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
+        if (key !== sourceApi.symbolKey || !ids.has(drawing.id)) return;
         invalidated.current = true;
         noteDrawingHistoryConflict();
         closeRef.current();

@@ -206,6 +206,7 @@ export interface ChartDrawingsApi {
     editingTextId: string | null;
     editText: (id: string) => void;
     commitText: (text: string | null) => void;
+    updateTextDraft: (text: string) => void;
     setText: (id: string, text: string) => void;
     // 復原／重做
     undo: () => void;
@@ -303,9 +304,12 @@ export function useChartDrawings(opts: {
     const measureDoneRef = useRef(false); // 量測第二點已定（再點一下清除）
     const layerRef = useRef<DrawingLayer | null>(null);
     // 文字編輯開始前的清單；新建的文字取消＝整筆不留、也不進復原
-    const textTxRef = useRef<{ id: string; key: string; context: string; before: Drawing[]; created: boolean; invalidated?: boolean } | null>(null);
-    const cancelDragRef = useRef<((restore?: boolean) => void) | null>(null);
-    const cancelInteractionsRef = useRef<() => void>(() => {});
+    const textTxRef = useRef<{ id: string; key: string; context: string; before: Drawing[]; created: boolean; value?: string; invalidated?: boolean } | null>(null);
+    const cancelDragRef = useRef<((remoteIds?: ReadonlySet<string>) => void) | null>(null);
+    const dragIdsRef = useRef<readonly string[]>([]);
+    const finishTextRef = useRef<() => void>(() => {});
+    const cancelTextRef = useRef<(remoteIds?: ReadonlySet<string>) => void>(() => {});
+    const cancelInteractionsRef = useRef<(submitText?: boolean) => void>(() => {});
     const historyBusyRef = useRef(false);
 
     // 事件處理器裡要讀的最新值
@@ -335,17 +339,19 @@ export function useChartDrawings(opts: {
 
     // ── 復原 ─────────────────────────────────────────────────────────
     const bumpHistory = useCallback(() => setHistoryVer((v) => v + 1), []);
-    useEffect(() => subscribeDrawingRemoteChanges((key) => {
+    useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
         const changed = historyRef.current.clear(key);
         const info = textTxRef.current;
-        if (key === stateRef.current.symbolKey && info) {
-            info.invalidated = true;
-            setEditingTextId(null);
+        if (key === info?.key && ids.has(info.id)) {
+            cancelTextRef.current(ids);
             noteDrawingHistoryConflict();
         }
-        if (key === stateRef.current.symbolKey) {
-            cancelDragRef.current?.(false); // 遠端版本已勝出，不可用本地互動快照蓋回去。
-            cancelInteractionsRef.current();
+        if (key === stateRef.current.symbolKey && dragIdsRef.current.some((id) => ids.has(id))) {
+            cancelDragRef.current?.(ids);
+        }
+        // 未受影響的互動繼續；完成後的新一步以已觀察遠端改動為歷史起點。
+        if (key === stateRef.current.symbolKey && (cancelDragRef.current || textTxRef.current)) {
+            historyRef.current.begin(key, getDrawingHistoryStart());
         }
         if (changed) {
             noteDrawingHistoryConflict();
@@ -390,12 +396,12 @@ export function useChartDrawings(opts: {
     );
     const undo = useCallback(() => {
         if (historyBusyRef.current) return;
-        cancelInteractionsRef.current();
+        cancelInteractionsRef.current(true);
         applyHistory(historyRef.current.undo());
     }, [applyHistory]);
     const redo = useCallback(() => {
         if (historyBusyRef.current) return;
-        cancelInteractionsRef.current();
+        cancelInteractionsRef.current(true);
         applyHistory(historyRef.current.redo());
     }, [applyHistory]);
 
@@ -527,14 +533,17 @@ export function useChartDrawings(opts: {
         return true;
     }, [pushState]);
 
-    const cancelText = useCallback(() => {
+    const cancelText = useCallback((remoteIds?: ReadonlySet<string>) => {
         const info = textTxRef.current;
         textTxRef.current = null;
         stateRef.current.editingTextId = null;
         setEditingTextId(null);
         if (!info || info.invalidated) return;
         withDrawingWriter(writer, () => {
-            if (info.created) removeDrawings(info.key, [info.id]);
+            if (remoteIds?.has(info.id)) {
+                const original = info.before.find((d) => d.id === info.id) ?? getDrawings(info.key).find((d) => d.id === info.id);
+                if (original) cancelDrawingChanges(info.key, [original], remoteIds);
+            } else if (info.created) removeDrawings(info.key, [info.id]);
             else {
                 const original = info.before.find((d) => d.id === info.id);
                 if (!original) return;
@@ -543,10 +552,12 @@ export function useChartDrawings(opts: {
             }
         });
     }, [writer]);
+    cancelTextRef.current = cancelText;
 
-    const cancelInteractions = useCallback(() => {
+    const cancelInteractions = useCallback((submitText = false) => {
         cancelDragRef.current?.();
-        cancelText();
+        if (submitText) finishTextRef.current();
+        else cancelText();
         draftRef.current = null;
         clearMeasure();
         stateRef.current.tool = null;
@@ -573,7 +584,7 @@ export function useChartDrawings(opts: {
     }, [contextKey, bumpHistory]);
 
     useEffect(() => {
-        const cancel = () => cancelInteractionsRef.current();
+        const cancel = () => cancelInteractionsRef.current(true);
         const eventDocument = typeof document === 'undefined' ? null : document;
         const hidden = () => { if (eventDocument?.hidden) cancel(); };
         window.addEventListener('blur', cancel);
@@ -761,7 +772,8 @@ export function useChartDrawings(opts: {
             if (e.button !== 0 || onOverlay(e)) return;
             claimKeyboard(token);
             cancelDragRef.current?.();
-            if (textTxRef.current) cancelText();
+            // 先提交最新草稿，再移動焦點；後續 blur 只能看到已結束的交易。
+            finishTextRef.current();
             // 圖表本體取得鍵盤焦點 — Delete 只在焦點還在這張圖時作用
             focusHost();
             // 交易模式武裝中：這一下是點價下單，畫圖物件不能攔（選取、拖曳
@@ -892,6 +904,7 @@ export function useChartDrawings(opts: {
             const key = stateRef.current.symbolKey;
             historyRef.current.begin(key, getDrawingHistoryStart());
             drag = { items, before: getDrawings(key), key, context: stateRef.current.contextKey };
+            dragIdsRef.current = items.map((item) => item.id);
 
             const move = (ev: MouseEvent) => {
                 if (!drag) return;
@@ -932,6 +945,7 @@ export function useChartDrawings(opts: {
                     }
                 }
                 drag = null;
+                dragIdsRef.current = [];
                 cancelDragRef.current = null;
                 setChartInteractive(true);
             };
@@ -939,9 +953,10 @@ export function useChartDrawings(opts: {
             document.addEventListener('mouseup', up, true);
             activeMove = move;
             activeUp = up;
-            cancelDragRef.current = (restore = true) => {
+            cancelDragRef.current = (remoteIds) => {
                 const session = drag;
                 drag = null;
+                dragIdsRef.current = [];
                 cancelDragRef.current = null;
                 document.removeEventListener('mousemove', move, true);
                 document.removeEventListener('mouseup', up, true);
@@ -950,10 +965,10 @@ export function useChartDrawings(opts: {
                 if (frame !== null) cancelRaf(frame);
                 frame = null;
                 pendingPt = null;
-                if (session && restore) {
+                if (session) {
                     const originals = session.before.filter((d) => session.items.some((item) => item.id === d.id));
                     if (originals.length) {
-                        const restored = withDrawingWriter(writer, () => cancelDrawingChanges(session.key, originals));
+                        const restored = withDrawingWriter(writer, () => cancelDrawingChanges(session.key, originals, remoteIds));
                         for (const original of originals) {
                             const d = restored.find((x) => x.id === original.id);
                             if (d) historyRef.current.rebase(session.key, original, d);
@@ -976,7 +991,7 @@ export function useChartDrawings(opts: {
             e.preventDefault();
             e.stopPropagation();
             historyRef.current.begin(stateRef.current.symbolKey, getDrawingHistoryStart());
-            cancelInteractionsRef.current();
+            cancelInteractionsRef.current(true);
             textTxRef.current = { id: picked.drawing.id, key: stateRef.current.symbolKey, context: stateRef.current.contextKey, before: getDrawings(stateRef.current.symbolKey), created: false };
             setSelectedIds([picked.drawing.id]);
             setEditingTextId(picked.drawing.id);
@@ -1067,7 +1082,7 @@ export function useChartDrawings(opts: {
     // 點擊，武裝點價買賣時按 Delete 也不會刪到剛才選著的畫圖物件
     useEffect(() => {
         if (!tradeArmed) return;
-        cancelInteractionsRef.current();
+        cancelInteractionsRef.current(true);
     }, [tradeArmed]);
 
     // ── 鍵盤 ─────────────────────────────────────────────────────────
@@ -1083,7 +1098,7 @@ export function useChartDrawings(opts: {
         const onOwnerChange = () => {
             setIsOwner(keyOwner === token);
             if (keyOwner === token) return;
-            cancelInteractionsRef.current();
+            cancelInteractionsRef.current(true);
         };
         keyOwnerListeners.add(onOwnerChange);
         return () => {
@@ -1094,7 +1109,7 @@ export function useChartDrawings(opts: {
 
     const setToolChecked = useCallback(
         (t: DrawingToolId | null) => {
-            cancelInteractionsRef.current();
+            cancelInteractionsRef.current(true);
             toolContextRef.current = stateRef.current.contextKey;
             // 動到左側工具列就離開交易模式 — 包含按「游標」，那是這一側的
             // 中性狀態，也是從交易模式脫身的方式之一
@@ -1398,7 +1413,7 @@ export function useChartDrawings(opts: {
     const editText = useCallback((id: string) => {
         const d = stateRef.current.drawings.find((x) => x.id === id);
         if (!d || d.tool !== 'text' || d.locked) return;
-        cancelInteractionsRef.current();
+        cancelInteractionsRef.current(true);
         historyRef.current.begin(stateRef.current.symbolKey, getDrawingHistoryStart());
         textTxRef.current = { id, key: stateRef.current.symbolKey, context: stateRef.current.contextKey, before: getDrawings(stateRef.current.symbolKey), created: false };
         setSelectedIds([id]);
@@ -1414,6 +1429,7 @@ export function useChartDrawings(opts: {
             const { editingTextId: id, symbolKey: key } = stateRef.current;
             const info = textTxRef.current;
             textTxRef.current = null;
+            stateRef.current.editingTextId = null;
             setEditingTextId(null);
             if (!id) return;
             if (!info || info.invalidated || info.key !== key || info.context !== stateRef.current.contextKey) return;
@@ -1446,6 +1462,19 @@ export function useChartDrawings(opts: {
         },
         [bumpHistory, hostRef, writer, symbolKey, contextKey, editingTextId],
     );
+
+    const updateTextDraft = useCallback((text: string) => {
+        const info = textTxRef.current;
+        if (info && info.key === symbolKey && info.context === contextKey && info.id === editingTextId) info.value = text;
+    }, [symbolKey, contextKey, editingTextId]);
+    finishTextRef.current = () => {
+        const info = textTxRef.current;
+        if (info && (info.key !== stateRef.current.symbolKey || info.context !== stateRef.current.contextKey)) {
+            cancelText();
+            return;
+        }
+        if (info) commitText(info.value ?? info.before.find((d) => d.id === info.id)?.text ?? '');
+    };
 
     const setText = useCallback(
         (id: string, text: string) => {
@@ -1552,6 +1581,7 @@ export function useChartDrawings(opts: {
         setAnchor,
         setFib,
         editingTextId,
+        updateTextDraft,
         editText,
         commitText,
         setText,

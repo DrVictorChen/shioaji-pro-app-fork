@@ -97,6 +97,18 @@ describe('設定對話框：規則 R 與欄位 diff', () => {
         for (const fn of [api.setText, api.rename, api.setAnchor, api.applyStyle]) expect(fn).not.toHaveBeenCalled();
     });
 
+    it('遠端修改別的物件，不中止目前物件的設定編輯', async () => {
+        const { d, api, onClose } = await dialog();
+        const y = { ...d, id: 'remote-y', text: '遠端 Y', revision: '0000000000000100:remote' };
+        storage.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [d, y] }));
+        await act(async () => reloadDrawingsFromStorage());
+        expect(onClose).not.toHaveBeenCalled();
+        const text = view.root.findByProps({ 'aria-label': '文字內容' });
+        await act(async () => text.props.onChange({ target: { value: '繼續編輯 X' } }));
+        await act(async () => view.root.findByProps({ 'aria-label': '文字內容' }).props.onBlur());
+        expect(api.setText).toHaveBeenCalledWith(d.id, '繼續編輯 X');
+    });
+
     it('改價格只提交 price，改時間只提交 time', async () => {
         const { api, d } = await dialog('trend');
         await act(async () => view.root.findAllByProps({ role: 'tab' })[1]!.props.onClick());
