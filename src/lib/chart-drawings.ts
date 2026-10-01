@@ -545,17 +545,28 @@ function loadSettings(): DrawingSettings {
 // 也把日誌疊上去，還沒被併進去之前畫面就看得到。
 const JOURNAL_PREFIX = 'sj-chart-drawings-pending:';
 const WINDOW_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+let chartSeq = 0;
+let activeWriter = WINDOW_ID;
+export function createDrawingWriter(): string {
+    return `${WINDOW_ID}-chart-${++chartSeq}`;
+}
+// 只包同步儲存操作；非同步鎖內的歷史操作另行捕捉 writer。
+export function withDrawingWriter<T>(writer: string, fn: () => T): T {
+    const previous = activeWriter;
+    activeWriter = writer;
+    try { return fn(); } finally { activeWriter = previous; }
+}
 let journalSeq = 0;
 let revisionCounter = 0;
 function observeRevision(revision: Revision) {
     revisionCounter = Math.max(revisionCounter, Number(revision.split(':')[0]));
 }
 function nextRevision(): Revision {
-    return `${(++revisionCounter).toString().padStart(16, '0')}:${WINDOW_ID}`;
+    return `${(++revisionCounter).toString().padStart(16, '0')}:${activeWriter}`;
 }
 
 function ownTombstone(t: unknown): t is Exclude<Tombstone, number> {
-    return isTombstone(t) && tombWriters(t).every((writer) => writer === WINDOW_ID);
+    return isTombstone(t) && tombWriters(t).every((writer) => writer === activeWriter);
 }
 
 type OrderMove = { id: string; after: string | null; revision: Revision };
@@ -689,6 +700,8 @@ type Op = Drawing | Tombstone;
 const pending = new Map<string, Map<string, Op>>();
 // 只重放實際移動的物件，不覆蓋遠端對其他物件的排序。
 const pendingOrder: OrderOps = new Map();
+// 同視窗各圖表也必須看見彼此尚未落地的寫入；保留每個 writer 的最新 counter。
+const localWrites = new Map<string, Map<string, Revision>>();
 
 function record(key: string, id: string, op: Op) {
     let ops = pending.get(key);
@@ -697,6 +710,11 @@ function record(key: string, id: string, op: Op) {
         pending.set(key, ops);
     }
     ops.set(id, op);
+    const revision = isTombstone(op) ? tombRevision(op) : drawingRevision(op);
+    const writer = revision.split(':')[1]!;
+    const writes = localWrites.get(key) ?? new Map<string, Revision>();
+    if ((writes.get(writer) ?? '') < revision) writes.set(writer, revision);
+    localWrites.set(key, writes);
     if (isTombstone(op)) {
         const moves = pendingOrder.get(key)?.filter((m) => m.id !== id);
         if (moves?.length) pendingOrder.set(key, moves);
@@ -950,8 +968,13 @@ export function writeDrawingJournal() {
     pendingSettingKeys.clear();
 }
 
-function persist() {
+function persist(remoteChecked = false) {
     writeTimer ??= setTimeout(flushDrawingWrites, WRITE_THROTTLE_MS);
+    if (!remoteChecked) {
+        const tombs = loadTombs();
+        const journals = loadJournals();
+        acceptRemoteChanges(loadView(tombs, journals), tombs, journals);
+    }
     emit();
 }
 
@@ -1020,7 +1043,7 @@ export function cancelDrawingChanges(key: string, originals: Drawing[]) {
             return original;
         }
         // 取消尚未落地的變更；尚未落地的新增仍須保存原版。
-        if (saved) pending.get(key)?.delete(d.id);
+        if (saved && drawingRevision(saved) === drawingRevision(original)) pending.get(key)?.delete(d.id);
         else record(key, d.id, original);
         return original;
     });
@@ -1032,11 +1055,19 @@ export function cancelDrawingChanges(key: string, originals: Drawing[]) {
     return getDrawings(key);
 }
 
-const remoteListeners = new Set<(key: string) => void>();
-const observedRemoteWrites = new Map<string, string>();
-export function subscribeDrawingRemoteChanges(listener: (key: string) => void) {
-    remoteListeners.add(listener);
-    return () => { remoteListeners.delete(listener); };
+const remoteListeners = new Map<(key: string) => void, string>();
+const observedRemoteWrites = new Map<string, Map<string, string>>();
+export function subscribeDrawingRemoteChanges(listener: (key: string) => void, writer = WINDOW_ID) {
+    if (!observedRemoteWrites.has(writer)) {
+        const tombs = loadTombs();
+        observedRemoteWrites.set(writer, new Map([...remoteWritesOf(loadView(tombs), tombs, loadJournals(), writer)]
+            .map(([key, writes]) => [key, writes.signature])));
+    }
+    remoteListeners.set(listener, writer);
+    return () => {
+        remoteListeners.delete(listener);
+        if (writer !== WINDOW_ID && ![...remoteListeners.values()].includes(writer)) observedRemoteWrites.delete(writer);
+    };
 }
 
 export function getDrawingHistoryStart(): number {
@@ -1045,11 +1076,14 @@ export function getDrawingHistoryStart(): number {
 }
 
 // 合併前也掃主項目與每份日誌；本視窗的較新版本不能遮蔽遠端寫入。
-function remoteWritesOf(base: Store, tombs: Tombs, journals = loadJournals()) {
+function remoteWritesOf(base: Store, tombs: Tombs, journals = loadJournals(), ownWriter = activeWriter) {
     const all = new Map<string, { tokens: Set<string>; latest: number }>();
     const put = (key: string, token: string, revision: Revision, writer = revision.split(':')[1]!) => {
         observeRevision(revision);
-        if (writer === WINDOW_ID) return;
+        if (writer === ownWriter) return;
+        // 本 module 已觀察的圖表寫入用 writer counter 表示，落地／日誌合併
+        // 不再算一次新改動，也不因舊主項目的消失誤清別張圖的新歷史。
+        if (token !== 'local' && revision <= (localWrites.get(key)?.get(writer) ?? '')) return;
         const writes = all.get(key) ?? { tokens: new Set<string>(), latest: 0 };
         writes.tokens.add(`${token}:${writer}:${revision}`);
         writes.latest = Math.max(writes.latest, Number(revision.split(':')[0]));
@@ -1069,18 +1103,27 @@ function remoteWritesOf(base: Store, tombs: Tombs, journals = loadJournals()) {
         }
         for (const [key, moves] of j.order) for (const m of moves) put(key, `order:${m.id}`, m.revision);
     }
+    for (const [key, writes] of localWrites) for (const [writer, revision] of writes) put(key, 'local', revision, writer);
     return new Map([...all].map(([key, writes]) => [key, {
         signature: JSON.stringify([...writes.tokens].sort()), latest: writes.latest,
     }]));
 }
 function rememberRemoteWrites(base: Store, tombs: Tombs) {
-    observedRemoteWrites.clear();
-    for (const [key, writes] of remoteWritesOf(base, tombs)) observedRemoteWrites.set(key, writes.signature);
+    for (const writer of new Set([WINDOW_ID, ...observedRemoteWrites.keys()])) {
+        observedRemoteWrites.set(writer, new Map([...remoteWritesOf(base, tombs, loadJournals(), writer)]
+            .map(([key, writes]) => [key, writes.signature])));
+    }
 }
 function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
-    const writes = remoteWritesOf(base, tombs, journals);
-    const changed = new Set([...writes].filter(([key, product]) =>
-        observedRemoteWrites.get(key) !== product.signature).map(([key]) => key));
+    const results = new Map<string, { changed: Set<string>; writes: ReturnType<typeof remoteWritesOf> }>();
+    for (const writer of new Set([activeWriter, ...observedRemoteWrites.keys(), ...remoteListeners.values()])) {
+        const writes = remoteWritesOf(base, tombs, journals, writer);
+        const observed = observedRemoteWrites.get(writer);
+        const changed = new Set([...writes].filter(([key, product]) =>
+            observed?.get(key) !== product.signature).map(([key]) => key));
+        observedRemoteWrites.set(writer, new Map([...writes].map(([key, product]) => [key, product.signature])));
+        results.set(writer, { changed, writes });
+    }
     // 同步的勝負仍按 revision／墓碑處理；墓碑必須保留自己的刪除並取聯集。
     for (const [key, ops] of pending) {
         for (const [id, op] of ops) {
@@ -1095,10 +1138,9 @@ function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
         }
         if (!ops.size) pending.delete(key);
     }
-    observedRemoteWrites.clear();
-    for (const [key, product] of writes) observedRemoteWrites.set(key, product.signature);
-    for (const key of changed) for (const listener of remoteListeners) listener(key);
-    return { changed, writes };
+    const result = results.get(activeWriter)!;
+    for (const [listener, writer] of remoteListeners) for (const key of results.get(writer)!.changed) listener(key);
+    return result;
 }
 
 export function noteDrawingHistoryConflict() {
@@ -1107,14 +1149,16 @@ export function noteDrawingHistoryConflict() {
 
 // 整份歷史的有效性在 Web Lock 內重讀判斷，不再逐物件配對歷史版本。
 export function applyDrawingHistory(step: HistoryStep, applied: (success: boolean) => void) {
-    withLock(() => {
+    const writer = activeWriter;
+    withLock(() => withDrawingWriter(writer, () => {
         const tombs = loadTombs();
         const journals = loadJournals();
         const base = loadView(tombs, journals);
         const { changed, writes } = acceptRemoteChanges(base, tombs, journals);
         store = applyPending(base, tombs);
         const foreignDelete = step.changes.some((c) => {
-            const t = tombs[step.key]?.[c.id];
+            const pendingDelete = pending.get(step.key)?.get(c.id);
+            const t = isTombstone(pendingDelete) ? pendingDelete : tombs[step.key]?.[c.id];
             return t !== undefined && !ownTombstone(t);
         });
         if (!step.changes.length || changed.has(step.key) || foreignDelete ||
@@ -1129,9 +1173,11 @@ export function applyDrawingHistory(step: HistoryStep, applied: (success: boolea
             if (isTombstone(pending.get(step.key)?.get(c.id))) pending.get(step.key)?.delete(c.id);
         }
         commit(step.key, applyChanges(getDrawings(step.key), step.changes, step.side, step.order), tombs);
+        // 復原／重做也是這張圖的新寫入，其他圖表立即套用遠端清空規則。
+        acceptRemoteChanges(base, tombs, journals);
         writeDrawingsNow({ base, tombs, journals });
         applied(true);
-    }, () => applied(false));
+    }), () => applied(false));
 }
 
 export function getDrawingSettings(): DrawingSettings {
@@ -1220,7 +1266,7 @@ function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs) {
     }
     const now = stamp();
     const ids = new Set(nextIn.map((d) => d.id));
-    for (const d of before) if (!ids.has(d.id)) record(key, d.id, { revision: nextRevision(), updatedAt: now, writers: [WINDOW_ID] });
+    for (const d of before) if (!ids.has(d.id)) record(key, d.id, { revision: nextRevision(), updatedAt: now, writers: [activeWriter] });
     const prev = new Map(before.map((d) => [d.id, d]));
     // 有變動的物件一律取得新 revision（含套用歷史快照）。
     const next = nextIn.map((d) => {
@@ -1246,7 +1292,7 @@ function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs) {
         pendingOrder.set(key, moves);
     }
     store = { ...store, [key]: next };
-    persist();
+    persist(historyTombs !== undefined);
 }
 
 // 整份換掉（復原／重做、多選操作）— 依物件記錄差異，跨視窗照樣合併
@@ -1356,6 +1402,7 @@ export function __resetDrawingsForTest() {
     notices = [];
     noticed.clear();
     observedRemoteWrites.clear();
+    localWrites.clear();
     revisionCounter = 0;
     lastStamp = 0;
     lockOverride = null;

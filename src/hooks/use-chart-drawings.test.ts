@@ -1,4 +1,4 @@
-import { createElement, createRef } from 'react';
+import { createElement, useLayoutEffect, useRef } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -56,14 +56,16 @@ function Probe({
     onEnterDrawingMode: () => void;
     host?: unknown;
 }) {
-    const hostRef = createRef<HTMLDivElement>();
+    const hostRef = useRef<HTMLDivElement>(null);
+    const chartRef = useRef(null);
+    const seriesRef = useRef(null);
     (hostRef as { current: unknown }).current = host ?? null;
     receive(
         useChartDrawings({
             contract,
             hostRef,
-            chartRef: createRef(),
-            seriesRef: createRef(),
+            chartRef,
+            seriesRef,
             getTimes: () => [],
             tradeArmed,
             onEnterDrawingMode,
@@ -120,6 +122,48 @@ describe('跨視窗改動後的復原／重做', () => {
         return { api: () => api, a, b };
     }
     const saved = (): Drawing[] => JSON.parse(store.get(KEY)!).TXF ?? [];
+
+    it.each(['pending', 'persisted', 'journal'] as const)('同視窗另一張圖刪除後，復原不可撤銷對方墓碑（%s）', async (path) => {
+        const { api: a, a: drawing } = await setup();
+        let b!: ChartDrawingsApi;
+        await mount({ receive: (v) => (b = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+        await act(async () => a().rename(drawing.id, 'A 修改'));
+        await act(async () => {
+            b.removeOne(drawing.id);
+            if (path === 'persisted') flushDrawingWrites();
+            if (path === 'journal') writeDrawingJournal();
+        });
+        expect(a().canUndo).toBe(false);
+        expect(b.canUndo).toBe(true);
+        await act(async () => a().undo());
+        await act(async () => flushDrawingWrites());
+        expect(saved().some((d) => d.id === drawing.id)).toBe(false);
+        await act(async () => b.undo());
+        expect(saved().some((d) => d.id === drawing.id)).toBe(true);
+    });
+
+    it.each(['update', 'move', 'delete'] as const)('另一圖表 %s 清空 undo 與 redo，writer 包含不同圖表實例 id', async (operation) => {
+        const { api: a, a: first, b: second } = await setup();
+        let b!: ChartDrawingsApi;
+        await mount({ receive: (v) => (b = v), tradeArmed: false, onEnterDrawingMode: vi.fn() });
+        await act(async () => b.rename(second.id, 'B'));
+        const writerB = drawingRevision(getDrawings('TXF')[1]!).split(':')[1]!;
+        await act(async () => a().rename(first.id, 'A1'));
+        const writerA = drawingRevision(getDrawings('TXF')[0]!).split(':')[1]!;
+        expect(writerA).not.toBe(writerB);
+        expect(writerA.replace(/-chart-\d+$/, '')).toBe(writerB.replace(/-chart-\d+$/, ''));
+        await act(async () => a().setHidden(first.id, true));
+        await act(async () => a().undo());
+        expect(a().canUndo).toBe(true);
+        expect(a().canRedo).toBe(true);
+        await act(async () => {
+            if (operation === 'update') b.rename(second.id, 'B 更新');
+            if (operation === 'move') b.reorder(second.id, 0);
+            if (operation === 'delete') b.removeOne(second.id);
+        });
+        expect(a().canUndo).toBe(false);
+        expect(a().canRedo).toBe(false);
+    });
 
     it.each(['pending', 'persisted', 'journal'] as const)('本地刪除→復原原子地撤銷自己的墓碑並持久化（%s）', async (path) => {
         const { api, a, b } = await setup();
@@ -212,13 +256,17 @@ describe('跨視窗改動後的復原／重做', () => {
                 if (path === 'persisted') flushDrawingWrites();
                 if (path === 'journal') writeDrawingJournal();
             });
-            const ownRevision = `${(Number(drawingRevision(b).split(':')[0]) + 1).toString().padStart(16, '0')}:${drawingRevision(a).split(':')[1]}`;
-            const writers = path === 'persisted' ? ['remote', ownRevision.split(':')[1]] : ['remote'];
+            const ownRevision = path === 'persisted' ? JSON.parse(store.get(TKEY)!).TXF[a.id].revision
+                : path === 'journal' ? JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]).ops.TXF[a.id].revision
+                : null;
+            const writers = path === 'persisted' ? ['remote', ownRevision!.split(':')[1]] : ['remote'];
             store.set(TKEY, JSON.stringify({ TXF: { [a.id]: { revision: path === 'persisted' ? ownRevision : '0000000000000001:remote', updatedAt: 1, writers } } }));
             await act(async () => { flushDrawingWrites(); api().undo(); });
             const tomb = JSON.parse(store.get(TKEY)!).TXF[a.id];
-            expect(tomb.revision).toBe(ownRevision);
-            expect(tomb.writers).toEqual(expect.arrayContaining(['remote', ownRevision.split(':')[1]]));
+            if (ownRevision) expect(tomb.revision).toBe(ownRevision);
+            expect(Number(tomb.revision.split(':')[0])).toBe(Number(drawingRevision(b).split(':')[0]) + 1);
+            expect(tomb.revision.split(':')[1]).toMatch(/-chart-\d+$/);
+            expect(tomb.writers).toEqual(expect.arrayContaining(['remote', tomb.revision.split(':')[1]]));
             expect(api().drawings.some((d) => d.id === a.id)).toBe(false);
             expect(api().canUndo).toBe(false);
             expect(api().canRedo).toBe(false);
@@ -454,7 +502,7 @@ describe('鍵盤只歸一張圖，且不擋 Esc×2 全部刪單', () => {
             },
         });
         vi.stubGlobal('performance', { now: () => 1000 });
-        vi.stubGlobal('document', { activeElement: null });
+        vi.stubGlobal('document', { activeElement: null, addEventListener() {}, removeEventListener() {} });
     });
 
     // stopAtTarget：目標元件（例如價格輸入框）在 Esc 上 stopPropagation —
@@ -791,13 +839,16 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         code?: string;
         themeMode?: 'dark' | 'light';
     }) {
+        const hostRef = useRef(host as unknown as HTMLDivElement);
+        const chartRef = useRef({ applyOptions() {} } as never);
+        const seriesRef = useRef(series as never);
         receive(
             useChartDrawings({
                 contract: { code, security_type: code === '2330' ? 'STK' : 'FUT' } as ContractBase,
                 themeMode,
-                hostRef: { current: host as unknown as HTMLDivElement },
-                chartRef: { current: { applyOptions() {} } as never },
-                seriesRef: { current: series as never },
+                hostRef,
+                chartRef,
+                seriesRef,
                 getTimes: () => [1000, 1060, 1120, 1180],
                 tradeArmed,
                 onEnterDrawingMode: vi.fn(),
@@ -1053,6 +1104,13 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
     const hostL = new Map<string, L>();
     const docL = new Map<string, L>();
     const keyL = new Set<L>();
+    const windowL = new Map<string, Set<L>>();
+    let currentContract = contract;
+    let priceBase = 25200;
+    let currentContext = '1:false';
+    let tradeArmed = false;
+    let beforeContextEffect: (() => void) | null = null;
+    let receiveApi: (v: ChartDrawingsApi) => void;
     const inside = { tagName: 'CANVAS' };
     const scope = { contains: (n: unknown) => n === inside };
     const host = {
@@ -1064,8 +1122,8 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
     };
     let layer: { state: { draft: unknown; measure: unknown } } | null = null;
     const series = {
-        priceToCoordinate: (p: number) => 25200 - p,
-        coordinateToPrice: (y: number) => 25200 - y,
+        priceToCoordinate: (p: number) => priceBase - p,
+        coordinateToPrice: (y: number) => priceBase - y,
         priceFormatter: () => ({ format: String }),
         attachPrimitive(l: {
             attached: (p: unknown) => void;
@@ -1099,14 +1157,16 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         { time: 1180, open: 25100, high: 25130, low: 25090, close: 25120 },
     ];
     function V2Probe({ receive }: { receive: (v: ChartDrawingsApi) => void }) {
+        useLayoutEffect(() => { beforeContextEffect?.(); }, [currentContract, currentContext]);
         receive(
             useChartDrawings({
-                contract,
+                contract: currentContract,
+                contextKey: currentContext,
                 hostRef: refs.host,
                 chartRef: refs.chart,
                 seriesRef: refs.series,
                 getTimes: () => [1000, 1060, 1120, 1180],
-                tradeArmed: false,
+                tradeArmed,
                 onEnterDrawingMode: () => {},
                 pnlPerPoint: 200,
                 getBars: () => v2Bars,
@@ -1119,21 +1179,31 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         hostL.clear();
         docL.clear();
         keyL.clear();
+        windowL.clear();
+        currentContract = contract;
+        priceBase = 25200;
+        currentContext = '1:false';
+        tradeArmed = false;
+        beforeContextEffect = null;
         vi.stubGlobal('document', {
             activeElement: inside,
             addEventListener: (t: string, l: L) => docL.set(t, l),
             removeEventListener: (t: string) => docL.delete(t),
         });
         vi.stubGlobal('window', {
-            addEventListener: (t: string, l: L) => t === 'keydown' && keyL.add(l),
-            removeEventListener: (t: string, l: L) => keyL.delete(l),
+            addEventListener: (t: string, l: L) => {
+                if (t === 'keydown') keyL.add(l);
+                else { const ls = windowL.get(t) ?? new Set<L>(); ls.add(l); windowL.set(t, ls); }
+            },
+            removeEventListener: (t: string, l: L) => { keyL.delete(l); windowL.get(t)?.delete(l); },
         });
     });
 
     async function setup() {
         let api!: ChartDrawingsApi;
+        receiveApi = (v) => (api = v);
         await act(async () => {
-            roots.push(create(createElement(V2Probe, { receive: (v) => (api = v) })));
+            roots.push(create(createElement(V2Probe, { receive: receiveApi })));
         });
         return () => api;
     }
@@ -1176,6 +1246,178 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         });
         return e;
     };
+    const contexts = ['symbol', 'shared-symbol', 'period', 'session', 'refresh', 'blur', 'pointercancel', 'unmount', 'tool', 'trade', 'pagehide', 'hidden'] as const;
+    const changeContext = async (change: typeof contexts[number], api: () => ChartDrawingsApi) => {
+        await act(async () => {
+            if (change === 'symbol' || change === 'shared-symbol') {
+                currentContract = { code: change === 'symbol' ? 'MXFR1' : 'TXFR2', security_type: 'FUT' } as ContractBase;
+                priceBase = 1200;
+            } else if (change === 'period') currentContext = '5:false';
+            else if (change === 'session') currentContext = '1:true';
+            else if (change === 'refresh') currentContext = '1:false:refresh';
+            else if (change === 'trade') tradeArmed = true;
+            else if (change === 'unmount') roots.at(-1)!.unmount();
+            else if (change === 'tool') api().setTool('vertical');
+            else if (change === 'pointercancel') docL.get('pointercancel')?.({});
+            else if (change === 'hidden') {
+                Object.assign(document, { hidden: true });
+                docL.get('visibilitychange')?.({});
+            } else for (const l of windowL.get(change) ?? []) l({});
+            if (['symbol', 'shared-symbol', 'period', 'session', 'refresh', 'trade'].includes(change)) {
+                roots.at(-1)!.update(createElement(V2Probe, { receive: receiveApi }));
+            }
+        });
+    };
+
+    it('拖曳前的 R2 尚未落地，Esc 後重載仍保留 R2', async () => {
+        vi.useFakeTimers();
+        try {
+            const api = await setup();
+            await act(async () => api().setTool('horizontal'));
+            await down(50, 200);
+            await act(async () => flushDrawingWrites());
+            await act(async () => api().setSelectedPrice(25020));
+            const r2 = api().drawings[0]!;
+            await down(50, 180);
+            await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+            await key({ key: 'Escape' });
+            expect(api().drawings[0]).toBe(r2);
+            await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(api().drawings[0]!.anchors).toEqual(r2.anchors);
+        } finally { vi.useRealTimers(); }
+    });
+
+    it.each(contexts.flatMap((change) => ['pending', 'persisted', 'journal'].map((path) => [change, path] as const)))('拖曳途中 %s（%s）回到開始狀態，遲到事件不可再寫入', async (change, path) => {
+        const api = await setup();
+        await act(async () => api().setTool('horizontal'));
+        await down(50, 200);
+        const original = api().drawings[0]!;
+        await act(async () => flushDrawingWrites());
+        await down(50, 200);
+        const lateUp = docL.get('mouseup')!;
+        await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+        expect(getDrawings('TXF')[0]!.anchors[0]!.price).toBe(25050);
+        await act(async () => {
+            if (path === 'persisted') flushDrawingWrites();
+            if (path === 'journal') writeDrawingJournal();
+        });
+        await changeContext(change, api);
+        await act(async () => lateUp(ev(50, 100)));
+        await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+        expect(getDrawings('TXF')[0]!.anchors).toEqual(original.anchors);
+        expect(docL.has('mousemove')).toBe(false);
+        expect(docL.has('mouseup')).toBe(false);
+    });
+
+    it.each(contexts.flatMap((change) => ['draft', 'measure', 'new-text', 'edit-text'].map((interaction) => [change, interaction] as const)))('%s 中止 %s，不留下草稿或文字編輯', async (change, interaction) => {
+        const api = await setup();
+        let original: Drawing | undefined;
+        if (interaction === 'edit-text') {
+            await act(async () => {
+                original = addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+                flushDrawingWrites();
+            });
+            await act(async () => api().editText(original!.id));
+            await act(async () => api().setText(original!.id, '互動中'));
+            await act(async () => flushDrawingWrites());
+        } else {
+            await act(async () => api().setTool(interaction === 'draft' ? 'channel' : interaction === 'measure' ? 'measure' : 'text'));
+            await down(50, 200);
+            await act(async () => flushDrawingWrites());
+        }
+        const lateCommit = api().commitText;
+        await changeContext(change, api);
+        await act(async () => { lateCommit('遲到文字'); flushDrawingWrites(); reloadDrawingsFromStorage(); });
+        expect(getDrawings('TXF').map((d) => d.text)).toEqual(original ? ['原文'] : []);
+        expect(layer?.state.draft).toBeNull();
+        expect(layer?.state.measure).toBeNull();
+        if (change !== 'unmount') expect(api().editingTextId).toBeNull();
+    });
+
+    it.each(['symbol', 'period', 'blur', 'pointercancel', 'unmount'] as const)('%s 清除待寫 RAF，已排程 callback 也不能污染儲存', async (change) => {
+        let queued!: FrameRequestCallback;
+        const cancel = vi.fn();
+        vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { queued = cb; return 17; });
+        vi.stubGlobal('cancelAnimationFrame', cancel);
+        const api = await setup();
+        await act(async () => api().setTool('horizontal'));
+        await down(50, 200);
+        const original = api().drawings[0]!;
+        await act(async () => flushDrawingWrites());
+        await down(50, 200);
+        const lateMove = docL.get('mousemove')!;
+        const lateUp = docL.get('mouseup')!;
+        await act(async () => lateMove(ev(50, 150)));
+        await changeContext(change, api);
+        expect(cancel).toHaveBeenCalledWith(17);
+        await act(async () => { queued(0); lateMove(ev(50, 100)); lateUp(ev(50, 100)); flushDrawingWrites(); });
+        expect(getDrawings('TXF')[0]).toBe(original);
+        expect(docL.has('mousemove')).toBe(false);
+        expect(docL.has('mouseup')).toBe(false);
+    });
+
+    it('context 清理 effect 前放開滑鼠，商品核對仍攔下錯誤投影', async () => {
+        const api = await setup();
+        await act(async () => api().setTool('horizontal'));
+        await down(50, 200);
+        const original = api().drawings[0]!;
+        await act(async () => flushDrawingWrites());
+        await down(50, 200);
+        const lateUp = docL.get('mouseup')!;
+        beforeContextEffect = () => lateUp(ev(50, 100));
+        await changeContext('symbol', api);
+        expect(getDrawings('TXF')[0]).toBe(original);
+        expect(getDrawings('MXF')).toEqual([]);
+    });
+
+    it.each(['draft', 'measure', 'text'] as const)('context 清理 effect 前的 %s 遲到事件不可混用新投影', async (interaction) => {
+        const api = await setup();
+        await act(async () => api().setTool(interaction === 'draft' ? 'trend' : interaction));
+        await down(50, 200);
+        const lateCommit = api().commitText;
+        beforeContextEffect = () => {
+            if (interaction === 'text') lateCommit('不應提交');
+            else hostL.get('mousedown')!(ev(70, 100));
+        };
+        await changeContext('symbol', api);
+        await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+        expect(getDrawings('TXF')).toEqual([]);
+        expect(getDrawings('MXF')).toEqual([]);
+        expect(layer?.state.draft).toBeNull();
+        expect(layer?.state.measure).toBeNull();
+    });
+
+    it('取消拖曳時才讀到遠端寫入，清理不重入且保留遠端版本', async () => {
+        const api = await setup();
+        await act(async () => api().setTool('horizontal'));
+        await down(50, 200);
+        const original = api().drawings[0]!;
+        await act(async () => flushDrawingWrites());
+        await down(50, 200);
+        await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+        const remote = { ...original, anchors: [{ time: 1000, price: 24900 }], revision: remoteRevision(original) };
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [remote] }));
+        await key({ key: 'Escape' });
+        expect(getDrawings('TXF')).toEqual([remote]);
+        expect(docL.has('mouseup')).toBe(false);
+        expect(api().canUndo).toBe(false);
+    });
+
+    it('舊文字框的 callback 不可提交新 context 中的文字物件', async () => {
+        const api = await setup();
+        await act(async () => api().setTool('text'));
+        await down(50, 200);
+        const stale = api().commitText;
+        await changeContext('symbol', api);
+        await act(async () => api().setTool('text'));
+        await down(50, 200);
+        const id = api().editingTextId;
+        await act(async () => stale('舊文字'));
+        expect(api().editingTextId).toBe(id);
+        expect(getDrawings('MXF')[0]!.text).toBe('');
+        await act(async () => api().commitText('新文字'));
+        expect(getDrawings('MXF')[0]!.text).toBe('新文字');
+    });
 
     it('平行通道點三下：基準線兩點＋決定寬度的第三點', async () => {
         const api = await setup();
@@ -1325,7 +1567,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect([25090, 25110, 25080, 25100]).toContain(d.anchors[1]!.price);
     });
 
-    it('拖曳期間其他本地操作新增的物件，復原拖曳時保留', async () => {
+    it('拖曳期間其他 writer 新增物件，中止拖曳並清除歷史，保留新增物件', async () => {
         const api = await setup();
         addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
         await act(async () => {});
@@ -1333,7 +1575,8 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         // 拖曳中另一個本地操作新增了一條線
         const theirs = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24800 }], DEFAULT_DRAWING_STYLE)!;
         await up(50, 150);
-        expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25050, 24800]);
+        expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25000, 24800]);
+        expect(api().canUndo).toBe(false);
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
         expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25000, 24800]);
         expect(api().drawings.some((d) => d.id === theirs.id)).toBe(true);

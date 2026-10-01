@@ -1442,6 +1442,7 @@ export function CandleChart({
     }, [dataVersion]);
     const drawings = useChartDrawings({
         contract,
+        contextKey: `${tf.minutes}:${dayOnly}:${historySeq}`,
         hostRef,
         chartRef,
         seriesRef: candleSeriesRef,

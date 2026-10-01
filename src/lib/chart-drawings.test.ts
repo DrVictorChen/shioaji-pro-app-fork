@@ -17,6 +17,9 @@ import {
     addDrawing,
     applyDrawingHistory,
     getDrawingHistoryStart,
+    createDrawingWriter,
+    withDrawingWriter,
+    subscribeDrawingRemoteChanges,
     clearDrawings,
     contrastTextColor,
     DEFAULT_DRAWING_STYLE,
@@ -46,6 +49,41 @@ import { drawingRevision } from './chart-drawing-revision';
 import { DrawingHistory } from './chart-drawing-history';
 
 const store = new Map<string, string>();
+
+describe('圖表實例 writer', () => {
+    it('排隊的歷史保留原圖表 writer；復原／重做也通知其他圖表', () => {
+        const a = createDrawingWriter();
+        const b = createDrawingWriter();
+        const history = new DrawingHistory();
+        const before = getDrawings('TXF');
+        history.begin('TXF', getDrawingHistoryStart());
+        const drawing = withDrawingWriter(a, () => addDrawing('TXF', 'horizontal', [{ time: 1, price: 25000 }], DEFAULT_DRAWING_STYLE))!;
+        history.push('TXF', before, getDrawings('TXF'));
+        flushDrawingWrites();
+        const remote = vi.fn();
+        const own = vi.fn();
+        const stopRemote = subscribeDrawingRemoteChanges(remote, b);
+        const stopOwn = subscribeDrawingRemoteChanges(own, a);
+        const queue: (() => unknown)[] = [];
+        __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+        const applied = vi.fn();
+        try {
+            withDrawingWriter(a, () => applyDrawingHistory(history.undo()!, applied));
+            expect(remote).not.toHaveBeenCalled();
+            queue.shift()!();
+            expect(applied).toHaveBeenLastCalledWith(true);
+            const tomb = JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF[drawing.id];
+            expect(tomb.writers).toEqual([a]);
+            expect(remote).toHaveBeenCalledExactlyOnceWith('TXF');
+            remote.mockClear();
+            withDrawingWriter(a, () => applyDrawingHistory(history.redo()!, applied));
+            queue.shift()!();
+            expect(drawingRevision(getDrawings('TXF')[0]!).split(':')[1]).toBe(a);
+            expect(remote).toHaveBeenCalledExactlyOnceWith('TXF');
+            expect(own).not.toHaveBeenCalled();
+        } finally { stopRemote(); stopOwn(); }
+    });
+});
 
 beforeEach(() => {
     store.clear();
