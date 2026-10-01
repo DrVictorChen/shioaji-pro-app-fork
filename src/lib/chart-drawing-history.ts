@@ -1,19 +1,14 @@
 // src/lib/chart-drawing-history.ts — 畫圖的復原／重做（每張圖各自一份）
 //
-// 每一步只記「這一步動到的物件」：它們改動前後的版本與圖層位置。復原
-// 時只把這些物件退回改動前 — 同一個商品可能在別的視窗、或在這一步進行
-// 中（拖曳、編輯文字）被別處改過，那些改動不能跟著被復原掉。刪除後復原
-// 放回原本的圖層位置（接在原本排在它前面的那個物件後面）。
+// 遠端改動清除整個商品的歷史；逐物件差異只用來記錄本地操作與拖曳。
 
 import type { Drawing } from './chart-drawings';
-import { drawingRevision, type Revision } from './chart-drawing-revision';
+import { drawingRevision } from './chart-drawing-revision';
 
 export interface HistoryChange {
     id: string;
     before: Drawing | null; // null＝這一步新增的
     after: Drawing | null; // null＝這一步刪掉的
-    beforeVersion: Revision | null; // 缺席時也保留墓碑版本
-    afterVersion: Revision | null;
     moved?: boolean;
 }
 
@@ -22,6 +17,7 @@ export interface HistoryStep {
     changes: HistoryChange[];
     side: 'before' | 'after';
     order: string[];
+    start: number;
 }
 
 export interface HistoryEntry {
@@ -59,8 +55,6 @@ export function diffDrawings(
                 id,
                 before: x,
                 after: y,
-                beforeVersion: x ? drawingRevision(x) : null,
-                afterVersion: y ? drawingRevision(y) : null,
                 // 指定 ids 的跨時間操作只改座標／文字，期間鄰居的排序
                 // 改變不算這個物件的圖層移動。
                 moved: !ids && !!x && !!y &&
@@ -110,10 +104,13 @@ export class DrawingHistory {
     private _undo: HistoryEntry[] = [];
     private _redo: HistoryEntry[] = [];
 
-    constructor(
-        private readonly _limit = HISTORY_LIMIT,
-        private readonly versionOf?: (key: string, id: string) => Revision | null,
-    ) {}
+    private starts = new Map<string, number>();
+
+    constructor(private readonly _limit = HISTORY_LIMIT) {}
+
+    begin(key: string, start: number) {
+        if (![...this._undo, ...this._redo].some((e) => e.key === key)) this.starts.set(key, start);
+    }
 
     get canUndo(): boolean {
         return this._undo.length > 0;
@@ -135,9 +132,6 @@ export class DrawingHistory {
         if (before === after) return;
         const changes = diffDrawings(before, after, ids);
         if (!changes.length) return;
-        for (const c of changes) {
-            if (!c.after) c.afterVersion = this.versionOf?.(key, c.id) ?? null;
-        }
         const beforeOrder = before.map((d) => d.id);
         const afterOrder = after.map((d) => d.id);
         const last = this._undo[this._undo.length - 1];
@@ -148,13 +142,12 @@ export class DrawingHistory {
             last.key === key &&
             now - last.at < COALESCE_MS &&
             changes.every((c) =>
-                last.changes.some((l) => l.id === c.id && l.afterVersion === c.beforeVersion),
+                last.changes.some((l) => l.id === c.id && l.after === c.before),
             )
         ) {
             for (const c of changes) {
                 const previous = last.changes.find((l) => l.id === c.id)!;
                 previous.after = c.after;
-                previous.afterVersion = c.afterVersion;
                 previous.moved ||= c.moved;
             }
             last.afterOrder = afterOrder;
@@ -166,58 +159,39 @@ export class DrawingHistory {
         this._redo = [];
     }
 
-    // 回傳待套用的步驟；呼叫端檢查版本後，透過 applied 接回成功寫入的版本
+    // 回傳待套用的步驟；鎖等待期間清除歷史，也會清空共用的 changes。
     undo(): HistoryStep | null {
         const e = this._undo.pop();
         if (!e) return null;
         this._redo.push(e);
-        return { key: e.key, changes: e.changes, side: 'before', order: e.beforeOrder };
+        return { key: e.key, changes: e.changes, side: 'before', order: e.beforeOrder, start: this.starts.get(e.key) ?? 0 };
     }
 
     redo(): HistoryStep | null {
         const e = this._redo.pop();
         if (!e) return null;
         this._undo.push(e);
-        return { key: e.key, changes: e.changes, side: 'after', order: e.afterOrder };
+        return { key: e.key, changes: e.changes, side: 'after', order: e.afterOrder, start: this.starts.get(e.key) ?? 0 };
     }
 
-    // 只有成功套用的物件才可再反向操作。復原／重做的新 revision 要接回
-    // 相同舊版本的歷史邊界，連續復原與重做才不會把自己的寫入當成衝突。
-    applied(step: HistoryStep, versions: Map<string, Revision | null>) {
-        for (const c of step.changes) {
-            if (!versions.has(c.id)) continue;
-            const old = step.side === 'before' ? c.beforeVersion : c.afterVersion;
-            const next = versions.get(c.id)!;
-            for (const e of [...this._undo, ...this._redo]) {
-                if (e.key !== step.key) continue;
-                for (const change of e.changes) {
-                    if (change.id !== c.id) continue;
-                    if (change.beforeVersion === old) change.beforeVersion = next;
-                    if (change.afterVersion === old) change.afterVersion = next;
-                }
-            }
-        }
-        step.changes.splice(0, step.changes.length, ...step.changes.filter((c) => versions.has(c.id)));
-        this._undo = this._undo.filter((e) => e.changes.length);
-        this._redo = this._redo.filter((e) => e.changes.length);
-    }
-
-    clear() {
-        this._undo = [];
-        this._redo = [];
-    }
-
-    // 遠端新版本永久切斷此物件的所有歷史；多物件步驟保留其餘物件。
-    invalidate(key: string, ids: ReadonlySet<string>) {
-        let changed = false;
+    // 取消已落地的拖曳後，把原物件的歷史快照接到取消版本。
+    rebase(key: string, original: Drawing, restored: Drawing) {
         for (const e of [...this._undo, ...this._redo]) {
             if (e.key !== key) continue;
-            const keep = e.changes.filter((c) => !ids.has(c.id));
-            if (keep.length !== e.changes.length) changed = true;
-            e.changes.splice(0, e.changes.length, ...keep);
+            for (const c of e.changes) for (const side of ['before', 'after'] as const) {
+                const d = c[side];
+                if (d?.id === original.id && drawingRevision(d) === drawingRevision(original)) c[side] = restored;
+            }
         }
+    }
+
+    clear(key?: string): boolean {
+        const entries = [...this._undo, ...this._redo].filter((e) => key === undefined || e.key === key);
+        for (const e of entries) e.changes.splice(0);
         this._undo = this._undo.filter((e) => e.changes.length);
         this._redo = this._redo.filter((e) => e.changes.length);
-        return changed;
+        if (key === undefined) this.starts.clear();
+        else this.starts.delete(key);
+        return entries.length > 0;
     }
 }

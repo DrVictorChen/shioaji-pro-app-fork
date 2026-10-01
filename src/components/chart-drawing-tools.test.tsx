@@ -79,7 +79,7 @@ describe('設定對話框：規則 R 與欄位 diff', () => {
         expect(onClose).toHaveBeenCalledTimes(1);
         for (const fn of [api.setText, api.rename, api.setAnchor, api.applyStyle]) expect(fn).not.toHaveBeenCalled();
         expect(getDrawings('TXF')).toEqual(kind === 'delete' ? [] : [remote]);
-        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*清除/)]);
     });
 
     it('文字、名稱、樣式與含秒數的時間未改動，失焦／確定都不寫', async () => {

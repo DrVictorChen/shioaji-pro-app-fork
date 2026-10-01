@@ -16,7 +16,7 @@ import {
     __resetDrawingsForTest,
     addDrawing,
     applyDrawingHistory,
-    getDrawingVersion,
+    getDrawingHistoryStart,
     clearDrawings,
     contrastTextColor,
     DEFAULT_DRAWING_STYLE,
@@ -773,29 +773,53 @@ describe('關窗日誌也帶圖層順序', () => {
 });
 
 describe('本視窗墓碑的歷史操作', () => {
-    it.each([false, true])('另一視窗以舊畫面再次刪除同 id，原刪除視窗不能撤銷那筆遠端墓碑（本地已落地=%s）', async (persisted) => {
-        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
-        flushDrawingWrites();
-        vi.resetModules();
-        const other = await import('./chart-drawings');
-        other.__setDrawingLocksForTest(null);
-        const history = new DrawingHistory(100, getDrawingVersion);
-        const before = getDrawings('TXF');
-        removeDrawing('TXF', a.id);
-        history.push('TXF', before, getDrawings('TXF'));
-        if (persisted) flushDrawingWrites();
-        other.removeDrawing('TXF', a.id);
-        other.flushDrawingWrites();
-        const undo = history.undo()!;
-        applyDrawingHistory(undo, (versions) => history.applied(undo, versions));
-        expect(getDrawings('TXF')).toEqual([]);
-        expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF ?? []).toEqual([]);
-        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
-        other.__resetDrawingsForTest();
-    });
+    it.each(['pending', 'persisted', 'journal'] as const)(
+        '兩視窗同刪，較小 revision 的 writer 取聯集後，兩邊都不能復原（本地 %s）', async (path) => {
+            const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+            flushDrawingWrites();
+            vi.resetModules();
+            const time = vi.spyOn(Date, 'now').mockReturnValue(1);
+            const other = await import('./chart-drawings');
+            time.mockRestore();
+            other.__setDrawingLocksForTest(null);
+            const history = new DrawingHistory();
+            const otherHistory = new DrawingHistory();
+            history.begin('TXF', getDrawingHistoryStart());
+            otherHistory.begin('TXF', other.getDrawingHistoryStart());
+            const before = getDrawings('TXF');
+            removeDrawing('TXF', a.id);
+            history.push('TXF', before, getDrawings('TXF'));
+            const otherBefore = other.getDrawings('TXF');
+            other.removeDrawing('TXF', a.id);
+            otherHistory.push('TXF', otherBefore, other.getDrawings('TXF'));
+            if (path === 'persisted') flushDrawingWrites();
+            if (path === 'journal') writeDrawingJournal();
+            other.flushDrawingWrites();
+            const ownWriter = drawingRevision(a).split(':')[1]!;
+            const ownRevision = `0000000000000002:${ownWriter}`;
+            const undo = history.undo()!;
+            applyDrawingHistory(undo, (success) => { if (!success) history.clear('TXF'); });
+            flushDrawingWrites();
+            const tomb = JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF[a.id];
+            expect(tomb.writers).toHaveLength(2);
+            expect(tomb.writers).toContain(ownWriter);
+            expect(tomb.revision).toBe(ownRevision);
+            expect(tomb.writers.find((w: string) => w !== ownWriter) < ownWriter).toBe(true);
+            const otherUndo = otherHistory.undo()!;
+            other.applyDrawingHistory(otherUndo, (success) => { if (!success) otherHistory.clear('TXF'); });
+            expect(history.canRedo).toBe(false);
+            expect(otherHistory.canRedo).toBe(false);
+            expect(getDrawings('TXF')).toEqual([]);
+            expect(other.getDrawings('TXF')).toEqual([]);
+            expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF ?? []).toEqual([]);
+            expect(takeDrawingNotices()).toEqual(['其他視窗修改了畫圖，復原紀錄已清除']);
+            other.__resetDrawingsForTest();
+        },
+    );
 
     it('新增→復原→重做，另一視窗將還原的物件合併為正常新版本', async () => {
-        const history = new DrawingHistory(100, getDrawingVersion);
+        const history = new DrawingHistory(100);
+        history.begin('TXF', getDrawingHistoryStart());
         const before = getDrawings('TXF');
         const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
         history.push('TXF', before, getDrawings('TXF'));
@@ -804,12 +828,12 @@ describe('本視窗墓碑的歷史操作', () => {
         const other = await import('./chart-drawings');
         other.__setDrawingLocksForTest(null);
         const undo = history.undo()!;
-        applyDrawingHistory(undo, (versions) => history.applied(undo, versions));
+        applyDrawingHistory(undo, (success) => { if (!success) history.clear('TXF'); });
         expect(getDrawings('TXF')).toEqual([]);
         other.reloadDrawingsFromStorage();
         expect(other.getDrawings('TXF')).toEqual([]);
         const redo = history.redo()!;
-        applyDrawingHistory(redo, (versions) => history.applied(redo, versions));
+        applyDrawingHistory(redo, (success) => { if (!success) history.clear('TXF'); });
         const restored = getDrawings('TXF')[0]!;
         expect(restored.id).toBe(a.id);
         expect(drawingRevision(restored) > drawingRevision(a)).toBe(true);

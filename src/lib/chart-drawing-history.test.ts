@@ -20,7 +20,7 @@ const run = (current: Drawing[], step: ReturnType<DrawingHistory['undo']> | Retu
 const ids = (l: Drawing[]) => l.map((d) => d.id);
 
 describe('只退回這一步動到的物件', () => {
-    it('復原新增＝移除那個物件，其他視窗同時加的物件保留', () => {
+    it('復原新增＝移除那個物件，其他本地操作新增的物件保留', () => {
         const h = new DrawingHistory();
         const a = mk('a');
         const b = mk('b');
@@ -38,7 +38,7 @@ describe('只退回這一步動到的物件', () => {
         expect(run([a2, c2], h.undo())).toEqual([a1, c2]);
     });
 
-    it('只復原內容時，不移動物件而蓋掉遠端對鄰居的圖層調整', () => {
+    it('只復原內容時，不移動物件而改到鄰居的圖層', () => {
         const h = new DrawingHistory();
         const [a, b, c] = [mk('a'), mk('b'), mk('c')];
         const renamed = { ...a, name: '本地' };
@@ -48,11 +48,11 @@ describe('只退回這一步動到的物件', () => {
         expect(ids(run([c, renamed, b], h.undo()))).toEqual(['c', 'a', 'b']);
     });
 
-    it('拖曳／文字這類跨時間的操作只記指定的物件：期間別的視窗的改動不會被復原', () => {
+    it('拖曳／文字這類跨時間的操作只記指定的物件：期間其他本地操作的改動不會被復原', () => {
         const h = new DrawingHistory();
         const a1 = mk('a', 100);
         const a2 = mk('a', 120);
-        const theirs = mk('z'); // 拖曳進行中另一個視窗新增的
+        const theirs = mk('z'); // 拖曳進行中另一步新增的
         h.push('TXF', [a1], [a2, theirs], undefined, 1000, ['a']);
         expect(ids(run([a2, theirs], h.undo()))).toEqual(['a', 'z']);
         expect(h.undo()).toBeNull(); // 只有一步
@@ -69,7 +69,7 @@ describe('只退回這一步動到的物件', () => {
         expect(ids(run([b, c], h2.undo()))).toEqual(['a', 'b', 'c']);
     });
 
-    it('調整圖層可復原，別的視窗新增的物件位置不動', () => {
+    it('調整圖層可復原，其他本地操作新增的物件位置不動', () => {
         const h = new DrawingHistory();
         const [a, b, c, z] = [mk('a'), mk('b'), mk('c'), mk('z')];
         h.push('TXF', [a, b, c], [{ ...c, updatedAt: 1 }, a, b]);
@@ -87,17 +87,16 @@ describe('只退回這一步動到的物件', () => {
 });
 
 describe('DrawingHistory', () => {
-    it('invalidate 同時移除所有 undo／redo 中的指定物件，保留多物件步驟其餘部分與其他商品', () => {
+    it('清除整個商品的 undo／redo，也使等待中的步驟失效，保留其他商品', () => {
         const h = new DrawingHistory();
         const a = mk('a');
-        const b = mk('b');
         h.push('OTHER', [a], [{ ...a, name: '另一商品' }]);
         h.push('TXF', [a], [{ ...a, name: '第一步' }]);
-        h.push('TXF', [a, b], [{ ...a, hidden: true }, { ...b, hidden: true }]);
-        h.undo();
-        expect(h.invalidate('TXF', new Set(['a']))).toBe(true);
-        expect(h.redo()!.changes.map((c) => c.id)).toEqual(['b']);
-        expect(h.undo()!.changes.map((c) => c.id)).toEqual(['b']);
+        h.push('TXF', [a], [{ ...a, hidden: true }]);
+        const queued = h.undo()!;
+        expect(h.clear('TXF')).toBe(true);
+        expect(queued.changes).toEqual([]);
+        expect(h.canRedo).toBe(false);
         expect(h.undo()!.key).toBe('OTHER');
         expect(h.canUndo).toBe(false);
     });

@@ -11,7 +11,7 @@ import { useSyncExternalStore } from 'react';
 import type { ContractBase } from './types/contract';
 import { defaultFibOptions, sanitizeFibOptions, type FibOptions } from './chart-drawing-fib';
 import { applyChanges, type HistoryStep } from './chart-drawing-history';
-import { drawingRevision, tombRevision, isRevision, isTombstone, type Revision, type Tombstone } from './chart-drawing-revision';
+import { drawingRevision, tombRevision, isRevision, isTombstone, tombWriters, mergeTombstones, type Revision, type Tombstone } from './chart-drawing-revision';
 
 export type DrawingTool =
     | 'horizontal' // 水平線：單一價位，橫貫整個 pane
@@ -423,7 +423,7 @@ export function sanitizeSettings(v: unknown): DrawingSettings {
 
 type Store = Record<string, Drawing[]>;
 
-// 刪除墓碑：{ 商品鍵: { 物件 id: { revision, updatedAt, writer } } }。
+// 刪除墓碑：{ 商品鍵: { 物件 id: { revision, updatedAt, writers } } }。
 // 僅寫入者的歷史操作可在鎖內撤銷原版本；其他視窗的任何版本都不能復活它。
 type Tombs = Record<string, Record<string, Tombstone>>;
 const TOMB_KEY = 'sj-pro-chart-drawing-tombstones';
@@ -438,7 +438,7 @@ function loadTombs(): Tombs {
         for (const [key, ids] of Object.entries(parsed as Record<string, unknown>)) {
             if (!ids || typeof ids !== 'object') continue;
             for (const [id, at] of Object.entries(ids as Record<string, unknown>)) {
-                if (isTombstone(at)) (out[key] ??= {})[id] = at;
+                if (isTombstone(at)) (out[key] ??= {})[id] = mergeTombstones(undefined, at);
             }
         }
         return out;
@@ -555,8 +555,7 @@ function nextRevision(): Revision {
 }
 
 function ownTombstone(t: unknown): t is Exclude<Tombstone, number> {
-    return isTombstone(t) && typeof t !== 'number' && t.writer === WINDOW_ID &&
-        t.revision.endsWith(`:${WINDOW_ID}`);
+    return isTombstone(t) && tombWriters(t).every((writer) => writer === WINDOW_ID);
 }
 
 type OrderMove = { id: string; after: string | null; revision: Revision };
@@ -720,7 +719,7 @@ function applyOps(
             if (isTombstone(op)) {
                 if (i >= 0) list.splice(i, 1);
                 const t = (tombs[key] ??= {});
-                if (t[id] === undefined || tombRevision(t[id]!) < tombRevision(op)) t[id] = op;
+                t[id] = mergeTombstones(t[id], op);
             } else if (buried(tombs, key, op)) {
                 if (i >= 0) list.splice(i, 1);
             } else if (i >= 0) {
@@ -831,7 +830,7 @@ function writeDrawingsNow(view?: { base: Store; tombs: Tombs; journals: Journal[
     const tombs = view?.tombs ?? loadTombs();
     const base = view?.base ?? loadView(tombs, journals);
     // 歷史操作已在同一把鎖內重讀及檢查，使用撤銷墓碑後的那份 view。
-    if (!view) acceptRemoteVersions(base, tombs, true);
+    if (!view) acceptRemoteChanges(base, tombs, journals);
     const snapshot = new Map([...pending].map(([k, ops]) => [k, new Map(ops)]));
     const orderSnap = new Map(pendingOrder);
     const next = applyOps(base, snapshot, tombs, orderSnap);
@@ -865,7 +864,7 @@ function writeDrawingsNow(view?: { base: Store; tombs: Tombs; journals: Journal[
         if (!cur.size) pending.delete(key);
     }
     for (const [key, order] of orderSnap) if (pendingOrder.get(key) === order) pendingOrder.delete(key);
-    rememberVersions(next, tombs);
+    rememberRemoteWrites(next, tombs);
     store = applyPending(next, tombs);
     emit();
     if (saveError) {
@@ -946,12 +945,6 @@ export function writeDrawingJournal() {
     } catch {
         return; // 配額滿：已經在關窗，沒有別的地方可放
     }
-    // 自己的日誌再次被讀到時不是遠端更新，不應清除自己的歷史。
-    const tombs = loadTombs();
-    for (const [key, byId] of pending) for (const [id, op] of byId) {
-        if (isTombstone(op)) (tombs[key] ??= {})[id] = op;
-    }
-    rememberVersions(store, tombs);
     pending.clear();
     pendingOrder.clear();
     pendingSettingKeys.clear();
@@ -965,8 +958,9 @@ function persist() {
 // 別的視窗寫入了 — 以它的版本為準，再疊上本視窗還沒寫出去的改動
 export function reloadDrawingsFromStorage() {
     const tombs = loadTombs();
-    const base = loadView(tombs);
-    acceptRemoteVersions(base, tombs);
+    const journals = loadJournals();
+    const base = loadView(tombs, journals);
+    acceptRemoteChanges(base, tombs, journals);
     store = applyPending(base, tombs);
     emit();
 }
@@ -1002,132 +996,142 @@ export function getDrawings(key: string): Drawing[] {
     return store[key] ?? EMPTY;
 }
 
-// 目前版本包含尚未落地的刪除；缺席的物件以墓碑版本識別。
-export function getDrawingVersion(key: string, id: string, tombs: Tombs = loadTombs()): Revision | null {
-    const drawing = getDrawings(key).find((d) => d.id === id);
-    if (drawing) return drawingRevision(drawing);
-    const op = pending.get(key)?.get(id);
-    const at = tombs[key]?.[id];
-    if (op !== undefined && isTombstone(op)) {
-        return at === undefined || tombRevision(op) > tombRevision(at) ? tombRevision(op) : tombRevision(at);
+// 未落地的拖曳可直接還原原物件與 revision；已寫出去則發布取消版本。
+export function cancelDrawingChanges(key: string, originals: Drawing[]) {
+    const tombs = loadTombs();
+    const journals = loadJournals();
+    const base = loadView(tombs, journals);
+    const { changed } = acceptRemoteChanges(base, tombs, journals);
+    if (changed.has(key)) {
+        store = applyPending(base, tombs);
+        emit();
+        return getDrawings(key);
     }
-    return at === undefined ? null : tombRevision(at);
+    const restore = new Map(originals.map((d) => [d.id, d]));
+    const current = getDrawings(key);
+    const written = new Map((base[key] ?? []).map((d) => [d.id, d]));
+    const syncCancel = new Set<string>();
+    const next = current.map((d) => {
+        const original = restore.get(d.id);
+        if (!original || tombs[key]?.[d.id] !== undefined) return d;
+        const saved = written.get(d.id);
+        if (saved && drawingRevision(saved) > drawingRevision(original)) {
+            syncCancel.add(d.id);
+            return original;
+        }
+        // 取消尚未落地的變更；尚未落地的新增仍須保存原版。
+        if (saved) pending.get(key)?.delete(d.id);
+        else record(key, d.id, original);
+        return original;
+    });
+    // 先接回未落地的原版，commit 只替需要同步取消的物件蓋新 revision。
+    store = { ...store, [key]: current.map((d, i) => syncCancel.has(d.id) ? d : next[i]!) };
+    if (pending.get(key)?.size === 0) pending.delete(key);
+    if (syncCancel.size) commit(key, next);
+    else emit();
+    return getDrawings(key);
 }
 
-const remoteListeners = new Set<(key: string, ids: ReadonlySet<string>) => void>();
-const observedVersions = new Map<string, Map<string, Revision>>();
-const observedDeleted = new Map<string, Set<string>>();
-export function subscribeDrawingRemoteChanges(listener: (key: string, ids: ReadonlySet<string>) => void) {
+const remoteListeners = new Set<(key: string) => void>();
+const observedRemoteWrites = new Map<string, string>();
+export function subscribeDrawingRemoteChanges(listener: (key: string) => void) {
     remoteListeners.add(listener);
     return () => { remoteListeners.delete(listener); };
 }
-function versionsOf(base: Store, tombs: Tombs) {
-    const all = new Map<string, Map<string, Revision>>();
-    const put = (key: string, id: string, revision: Revision) => {
+
+export function getDrawingHistoryStart(): number {
+    // 起點涵蓋已觀察到的所有 writer；同 counter 的新遠端寫入由同步偵測攔下。
+    return revisionCounter;
+}
+
+// 合併前也掃主項目與每份日誌；本視窗的較新版本不能遮蔽遠端寫入。
+function remoteWritesOf(base: Store, tombs: Tombs, journals = loadJournals()) {
+    const all = new Map<string, { tokens: Set<string>; latest: number }>();
+    const put = (key: string, token: string, revision: Revision, writer = revision.split(':')[1]!) => {
         observeRevision(revision);
-        const byId = all.get(key) ?? new Map<string, Revision>();
-        if (!byId.has(id) || byId.get(id)! < revision) byId.set(id, revision);
-        all.set(key, byId);
+        if (writer === WINDOW_ID) return;
+        const writes = all.get(key) ?? { tokens: new Set<string>(), latest: 0 };
+        writes.tokens.add(`${token}:${writer}:${revision}`);
+        writes.latest = Math.max(writes.latest, Number(revision.split(':')[0]));
+        all.set(key, writes);
     };
-    for (const [key, list] of Object.entries(base)) for (const d of list) put(key, d.id, drawingRevision(d));
-    for (const [key, ids] of Object.entries(tombs)) for (const [id, t] of Object.entries(ids)) put(key, id, tombRevision(t));
-    return all;
+    for (const source of [loadStore({}), base]) {
+        for (const [key, list] of Object.entries(source)) for (const d of list) put(key, d.id, drawingRevision(d));
+    }
+    const tomb = (key: string, id: string, t: Tombstone) => {
+        for (const writer of tombWriters(t)) put(key, `tomb:${id}`, tombRevision(t), writer);
+    };
+    for (const [key, ids] of Object.entries(tombs)) for (const [id, t] of Object.entries(ids)) tomb(key, id, t);
+    for (const j of journals) {
+        for (const [key, ops] of j.ops) for (const [id, op] of ops) {
+            if (isTombstone(op)) tomb(key, id, op);
+            else put(key, id, drawingRevision(op));
+        }
+        for (const [key, moves] of j.order) for (const m of moves) put(key, `order:${m.id}`, m.revision);
+    }
+    return new Map([...all].map(([key, writes]) => [key, {
+        signature: JSON.stringify([...writes.tokens].sort()), latest: writes.latest,
+    }]));
 }
-function rememberVersions(base: Store, tombs: Tombs) {
-    observedVersions.clear();
-    observedDeleted.clear();
-    for (const [key, ids] of versionsOf(base, tombs)) observedVersions.set(key, ids);
-    for (const [key, ids] of Object.entries(tombs)) observedDeleted.set(key, new Set(Object.keys(ids)));
+function rememberRemoteWrites(base: Store, tombs: Tombs) {
+    observedRemoteWrites.clear();
+    for (const [key, writes] of remoteWritesOf(base, tombs)) observedRemoteWrites.set(key, writes.signature);
 }
-function acceptRemoteVersions(base: Store, tombs: Tombs, writing = false) {
-    for (const [key, ids] of versionsOf(base, tombs)) {
-        const known = observedVersions.get(key);
-        const changed = new Set<string>();
-        for (const [id, revision] of ids) {
-            const op = pending.get(key)?.get(id);
-            const deleted = tombs[key]?.[id] !== undefined;
-            const local = getDrawingVersion(key, id, {});
-            const remoteWins = deleted || local === null || local < revision;
-            const newlyObserved = deleted
-                ? !observedDeleted.get(key)?.has(id) || known?.get(id) !== revision
-                : (!known?.has(id) || known.get(id)! < revision);
-            const ownDelete = deleted && ownTombstone(tombs[key]?.[id]) && local === revision;
-            if (!ownDelete && remoteWins && (newlyObserved || (deleted && op !== undefined))) {
-                changed.add(id);
-                // 另一視窗已刪除時，本視窗再次刪除仍須落地自己的墓碑，
-                // 讓原寫入者不能復原。歷史照樣因遠端刪除而失效。
-                if (!(writing && deleted && ownTombstone(op))) pending.get(key)?.delete(id);
+function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
+    const writes = remoteWritesOf(base, tombs, journals);
+    const changed = new Set([...writes].filter(([key, product]) =>
+        observedRemoteWrites.get(key) !== product.signature).map(([key]) => key));
+    // 同步的勝負仍按 revision／墓碑處理；墓碑必須保留自己的刪除並取聯集。
+    for (const [key, ops] of pending) {
+        for (const [id, op] of ops) {
+            if (isTombstone(op)) continue;
+            const remote = base[key]?.find((d) => d.id === id);
+            if (tombs[key]?.[id] !== undefined || (remote && drawingRevision(remote) > drawingRevision(op))) {
+                ops.delete(id);
                 const moves = pendingOrder.get(key)?.filter((m) => m.id !== id);
                 if (moves?.length) pendingOrder.set(key, moves);
                 else pendingOrder.delete(key);
             }
         }
-        if (pending.get(key)?.size === 0) pending.delete(key);
-        observedVersions.set(key, ids);
-        observedDeleted.set(key, new Set(Object.keys(tombs[key] ?? {})));
-        if (changed.size) for (const listener of remoteListeners) listener(key, changed);
+        if (!ops.size) pending.delete(key);
     }
+    observedRemoteWrites.clear();
+    for (const [key, product] of writes) observedRemoteWrites.set(key, product.signature);
+    for (const key of changed) for (const listener of remoteListeners) listener(key);
+    return { changed, writes };
 }
 
 export function noteDrawingHistoryConflict() {
-    noteDrawings('部分畫圖物件已被其他視窗修改或刪除，已略過這些物件的復原／重做。');
+    noteDrawings('其他視窗修改了畫圖，復原紀錄已清除');
 }
 
-// 在替歷史快照蓋新 revision 以前，先合併最新持久化資料（storage 事件可能
-// 還沒送達）。僅允許反向操作仍是歷史預期版本的物件，含刪除墓碑。
-export function applyDrawingHistory(step: HistoryStep, applied: (versions: Map<string, Revision | null>) => void) {
-    // 複製候選項目：鎖等待期間遠端同步可能會移除原歷史中的項目。
-    const candidates = [...step.changes];
+// 整份歷史的有效性在 Web Lock 內重讀判斷，不再逐物件配對歷史版本。
+export function applyDrawingHistory(step: HistoryStep, applied: (success: boolean) => void) {
     withLock(() => {
         const tombs = loadTombs();
         const journals = loadJournals();
         const base = loadView(tombs, journals);
-        const unburied = loadStore({});
-        acceptRemoteVersions(base, tombs);
+        const { changed, writes } = acceptRemoteChanges(base, tombs, journals);
         store = applyPending(base, tombs);
-        const current = getDrawings(step.key);
-        const expectedSide = step.side === 'before' ? 'after' : 'before';
-        const changes = candidates.filter((c) => {
-            if (!step.changes.some((valid) => valid.id === c.id)) return false;
-            const exists = current.some((d) => d.id === c.id);
-            const expected = expectedSide === 'after' ? c.afterVersion : c.beforeVersion;
-            const version = getDrawingVersion(step.key, c.id, tombs);
-            if (c[step.side]) {
-                const persisted = tombs[step.key]?.[c.id];
-                const op = pending.get(step.key)?.get(c.id);
-                // 每一份墓碑都須屬於本視窗且與歷史邊界完全相符。遠端墓碑
-                // 即使 revision 較小，也不能被尚未落地的本地刪除遮蔽。
-                const deletions = [persisted, isTombstone(op) ? op : undefined,
-                    ...journals.map((j) => j.ops.get(step.key)?.get(c.id)).filter(isTombstone),
-                ].filter((t) => t !== undefined);
-                if (deletions.some((t) => !ownTombstone(t) || tombRevision(t) !== expected)) return false;
-                // 本地刪除仍在 pending／關窗日誌時，也不能以撤銷墓碑為由
-                // 蓋掉已取代歷史版本的遠端物件。
-                if (expected !== null && !c[expectedSide]) {
-                    const updates = [unburied[step.key]?.find((d) => d.id === c.id),
-                        ...journals.map((j) => j.ops.get(step.key)?.get(c.id)),
-                    ].filter((op): op is Drawing => op !== undefined && !isTombstone(op));
-                    if (updates.some((d) => drawingRevision(d) > expected)) return false;
-                }
-            }
-            const matches = exists === !!c[expectedSide] && version === expected;
-            if (matches && version !== null) observeRevision(version);
-            return matches;
+        const foreignDelete = step.changes.some((c) => {
+            const t = tombs[step.key]?.[c.id];
+            return t !== undefined && !ownTombstone(t);
         });
-        if (changes.length) {
-            for (const c of changes) if (c[step.side]) {
-                if (tombs[step.key]) delete tombs[step.key]![c.id];
-                if (isTombstone(pending.get(step.key)?.get(c.id))) pending.get(step.key)?.delete(c.id);
-            }
-            commit(step.key, applyChanges(current, changes, step.side, step.order), tombs);
-            // 不留節流窗：仍在同一把 Web Lock 內立即落地。
-            writeDrawingsNow({ base, tombs, journals });
-        } else {
+        if (!step.changes.length || changed.has(step.key) || foreignDelete ||
+            (writes.get(step.key)?.latest ?? 0) > step.start) {
+            noteDrawingHistoryConflict();
             emit();
+            applied(false);
+            return;
         }
-        if (changes.length !== candidates.length) noteDrawingHistoryConflict();
-        applied(new Map(changes.map((c) => [c.id, getDrawingVersion(step.key, c.id)])));
-    }, () => applied(new Map()));
+        for (const c of step.changes) if (c[step.side]) {
+            if (tombs[step.key]) delete tombs[step.key]![c.id];
+            if (isTombstone(pending.get(step.key)?.get(c.id))) pending.get(step.key)?.delete(c.id);
+        }
+        commit(step.key, applyChanges(getDrawings(step.key), step.changes, step.side, step.order), tombs);
+        writeDrawingsNow({ base, tombs, journals });
+        applied(true);
+    }, () => applied(false));
 }
 
 export function getDrawingSettings(): DrawingSettings {
@@ -1216,7 +1220,7 @@ function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs) {
     }
     const now = stamp();
     const ids = new Set(nextIn.map((d) => d.id));
-    for (const d of before) if (!ids.has(d.id)) record(key, d.id, { revision: nextRevision(), updatedAt: now, writer: WINDOW_ID });
+    for (const d of before) if (!ids.has(d.id)) record(key, d.id, { revision: nextRevision(), updatedAt: now, writers: [WINDOW_ID] });
     const prev = new Map(before.map((d) => [d.id, d]));
     // 有變動的物件一律取得新 revision（含套用歷史快照）。
     const next = nextIn.map((d) => {
@@ -1351,8 +1355,7 @@ export function __resetDrawingsForTest() {
     pendingSettingKeys.clear();
     notices = [];
     noticed.clear();
-    observedVersions.clear();
-    observedDeleted.clear();
+    observedRemoteWrites.clear();
     revisionCounter = 0;
     lastStamp = 0;
     lockOverride = null;
@@ -1373,5 +1376,5 @@ export function __resetDrawingsForTest() {
 // ── 初始載入 ─────────────────────────────────────────────────────────
 // 放在最後：loadView／loadSettingsView 會用到上面所有常數與函式
 store = loadView();
-rememberVersions(store, loadTombs());
+rememberRemoteWrites(store, loadTombs());
 settings = loadSettingsView();

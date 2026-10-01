@@ -6,7 +6,8 @@ export type Revision = string;
 export interface DrawingTombstone {
     revision: Revision;
     updatedAt: number;
-    writer?: string; // 舊墓碑沒有 writer，不能由本視窗撤銷
+    writers?: string[]; // JSON 中的集合；舊墓碑載入時升級
+    writer?: string; // 相容既有資料
 }
 export type Tombstone = number | DrawingTombstone;
 
@@ -31,5 +32,20 @@ export function isTombstone(v: unknown): v is Tombstone {
     if (!v || typeof v !== 'object' || 'id' in v) return false;
     const t = v as DrawingTombstone;
     return isRevision(t.revision) && Number.isFinite(t.updatedAt) &&
-        (t.writer === undefined || (typeof t.writer === 'string' && /^[\w-]+$/.test(t.writer)));
+        (t.writer === undefined || (typeof t.writer === 'string' && /^[\w-]+$/.test(t.writer))) &&
+        (t.writers === undefined || (Array.isArray(t.writers) && t.writers.length > 0 &&
+            t.writers.every((w) => typeof w === 'string' && /^[\w-]+$/.test(w))));
+}
+
+export function tombWriters(t: Tombstone): string[] {
+    return typeof t === 'number' ? ['legacy'] : t.writers ?? [t.writer ?? 'legacy'];
+}
+
+export function mergeTombstones(a: Tombstone | undefined, b: Tombstone): DrawingTombstone {
+    return {
+        revision: a !== undefined && tombRevision(a) > tombRevision(b) ? tombRevision(a) : tombRevision(b),
+        updatedAt: Math.max(a === undefined ? 0 : typeof a === 'number' ? a : a.updatedAt,
+            typeof b === 'number' ? b : b.updatedAt),
+        writers: [...new Set([...(a === undefined ? [] : tombWriters(a)), ...tombWriters(b)])].sort(),
+    };
 }

@@ -21,7 +21,8 @@ import {
     drawingSymbolKey,
     duplicateDrawing,
     getDrawings,
-    getDrawingVersion,
+    getDrawingHistoryStart,
+    cancelDrawingChanges,
     subscribeDrawingRemoteChanges,
     noteDrawingHistoryConflict,
     MAX_NAME_LENGTH,
@@ -286,7 +287,7 @@ export function useChartDrawings(opts: {
     const [token] = useState(() => ({}));
     // 這張圖目前是否握有鍵盤（最後被點的圖）— 握有時才掛 keydown listener
     const [isOwner, setIsOwner] = useState(false);
-    const historyRef = useRef(new DrawingHistory(undefined, getDrawingVersion));
+    const historyRef = useRef(new DrawingHistory());
 
     // 高頻狀態（繪製中的點、量測跟著游標跑）走 ref 直接推給 layer，
     // 不經過 React state — 每次 mousemove 重繪整棵樹太貴
@@ -325,10 +326,10 @@ export function useChartDrawings(opts: {
 
     // ── 復原 ─────────────────────────────────────────────────────────
     const bumpHistory = useCallback(() => setHistoryVer((v) => v + 1), []);
-    useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
-        const changed = historyRef.current.invalidate(key, ids);
+    useEffect(() => subscribeDrawingRemoteChanges((key) => {
+        const changed = historyRef.current.clear(key);
         const info = textTxRef.current;
-        if (key === stateRef.current.symbolKey && info && ids.has(info.id)) {
+        if (key === stateRef.current.symbolKey && info) {
             info.invalidated = true;
             setEditingTextId(null);
             noteDrawingHistoryConflict();
@@ -343,6 +344,7 @@ export function useChartDrawings(opts: {
         (fn: () => void, tag?: string) => {
             const key = stateRef.current.symbolKey;
             const before = getDrawings(key);
+            historyRef.current.begin(key, getDrawingHistoryStart());
             fn();
             const after = getDrawings(key);
             if (before !== after) {
@@ -356,10 +358,10 @@ export function useChartDrawings(opts: {
     const applyHistory = useCallback(
         (step: HistoryStep | null) => {
             if (!step) return;
-            // 只動這一步記錄的物件；別的視窗、別的操作的改動維持現況
+            // 鎖內檢查整個商品；失效時清掉全部歷史。
             historyBusyRef.current = true;
-            applyDrawingHistory(step, (versions) => {
-                historyRef.current.applied(step, versions);
+            applyDrawingHistory(step, (success) => {
+                if (!success) historyRef.current.clear(step.key);
                 // 選取裡已經不存在的物件拿掉
                 const ids = new Set(getDrawings(step.key).map((d) => d.id));
                 setSelectedIds((cur) =>
@@ -592,12 +594,10 @@ export function useChartDrawings(opts: {
         // startAnchors：按下當下的時間／價格 — 拖單一控制點時，其他點原樣保留
         type DragItem = { id: string; tool: DrawingTool; plan: DragPlan; startAnchors: DrawingAnchor[] };
         let drag: { items: DragItem[]; before: Drawing[]; key: string } | null = null;
-        const unsubscribeRemote = subscribeDrawingRemoteChanges((key, ids) => {
+        const unsubscribeRemote = subscribeDrawingRemoteChanges((key) => {
             if (drag?.key !== key) return;
-            const keep = drag.items.filter((item) => !ids.has(item.id));
-            if (keep.length !== drag.items.length) noteDrawingHistoryConflict();
-            drag.items = keep;
-            if (!keep.length) cancelDragRef.current?.();
+            drag.items = [];
+            cancelDragRef.current?.();
         });
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
@@ -742,6 +742,7 @@ export function useChartDrawings(opts: {
                 );
                 const need = anchorCount(armed);
                 const before = getDrawings(key);
+                historyRef.current.begin(key, getDrawingHistoryStart());
                 if (need === 1) {
                     finishCreate(addDrawing(key, armed, [anchor], style), before);
                     return;
@@ -816,6 +817,7 @@ export function useChartDrawings(opts: {
                 });
             }
             const key = stateRef.current.symbolKey;
+            historyRef.current.begin(key, getDrawingHistoryStart());
             drag = { items, before: getDrawings(key), key };
 
             const move = (ev: MouseEvent) => {
@@ -871,12 +873,14 @@ export function useChartDrawings(opts: {
                 frame = null;
                 pendingPt = null;
                 if (drag) {
-                    const originals = new Map(drag.before.map((d) => [d.id, d]));
-                    const ids = new Set(drag.items.map((item) => item.id));
-                    replaceDrawings(drag.key, getDrawings(drag.key).map((d) => {
-                        const original = originals.get(d.id);
-                        return ids.has(d.id) && original ? { ...d, anchors: original.anchors } : d;
-                    }));
+                    const originals = drag.before.filter((d) => drag!.items.some((item) => item.id === d.id));
+                    if (originals.length) {
+                        const restored = cancelDrawingChanges(drag.key, originals);
+                        for (const original of originals) {
+                            const d = restored.find((x) => x.id === original.id);
+                            if (d) historyRef.current.rebase(drag.key, original, d);
+                        }
+                    }
                 }
                 drag = null;
                 cancelDragRef.current = null;
@@ -895,6 +899,7 @@ export function useChartDrawings(opts: {
             if (picked?.drawing.tool !== 'text' || picked.drawing.locked) return;
             e.preventDefault();
             e.stopPropagation();
+            historyRef.current.begin(stateRef.current.symbolKey, getDrawingHistoryStart());
             textTxRef.current = { id: picked.drawing.id, before: getDrawings(stateRef.current.symbolKey), created: false };
             setSelectedIds([picked.drawing.id]);
             setEditingTextId(picked.drawing.id);
@@ -1321,6 +1326,7 @@ export function useChartDrawings(opts: {
     const editText = useCallback((id: string) => {
         const d = stateRef.current.drawings.find((x) => x.id === id);
         if (!d || d.tool !== 'text' || d.locked) return;
+        historyRef.current.begin(stateRef.current.symbolKey, getDrawingHistoryStart());
         textTxRef.current = { id, before: getDrawings(stateRef.current.symbolKey), created: false };
         setSelectedIds([id]);
         setEditingTextId(id);
@@ -1342,7 +1348,14 @@ export function useChartDrawings(opts: {
                 setSelectedIds([]);
                 return;
             }
-            if (text === null) return; // Esc 取消既有文字，不建立歷史
+            if (text === null) {
+                const original = info?.before.find((d) => d.id === id);
+                if (original) {
+                    const restored = cancelDrawingChanges(key, [original]).find((d) => d.id === id);
+                    if (restored) historyRef.current.rebase(key, original, restored);
+                }
+                return;
+            }
             if (value) updateDrawing(key, id, { text: value });
             if (info) {
                 const after = getDrawings(key);

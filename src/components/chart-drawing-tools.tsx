@@ -803,8 +803,8 @@ export function DrawingSettingsDialog({
     const dialogRef = useRef<HTMLDivElement | null>(null);
     // 遠端勝出時先同步封住所有事件，再關閉；unmount 期間的 blur 也不能寫舊值。
     const invalidated = useRef(false);
-    useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
-        if (key !== sourceApi.symbolKey || !ids.has(drawing.id)) return;
+    useEffect(() => subscribeDrawingRemoteChanges((key) => {
+        if (key !== sourceApi.symbolKey) return;
         invalidated.current = true;
         noteDrawingHistoryConflict();
         closeRef.current();
