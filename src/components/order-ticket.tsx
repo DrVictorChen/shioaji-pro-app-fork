@@ -530,6 +530,10 @@ export function OrderTicket({
             // 逐戶送出（sequential — deterministic order, per-order risk）
             for (const { account, qty: q } of allocation) {
                 const label = `${account.broker_id}-${maskAccountId(account.account_id, priv)}`;
+                if (!canTrade(account) || !isAccountAvailable(account)) {
+                    fail.push(`${label}: ${ACCOUNT_CHANGED_MESSAGE}；已停止後續分倉`);
+                    break;
+                }
                 const blocked = checkOrderAllowed(q, isFutures ? undefined : orderLot);
                 if (blocked) {
                     fail.push(`${label}: ${blocked}`);
@@ -581,6 +585,7 @@ export function OrderTicket({
                     fail.push(
                         `${label}: ${e instanceof Error ? e.message : String(e)}`,
                     );
+                    if ((e as { tradingGateRejected?: boolean })?.tradingGateRejected) break;
                 }
             }
             notify({

@@ -88,6 +88,31 @@ it('revokes a popout trading snapshot when the main window announces pagehide', 
     expect(lease.getTradingMirrorFresh()).toBe(false);
 });
 
+it('mode discovery rereads positions, orders and funds despite the initial snapshot cooldown', async () => {
+    const calls = [mocks.positions, mocks.trades, mocks.balance].map(fn => fn.mock.calls.length);
+    await act(async () => { await store.refreshTradingStateForModeChange(); });
+    expect([mocks.positions, mocks.trades, mocks.balance].map(fn => fn.mock.calls.length)).toEqual(calls.map(n => n + 1));
+});
+
+it('mode discovery during an initial read waits for it and then queries newly tradable accounts', async () => {
+    vi.advanceTimersByTime(1600);
+    const pending = deferred<ReturnType<typeof baseline>[]>();
+    mocks.positions.mockImplementationOnce(() => pending.promise);
+    const initial = store.refreshTradingState();
+    await flush();
+    const additional = { ...mocks.account, account_type: 'F', account_id: 'late', signed: false };
+    mocks.extraAccounts = [additional];
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+    const followup = store.refreshTradingStateForModeChange();
+    expect(store.refreshTradingStateForModeChange()).toBe(followup);
+    pending.resolve([baseline()]);
+    await act(async () => { await Promise.all([initial, followup]); });
+    expect(mocks.positions).toHaveBeenCalledWith('F', additional);
+    expect(mocks.trades).toHaveBeenCalledWith('F', additional, { refresh: true });
+    expect(mocks.margin).toHaveBeenCalledWith(additional);
+});
+
 describe('shared trading state with isolated broker fixtures', () => {
     it('marks each accounting read of a refresh with its duration, accounts by type/order only (#142)', async () => {
         const timing = await import('./startup-timing');

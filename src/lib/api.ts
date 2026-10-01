@@ -105,7 +105,7 @@ async function withWebviewInfoSlot<T>(origin: string, signal: AbortSignal | unde
     }
 }
 
-async function doFetch(url: string, init?: RequestInit): Promise<Response> {
+async function doFetch(url: string, init?: RequestInit, beforeDispatch?: () => void): Promise<Response> {
     if (isTauri) {
         // Info is read-only and frequently requested in parallel by watchlists.
         // The WebView can reach the loopback sidecar directly, avoiding the
@@ -138,8 +138,10 @@ async function doFetch(url: string, init?: RequestInit): Promise<Response> {
             }
         }
         const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+        beforeDispatch?.();
         return tauriFetch(url, init);
     }
+    beforeDispatch?.();
     return fetch(url, init);
 }
 
@@ -203,7 +205,7 @@ export async function apiGet<T>(path: string, opts?: { signal?: AbortSignal; hea
 export async function apiPost<T>(
     path: string,
     body: unknown,
-    opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void },
 ): Promise<T> {
     if (isTauri && AGENT_HARNESS_MUTATIONS.has(path) && !serverIdentityVerified()) {
         throw Object.assign(
@@ -235,6 +237,7 @@ export async function apiPost<T>(
         const bodyText = JSON.stringify(body);
         const { invoke } = await import('@tauri-apps/api/core');
         let proxied: { status: number; body: string };
+        opts?.beforeDispatch?.();
         try {
             proxied = await invoke<{ status: number; body: string }>(
                 'agent_harness_post',
@@ -270,7 +273,7 @@ export async function apiPost<T>(
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
             signal,
-        });
+        }, opts?.beforeDispatch);
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);

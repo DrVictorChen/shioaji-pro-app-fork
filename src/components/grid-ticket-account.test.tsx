@@ -71,6 +71,19 @@ it('lay-out aborts when the selection changes during confirmation', async () => 
     expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '鋪單未送出' });
 });
 
+it('stops the batch when simulation becomes production after the first order', async () => {
+    h.accounts[0]!.signed = false;
+    observeServerInfo(beginServerInfoRequest(), { simulation: true } as import('../lib/shioaji').ServerInfo);
+    m.future.mockImplementationOnce(async () => {
+        observeServerInfo(beginServerInfoRequest(), { simulation: false } as import('../lib/shioaji').ServerInfo);
+        return {};
+    });
+    await render();
+    await act(async () => { await btn('鋪 ').props.onClick(); });
+    expect(m.future).toHaveBeenCalledOnce();
+    expect(m.notify.mock.calls.some(c => c[0].kind === 'err' && c[0].body.includes('帳戶'))).toBe(true);
+});
+
 it('follow refills use the account captured when follow started and only look at its orders', async () => {
     // account B already has grid orders at 99/98 — they must not count for A,
     // and B's stray order at 90 must not be cancelled by A's follow loop

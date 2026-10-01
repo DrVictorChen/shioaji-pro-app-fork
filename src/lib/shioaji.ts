@@ -750,6 +750,28 @@ export function unsubscribeMarketSignal(
 
 // ---- orders ----
 
+/** Every mutation shares this dispatch gate. Re-read the wire account from
+ * the current list and the current mode, including after transport loading. */
+function sendOrderMutation<T>(
+    path: string,
+    body: unknown,
+    account: Account | undefined,
+    opts?: Parameters<typeof apiPost>[2],
+) {
+    const base = getApiBase();
+    const beforeDispatch = () => {
+        const current = account && getAccountState().accounts.find(a =>
+            a.account_type === account.account_type && a.broker_id === account.broker_id && a.account_id === account.account_id);
+        if (base !== getApiBase() || !canTrade(current)) {
+            throw Object.assign(new Error('伺服器模式或帳戶已變更，帳戶不可交易；未送出此筆'),
+                { mutationNotStarted: true as const, tradingGateRejected: true as const });
+        }
+    };
+    try { beforeDispatch(); }
+    catch (error) { return Promise.reject(error); }
+    return apiPost<T>(path, body, { ...opts, beforeDispatch });
+}
+
 // R1/R2 continuous-month aliases are data-only — orders must target the
 // resolved real contract (target_code, e.g. TXFR1 → TXFF6), otherwise the
 // exchange rejects them (issue #1: TXFR1 下單 Failed)
@@ -789,10 +811,10 @@ export function placeStockOrder(
     const problem = stockOrderProblem(order);
     if (problem) return Promise.reject(Object.assign(new Error(problem), { mutationNotStarted: true as const }));
     const selected = account ?? accountFor('S');
-    return apiPost<Trade>('/api/v1/order/place_order', {
+    return sendOrderMutation<Trade>('/api/v1/order/place_order', {
         contract: contractKey(contract),
         stock_order: { ...order, account: selected },
-    }, opts).then(ensureAccepted).then(trade => observeTradeResponse(trade, selected));
+    }, selected, opts).then(ensureAccepted).then(trade => observeTradeResponse(trade, selected));
 }
 
 export function placeFuturesOrder(
@@ -802,10 +824,10 @@ export function placeFuturesOrder(
     opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
 ) {
     const selected = account ?? accountFor('F');
-    return apiPost<Trade>('/api/v1/order/place_order', {
+    return sendOrderMutation<Trade>('/api/v1/order/place_order', {
         contract: orderableKey(contract),
         futures_order: { ...order, account: selected },
-    }, opts).then(ensureAccepted).then(trade => observeTradeResponse(trade, selected));
+    }, selected, opts).then(ensureAccepted).then(trade => observeTradeResponse(trade, selected));
 }
 
 /** Preflight for cancel/update. Shioaji 1.7.6 fixed Sinotrade/Shioaji#235
@@ -907,9 +929,10 @@ function observeCancel(
         const { account } = target;
         const { cancelCacheTrusted, locallyCancelled } = target.tradingState;
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
-        await apiPost<Trade>(
+        await sendOrderMutation<Trade>(
             '/api/v1/order/cancel_order',
             { trade_id: target.tradeId },
+            account,
             opts,
         );
         // Quantities come from the local order at the start; the id is the one
@@ -947,10 +970,10 @@ export function updateOrderPrice(tradeId: string, price: number) {
         // 零股委託只能減量（#204）— 任何改價路徑都在送出前擋下
         if (isOddLot(target.trade.order.order_lot)) throw Object.assign(new Error(ODD_LOT_NO_PRICE_UPDATE), { mutationNotStarted: true });
         noteMutationIntent(tradeId, { kind: 'price', price });
-        return apiPost<Trade>('/api/v1/order/update_price', {
+        return sendOrderMutation<Trade>('/api/v1/order/update_price', {
         trade_id: target.tradeId,
         price,
-    }); });
+    }, target.account); });
 }
 
 export function updateOrderQty(tradeId: string, quantity: number) {
@@ -958,10 +981,10 @@ export function updateOrderQty(tradeId: string, quantity: number) {
         const target = await prepareOrderMutation(tradeId);
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
         noteMutationIntent(tradeId, { kind: 'qty', quantity });
-        return apiPost<Trade>('/api/v1/order/update_qty', {
+        return sendOrderMutation<Trade>('/api/v1/order/update_qty', {
         trade_id: target.tradeId,
         quantity,
-    }); });
+    }, target.account); });
 }
 
 // explicit account selector — omitted falls back to the store's selected
@@ -1412,19 +1435,19 @@ export function placeComboOrder(
     account?: Account,
 ) {
     const acc = account ?? accountFor('F');
-    return apiPost<ComboTrade>('/api/v1/order/place_comboorder', {
+    return sendOrderMutation<ComboTrade>('/api/v1/order/place_comboorder', {
         combo_contract: {
             legs: combo.legs,
             ...(combo.combo_type ? { combo_type: combo.combo_type } : {}),
         },
         order: { ...order, account: acc },
-    }).then(ensureAccepted);
+    }, acc).then(ensureAccepted);
 }
 
 export function cancelComboOrder(tradeId: string) {
-    return apiPost<ComboTrade>('/api/v1/order/cancel_comboorder', {
+    return sendOrderMutation<ComboTrade>('/api/v1/order/cancel_comboorder', {
         trade_id: tradeId,
-    });
+    }, accountFor('F'));
 }
 
 export function fetchComboTrades() {

@@ -308,6 +308,19 @@ function mergeOrders(account: Account, trades: Trade[], accounts: Account[], pro
 // refresh without letting many accounts burst past it.
 export const ACCOUNT_READ_CONCURRENCY = 2;
 
+/** Mode discovery may make unsigned accounts queryable after an initial
+ * empty/partial read. Wait for that read, then bypass only its cooldown. */
+let modeRefresh: Promise<void> | null = null;
+export function refreshTradingStateForModeChange(): Promise<void> {
+    if (modeRefresh) return modeRefresh;
+    modeRefresh = (async () => {
+        if (inFlight) await inFlight;
+        for (const key of queryScopes) nextRefreshAt[key] = 0;
+        await refreshTradingState();
+    })().finally(() => { modeRefresh = null; });
+    return modeRefresh;
+}
+
 /** Run `fn` over `items` with at most `limit` in flight; results keep the
  *  input order. */
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {

@@ -17,6 +17,10 @@ vi.mock('./server-identity', () => ({ serverIdentityVerified: () => mocks.identi
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 
 import { apiPost } from './api';
+import { canTrade } from './account-tradable';
+import { beginServerInfoRequest, observeServerInfo } from './server-info-store';
+import type { Account } from './types/portfolio';
+import type { ServerInfo } from './shioaji';
 
 describe('agent harness native POST proxy', () => {
     beforeEach(() => {
@@ -55,6 +59,21 @@ describe('agent harness native POST proxy', () => {
         });
         expect(browserFetch).not.toHaveBeenCalled();
         browserFetch.mockRestore();
+    });
+
+    it('rechecks the trading account after serialization and native transport loading', async () => {
+        const account = { signed: false } as Account;
+        observeServerInfo(beginServerInfoRequest(), { simulation: true } as ServerInfo);
+        const body = { toJSON: () => {
+            observeServerInfo(beginServerInfoRequest(), { simulation: false } as ServerInfo);
+            return { code: 'fixture' };
+        } };
+        await expect(apiPost('/api/v1/order/place_order', body, {
+            beforeDispatch: () => {
+                if (!canTrade(account)) throw Object.assign(new Error('帳戶不可交易'), { mutationNotStarted: true });
+            },
+        })).rejects.toMatchObject({ mutationNotStarted: true });
+        expect(mocks.invoke).not.toHaveBeenCalled();
     });
 
     it('marks an Agent mutation for native production approval', async () => {

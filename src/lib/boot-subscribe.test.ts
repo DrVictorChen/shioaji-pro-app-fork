@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-    accounts: vi.fn(), health: vi.fn(), subscribe: vi.fn(), notify: vi.fn(),
+    accounts: vi.fn(), health: vi.fn(), subscribe: vi.fn(), notify: vi.fn(), snapshots: vi.fn(),
     simulation: undefined as boolean | undefined,
     modeChanged: undefined as (() => void) | undefined,
 }));
@@ -16,7 +16,7 @@ vi.mock('./shioaji', () => ({
     subscribeTradeEvents: mocks.subscribe,
 }));
 vi.mock('./account-store', () => ({ loadAccountsShared: mocks.accounts }));
-vi.mock('./trading-state', () => ({ startTradingState: vi.fn() }));
+vi.mock('./trading-state', () => ({ startTradingState: vi.fn(), refreshTradingStateForModeChange: mocks.snapshots }));
 vi.mock('./trade', () => ({ notify: mocks.notify }));
 vi.mock('./stream', () => ({}));
 vi.mock('./tauri', () => ({}));
@@ -67,8 +67,10 @@ describe('subscribeTradeReports', () => {
         mocks.simulation = true;
         mocks.modeChanged!();
         await vi.waitFor(() => expect(mocks.subscribe.mock.calls).toEqual([[unsigned]]));
+        expect(mocks.snapshots).toHaveBeenCalledOnce();
         mocks.modeChanged!(); // ordinary /info refresh does not resubscribe
         expect(mocks.accounts).toHaveBeenCalledTimes(2);
+        expect(mocks.snapshots).toHaveBeenCalledOnce();
     });
 
     it('revisits mode changes while a subscription check is in flight (#228)', async () => {

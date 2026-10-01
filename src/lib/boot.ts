@@ -47,7 +47,8 @@ import {
 import { appReadySignals, startStallProbe, watchFrontendReady } from './frontend-ready';
 import { ensureAccounts, loadAccountsShared } from './account-store';
 import { timedAutostart } from './server-actions';
-import { startTradingState } from './trading-state';
+import { refreshTradingStateForModeChange, startTradingState } from './trading-state';
+import { watchProtectionEnv } from './protection-env';
 import { serverHealthReady } from './server-health';
 import { FAST_START_SCHEDULE, pollDelay } from './poll-until';
 import { setServerIdentityVerified } from './server-identity';
@@ -125,6 +126,7 @@ function installKeyboardFocusHeal() {
 export function bootstrap() {
     if (booted) return;
     booted = true;
+    watchProtectionEnv();
     if (isTauri && !isChildWindow()) setServerIdentityVerified(false);
     installKeyboardFocusHeal();
     // agent scheduled/triggered tasks run for the app's lifetime
@@ -495,6 +497,7 @@ export function subscribeTradeReports(): Promise<void> {
             const next = knownServerInfo()?.simulation === true;
             if (next === simulation) return;
             simulation = next;
+            if (next) void refreshTradingStateForModeChange();
             if (tradeSubscriptionInFlight) tradeSubscriptionModeQueued = true;
             else void subscribeTradeReports().catch(() => undefined);
         });

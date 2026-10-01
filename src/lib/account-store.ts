@@ -104,12 +104,26 @@ function apply(all: Account[]) {
 }
 
 let simulation = knownServerInfo()?.simulation === true;
+let simulationSelection: { stock?: string; futures?: string } | undefined;
 const stopServerInfo = subscribeServerInfo(() => {
     const next = knownServerInfo()?.simulation === true;
     if (next === simulation) return;
+    if (simulation) {
+        simulationSelection = {
+            stock: state.selectedStock ? keyOf(state.selectedStock) : undefined,
+            futures: state.selectedFutures ? keyOf(state.selectedFutures) : undefined,
+        };
+    }
     simulation = next;
     if (state.loaded) {
         const loadError = state.loadError;
+        if (next && simulationSelection) {
+            state = {
+                ...state,
+                selectedStock: state.accounts.find(a => a.account_type === 'S' && keyOf(a) === simulationSelection!.stock) ?? state.selectedStock,
+                selectedFutures: state.accounts.find(a => a.account_type === 'F' && keyOf(a) === simulationSelection!.futures) ?? state.selectedFutures,
+            };
+        }
         apply(state.accounts);
         state = { ...state, loadError };
     } else {

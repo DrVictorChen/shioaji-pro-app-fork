@@ -30,6 +30,19 @@ describe('unsigned simulation accounts (#228)', () => {
     const unsigned = { ...account, signed: false };
     const mode = (simulation: boolean) => info.observeServerInfo(info.beginServerInfoRequest(), { simulation } as import('./shioaji').ServerInfo);
 
+    it('restores the simulation choice after temporarily falling back to a signed account', async () => {
+        mode(true);
+        const signed = { ...account, account_id: 'signed' };
+        fetchAccounts.mockResolvedValue([signed, unsigned]);
+        await mod.loadAccountsShared();
+        mod.selectAccount(unsigned);
+        mode(false);
+        expect(mod.accountFor('S')).toBe(signed);
+        await mod.loadAccountsShared();
+        mode(true);
+        expect(mod.accountFor('S')).toBe(unsigned);
+    });
+
     it('selects unsigned stock and futures accounts in simulation without changing signed', async () => {
         mode(true);
         const futures = { ...unsigned, account_type: 'F', account_id: 'f' };
