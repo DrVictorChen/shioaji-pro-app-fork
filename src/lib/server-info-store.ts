@@ -19,6 +19,7 @@ const infos = new Map<string, ServerInfo>();
 const applied = new Map<string, number>();
 const listeners = new Set<() => void>();
 let sequence = 0;
+let modeVersion = 0;
 let activeBase: string | undefined;
 let channel: BroadcastChannel | null = null;
 
@@ -28,6 +29,7 @@ function syncBase() {
     const base = getApiBase();
     if (activeBase === base) return base;
     if (activeBase !== undefined) {
+        modeVersion += 1;
         channel?.postMessage({ kind: 'server-info-invalidated', base: activeBase });
         sequence += 1;
         infos.clear();
@@ -46,6 +48,7 @@ function syncBase() {
 }
 
 function invalidate(base: string) {
+    modeVersion += 1;
     sequence += 1;
     applied.set(base, sequence);
     infos.delete(base);
@@ -62,6 +65,7 @@ export function observeServerInfo(request: ServerInfoRequest, info: ServerInfo |
     const { base } = request;
     if (base !== syncBase()) return;
     if ((applied.get(base) ?? 0) > request.sequence) return;
+    if (infos.get(base)?.simulation !== info?.simulation) modeVersion += 1;
     applied.set(base, request.sequence);
     if (info) infos.set(base, info);
     else infos.delete(base);
@@ -103,6 +107,13 @@ export function subscribeServerInfo(listener: () => void) {
 function currentServerInfo() { return infos.get(syncBase()); }
 /** Last /info observed for the current API base, without a new request. */
 export const knownServerInfo = currentServerInfo;
+
+/** Changes of mode or server invalidate in-flight accounting responses,
+ * including a switch away and back while a request is waiting. */
+export function getServerModeVersion() {
+    syncBase();
+    return modeVersion;
+}
 
 export function useServerInfo() {
     return useSyncExternalStore(subscribeServerInfo, currentServerInfo);

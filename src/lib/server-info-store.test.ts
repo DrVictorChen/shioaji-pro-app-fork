@@ -17,6 +17,26 @@ const simulation = { version: '1.7.5', simulation: true } as ServerInfo;
 const production = { version: '1.7.5', simulation: false } as ServerInfo;
 const newer = { version: '1.7.6', simulation: true } as ServerInfo;
 
+it('versions mode changes and invalidations but ignores repeated modes and obsolete info responses', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'mode-version';
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    const original = info.getServerModeVersion();
+    const old = info.beginServerInfoRequest();
+    info.observeServerInfo(info.beginServerInfoRequest(), newer);
+    info.observeServerInfo(old, production);
+    expect(info.getServerModeVersion()).toBe(original);
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    const roundtrip = info.getServerModeVersion();
+    expect(roundtrip).toBeGreaterThan(original);
+    info.forgetServerInfo(runtime.base);
+    const unknown = info.getServerModeVersion();
+    expect(unknown).toBeGreaterThan(roundtrip);
+    runtime.base = 'mode-version-other';
+    expect(info.getServerModeVersion()).toBeGreaterThan(unknown);
+});
+
 async function mountProbe() {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     const seen: { info: ServerInfo | undefined } = { info: undefined };

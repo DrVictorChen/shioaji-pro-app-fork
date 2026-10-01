@@ -54,6 +54,7 @@ beforeEach(async () => {
     vi.stubGlobal('BroadcastChannel', undefined); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     mocks.status = 'live'; mocks.order = null; mocks.statusChanged = null; mocks.tick = null; mocks.response = null; mocks.account.account_type = 'S';
     mocks.account.account_id = 'a'; mocks.account.broker_id = 'fixture';
+    mocks.account.signed = true;
     mocks.extraAccounts = [];
     mocks.positions.mockReset().mockImplementation(async () => [baseline()]);
     mocks.trades.mockReset().mockResolvedValue([]); mocks.balance.mockReset().mockResolvedValue({ acc_balance: 100, date: '2026-09-12', errmsg: '' });
@@ -111,6 +112,105 @@ it('mode discovery during an initial read waits for it and then queries newly tr
     expect(mocks.positions).toHaveBeenCalledWith('F', additional);
     expect(mocks.trades).toHaveBeenCalledWith('F', additional, { refresh: true });
     expect(mocks.margin).toHaveBeenCalledWith(additional);
+});
+
+it.each(['positions', 'orders', 'balance', 'margin'] as const)('discards an unsigned account %s response and stops later reads after a mode change', async stage => {
+    const info = await import('./server-info-store');
+    for (const change of ['production', 'unknown', 'roundtrip'] as const) {
+        info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+        mocks.account.signed = false;
+        mocks.account.account_type = stage === 'margin' ? 'F' : 'S';
+        const reads = [mocks.positions, mocks.trades, mocks.balance, mocks.margin];
+        reads.forEach(read => read.mockClear());
+        const pending = deferred<unknown>();
+        const read = stage === 'positions' ? mocks.positions : stage === 'orders' ? mocks.trades : mocks[stage];
+        read.mockReturnValueOnce(pending.promise);
+        vi.advanceTimersByTime(1600);
+        let run!: Promise<void>;
+        await act(async () => { run = store.refreshTradingState(); });
+        expect(read).toHaveBeenCalledOnce();
+        const before = store.getTradingState();
+        if (change === 'unknown') info.forgetServerInfo('http://fixture.invalid');
+        else info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+        if (change === 'roundtrip') info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+        pending.resolve(stage === 'positions' ? [{ ...baseline(), quantity: 9999 }]
+            : stage === 'orders' ? [{ order: { id: 'stale-mode' }, status: { status: 'Submitted' } }]
+            : stage === 'balance' ? { acc_balance: 9999, date: '2026-09-12', errmsg: '' } : { equity: 9999 });
+        await act(async () => { await run; });
+        const after = store.getTradingState();
+        if (stage === 'positions') {
+            expect(after.positions).toBe(before.positions);
+            expect(mocks.trades).not.toHaveBeenCalled();
+        }
+        if (stage === 'positions' || stage === 'orders') {
+            expect(after.trades).toBe(before.trades);
+            expect(mocks.balance).not.toHaveBeenCalled();
+            expect(mocks.margin).not.toHaveBeenCalled();
+        }
+        expect(after.funds).toBe(before.funds);
+        const scope = stage === 'balance' || stage === 'margin' ? 'account' : stage;
+        expect(after.queries[scope].updatedAt).toBe(before.queries[scope].updatedAt);
+        expect(after.queries[scope].reasons).toContain('query-failed');
+        expect(after.loading).toBe(false);
+    }
+});
+
+it('revalidates the current account row before each query and before applying its response', async () => {
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    const pending = deferred<ReturnType<typeof baseline>[]>();
+    mocks.positions.mockImplementationOnce(() => pending.promise);
+    mocks.trades.mockClear(); mocks.balance.mockClear(); mocks.margin.mockClear();
+    vi.advanceTimersByTime(1600);
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    const before = store.getTradingState();
+    // Same identity, but a new row has lost its signed qualification.
+    mocks.account = { ...mocks.account, signed: false };
+    pending.resolve([{ ...baseline(), quantity: 9999 }]);
+    await act(async () => { await run; });
+    expect(store.getTradingState().positions).toBe(before.positions);
+    expect(mocks.trades).not.toHaveBeenCalledWith('S', mocks.account, { refresh: true });
+    expect(mocks.balance).not.toHaveBeenCalled();
+});
+
+it('does not query queued accounts after the mode changes while the concurrency slots are occupied', async () => {
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+    mocks.extraAccounts = ['b', 'c'].map(account_id => ({ ...mocks.account, account_id, signed: false }));
+    const pending = deferred<ReturnType<typeof baseline>[]>();
+    mocks.positions.mockReset().mockReturnValue(pending.promise);
+    mocks.trades.mockClear(); mocks.balance.mockClear();
+    vi.advanceTimersByTime(1600);
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    expect(mocks.positions).toHaveBeenCalledTimes(store.ACCOUNT_READ_CONCURRENCY);
+    const before = store.getTradingState();
+    info.forgetServerInfo('http://fixture.invalid');
+    pending.resolve([baseline()]);
+    await act(async () => { await run; });
+    expect(mocks.positions).toHaveBeenCalledTimes(store.ACCOUNT_READ_CONCURRENCY);
+    expect(mocks.trades).not.toHaveBeenCalled();
+    expect(mocks.balance).not.toHaveBeenCalled();
+    expect(store.getTradingState().positions).toBe(before.positions);
+});
+
+it('discards buffered funds if mode changes while another account is still waiting', async () => {
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+    mocks.extraAccounts = [{ ...mocks.account, account_type: 'F', account_id: 'f', signed: false }];
+    mocks.balance.mockResolvedValue({ acc_balance: 9999, date: '2026-09-12', errmsg: '' });
+    const pending = deferred<{ equity: number }>();
+    mocks.margin.mockReturnValueOnce(pending.promise);
+    vi.advanceTimersByTime(1600);
+    const before = store.getTradingState();
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState('account'); });
+    info.forgetServerInfo('http://fixture.invalid');
+    pending.resolve({ equity: 9999 });
+    await act(async () => { await run; });
+    expect(store.getTradingState().funds).toBe(before.funds);
+    expect(store.getTradingState().queries.account.updatedAt).toBe(before.queries.account.updatedAt);
 });
 
 describe('shared trading state with isolated broker fixtures', () => {

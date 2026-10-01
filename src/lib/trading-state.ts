@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { getServerModeVersion } from './server-info-store';
 import { onTradeMutation } from './trade-mutations';
 import { useEffect, useSyncExternalStore } from 'react';
 import { getAccountState, refreshAccounts, useAccounts } from './account-store';
@@ -351,6 +352,16 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
     let ordersRead = false;
     const run: Promise<void> = inFlight = (async () => {
         if (resyncInFlight) await resyncInFlight;
+        const modeBefore = getServerModeVersion();
+        const assertMode = () => {
+            if (getServerModeVersion() !== modeBefore) throw new Error('查詢期間伺服器模式已變更，已丟棄回應；請重新更新');
+        };
+        const queryAccount = (account: Account) => {
+            assertMode();
+            const current = getAccountState().accounts.find(a => accountKey(a) === accountKey(account));
+            if (!current || !canTrade(current)) throw new Error('查詢帳戶已不可用，已丟棄回應；請重新更新');
+            return current;
+        };
         const before = eventSequence;
         const connectionBefore = connectionEpoch;
         const clockBefore = reasonClock;
@@ -387,7 +398,8 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                     if (readPositions) try {
                         const positionStart = eventSequence;
                         const hadSnapshot = snapshotEnds.has(accountKey(account));
-                        const positions = await timedRead(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', account));
+                        const positions = await timedRead(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', queryAccount(account)));
+                        queryAccount(account);
                         if (positionStart === eventSequence || !hadSnapshot) {
                             snapshotEnds.set(accountKey(account), Date.now() / 1000);
                             // Ticks received before this instant no longer mark this
@@ -405,7 +417,8 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                     if (readOrders) try {
                         // Initial/manual reconciliation stays authoritative:
                         // refresh:true runs update_status(account) (accounting quota).
-                        const trades = await timedRead(`${accountLabel(account, accounts)} orders`, () => fetchTrades(account.account_type as 'S' | 'F', account, { refresh: true }));
+                        const trades = await timedRead(`${accountLabel(account, accounts)} orders`, () => fetchTrades(account.account_type as 'S' | 'F', queryAccount(account), { refresh: true }));
+                        queryAccount(account);
                         // A kept (not rebuilt) view resolves nothing.
                         if (!mergeOrders(account, trades, accounts, problems.orders)) { ordersOk = false; failed.add('orders'); }
                     } catch {
@@ -414,15 +427,16 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         problems.orders.push(['query-failed', `${account.account_type} 委託查詢失敗，保留上次資料`]);
                     }
                 });
-                if (readOrders && ordersOk) ordersRead = true;
+                assertMode();
                 if (readAccount) {
                     // concurrently too; results keep the account order
                     const funds: AccountFunds[] = await mapLimit(accounts, ACCOUNT_READ_CONCURRENCY, async (account): Promise<AccountFunds> => {
                         const previous = state.funds?.find(f => accountKey(f.account) === accountKey(account));
                         try {
                             const value = account.account_type === 'S'
-                                ? { balance: await timedRead(`${accountLabel(account, accounts)} balance`, () => fetchAccountBalance(account)) }
-                                : { margin: await timedRead(`${accountLabel(account, accounts)} margin`, () => fetchMargin(account)) };
+                                ? { balance: await timedRead(`${accountLabel(account, accounts)} balance`, () => fetchAccountBalance(queryAccount(account))) }
+                                : { margin: await timedRead(`${accountLabel(account, accounts)} margin`, () => fetchMargin(queryAccount(account))) };
+                            queryAccount(account);
                             if (value.balance?.errmsg?.trim()) throw new Error('券商餘額查詢回報錯誤');
                             return { account, ...value, updatedAt: Date.now() };
                         } catch {
@@ -432,6 +446,9 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                             return { ...previous, account, error };
                         }
                     });
+                    // Another account can still be waiting after this one's
+                    // response; validate again at the shared funds write.
+                    accounts.forEach(queryAccount);
                     const stock = getAccountState().selectedStock ?? accounts.find(a => a.account_type === 'S');
                     const future = getAccountState().selectedFutures ?? accounts.find(a => a.account_type === 'F');
                     state = { ...state, funds,
@@ -439,6 +456,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         margin: funds.find(f => future && accountKey(f.account) === accountKey(future))?.margin,
                         balanceAccount: stock && accountKey(stock), marginAccount: future && accountKey(future) };
                 }
+                if (readOrders && ordersOk) ordersRead = true;
                 if (readPositions) prepareQuotes();
             }
         } catch (e) {

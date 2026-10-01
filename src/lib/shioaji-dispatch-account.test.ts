@@ -17,6 +17,7 @@ beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('BroadcastChannel', undefined);
+    vi.stubGlobal('navigator', { locks: { request: (_name: string, _options: unknown, callback: (lock: object) => unknown) => callback({}) } });
     m.accounts = [{ account_type: 'F', broker_id: 'fixture', account_id: 'unsigned', signed: false, username: '', person_id: '' }];
     m.trades = [{ account: m.accounts[0], contract, order: { ...order, account: m.accounts[0], id: 'id' }, status: { status: 'Submitted' } } as unknown as Trade];
     m.baseline.mockReturnValue(true);
@@ -61,12 +62,23 @@ it('uses the current account row rather than a captured signed flag', async () =
     expect(fetchMock).not.toHaveBeenCalled();
 });
 
-it.each([
+const mutations = [
     () => cancelOrder('id'),
     () => updateOrderPrice('id', 101),
     () => updateOrderQty('id', 1),
-])('revalidates mutations when mode changes after account preflight', async call => {
+] as const;
+it.each(mutations)('revalidates mutations when mode changes after account preflight', async call => {
     m.baseline.mockImplementation(() => { mode(false); return true; });
     await expect(call()).rejects.toMatchObject({ mutationNotStarted: true, tradingGateRejected: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it.each(mutations)('rejects mutations without Web Locks before account preflight', async call => {
+    vi.stubGlobal('navigator', {});
+    expect(navigator.locks).toBeUndefined();
+    const error = await call().catch(error => error);
+    expect(error).toMatchObject({ message: expect.stringContaining('Web Locks'), mutationNotStarted: true });
+    expect(error).not.toHaveProperty('tradingGateRejected');
+    expect(m.baseline).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
 });
