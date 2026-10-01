@@ -1,8 +1,10 @@
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isImeKey, parseLevels, placeFloatingToolbar, placeStylePopover, Popover, PriceInput, TextEditor } from './chart-drawing-tools';
+import { DrawingSettingsDialog, isImeKey, parseLevels, placeFloatingToolbar, placeStylePopover, Popover, PriceInput, TextEditor } from './chart-drawing-tools';
 import { escStackDepth } from '../hooks/use-esc-close';
+import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE, flushDrawingWrites, getDrawings, reloadDrawingsFromStorage, takeDrawingNotices } from '../lib/chart-drawings';
+import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
 
 // 瀏覽器裡 blur() 會同步觸發 onBlur — 替身照做，才重現得出「Esc 之後
 // onBlur 看到舊 draft」的時序
@@ -28,6 +30,84 @@ async function typeThenPress(key: string) {
     );
     return onCommit;
 }
+
+describe('設定對話框：規則 R 與欄位 diff', () => {
+    const storage = new Map<string, string>();
+    beforeEach(() => {
+        vi.useFakeTimers();
+        vi.setSystemTime(10000);
+        storage.clear();
+        vi.stubGlobal('localStorage', {
+            getItem: (k: string) => storage.get(k) ?? null,
+            setItem: (k: string, v: string) => storage.set(k, v),
+            removeItem: (k: string) => storage.delete(k),
+        });
+        __resetDrawingsForTest();
+    });
+    afterEach(() => vi.useRealTimers());
+    async function dialog(tool: 'text' | 'trend' = 'text') {
+        const anchors = [{ time: 1000, price: 25000 }, { time: 2000, price: 25100 }];
+        const d = addDrawing('TXF', tool, tool === 'text' ? anchors.slice(0, 1) : anchors, DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+        flushDrawingWrites();
+        const api = { symbolKey: 'TXF', themeMode: 'dark', rename: vi.fn(), setText: vi.fn(), setAnchor: vi.fn(), setFib: vi.fn(), applyStyle: vi.fn(), formatPrice: String } as unknown as ChartDrawingsApi;
+        const onClose = vi.fn();
+        await act(async () => { view = create(createElement(DrawingSettingsDialog, { drawing: d, api, onClose })); });
+        return { d, api, onClose };
+    }
+
+    it.each(['update', 'delete'])('遠端%s同步封住舊文字、名稱、座標與樣式事件並關閉', async (kind) => {
+        const { d, api, onClose } = await dialog();
+        const text = view.root.findByProps({ 'aria-label': '文字內容' });
+        await act(async () => text.props.onChange({ target: { value: '本地待寫文字' } }));
+        const staleTextBlur = view.root.findByProps({ 'aria-label': '文字內容' }).props.onBlur;
+        const staleName = view.root.findByProps({ 'aria-label': '物件名稱' }).props;
+        const staleStyle = view.root.findByProps({ 'aria-label': '線寬 4' }).props.onClick;
+        await act(async () => view.root.findAllByProps({ role: 'tab' })[1]!.props.onClick());
+        const time = view.root.findAllByType('input').find((n) => n.props.type === 'datetime-local')!;
+        const staleTime = time.props.onBlur;
+        const remote = { ...d, text: '遠端', revision: '0000000000000100:remote' };
+        storage.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [remote] }));
+        if (kind === 'delete') storage.set('sj-pro-chart-drawing-tombstones', JSON.stringify({ TXF: { [d.id]: { revision: '0000000000000001:remote', updatedAt: 1 } } }));
+        await act(async () => {
+            reloadDrawingsFromStorage();
+            staleTextBlur();
+            staleName.onBlur({ target: { value: '本地舊名' } });
+            staleName.onKeyDown({ key: 'Enter', currentTarget: { value: '本地舊名' } });
+            staleTime({ target: { value: '2026-10-01T12:00' } });
+            staleStyle();
+        });
+        expect(onClose).toHaveBeenCalledTimes(1);
+        for (const fn of [api.setText, api.rename, api.setAnchor, api.applyStyle]) expect(fn).not.toHaveBeenCalled();
+        expect(getDrawings('TXF')).toEqual(kind === 'delete' ? [] : [remote]);
+        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+    });
+
+    it('文字、名稱、樣式與含秒數的時間未改動，失焦／確定都不寫', async () => {
+        const { api, d } = await dialog();
+        await act(async () => {
+            view.root.findByProps({ 'aria-label': '文字內容' }).props.onBlur();
+            const name = view.root.findByProps({ 'aria-label': '物件名稱' }).props;
+            name.onBlur({ target: { value: '' } });
+            name.onKeyDown({ key: 'Enter', currentTarget: { value: '' } });
+            view.root.findByProps({ 'aria-label': `線寬 ${d.style.width}` }).props.onClick();
+            view.root.findAllByProps({ role: 'tab' })[1]!.props.onClick();
+        });
+        const time = view.root.findAllByType('input').find((n) => n.props.type === 'datetime-local')!;
+        await act(async () => time.props.onBlur({ target: { value: time.props.defaultValue } }));
+        for (const fn of [api.setText, api.rename, api.setAnchor, api.applyStyle]) expect(fn).not.toHaveBeenCalled();
+    });
+
+    it('改價格只提交 price，改時間只提交 time', async () => {
+        const { api, d } = await dialog('trend');
+        await act(async () => view.root.findAllByProps({ role: 'tab' })[1]!.props.onClick());
+        const price = view.root.findAllByType(PriceInput)[0]!;
+        await act(async () => price.props.onCommit(25123));
+        expect(api.setAnchor).toHaveBeenLastCalledWith(d.id, 0, { price: 25123 });
+        const time = view.root.findAllByType('input').find((n) => n.props.type === 'datetime-local')!;
+        await act(async () => time.props.onBlur({ target: { value: '2026-10-01T12:00' } }));
+        expect(api.setAnchor).toHaveBeenLastCalledWith(d.id, 0, { time: new Date('2026-10-01T12:00').getTime() / 1000 });
+    });
+});
 
 describe('水平線價格輸入', () => {
     it('Esc 還原，不套用打到一半的價格', async () => {

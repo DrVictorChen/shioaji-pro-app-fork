@@ -1,6 +1,6 @@
 import type { Drawing } from './chart-drawings';
 
-// Lamport counter＋writer 全序；時間只用於顯示與墓碑 TTL。舊資料以時間
+// Lamport counter＋writer 全序；時間只用於顯示。舊資料以時間
 // 轉成 legacy counter，第一次修改即升級，不需整份遷移。
 export type Revision = string;
 export interface DrawingTombstone {

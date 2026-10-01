@@ -4,6 +4,7 @@ import {
     channelOffset,
     estimateTextWidth,
     fibPrice,
+    fibLabels,
     formatSpan,
     magnetAnchor,
     measureStats,
@@ -32,6 +33,36 @@ import {
 const MIN = 60;
 const DAY = 86400;
 const SIZE: PaneSize = { width: 800, height: 400 };
+
+describe('可見範圍命中：未選取的斐波那契不能把指標交給委託線', () => {
+    const pts = [{ x: 200, y: 300 }, { x: 500, y: 100 }];
+    it('色帶內部命中，關閉色帶後空白處不命中', () => {
+        const fib = { ...defaultFibOptions(), showTrend: false };
+        expect(hitTest('fib', pts, SIZE, { x: 280, y: 180 }, 0, { fib })).toEqual({ kind: 'body' });
+        expect(hitTest('fib', pts, SIZE, { x: 280, y: 180 }, 0, { fib: { ...fib, bandOpacity: 0 } })).toBeNull();
+    });
+    it.each(['left', 'right'] as const)('外側價位標籤命中（%s）', (labelH) => {
+        const fib = { ...defaultFibOptions(), labelH, labelV: 'middle' as const, showTrend: false };
+        expect(hitTest('fib', pts, SIZE, { x: labelH === 'left' ? 160 : 550, y: 100 }, 0, { fib })).toEqual({ kind: 'body' });
+    });
+    it.each(['top', 'middle', 'bottom'] as const)('字級16、百分比、反轉與延伸的全部標籤範圍命中（%s）', (labelV) => {
+        const fib = { ...defaultFibOptions(), labelV, fontSize: 16, levelFormat: 'percent' as const, reverse: true, extendLeft: true, extendRight: true };
+        const anchors = [{ time: 1, price: 25123.45 }, { time: 2, price: 24123.45 }];
+        const shape = shapeOf('fib', pts, SIZE, { fib });
+        if (shape?.kind !== 'fib') throw new Error('expected fib');
+        const formatPrice = (v: number) => v.toLocaleString('en-US', { minimumFractionDigits: 2 });
+        for (const r of fibLabels(shape, fib, anchors, SIZE.width, formatPrice)) {
+            for (const at of [{ x: r.left, y: r.top }, { x: r.right, y: r.bottom }]) {
+                expect(hitTest('fib', pts, SIZE, at, 0, { fib, anchors, formatPrice })).toEqual({ kind: 'body' });
+            }
+        }
+    });
+    it('新工具與粗線的完整範圍命中', () => {
+        expect(hitTest('channel', [...pts, { x: 300, y: 330 }], SIZE, { x: 350, y: 280 }, 0)).toEqual({ kind: 'body' });
+        expect(hitTest('text', [{ x: 200, y: 100 }], SIZE, { x: 240, y: 140 }, 0, { text: '兩行文字\n中文與abc' })).toEqual({ kind: 'body' });
+        expect(hitTest('vertical', [{ x: 200, y: 100 }], SIZE, { x: 202, y: 399 }, 0, { style: { width: 4 } })).toEqual({ kind: 'body' });
+    });
+});
 
 // 1 分 K：09:00 起連續 5 根
 const m1 = [0, 1, 2, 3, 4].map((i) => 32400 + i * MIN);

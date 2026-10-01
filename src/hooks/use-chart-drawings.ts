@@ -196,7 +196,7 @@ export interface ChartDrawingsApi {
     // 水平線可直接輸入精確價格（拖曳只能拖到游標所在的價位）
     setSelectedPrice: (price: number) => void;
     // 設定視窗「座標」分頁
-    setAnchor: (id: string, index: number, anchor: DrawingAnchor) => void;
+    setAnchor: (id: string, index: number, anchor: Partial<DrawingAnchor>) => void;
     // 斐波那契選項（比例、色帶、標籤、延伸、反轉…）
     setFib: (id: string, patch: Partial<FibOptions>) => void;
     // 文字註記
@@ -295,7 +295,7 @@ export function useChartDrawings(opts: {
     const measureDoneRef = useRef(false); // 量測第二點已定（再點一下清除）
     const layerRef = useRef<DrawingLayer | null>(null);
     // 文字編輯開始前的清單；新建的文字取消＝整筆不留、也不進復原
-    const textTxRef = useRef<{ before: Drawing[]; created: boolean; invalidated?: boolean } | null>(null);
+    const textTxRef = useRef<{ id: string; before: Drawing[]; created: boolean; invalidated?: boolean } | null>(null);
     const cancelDragRef = useRef<(() => void) | null>(null);
     const historyBusyRef = useRef(false);
 
@@ -328,8 +328,9 @@ export function useChartDrawings(opts: {
     useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
         const changed = historyRef.current.invalidate(key, ids);
         const info = textTxRef.current;
-        if (key === stateRef.current.symbolKey && info && ids.has(stateRef.current.editingTextId ?? '')) {
+        if (key === stateRef.current.symbolKey && info && ids.has(info.id)) {
             info.invalidated = true;
+            setEditingTextId(null);
             noteDrawingHistoryConflict();
         }
         if (changed) {
@@ -551,7 +552,7 @@ export function useChartDrawings(opts: {
         const pick = (projector: Projector, pt: Point) => {
             const layer = layerOf();
             if (!layer) return null;
-            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt);
+            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice);
         };
 
         const measureLabel = (a: DrawingAnchor, b: DrawingAnchor) => {
@@ -596,6 +597,7 @@ export function useChartDrawings(opts: {
             const keep = drag.items.filter((item) => !ids.has(item.id));
             if (keep.length !== drag.items.length) noteDrawingHistoryConflict();
             drag.items = keep;
+            if (!keep.length) cancelDragRef.current?.();
         });
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
@@ -679,7 +681,7 @@ export function useChartDrawings(opts: {
             setSelectedIds([created.id]);
             if (created.tool === 'text') {
                 // 文字：先開輸入框，確定後才算一步（取消＝整筆不留）
-                textTxRef.current = { before, created: true };
+                textTxRef.current = { id: created.id, before, created: true };
                 setEditingTextId(created.id);
                 return;
             }
@@ -893,7 +895,7 @@ export function useChartDrawings(opts: {
             if (picked?.drawing.tool !== 'text' || picked.drawing.locked) return;
             e.preventDefault();
             e.stopPropagation();
-            textTxRef.current = { before: getDrawings(stateRef.current.symbolKey), created: false };
+            textTxRef.current = { id: picked.drawing.id, before: getDrawings(stateRef.current.symbolKey), created: false };
             setSelectedIds([picked.drawing.id]);
             setEditingTextId(picked.drawing.id);
         };
@@ -1208,6 +1210,8 @@ export function useChartDrawings(opts: {
     const rename = useCallback(
         (id: string, name: string) => {
             const n = name.trim().slice(0, MAX_NAME_LENGTH);
+            const d = getDrawings(stateRef.current.symbolKey).find((x) => x.id === id);
+            if (!d || n === (d.name ?? '')) return;
             patchOne(id, { name: n || undefined });
         },
         [patchOne],
@@ -1284,14 +1288,16 @@ export function useChartDrawings(opts: {
     );
 
     const setAnchor = useCallback(
-        (id: string, index: number, anchor: DrawingAnchor) => {
-            const d = stateRef.current.drawings.find((x) => x.id === id);
+        (id: string, index: number, patch: Partial<DrawingAnchor>) => {
+            const d = getDrawings(stateRef.current.symbolKey).find((x) => x.id === id);
             if (!d || d.locked || !d.anchors[index]) return;
+            const anchor = { ...d.anchors[index]!, ...patch };
             if (!Number.isFinite(anchor.time) || !Number.isFinite(anchor.price)) return;
             const price =
                 d.tool === 'horizontal'
                     ? roundToTick(stateRef.current.contract, anchor.price)
                     : anchor.price;
+            if (anchor.time === d.anchors[index]!.time && price === d.anchors[index]!.price) return;
             patchOne(id, {
                 anchors: d.anchors.map((a, i) => (i === index ? { time: anchor.time, price } : a)),
             });
@@ -1301,10 +1307,11 @@ export function useChartDrawings(opts: {
 
     const setFib = useCallback(
         (id: string, patch: Partial<FibOptions>) => {
-            const d = stateRef.current.drawings.find((x) => x.id === id);
+            const d = getDrawings(stateRef.current.symbolKey).find((x) => x.id === id);
             if (!d || d.tool !== 'fib') return;
             // 整份過一次驗證：比例去重排序、範圍夾住
             const fib = sanitizeFibOptions({ ...d.fib, ...patch });
+            if (JSON.stringify(fib) === JSON.stringify(d.fib)) return;
             // 連續拉滑桿（色帶透明度）合併成一步復原
             patchOne(id, { fib }, `fib:${Object.keys(patch).sort().join(',')}`);
         },
@@ -1314,7 +1321,7 @@ export function useChartDrawings(opts: {
     const editText = useCallback((id: string) => {
         const d = stateRef.current.drawings.find((x) => x.id === id);
         if (!d || d.tool !== 'text' || d.locked) return;
-        textTxRef.current = { before: getDrawings(stateRef.current.symbolKey), created: false };
+        textTxRef.current = { id, before: getDrawings(stateRef.current.symbolKey), created: false };
         setSelectedIds([id]);
         setEditingTextId(id);
     }, []);
@@ -1405,7 +1412,7 @@ export function useChartDrawings(opts: {
         if (!layer || !pt || !projector) return null;
         const { drawings: list, selectedIds: sel } = stateRef.current;
         if (!list.length) return null;
-        const picked = pickDrawing(list, projector, layer.paneSize, pt);
+        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice);
         if (!picked) return null;
         return sel.includes(picked.drawing.id) ? 'selected' : 'other';
     }, []);

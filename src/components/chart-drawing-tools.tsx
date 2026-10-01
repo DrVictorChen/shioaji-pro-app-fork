@@ -56,8 +56,11 @@ import {
     fibOptionsOf,
     MAX_DRAWINGS_PER_SYMBOL,
     MAX_TEXT_LENGTH,
+    subscribeDrawingRemoteChanges,
+    noteDrawingHistoryConflict,
     toolDef,
     type Drawing,
+    type DrawingStyle,
     type DrawingGroup,
     type DrawingToolId,
 } from '../lib/chart-drawings';
@@ -540,8 +543,8 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
     useEffect(() => setMenu(null), [selKey]);
     // 設定視窗只對單一物件；選取變了（例如 Esc 取消選取）就關
     useEffect(() => {
-        if (!primary) setSettingsOpen(false);
-    }, [primary]);
+        setSettingsOpen(false);
+    }, [primary?.id, api.symbolKey]);
 
     const showBar = !!primary && !!box && !api.editingTextId && !api.tool;
     const pos = showBar ? placeFloatingToolbar(box!, barSize, api.hostSize) : null;
@@ -689,7 +692,7 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
             )}
 
             {settingsOpen && primary && (
-                <DrawingSettingsDialog api={api} drawing={primary} onClose={() => setSettingsOpen(false)} />
+                <DrawingSettingsDialog key={`${api.symbolKey}:${primary.id}`} api={api} drawing={primary} onClose={() => setSettingsOpen(false)} />
             )}
 
             {api.editingTextId && api.editBox && (
@@ -786,7 +789,7 @@ const ANCHOR_NAMES: Partial<Record<Drawing['tool'], string[]>> = {
 };
 
 export function DrawingSettingsDialog({
-    api,
+    api: sourceApi,
     drawing,
     onClose,
 }: {
@@ -798,6 +801,37 @@ export function DrawingSettingsDialog({
     const closeRef = useRef(onClose);
     closeRef.current = onClose;
     const dialogRef = useRef<HTMLDivElement | null>(null);
+    // 遠端勝出時先同步封住所有事件，再關閉；unmount 期間的 blur 也不能寫舊值。
+    const invalidated = useRef(false);
+    useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
+        if (key !== sourceApi.symbolKey || !ids.has(drawing.id)) return;
+        invalidated.current = true;
+        noteDrawingHistoryConflict();
+        closeRef.current();
+    }), [sourceApi.symbolKey, drawing.id]);
+    const api: ChartDrawingsApi = {
+        ...sourceApi,
+        applyStyle: (patch) => {
+            if (invalidated.current) return;
+            const diff = Object.fromEntries(Object.entries(patch).filter(([k, v]) => drawing.style[k as keyof DrawingStyle] !== v));
+            if (Object.keys(diff).length) sourceApi.applyStyle(diff);
+        },
+        rename: (id, value) => {
+            if (!invalidated.current && value !== (drawing.name ?? '')) sourceApi.rename(id, value);
+        },
+        setText: (id, value) => {
+            if (!invalidated.current && value !== (drawing.text ?? '')) sourceApi.setText(id, value);
+        },
+        setAnchor: (id, index, patch) => {
+            if (!invalidated.current) sourceApi.setAnchor(id, index, patch);
+        },
+        setFib: (id, patch) => {
+            if (invalidated.current) return;
+            const fib = fibOptionsOf(drawing);
+            const diff = Object.fromEntries(Object.entries(patch).filter(([k, v]) => JSON.stringify(fib[k as keyof FibOptions]) !== JSON.stringify(v)));
+            if (Object.keys(diff).length) sourceApi.setFib(id, diff);
+        },
+    };
     // Esc 關閉：入 modal stack（preventDefault），不算進 Esc×2 全部刪單。
     // 輸入框裡的 Esc 是還原輸入（輸入框自己處理），不關視窗
     useEscClose(() => {
@@ -923,7 +957,7 @@ export function DrawingSettingsDialog({
                                             price={a.price}
                                             format={(p) => api.formatPrice(p, false)}
                                             disabled={d.locked}
-                                            onCommit={(price) => api.setAnchor(d.id, i, { ...a, price })}
+                                            onCommit={(price) => api.setAnchor(d.id, i, { price })}
                                         />
                                     )}
                                     {d.tool !== 'horizontal' && (
@@ -936,7 +970,7 @@ export function DrawingSettingsDialog({
                                             defaultValue={toLocalInput(a.time)}
                                             onBlur={(e) => {
                                                 const t = fromLocalInput(e.target.value);
-                                                if (t !== null && t !== a.time) api.setAnchor(d.id, i, { ...a, time: t });
+                                                if (e.target.value !== toLocalInput(a.time) && t !== null && t !== a.time) api.setAnchor(d.id, i, { time: t });
                                             }}
                                         />
                                     )}

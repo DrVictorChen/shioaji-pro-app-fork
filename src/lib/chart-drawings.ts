@@ -424,11 +424,9 @@ export function sanitizeSettings(v: unknown): DrawingSettings {
 type Store = Record<string, Drawing[]>;
 
 // 刪除墓碑：{ 商品鍵: { 物件 id: { revision, updatedAt } } }，另存一個項目。別的視窗
-// 手上還有這個物件的舊版本時，寫出或同步都不會讓它復活；超過 TTL 的
-// 墓碑在寫出時清掉，不會無限長大。
+// 手上還有這個物件的任何版本時，寫出或同步都不會讓它復活。墓碑永久保留。
 type Tombs = Record<string, Record<string, Tombstone>>;
 const TOMB_KEY = 'sj-pro-chart-drawing-tombstones';
-export const TOMBSTONE_TTL_MS = 7 * 24 * 3600 * 1000;
 
 function loadTombs(): Tombs {
     try {
@@ -449,10 +447,9 @@ function loadTombs(): Tombs {
     }
 }
 
-// 墓碑 revision 不比物件舊 → 物件已被刪除。
+// 規則 R：墓碑永久否決同 id 的任何版本；新物件必須用新 id。
 function buried(tombs: Tombs, key: string, d: Drawing): boolean {
-    const at = tombs[key]?.[d.id];
-    return at !== undefined && tombRevision(at) >= drawingRevision(d);
+    return tombs[key]?.[d.id] !== undefined;
 }
 
 // 保留既有時間欄位的遞增行為；版本先後由 revision 決定。
@@ -634,7 +631,25 @@ function loadJournals(): Journal[] {
 }
 
 function applyJournals(base: Store, tombs: Tombs, journals: Journal[]): Store {
-    return journals.reduce((acc, j) => applyOps(acc, j.ops, tombs, j.order), base);
+    // 先找出所有日誌的勝出版本，避免讀取順序讓舊日誌的待重放移動先落地。
+    const latest = new Map<string, Map<string, Revision>>();
+    for (const j of journals) for (const [key, ops] of j.ops) for (const [id, op] of ops) {
+        if (isTombstone(op)) continue;
+        const ids = latest.get(key) ?? new Map<string, Revision>();
+        const revision = drawingRevision(op);
+        if (!ids.has(id) || ids.get(id)! < revision) ids.set(id, revision);
+        latest.set(key, ids);
+    }
+    return journals.reduce((acc, j) => {
+        const order: OrderOps = new Map();
+        for (const [key, moves] of j.order) {
+            order.set(key, moves.filter((m) => {
+                const op = j.ops.get(key)?.get(m.id);
+                return op && !isTombstone(op) && drawingRevision(op) === latest.get(key)?.get(m.id);
+            }));
+        }
+        return applyOps(acc, j.ops, tombs, order);
+    }, base);
 }
 
 // 主項目＋所有日誌（讀取時看到的樣子）
@@ -665,7 +680,7 @@ function emit() {
 // 視窗的改動 → 寫回」，而且整段在跨視窗的 Web Lock 裡做（見 withLock），
 // 兩個視窗不會同時讀到同一份舊資料再各自寫回。收到別的視窗寫入時也是
 // 「對方版本 → 疊上本視窗還沒寫出去的改動」。同一個物件兩邊都改時，
-// revision 較大的一方勝出；刪除比修改新就維持刪除。
+// revision 較大的一方勝出；刪除永遠勝出。
 type Op = Drawing | Tombstone;
 const pending = new Map<string, Map<string, Op>>();
 // 只重放實際移動的物件，不覆蓋遠端對其他物件的排序。
@@ -678,9 +693,10 @@ function record(key: string, id: string, op: Op) {
         pending.set(key, ops);
     }
     ops.set(id, op);
-    if (!isTombstone(op)) {
-        const moves = pendingOrder.get(key);
-        if (moves) pendingOrder.set(key, moves.map((m) => m.id === id ? { ...m, revision: drawingRevision(op) } : m));
+    if (isTombstone(op)) {
+        const moves = pendingOrder.get(key)?.filter((m) => m.id !== id);
+        if (moves?.length) pendingOrder.set(key, moves);
+        else pendingOrder.delete(key);
     }
 }
 
@@ -697,15 +713,11 @@ function applyOps(
         for (const [id, op] of byId) {
             const i = list.findIndex((x) => x.id === id);
             if (isTombstone(op)) {
-                if (i >= 0 && drawingRevision(list[i]!) <= tombRevision(op)) list.splice(i, 1);
+                if (i >= 0) list.splice(i, 1);
                 const t = (tombs[key] ??= {});
                 if (t[id] === undefined || tombRevision(t[id]!) < tombRevision(op)) t[id] = op;
             } else if (buried(tombs, key, op)) {
-                // 別的視窗在本視窗修改之後刪掉了它 — 這筆（較舊的）修改作廢。
-                // 主項目裡同 id 的版本只有「不比刪除新」時才跟著移除；比刪除
-                // 還新的版本是刪除之後重建／復原的，要保留
-                const at = tombs[key]![id]!;
-                if (i >= 0 && drawingRevision(list[i]!) <= tombRevision(at)) list.splice(i, 1);
+                if (i >= 0) list.splice(i, 1);
             } else if (i >= 0) {
                 if (drawingRevision(list[i]!) <= drawingRevision(op)) list[i] = op;
             } else {
@@ -729,7 +741,8 @@ function applyOps(
         for (const move of moves) {
             const i = next.findIndex((d) => d.id === move.id);
             // 遠端已改過同一物件時，舊排序操作也作廢。
-            if (i < 0 || drawingRevision(next[i]!) !== move.revision) continue;
+            const persisted = base[key]?.find((d) => d.id === move.id);
+            if (i < 0 || (persisted && drawingRevision(persisted) > move.revision)) continue;
             const anchor = move.after === null ? -1 : next.findIndex((d) => d.id === move.after);
             if (move.after !== null && anchor < 0) continue;
             const [item] = next.splice(i, 1);
@@ -817,11 +830,6 @@ function writeDrawingsNow() {
     const orderSnap = new Map(pendingOrder);
     const next = applyOps(base, snapshot, tombs, orderSnap);
     const journalSettings = journals.filter((j) => Object.keys(j.settings).length);
-    const now = Date.now();
-    for (const [key, ids] of Object.entries(tombs)) {
-        for (const [id, at] of Object.entries(ids)) if (now - (typeof at === 'number' ? at : at.updatedAt) > TOMBSTONE_TTL_MS) delete ids[id];
-        if (!Object.keys(ids).length) delete tombs[key];
-    }
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
         localStorage.setItem(TOMB_KEY, JSON.stringify(tombs));
@@ -1002,6 +1010,7 @@ export function getDrawingVersion(key: string, id: string, tombs: Tombs = loadTo
 
 const remoteListeners = new Set<(key: string, ids: ReadonlySet<string>) => void>();
 const observedVersions = new Map<string, Map<string, Revision>>();
+const observedDeleted = new Map<string, Set<string>>();
 export function subscribeDrawingRemoteChanges(listener: (key: string, ids: ReadonlySet<string>) => void) {
     remoteListeners.add(listener);
     return () => { remoteListeners.delete(listener); };
@@ -1020,21 +1029,29 @@ function versionsOf(base: Store, tombs: Tombs) {
 }
 function rememberVersions(base: Store, tombs: Tombs) {
     for (const [key, ids] of versionsOf(base, tombs)) observedVersions.set(key, ids);
+    for (const [key, ids] of Object.entries(tombs)) observedDeleted.set(key, new Set(Object.keys(ids)));
 }
 function acceptRemoteVersions(base: Store, tombs: Tombs) {
     for (const [key, ids] of versionsOf(base, tombs)) {
         const known = observedVersions.get(key);
         const changed = new Set<string>();
         for (const [id, revision] of ids) {
-            if (!known?.has(id) || known.get(id)! < revision) {
+            const op = pending.get(key)?.get(id);
+            const deleted = tombs[key]?.[id] !== undefined;
+            const local = getDrawingVersion(key, id, {});
+            const remoteWins = deleted || (!isTombstone(op) && (local === null || local < revision));
+            const newlyObserved = deleted ? !observedDeleted.get(key)?.has(id) : (!known?.has(id) || known.get(id)! < revision);
+            if (remoteWins && (newlyObserved || (deleted && op !== undefined))) {
                 changed.add(id);
-                const op = pending.get(key)?.get(id);
-                if (op !== undefined && (isTombstone(op) ? tombRevision(op) : drawingRevision(op)) < revision) {
-                    pending.get(key)!.delete(id);
-                }
+                pending.get(key)?.delete(id);
+                const moves = pendingOrder.get(key)?.filter((m) => m.id !== id);
+                if (moves?.length) pendingOrder.set(key, moves);
+                else pendingOrder.delete(key);
             }
         }
+        if (pending.get(key)?.size === 0) pending.delete(key);
         observedVersions.set(key, ids);
+        observedDeleted.set(key, new Set(Object.keys(tombs[key] ?? {})));
         if (changed.size) for (const listener of remoteListeners) listener(key, changed);
     }
 }
@@ -1057,6 +1074,7 @@ export function applyDrawingHistory(step: HistoryStep, applied: (versions: Map<s
         const expectedSide = step.side === 'before' ? 'after' : 'before';
         const changes = candidates.filter((c) => {
             if (!step.changes.some((valid) => valid.id === c.id)) return false;
+            if (c[step.side] && (tombs[step.key]?.[c.id] !== undefined || isTombstone(pending.get(step.key)?.get(c.id)))) return false;
             const exists = current.some((d) => d.id === c.id);
             const expected = expectedSide === 'after' ? c.afterVersion : c.beforeVersion;
             const version = getDrawingVersion(step.key, c.id, tombs);
@@ -1150,6 +1168,9 @@ export function addDrawing(
 
 // 把 key 的清單換成 next，並把有變動的物件記進待寫入（依 id）
 function commit(key: string, nextIn: Drawing[]) {
+    const tombs = loadTombs();
+    loadView(tombs); // 尚未併進主項目的關窗日誌也可能已有墓碑。
+    nextIn = nextIn.filter((d) => !buried(tombs, key, d) && !isTombstone(pending.get(key)?.get(d.id)));
     const before = store[key] ?? EMPTY;
     for (const d of before) {
         lastStamp = Math.max(lastStamp, d.updatedAt);
@@ -1293,6 +1314,7 @@ export function __resetDrawingsForTest() {
     notices = [];
     noticed.clear();
     observedVersions.clear();
+    observedDeleted.clear();
     revisionCounter = 0;
     lastStamp = 0;
     lockOverride = null;

@@ -11,7 +11,7 @@
 // 座標，包含最後一根 K 棒右邊的空白區。
 
 import type { DrawingAnchor, DrawingTool } from './chart-drawings';
-import { defaultFibOptions, type FibOptions } from './chart-drawing-fib';
+import { defaultFibOptions, fibLabel, fibLabelPlacement, fibLevelPrice, type FibOptions } from './chart-drawing-fib';
 
 export interface Point {
     x: number;
@@ -146,6 +146,9 @@ export interface Segment {
 export interface ShapeExtra {
     text?: string;
     fib?: FibOptions;
+    anchors?: DrawingAnchor[];
+    style?: { width: number };
+    formatPrice?: (price: number) => string;
 }
 
 export const TEXT_FONT_PX = 12;
@@ -166,6 +169,25 @@ export function textBox(at: Point, text: string) {
     const width = Math.max(...lines.map((l) => estimateTextWidth(l))) + TEXT_PAD_X * 2;
     const height = lines.length * TEXT_LINE_PX + TEXT_PAD_Y * 2;
     return { left: at.x, top: at.y, right: at.x + width, bottom: at.y + height, lines };
+}
+
+// 繪製與命中共用同一標籤範圍；canvas 文字以 width 作 maxWidth，
+// 字型差異不會讓可見文字超出命中框。
+export function fibLabels(
+    shape: Extract<Shape, { kind: 'fib' }>,
+    fib: FibOptions,
+    anchors: DrawingAnchor[],
+    paneWidth: number,
+    formatPrice: (price: number) => string = String,
+) {
+    return shape.levels.map((l) => {
+        const text = fibLabel(l.level, fibLevelPrice(anchors[0]!.price, anchors[1]!.price, l.level, fib.reverse), fib, formatPrice);
+        const at = fibLabelPlacement({ min: shape.anchorLeft, max: shape.anchorRight }, fib, paneWidth, l.y, fib.fontSize);
+        const width = estimateTextWidth(text, fib.fontSize);
+        const left = at.align === 'left' ? at.x : at.x - width;
+        const top = at.baseline === 'top' ? at.y : at.baseline === 'middle' ? at.y - fib.fontSize / 2 : at.y - fib.fontSize;
+        return { ...at, text, width, left, right: left + width, top, bottom: top + fib.fontSize, index: l.index };
+    });
 }
 
 // 通道的平行線相對基準線的垂直位移（畫面座標）：第三點與基準線在同一個
@@ -365,18 +387,25 @@ export function hitTest(
     }
     const shape = shapeOf(tool, pts, size, extra);
     if (!shape) return null;
+    tolerance = Math.max(tolerance, (extra?.style?.width ?? 0) / 2);
     const near = (seg: Segment) => distanceToSegment(at, seg.a, seg.b) <= tolerance;
     if (shape.kind === 'line') {
         return near(shape) ? { kind: 'body' } : null;
     }
     if (shape.kind === 'channel') {
         const hit =
-            near(shape.base) || near(shape.parallel) || pointInPolygon(at, shape.fill);
+            near(shape.base) || near(shape.parallel) || near(shape.mid) || pointInPolygon(at, shape.fill);
         return hit ? { kind: 'body' } : null;
     }
     if (shape.kind === 'fib') {
         const inX = at.x >= shape.left - tolerance && at.x <= shape.right + tolerance;
+        const fib = extra?.fib ?? defaultFibOptions();
+        const ys = shape.levels.map((l) => l.y);
+        const band = fib.bandOpacity > 0 && ys.length > 1 && inX && at.y >= Math.min(...ys) && at.y <= Math.max(...ys);
+        const labels = fibLabels(shape, fib, extra?.anchors ?? pts.map((p) => ({ time: p.x, price: p.y })), size.width, extra?.formatPrice);
+        const label = labels.some((r) => r.text && at.x >= r.left - tolerance - 2 && at.x <= r.right + tolerance + 2 && at.y >= r.top - tolerance - 2 && at.y <= r.bottom + tolerance + 2);
         const hit =
+            band || label ||
             (inX && shape.levels.some((l) => Math.abs(at.y - l.y) <= tolerance)) ||
             (!!shape.diag && near(shape.diag));
         return hit ? { kind: 'body' } : null;
@@ -408,13 +437,14 @@ export function pickDrawing<
     size: PaneSize,
     at: Point,
     tolerance = HIT_TOLERANCE,
+    formatPrice?: (price: number) => string,
 ): { drawing: T; hit: Hit; points: Point[] } | null {
     for (let i = list.length - 1; i >= 0; i--) {
         const d = list[i]!;
         if (d.hidden) continue;
         const points = projectAnchors(projector, d.anchors);
         if (!points) continue;
-        const hit = hitTest(d.tool, points, size, at, tolerance, d);
+        const hit = hitTest(d.tool, points, size, at, tolerance, { ...d, formatPrice });
         if (hit) return { drawing: d, hit, points };
     }
     return null;

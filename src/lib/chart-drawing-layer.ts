@@ -18,10 +18,7 @@ import type {
     Time,
 } from 'lightweight-charts';
 import {
-    fibLabel,
-    fibLabelPlacement,
     fibLevelColor,
-    fibLevelPrice,
     type FibOptions,
 } from './chart-drawing-fib';
 import {
@@ -35,6 +32,7 @@ import {
 import {
     ANCHOR_RADIUS,
     estimateBarSeconds,
+    fibLabels,
     formatSpan,
     logicalOfX,
     logicalToTime,
@@ -237,8 +235,6 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
             }
             case 'fib': {
                 const fib = fibOptionsOf(d);
-                const start = d.anchors[0]!.price;
-                const end = d.anchors[1]!.price;
                 const mode = this._layer.themeMode;
                 const colorOf = (index: number) =>
                     fibLevelColor(fib.levels[index]!, fib, style.color, mode);
@@ -279,23 +275,10 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 if (fib.showLevel || fib.showPrice) {
                     ctx.setLineDash([]);
                     ctx.font = `${fib.fontSize * vr}px sans-serif`;
-                    for (const l of shape.levels) {
-                        const text = fibLabel(
-                            l.level,
-                            fibLevelPrice(start, end, l.level, fib.reverse),
-                            fib,
-                            fmt,
-                        );
-                        const at = fibLabelPlacement(
-                            { min: shape.anchorLeft, max: shape.anchorRight },
-                            fib,
-                            size.width,
-                            l.y,
-                            fib.fontSize,
-                        );
+                    for (const at of fibLabels(shape, fib, d.anchors, size.width, fmt)) {
                         ctx.textAlign = at.align;
                         ctx.textBaseline = at.baseline;
-                        this._haloText(ctx, text, at.x * hr, at.y * vr, colorOf(l.index), hr);
+                        this._haloText(ctx, at.text, at.x * hr, at.y * vr, colorOf(at.index), hr, at.width * hr);
                     }
                 }
                 break;
@@ -325,6 +308,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                             line,
                             (shape.left + TEXT_PAD_X) * hr,
                             (shape.top + TEXT_PAD_Y + i * TEXT_LINE_PX + 2) * vr,
+                            (shape.right - shape.left - TEXT_PAD_X * 2) * hr,
                         ),
                     );
                 }
@@ -343,14 +327,15 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
         y: number,
         color: string,
         hr: number,
+        maxWidth?: number,
     ) {
         ctx.save();
         ctx.lineJoin = 'round';
         ctx.lineWidth = 4 * hr;
         ctx.strokeStyle = withAlpha(this._layer.background, 0.92);
-        ctx.strokeText(text, x, y);
+        ctx.strokeText(text, x, y, maxWidth);
         ctx.fillStyle = color;
-        ctx.fillText(text, x, y);
+        ctx.fillText(text, x, y, maxWidth);
         ctx.restore();
     }
 

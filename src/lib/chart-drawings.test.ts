@@ -13,7 +13,6 @@ import {
     takeDrawingNotices,
     writeDrawingJournal,
     __setDrawingLocksForTest,
-    TOMBSTONE_TTL_MS,
     __resetDrawingsForTest,
     addDrawing,
     clearDrawings,
@@ -603,7 +602,7 @@ describe('review 修正：跨視窗鎖、墓碑、上限、設定合併', () => 
         expect((saved().TXF!.find((d) => d.id === mine.id) as unknown as { locked: boolean }).locked).toBe(true);
     });
 
-    it('刪除墓碑寫出後仍保留：別的視窗較舊的寫入不會讓物件復活；比刪除更晚的修改才算數', () => {
+    it('刪除墓碑寫出後永久保留：任何 revision 的同 id 都不能復活', () => {
         const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
         flushDrawingWrites();
         removeDrawing('TXF', a.id);
@@ -614,19 +613,18 @@ describe('review 修正：跨視窗鎖、墓碑、上限、設定合併', () => 
         store.set(KEY, JSON.stringify({ TXF: [{ ...a }] }));
         reloadDrawingsFromStorage();
         expect(getDrawings('TXF')).toEqual([]);
-        // 刪除之後才修改的 revision 才會留下，時間可以完全相同。
+        // 刪除之後的 revision 也不得復活。
         const counter = Number(tombs.TXF[a.id].revision.split(':')[0]) + 1;
         store.set(KEY, JSON.stringify({ TXF: [{ ...a, revision: `${counter.toString().padStart(16, '0')}:remote` }] }));
         reloadDrawingsFromStorage();
-        expect(getDrawings('TXF').map((d) => d.id)).toEqual([a.id]);
+        expect(getDrawings('TXF')).toEqual([]);
     });
 
-    it('過期（超過 TTL）的墓碑在寫出時清掉', () => {
-        const old = Date.now() - TOMBSTONE_TTL_MS - 1000;
-        store.set(TKEY, JSON.stringify({ TXF: { gone: old, fresh: Date.now() } }));
+    it('舊墓碑不過期，長期離線視窗也不得復活同 id', () => {
+        store.set(TKEY, JSON.stringify({ TXF: { gone: 1, fresh: 10000 } }));
         addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
         flushDrawingWrites();
-        expect(Object.keys(JSON.parse(store.get(TKEY)!).TXF)).toEqual(['fresh']);
+        expect(Object.keys(JSON.parse(store.get(TKEY)!).TXF)).toEqual(['gone', 'fresh']);
     });
 
     it('載入時只有異常巨大的資料才截斷（硬上限 1000，保留最新的、順序不變），並通知', () => {
@@ -772,6 +770,74 @@ describe('關窗日誌也帶圖層順序', () => {
 });
 
 describe('revision 與相對圖層移動的跨視窗合併', () => {
+    it.each([false, true])('關窗日誌的舊移動／修改遇到較新版本或墓碑均作廢（墓碑=%s）', (deleted) => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        const old = { ...a, revision: '0000000000000010:old' };
+        const remote = { ...a, name: '遠端', revision: '0000000000000100:remote' };
+        store.set('sj-chart-drawings-pending:1-old', JSON.stringify({ ops: { TXF: { [a.id]: old } }, order: { TXF: [{ id: a.id, after: b.id, revision: old.revision }] } }));
+        store.set('sj-chart-drawings-pending:2-remote', JSON.stringify({ ops: { TXF: { [a.id]: deleted ? { revision: '0000000000000001:remote', updatedAt: 1 } : remote } } }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual(deleted ? [b.id] : [a.id, b.id]);
+        flushDrawingWrites();
+        expect(JSON.parse(store.get(KEY)!).TXF.map((d: { id: string }) => d.id)).toEqual(deleted ? [b.id] : [a.id, b.id]);
+    });
+
+    it('尚未落地的本地墓碑與自己的關窗墓碑均不能被替換清單復活', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        removeDrawing('TXF', a.id);
+        replaceDrawings('TXF', [{ ...a, revision: '0000000000000100:stale' }]);
+        expect(getDrawings('TXF')).toEqual([]);
+        writeDrawingJournal();
+        replaceDrawings('TXF', [{ ...a, revision: '0000000000000200:stale' }]);
+        expect(getDrawings('TXF')).toEqual([]);
+        flushDrawingWrites();
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')).toEqual([]);
+    });
+
+    it('圖層移動只在建立時取得 revision，後續編輯不改寫舊移動', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(10000);
+        try {
+            const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+            addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+            flushDrawingWrites();
+            moveDrawing('TXF', a.id, 1);
+            const revision = drawingRevision(getDrawings('TXF')[1]!);
+            updateDrawing('TXF', a.id, { name: '移動後改名' });
+            expect(drawingRevision(getDrawings('TXF')[1]!)).not.toBe(revision);
+            writeDrawingJournal();
+            const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
+            expect(journal.order.TXF[0].revision).toBe(revision);
+            reloadDrawingsFromStorage();
+            expect(getDrawings('TXF')[1]!.id).toBe(a.id);
+        } finally { vi.useRealTimers(); }
+    });
+
+    it.each(['update', 'delete'])('規則 R：遠端勝出後舊圖層移動永久作廢（%s）', (kind) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(10000);
+        try {
+            const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+            const b = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+            flushDrawingWrites();
+            moveDrawing('TXF', a.id, 1);
+            const remote = { ...a, name: '遠端', revision: '0000000000000100:remote' };
+            store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [remote, b] }));
+            if (kind === 'delete') store.set('sj-pro-chart-drawing-tombstones', JSON.stringify({ TXF: { [a.id]: { revision: '0000000000000001:remote', updatedAt: 1 } } }));
+            reloadDrawingsFromStorage();
+            updateDrawing('TXF', a.id, { name: '新本地編輯' });
+            flushDrawingWrites();
+            expect(getDrawings('TXF').map((d) => d.id)).toEqual(kind === 'delete' ? [b.id] : [a.id, b.id]);
+            replaceDrawings('TXF', [remote, b]);
+            flushDrawingWrites();
+            if (kind === 'delete') expect(getDrawings('TXF').map((d) => d.id)).toEqual([b.id]);
+        } finally { vi.useRealTimers(); }
+    });
+
     const KEY = 'sj-pro-chart-drawings';
     beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10000); });
     afterEach(() => vi.useRealTimers());
@@ -920,7 +986,7 @@ describe('round 4：初始化順序、日誌只刪合併過的那一版', () => 
     });
 });
 
-describe('round 5：墓碑不刪較新的版本、合併不默默丟物件', () => {
+describe('規則 R：墓碑刪除任何版本、合併不默默丟其他物件', () => {
     const KEY = 'sj-pro-chart-drawings';
     const TKEY = 'sj-pro-chart-drawing-tombstones';
     const obj = (id: string, updatedAt: number) => ({
@@ -934,18 +1000,17 @@ describe('round 5：墓碑不刪較新的版本、合併不默默丟物件', () 
         updatedAt,
     });
 
-    it('被墓碑否決的舊修改，不會連帶刪掉主項目裡比墓碑新的同 id 版本（刪除後重建）', () => {
+    it('墓碑否決 pending 與主項目裡較新的同 id 版本', () => {
         const x = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!; // 本視窗待寫的修改（較舊）
         const deletedAt = x.updatedAt + 10;
         store.set(TKEY, JSON.stringify({ TXF: { [x.id]: deletedAt } }));
         // 別的視窗在刪除之後又重建了同 id 的物件（例如復原）
         store.set(KEY, JSON.stringify({ TXF: [obj(x.id, deletedAt + 10)] }));
         reloadDrawingsFromStorage();
-        expect(getDrawings('TXF').map((d) => d.updatedAt)).toEqual([deletedAt + 10]);
+        expect(getDrawings('TXF')).toEqual([]);
+        const fresh = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
         flushDrawingWrites();
-        const saved = JSON.parse(store.get(KEY)!).TXF;
-        expect(saved).toHaveLength(1);
-        expect(saved[0].updatedAt).toBe(deletedAt + 10);
+        expect(JSON.parse(store.get(KEY)!).TXF.map((d: { id: string }) => d.id)).toEqual([fresh.id]);
     });
 
     it('兩個視窗各自在上限附近新增：合併後全部保留（暫時超過上限）並通知，之後新增被擋', () => {
