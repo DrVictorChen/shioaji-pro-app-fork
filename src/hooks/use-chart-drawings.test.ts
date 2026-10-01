@@ -276,6 +276,107 @@ describe('跨視窗改動後的復原／重做', () => {
     );
 
     it.each(['undo', 'redo'] as const)(
+        '等鎖時本地刪除，排隊的 %s 整步作廢且保留新刪除歷史', async (action) => {
+            const { api, a } = await setup();
+            await act(async () => { api().rename(a.id, '本地'); flushDrawingWrites(); });
+            if (action === 'redo') await act(async () => api().undo());
+            const queue: (() => unknown)[] = [];
+            __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+            await act(async () => api()[action]());
+            await act(async () => api().removeOne(a.id));
+            await act(async () => { queue.shift()!(); });
+            expect(getDrawings('TXF').some((d) => d.id === a.id)).toBe(false);
+            expect(api().canUndo).toBe(true);
+            expect(api().canRedo).toBe(false);
+            __setDrawingLocksForTest(null);
+            await act(async () => api().undo());
+            expect(getDrawings('TXF').find((d) => d.id === a.id)?.name).toBe(action === 'undo' ? '本地' : undefined);
+        },
+    );
+
+    it('同步操作才讀到同物件遠端修改，不可建立跨越遠端版本的歷史', async () => {
+        const { api, a, b } = await setup();
+        const remote = { ...a, name: '遠端版本', revision: remoteRevision(a) };
+        store.set(KEY, JSON.stringify({ TXF: [remote, b] }));
+        await act(async () => api().setHidden(a.id, true));
+        await act(async () => api().undo());
+        expect(getDrawings('TXF').find((d) => d.id === a.id)?.hidden).toBe(true);
+        expect(api().canUndo).toBe(false);
+        expect(api().canRedo).toBe(false);
+    });
+
+    it.each(['undo', 'redo'] as const)(
+        '等鎖時本地提交文字，排隊的 %s 不可覆蓋新文字', async (action) => {
+            const { api } = await setup();
+            let text!: Drawing;
+            await act(async () => {
+                text = addDrawing('TXF', 'text', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+            });
+            await act(async () => api().editText(text.id));
+            await act(async () => { api().commitText('第一版'); flushDrawingWrites(); });
+            if (action === 'redo') await act(async () => api().undo());
+            const queue: (() => unknown)[] = [];
+            __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+            await act(async () => api()[action]());
+            await act(async () => api().editText(text.id));
+            await act(async () => api().commitText('新文字'));
+            await act(async () => { queue.shift()!(); });
+            expect(getDrawings('TXF').find((d) => d.id === text.id)?.text).toBe('新文字');
+            expect(api().canUndo).toBe(true);
+            expect(api().canRedo).toBe(false);
+        },
+    );
+
+    it.each(['undo', 'redo'] as const)('等鎖時開始文字編輯即作廢 %s，不必等到寫入', async (action) => {
+        const { api, a } = await setup();
+        let text!: Drawing;
+        await act(async () => {
+            text = addDrawing('TXF', 'text', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+            api().rename(a.id, '本地');
+            flushDrawingWrites();
+        });
+        if (action === 'redo') await act(async () => api().undo());
+        const queue: (() => unknown)[] = [];
+        __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+        await act(async () => api()[action]());
+        await act(async () => api().editText(text.id));
+        await act(async () => api().updateTextDraft('未提交'));
+        await act(async () => { queue.shift()!(); });
+        expect(getDrawings('TXF').find((d) => d.id === a.id)?.name).toBe(action === 'undo' ? '本地' : undefined);
+        expect(api().editingTextId).toBe(text.id);
+        expect(api().canUndo).toBe(false);
+        expect(api().canRedo).toBe(false);
+        await act(async () => api().commitText('未提交'));
+        expect(getDrawings('TXF').find((d) => d.id === text.id)?.text).toBe('未提交');
+        expect(api().canUndo).toBe(true);
+    });
+
+    it.each(['undo', 'redo'] as const)('等鎖時連續新操作，作廢 %s 後仍可逐步復原新歷史', async (action) => {
+        const { api, a, b } = await setup();
+        await act(async () => api().rename(b.id, '前一步'));
+        await act(async () => { api().rename(a.id, '本地'); flushDrawingWrites(); });
+        if (action === 'redo') await act(async () => api().undo());
+        const queue: (() => unknown)[] = [];
+        __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+        await act(async () => api()[action]());
+        await act(async () => api().removeOne(a.id));
+        await act(async () => api().rename(b.id, '新的改名'));
+        await act(async () => { queue.shift()!(); });
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([b.id]);
+        __setDrawingLocksForTest(null);
+        await act(async () => api().undo());
+        expect(getDrawings('TXF')[0]!.name).toBe('前一步');
+        expect(api().canUndo).toBe(true);
+        await act(async () => api().undo());
+        expect(getDrawings('TXF').map((d) => d.id)).toEqual([a.id, b.id]);
+        expect(api().canUndo).toBe(true);
+        await act(async () => api().undo());
+        expect(getDrawings('TXF').find((d) => d.id === b.id)?.name).toBeUndefined();
+        expect(api().canUndo).toBe(false);
+        expect(takeDrawingNotices()).toEqual([]);
+    });
+
+    it.each(['undo', 'redo'] as const)(
         '等鎖時另一物件先被遠端改動，%s 在鎖內重讀後整份作廢', async (action) => {
             const { api, a, b } = await setup();
             await act(async () => { api().rename(a.id, '本地'); flushDrawingWrites(); });
@@ -1832,6 +1933,14 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
             expect(getDrawings('TXF').map((d) => d.id)).toEqual([y.id]);
             expect(getDrawings('TXF')[0]!.anchors).toEqual(y.anchors);
             expect(api().canUndo).toBe(false);
+            expect(other.canUndo).toBe(true);
+            await act(async () => other.undo());
+            await act(async () => { flushDrawingWrites(); reloadDrawingsFromStorage(); });
+            expect(getDrawings('TXF').map((d) => d.id)).toEqual([x.id, y.id]);
+            expect(getDrawings('TXF').find((d) => d.id === y.id)!.anchors).toEqual(y.anchors);
+            await act(async () => other.redo());
+            expect(getDrawings('TXF').map((d) => d.id)).toEqual([y.id]);
+            expect(getDrawings('TXF')[0]!.anchors).toEqual(y.anchors);
         } finally { vi.useRealTimers(); }
     });
 

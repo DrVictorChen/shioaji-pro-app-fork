@@ -23,6 +23,7 @@ import {
     getDrawings,
     getDrawingHistoryStart,
     cancelDrawingChanges,
+    captureDrawingWrites,
     createDrawingWriter,
     withDrawingWriter,
     subscribeDrawingRemoteChanges,
@@ -311,6 +312,8 @@ export function useChartDrawings(opts: {
     const cancelTextRef = useRef<(remoteIds?: ReadonlySet<string>) => void>(() => {});
     const cancelInteractionsRef = useRef<(submitText?: boolean) => void>(() => {});
     const historyBusyRef = useRef(false);
+    const operationSequenceRef = useRef(0);
+    const pendingHistoryRef = useRef<{ sequence: number; step: HistoryStep } | null>(null);
 
     // 事件處理器裡要讀的最新值
     const live = {
@@ -339,7 +342,17 @@ export function useChartDrawings(opts: {
 
     // ── 復原 ─────────────────────────────────────────────────────────
     const bumpHistory = useCallback(() => setHistoryVer((v) => v + 1), []);
+    const beginOperation = useCallback(() => {
+        // 待套用步驟已移入另一個 stack；新操作接手時移除這一步。
+        const pending = pendingHistoryRef.current;
+        if (pending?.sequence === operationSequenceRef.current) {
+            historyRef.current.discard(pending.step);
+            bumpHistory();
+        }
+        operationSequenceRef.current++;
+    }, [bumpHistory]);
     useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
+        if (key === stateRef.current.symbolKey) operationSequenceRef.current++;
         const changed = historyRef.current.clear(key);
         const info = textTxRef.current;
         if (key === info?.key && ids.has(info.id)) {
@@ -358,31 +371,34 @@ export function useChartDrawings(opts: {
             bumpHistory();
         }
     }, writer), [bumpHistory, writer]);
-    // 包一次操作：前後清單不同就記成一步
+    // 包一次操作：只記這個 writer 實際寫入的物件。
     const tx = useCallback(
         (fn: () => void, tag?: string) => {
+            beginOperation();
             // 物件列表／樣式／刪除等操作接手時，先撤回尚未結束的拖曳。
             cancelDragRef.current?.();
             const key = stateRef.current.symbolKey;
-            const before = getDrawings(key);
+            const { before, after, ids, conflicted } = withDrawingWriter(writer, () => captureDrawingWrites(key, fn));
+            // 同步回呼中的遠端取消已被觀察；新歷史從這個起點開始。
             historyRef.current.begin(key, getDrawingHistoryStart());
-            withDrawingWriter(writer, fn);
-            const after = getDrawings(key);
-            if (before !== after) {
-                historyRef.current.push(key, before, after, tag);
+            // 同步期間才發現同物件的遠端版本，仍不能建立跨越該版本的歷史。
+            if (ids.size && !conflicted) {
+                historyRef.current.push(key, before, after, tag, undefined, ids, true);
                 bumpHistory();
             }
         },
-        [bumpHistory, writer],
+        [beginOperation, bumpHistory, writer],
     );
 
     const applyHistory = useCallback(
         (step: HistoryStep | null) => {
             if (!step) return;
-            // 鎖內檢查整個商品；失效時清掉全部歷史。
+            // 鎖內檢查整個商品與操作序號；保留等待期間新建的歷史。
             historyBusyRef.current = true;
+            const sequence = operationSequenceRef.current;
+            pendingHistoryRef.current = { sequence, step };
             withDrawingWriter(writer, () => applyDrawingHistory(step, (success) => {
-                if (!success) historyRef.current.clear(step.key);
+                if (!success && sequence === operationSequenceRef.current) historyRef.current.clear(step.key);
                 // 選取裡已經不存在的物件拿掉
                 const ids = new Set(getDrawings(step.key).map((d) => d.id));
                 setSelectedIds((cur) =>
@@ -390,7 +406,8 @@ export function useChartDrawings(opts: {
                 );
                 bumpHistory();
                 historyBusyRef.current = false;
-            }));
+                pendingHistoryRef.current = null;
+            }, () => sequence === operationSequenceRef.current));
         },
         [bumpHistory, writer],
     );
@@ -539,6 +556,7 @@ export function useChartDrawings(opts: {
         stateRef.current.editingTextId = null;
         setEditingTextId(null);
         if (!info || info.invalidated) return;
+        beginOperation();
         withDrawingWriter(writer, () => {
             if (remoteIds?.has(info.id)) {
                 const original = info.before.find((d) => d.id === info.id) ?? getDrawings(info.key).find((d) => d.id === info.id);
@@ -551,10 +569,11 @@ export function useChartDrawings(opts: {
                 if (restored) historyRef.current.rebase(info.key, original, restored);
             }
         });
-    }, [writer]);
+    }, [beginOperation, writer]);
     cancelTextRef.current = cancelText;
 
     const cancelInteractions = useCallback((submitText = false) => {
+        beginOperation();
         cancelDragRef.current?.();
         if (submitText) finishTextRef.current();
         else cancelText();
@@ -569,7 +588,7 @@ export function useChartDrawings(opts: {
         const host = hostRef.current;
         if (host && ['grab', 'move', 'pointer', 'crosshair'].includes(host.style.cursor)) host.style.cursor = '';
         pushState();
-    }, [cancelText, clearMeasure, hostRef, pushState]);
+    }, [beginOperation, cancelText, clearMeasure, hostRef, pushState]);
     cancelInteractionsRef.current = cancelInteractions;
 
     // 切換商品時清掉選取、繪製中的物件、量測與復原紀錄 — 殘留的 draft
@@ -770,6 +789,7 @@ export function useChartDrawings(opts: {
 
         const down = (e: MouseEvent) => {
             if (e.button !== 0 || onOverlay(e)) return;
+            beginOperation();
             claimKeyboard(token);
             cancelDragRef.current?.();
             // 先提交最新草稿，再移動焦點；後續 blur 只能看到已結束的交易。
@@ -988,6 +1008,7 @@ export function useChartDrawings(opts: {
             if (!layer || !pt || !projector) return;
             const picked = pick(projector, pt);
             if (picked?.drawing.tool !== 'text' || picked.drawing.locked) return;
+            beginOperation();
             e.preventDefault();
             e.stopPropagation();
             historyRef.current.begin(stateRef.current.symbolKey, getDrawingHistoryStart());
@@ -1076,7 +1097,7 @@ export function useChartDrawings(opts: {
             if (frame !== null) cancelRaf(frame);
             if (drag) setChartInteractive(true); // 拖曳中被卸載 — 別讓圖表卡住
         };
-    }, [hostRef, chartRef, pushState, token, clearMeasure, bumpHistory, writer, cancelText]);
+    }, [hostRef, chartRef, pushState, token, clearMeasure, beginOperation, bumpHistory, writer, cancelText]);
 
     // 交易模式武裝時收起畫圖工具、量測並取消選取：兩者不會同時吃同一下
     // 點擊，武裝點價買賣時按 Delete 也不會刪到剛才選著的畫圖物件
@@ -1433,6 +1454,7 @@ export function useChartDrawings(opts: {
             setEditingTextId(null);
             if (!id) return;
             if (!info || info.invalidated || info.key !== key || info.context !== stateRef.current.contextKey) return;
+            beginOperation();
             const value = text === null ? null : text.slice(0, MAX_TEXT_LENGTH).replace(/\s+$/, '');
             if (info?.created && !value) {
                 // 新建後沒打字（或取消）：不留下空的文字框，也不進復原
@@ -1460,13 +1482,16 @@ export function useChartDrawings(opts: {
             const host = hostRef.current;
             if (host && typeof host.focus === 'function') host.focus({ preventScroll: true });
         },
-        [bumpHistory, hostRef, writer, symbolKey, contextKey, editingTextId],
+        [beginOperation, bumpHistory, hostRef, writer, symbolKey, contextKey, editingTextId],
     );
 
     const updateTextDraft = useCallback((text: string) => {
         const info = textTxRef.current;
-        if (info && info.key === symbolKey && info.context === contextKey && info.id === editingTextId) info.value = text;
-    }, [symbolKey, contextKey, editingTextId]);
+        if (info && info.key === symbolKey && info.context === contextKey && info.id === editingTextId) {
+            beginOperation();
+            info.value = text;
+        }
+    }, [beginOperation, symbolKey, contextKey, editingTextId]);
     finishTextRef.current = () => {
         const info = textTxRef.current;
         if (info && (info.key !== stateRef.current.symbolKey || info.context !== stateRef.current.contextKey)) {

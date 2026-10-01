@@ -556,6 +556,20 @@ export function withDrawingWriter<T>(writer: string, fn: () => T): T {
     activeWriter = writer;
     try { return fn(); } finally { activeWriter = previous; }
 }
+// 在寫入邊界擷取這筆同步操作的快照；persist 的遠端回呼可能重入其他圖表。
+type DrawingWriteCapture = { writer: string; key: string; after: Drawing[]; ids: Set<string>; remoteIds: Set<string> };
+let writeCapture: DrawingWriteCapture | null = null;
+export function captureDrawingWrites(key: string, fn: () => void) {
+    const before = getDrawings(key);
+    const capture: DrawingWriteCapture = { writer: activeWriter, key, after: before, ids: new Set(), remoteIds: new Set() };
+    const previous = writeCapture;
+    writeCapture = capture;
+    try { fn(); } finally { writeCapture = previous; }
+    return { before, after: capture.after, ids: capture.ids, conflicted: [...capture.ids].some((id) => capture.remoteIds.has(id)) };
+}
+function captureWrittenDrawings(key: string) {
+    if (writeCapture?.writer === activeWriter && writeCapture.key === key) writeCapture.after = getDrawings(key);
+}
 let journalSeq = 0;
 let revisionCounter = 0;
 function observeRevision(revision: Revision) {
@@ -704,6 +718,7 @@ const pendingOrder: OrderOps = new Map();
 const localWrites = new Map<string, Map<string, Map<string, Revision>>>();
 
 function record(key: string, id: string, op: Op) {
+    if (writeCapture?.writer === activeWriter && writeCapture.key === key) writeCapture.ids.add(id);
     let ops = pending.get(key);
     if (!ops) {
         ops = new Map();
@@ -1159,6 +1174,10 @@ function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
         if (!ops.size) pending.delete(key);
     }
     const result = results.get(activeWriter)!;
+    if (writeCapture) {
+        const ids = results.get(writeCapture.writer)?.changedIds.get(writeCapture.key);
+        for (const id of ids ?? []) writeCapture.remoteIds.add(id);
+    }
     for (const [listener, writer] of remoteListeners) for (const [key, ids] of results.get(writer)!.changedIds) listener(key, ids);
     return result;
 }
@@ -1168,7 +1187,7 @@ export function noteDrawingHistoryConflict() {
 }
 
 // 整份歷史的有效性在 Web Lock 內重讀判斷，不再逐物件配對歷史版本。
-export function applyDrawingHistory(step: HistoryStep, applied: (success: boolean) => void) {
+export function applyDrawingHistory(step: HistoryStep, applied: (success: boolean) => void, isCurrent = () => true) {
     const writer = activeWriter;
     withLock(() => withDrawingWriter(writer, () => {
         const tombs = loadTombs();
@@ -1176,6 +1195,12 @@ export function applyDrawingHistory(step: HistoryStep, applied: (success: boolea
         const base = loadView(tombs, journals);
         const { changed, writes } = acceptRemoteChanges(base, tombs, journals);
         store = applyPending(base, tombs);
+        // 排隊後的任何新操作（含鎖內剛觀察到的遠端改動）使整步失效。
+        if (!isCurrent()) {
+            emit();
+            applied(false);
+            return;
+        }
         const foreignDelete = step.changes.some((c) => {
             const pendingDelete = pending.get(step.key)?.get(c.id);
             const t = isTombstone(pendingDelete) ? pendingDelete : tombs[step.key]?.[c.id];
@@ -1268,6 +1293,7 @@ export function addDrawing(
     };
     store = { ...store, [key]: [...(store[key] ?? []), drawing] };
     record(key, drawing.id, drawing);
+    captureWrittenDrawings(key);
     persist();
     return drawing;
 }
@@ -1312,6 +1338,7 @@ function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs) {
         pendingOrder.set(key, moves);
     }
     store = { ...store, [key]: next };
+    captureWrittenDrawings(key);
     persist(historyTombs !== undefined);
 }
 

@@ -39,6 +39,7 @@ export function diffDrawings(
     before: Drawing[],
     after: Drawing[],
     ids?: Iterable<string>,
+    trackOrder = ids === undefined,
 ): HistoryChange[] {
     const b = new Map(before.map((d) => [d.id, d]));
     const a = new Map(after.map((d) => [d.id, d]));
@@ -55,9 +56,8 @@ export function diffDrawings(
                 id,
                 before: x,
                 after: y,
-                // 指定 ids 的跨時間操作只改座標／文字，期間鄰居的排序
-                // 改變不算這個物件的圖層移動。
-                moved: !ids && !!x && !!y &&
+                // 跨時間操作不追蹤順序；同步操作即使限定 ids，仍記實際圖層移動。
+                moved: trackOrder && !!x && !!y &&
                     before.filter((d) => a.has(d.id)).findIndex((d) => d.id === id) !==
                     after.filter((d) => b.has(d.id)).findIndex((d) => d.id === id),
             });
@@ -120,7 +120,7 @@ export class DrawingHistory {
         return this._redo.length > 0;
     }
 
-    // ids：只記這些物件（省略＝前後清單所有差異；同步操作用）
+    // ids：只記操作本身寫入的物件；同步操作的排序另以 trackOrder 開啟。
     push(
         key: string,
         before: Drawing[],
@@ -128,9 +128,10 @@ export class DrawingHistory {
         tag?: string,
         now = Date.now(),
         ids?: Iterable<string>,
+        trackOrder = ids === undefined,
     ) {
         if (before === after) return;
-        const changes = diffDrawings(before, after, ids);
+        const changes = diffDrawings(before, after, ids, trackOrder);
         if (!changes.length) return;
         const beforeOrder = before.map((d) => d.id);
         const afterOrder = after.map((d) => d.id);
@@ -172,6 +173,13 @@ export class DrawingHistory {
         if (!e) return null;
         this._undo.push(e);
         return { key: e.key, changes: e.changes, side: 'after', order: e.afterOrder, start: this.starts.get(e.key) ?? 0 };
+    }
+
+    // 尚未套用的步驟作廢；其他已完成操作與之後新增的歷史仍然有效。
+    discard(step: HistoryStep) {
+        this._undo = this._undo.filter((e) => e.changes !== step.changes);
+        this._redo = this._redo.filter((e) => e.changes !== step.changes);
+        step.changes.splice(0);
     }
 
     // 取消已落地的拖曳後，把原物件的歷史快照接到取消版本。
