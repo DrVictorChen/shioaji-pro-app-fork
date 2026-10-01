@@ -6,6 +6,7 @@ export type Revision = string;
 export interface DrawingTombstone {
     revision: Revision;
     updatedAt: number;
+    writer?: string; // 舊墓碑沒有 writer，不能由本視窗撤銷
 }
 export type Tombstone = number | DrawingTombstone;
 
@@ -29,5 +30,6 @@ export function isTombstone(v: unknown): v is Tombstone {
     if (typeof v === 'number') return Number.isFinite(v);
     if (!v || typeof v !== 'object' || 'id' in v) return false;
     const t = v as DrawingTombstone;
-    return isRevision(t.revision) && Number.isFinite(t.updatedAt);
+    return isRevision(t.revision) && Number.isFinite(t.updatedAt) &&
+        (t.writer === undefined || (typeof t.writer === 'string' && /^[\w-]+$/.test(t.writer)));
 }

@@ -16,11 +16,13 @@ import {
     addDrawing,
     DEFAULT_DRAWING_STYLE,
     getDrawingSettings,
+    getDrawingVersion,
     getDrawings,
     flushDrawingWrites,
     reloadDrawingsFromStorage,
     takeDrawingNotices,
     TOOL_DEFAULT_COLORS,
+    writeDrawingJournal,
     type Drawing,
 } from '../lib/chart-drawings';
 import type { ContractBase } from '../lib/types/contract';
@@ -86,6 +88,8 @@ beforeEach(() => {
         getItem: (k: string) => store.get(k) ?? null,
         setItem: (k: string, v: string) => void store.set(k, v),
         removeItem: (k: string) => void store.delete(k),
+        get length() { return store.size; },
+        key: (i: number) => [...store.keys()][i] ?? null,
     });
     vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -118,6 +122,104 @@ describe('跨視窗改動後的復原／重做', () => {
     }
     const saved = (): Drawing[] => JSON.parse(store.get(KEY)!).TXF ?? [];
 
+    it.each(['pending', 'persisted', 'journal'] as const)('本地刪除→復原原子地撤銷自己的墓碑並持久化（%s）', async (path) => {
+        const { api, a, b } = await setup();
+        await act(async () => {
+            api().removeOne(a.id);
+            if (path === 'persisted') flushDrawingWrites();
+            if (path === 'journal') writeDrawingJournal();
+        });
+        const queue: (() => unknown)[] = [];
+        __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+        const before = store.get(KEY);
+        const tombsBefore = store.get(TKEY);
+        await act(async () => api().undo());
+        expect(store.get(KEY)).toBe(before);
+        expect(store.get(TKEY)).toBe(tombsBefore);
+        await act(async () => { queue.shift()!(); });
+        expect(saved().map((d) => d.id)).toEqual([a.id, b.id]);
+        expect(saved()[0]).toMatchObject({ anchors: a.anchors, style: a.style });
+        expect(drawingRevision(saved()[0]!) > drawingRevision(a)).toBe(true);
+        expect(JSON.parse(store.get(TKEY)!).TXF?.[a.id]).toBeUndefined();
+        expect(api().drawings).toEqual(saved());
+        expect(takeDrawingNotices()).toEqual([]);
+        expect(queue).toHaveLength(0);
+    });
+
+    it('清除全部→一次復原所有仍有效的本地墓碑，亦可重做再復原', async () => {
+        const { api, a, b } = await setup();
+        await act(async () => { api().clearAll(); flushDrawingWrites(); });
+        expect(saved()).toEqual([]);
+        await act(async () => api().undo());
+        expect(saved().map((d) => d.id)).toEqual([a.id, b.id]);
+        await act(async () => api().redo());
+        expect(saved()).toEqual([]);
+        await act(async () => api().undo());
+        expect(saved().map((d) => d.id)).toEqual([a.id, b.id]);
+        expect(takeDrawingNotices()).toEqual([]);
+    });
+
+    it.each(['newer-delete', 'older-delete', 'writer-only', 'missing-writer', 'own-newer-revision', 'legacy-delete', 'update', 'pending-update', 'journal-update', 'buried-update', 'journal-delete'] as const)(
+        '本地刪除後同 id 遠端寫入（%s），等鎖後復原略過並提示', async (kind) => {
+            const { api, a, b } = await setup();
+            let localRevision!: string;
+            await act(async () => {
+                api().removeOne(a.id);
+                localRevision = getDrawingVersion('TXF', a.id)!;
+                if (kind === 'journal-update') writeDrawingJournal();
+                else if (kind !== 'pending-update') flushDrawingWrites();
+            });
+            const tombs = JSON.parse(store.get(TKEY)!);
+            const localTomb = tombs.TXF?.[a.id] ?? {
+                revision: localRevision,
+                writer: localRevision.split(':')[1],
+            };
+            expect(localTomb.writer).toBe(localTomb.revision.split(':')[1]);
+            const queue: (() => unknown)[] = [];
+            __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+            await act(async () => api().undo());
+            if (kind === 'update' || kind === 'pending-update' || kind === 'journal-update' || kind === 'buried-update') {
+                const revision = `${(Number(localTomb.revision.split(':')[0]) + 100).toString().padStart(16, '0')}:remote`;
+                store.set(KEY, JSON.stringify({ TXF: [{ ...a, name: '遠端新版本', revision }, b] }));
+                if (kind === 'update') { delete tombs.TXF[a.id]; store.set(TKEY, JSON.stringify(tombs)); }
+            } else if (kind === 'journal-delete') {
+                store.set('sj-chart-drawings-pending:remote', JSON.stringify({ ops: { TXF: { [a.id]: { revision: '0000000000000001:remote', updatedAt: 1, writer: 'remote' } } } }));
+            } else {
+                tombs.TXF[a.id] = kind === 'legacy-delete' ? 1 : {
+                    ...localTomb, writer: kind === 'own-newer-revision' ? localTomb.writer : kind === 'missing-writer' ? undefined : 'remote',
+                    revision: kind === 'writer-only' ? localTomb.revision : kind === 'older-delete'
+                        ? '0000000000000001:remote'
+                        : `${(Number(localTomb.revision.split(':')[0]) + 100).toString().padStart(16, '0')}:${kind === 'own-newer-revision' ? localTomb.writer : 'remote'}`,
+                };
+                store.set(TKEY, JSON.stringify(tombs));
+            }
+            await act(async () => { queue.shift()!(); });
+            const current = api().drawings.find((d) => d.id === a.id);
+            if (kind === 'update' || kind === 'pending-update') expect(current?.name).toBe('遠端新版本');
+            else expect(current).toBeUndefined();
+            expect(api().canRedo).toBe(false);
+            expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+            expect(queue).toHaveLength(0);
+        },
+    );
+
+    it('清除全部復原只恢復墓碑仍有效的物件，其他略過並提示', async () => {
+        const { api, a, b } = await setup();
+        await act(async () => { api().clearAll(); flushDrawingWrites(); });
+        const tombs = JSON.parse(store.get(TKEY)!);
+        tombs.TXF[b.id] = { ...tombs.TXF[b.id], writer: 'remote' };
+        store.set(TKEY, JSON.stringify(tombs));
+        await act(async () => reloadDrawingsFromStorage());
+        await act(async () => api().undo());
+        expect(saved().map((d) => d.id)).toEqual([a.id]);
+        expect(JSON.parse(store.get(TKEY)!).TXF[b.id]).toMatchObject({ writer: 'remote' });
+        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+        await act(async () => api().redo());
+        expect(saved()).toEqual([]);
+        await act(async () => api().undo());
+        expect(saved().map((d) => d.id)).toEqual([a.id]);
+    });
+
     it('較舊的遠端墓碑也清除 pending、圖層移動與 undo／redo；新 id 才可新增', async () => {
         const { api, a, b } = await setup();
         await act(async () => api().rename(a.id, '第一步'));
@@ -149,16 +251,16 @@ describe('跨視窗改動後的復原／重做', () => {
         expect(drawingRevision(api().drawings[0]!)).toBe(revision);
     });
 
-    it('刪 A 後另一視窗改 B，復原不得復活 A 或覆寫 B', async () => {
+    it('刪 A 後另一視窗改 B，復原 A 並保留 B 的遠端版本', async () => {
         const { api, a, b } = await setup();
         await act(async () => { api().removeOne(a.id); flushDrawingWrites(); });
         const remote = { ...b, anchors: [{ time: 1, price: 250 }], revision: remoteRevision(b) };
         store.set(KEY, JSON.stringify({ TXF: [remote] }));
         await act(async () => reloadDrawingsFromStorage());
         await act(async () => { api().undo(); flushDrawingWrites(); });
-        expect(api().drawings.map((d) => d.id)).toEqual([b.id]);
-        expect(api().drawings[0]!.anchors[0]!.price).toBe(250);
-        expect(saved()).toEqual([remote]);
+        expect(api().drawings.map((d) => d.id)).toEqual([a.id, b.id]);
+        expect(api().drawings[1]!.anchors[0]!.price).toBe(250);
+        expect(saved()[1]).toEqual(remote);
     });
 
     it('刪 A 後另一視窗刪 B，復原 A 不讓 B 復活', async () => {
@@ -170,8 +272,8 @@ describe('跨視窗改動後的復原／重做', () => {
         store.set(KEY, '{}');
         await act(async () => reloadDrawingsFromStorage());
         await act(async () => { api().undo(); flushDrawingWrites(); });
-        expect(api().drawings).toEqual([]);
-        expect(saved()).toEqual([]);
+        expect(api().drawings.map((d) => d.id)).toEqual([a.id]);
+        expect(saved().map((d) => d.id)).toEqual([a.id]);
     });
 
     it.each([false, true])('同一物件被遠端改過或刪除（刪除=%s），跳過復原並通知', async (deleted) => {
@@ -190,7 +292,7 @@ describe('跨視窗改動後的復原／重做', () => {
         expect(saved().find((d: { id: string }) => d.id === a.id)?.name).toBe(deleted ? undefined : '遠端');
     });
 
-    it('未刪除物件仍可連續復原／重做；刪除後任何歷史均不能復活', async () => {
+    it('本地刪除可復原，且仍可接回先前的復原／重做邊界', async () => {
         const { api, a, b } = await setup();
         await act(async () => api().rename(a.id, '第一步'));
         await act(async () => api().setHidden(a.id, true));
@@ -203,8 +305,9 @@ describe('跨視窗改動後的復原／重做', () => {
         expect(api().drawings[0]).toMatchObject({ name: '第一步', hidden: true });
         await act(async () => api().removeOne(a.id));
         await act(async () => { api().undo(); api().undo(); api().redo(); flushDrawingWrites(); });
-        expect(saved().map((d: { id: string }) => d.id)).toEqual([b.id]);
-        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+        expect(saved().map((d: { id: string }) => d.id)).toEqual([a.id, b.id]);
+        expect(saved()[0]).toMatchObject({ name: '第一步', hidden: true });
+        expect(takeDrawingNotices()).toEqual([]);
     });
 
     it.each([false, true])('復原後同一物件被遠端改過或刪除（刪除=%s），重做也跳過', async (deleted) => {
@@ -1233,15 +1336,15 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(e.defaultPrevented).toBe(true);
         expect(api().drawings).toHaveLength(0);
         await key({ key: 'Z', code: 'KeyZ', metaKey: true, shiftKey: true });
-        expect(api().drawings).toHaveLength(0);
+        expect(api().drawings).toHaveLength(1);
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
         await key({ key: 'y', code: 'KeyY', ctrlKey: true });
-        expect(api().drawings).toHaveLength(0);
+        expect(api().drawings).toHaveLength(1);
         // 焦點在別的面板
         vi.stubGlobal('document', { activeElement: { tagName: 'BUTTON' }, addEventListener() {}, removeEventListener() {} });
         e = await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
         expect(e.defaultPrevented).toBe(false);
-        expect(api().drawings).toHaveLength(0);
+        expect(api().drawings).toHaveLength(1);
     });
 
     it('拖曳結束算一步，可復原回原位', async () => {

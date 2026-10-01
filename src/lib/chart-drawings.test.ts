@@ -15,6 +15,8 @@ import {
     __setDrawingLocksForTest,
     __resetDrawingsForTest,
     addDrawing,
+    applyDrawingHistory,
+    getDrawingVersion,
     clearDrawings,
     contrastTextColor,
     DEFAULT_DRAWING_STYLE,
@@ -41,6 +43,7 @@ import {
 } from './chart-drawings';
 import { defaultFibLevels, defaultFibOptions } from './chart-drawing-fib';
 import { drawingRevision } from './chart-drawing-revision';
+import { DrawingHistory } from './chart-drawing-history';
 
 const store = new Map<string, string>();
 
@@ -766,6 +769,59 @@ describe('關窗日誌也帶圖層順序', () => {
         flushDrawingWrites();
         const saved = JSON.parse(store.get('sj-pro-chart-drawings')!).TXF.map((d: { id: string }) => d.id);
         expect(saved).toEqual([b.id, a.id]);
+    });
+});
+
+describe('本視窗墓碑的歷史操作', () => {
+    it.each([false, true])('另一視窗以舊畫面再次刪除同 id，原刪除視窗不能撤銷那筆遠端墓碑（本地已落地=%s）', async (persisted) => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        vi.resetModules();
+        const other = await import('./chart-drawings');
+        other.__setDrawingLocksForTest(null);
+        const history = new DrawingHistory(100, getDrawingVersion);
+        const before = getDrawings('TXF');
+        removeDrawing('TXF', a.id);
+        history.push('TXF', before, getDrawings('TXF'));
+        if (persisted) flushDrawingWrites();
+        other.removeDrawing('TXF', a.id);
+        other.flushDrawingWrites();
+        const undo = history.undo()!;
+        applyDrawingHistory(undo, (versions) => history.applied(undo, versions));
+        expect(getDrawings('TXF')).toEqual([]);
+        expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF ?? []).toEqual([]);
+        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+        other.__resetDrawingsForTest();
+    });
+
+    it('新增→復原→重做，另一視窗將還原的物件合併為正常新版本', async () => {
+        const history = new DrawingHistory(100, getDrawingVersion);
+        const before = getDrawings('TXF');
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        history.push('TXF', before, getDrawings('TXF'));
+        flushDrawingWrites();
+        vi.resetModules();
+        const other = await import('./chart-drawings');
+        other.__setDrawingLocksForTest(null);
+        const undo = history.undo()!;
+        applyDrawingHistory(undo, (versions) => history.applied(undo, versions));
+        expect(getDrawings('TXF')).toEqual([]);
+        other.reloadDrawingsFromStorage();
+        expect(other.getDrawings('TXF')).toEqual([]);
+        const redo = history.redo()!;
+        applyDrawingHistory(redo, (versions) => history.applied(redo, versions));
+        const restored = getDrawings('TXF')[0]!;
+        expect(restored.id).toBe(a.id);
+        expect(drawingRevision(restored) > drawingRevision(a)).toBe(true);
+        expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[a.id]).toBeUndefined();
+        other.reloadDrawingsFromStorage();
+        expect(other.getDrawings('TXF')).toEqual([restored]);
+        other.updateDrawing('TXF', a.id, { name: '另一視窗正常編輯' });
+        other.flushDrawingWrites();
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')[0]!.name).toBe('另一視窗正常編輯');
+        expect(takeDrawingNotices()).toEqual([]);
+        other.__resetDrawingsForTest();
     });
 });
 
