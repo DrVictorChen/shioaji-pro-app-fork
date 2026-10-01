@@ -51,6 +51,105 @@ import { DrawingHistory } from './chart-drawing-history';
 const store = new Map<string, string>();
 
 describe('圖表實例 writer', () => {
+    it.each(['new-version', 'foreign-union', 'wrong-writer'] as const)('獨立撤銷紀錄不能撤銷不符合原 writer／版本的墓碑（%s）', async (path) => {
+        const { d, history } = withDrawingWriter('chart-a', deletedDrawing);
+        const originalSet = localStorage.setItem;
+        const write = vi.spyOn(localStorage, 'setItem').mockImplementation((k, v) => {
+            if (!k.startsWith('sj-chart-drawings-pending:')) throw new Error('QuotaExceededError');
+            originalSet(k, v);
+        });
+        withDrawingWriter('chart-a', () => applyDrawingHistory(history.undo()!, vi.fn()));
+        withDrawingWriter('chart-b', () => updateDrawing('TXF', d.id, { name: 'B 的後續編輯' }));
+        writeDrawingJournal();
+        write.mockRestore();
+        const tombs = JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!);
+        if (path === 'new-version') tombs.TXF[d.id].revision = '0000000000000100:chart-a';
+        if (path === 'foreign-union') tombs.TXF[d.id].writers.push('chart-b');
+        store.set('sj-pro-chart-drawing-tombstones', JSON.stringify(tombs));
+        if (path === 'wrong-writer') {
+            const [name, raw] = [...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))!;
+            const journal = JSON.parse(raw);
+            journal.restores.TXF[d.id].writer = 'chart-b';
+            store.set(name, JSON.stringify(journal));
+        }
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        fresh.__setDrawingLocksForTest(null);
+        try {
+            expect(fresh.getDrawings('TXF')).toEqual([]);
+            fresh.flushDrawingWrites();
+            expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF[d.id]).toEqual(tombs.TXF[d.id]);
+        } finally { fresh.__resetDrawingsForTest(); }
+    });
+
+    it('B 的較新內容已落地主項目，淘汰 A 的待寫內容後仍保留 A 的墓碑撤銷日誌', async () => {
+        const { d, history } = withDrawingWriter('chart-a', deletedDrawing);
+        const originalSet = localStorage.setItem;
+        const write = vi.spyOn(localStorage, 'setItem').mockImplementation((k, v) => {
+            if (!k.startsWith('sj-chart-drawings-pending:')) throw new Error('QuotaExceededError');
+            originalSet(k, v);
+        });
+        withDrawingWriter('chart-a', () => applyDrawingHistory(history.undo()!, vi.fn()));
+        // B 已寫入內容，但墓碑寫入仍失敗；A 的內容將依 revision 被淘汰。
+        const remote = { ...getDrawings('TXF')[0]!, name: 'B 已落地的編輯', revision: '0000000000000100:chart-b' };
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [remote] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')).toEqual([remote]);
+        writeDrawingJournal();
+        const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
+        expect(journal.ops.TXF?.[d.id]).toBeUndefined();
+        expect(journal.restores.TXF[d.id].writer).toBe('chart-a');
+        write.mockRestore();
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        fresh.__setDrawingLocksForTest(null);
+        try {
+            expect(fresh.getDrawings('TXF')).toEqual([remote]);
+            fresh.flushDrawingWrites();
+            expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[d.id]).toBeUndefined();
+            fresh.reloadDrawingsFromStorage();
+            expect(fresh.getDrawings('TXF')).toEqual([remote]);
+        } finally { fresh.__resetDrawingsForTest(); }
+    });
+
+    it.each(['same-window', 'other-window'] as const)('A 復原寫入失敗，B 再編輯後關窗日誌重開仍保留物件（%s）', async (path) => {
+        const a = 'chart-a';
+        const b = 'chart-b';
+        const { d, history } = withDrawingWriter(a, deletedDrawing);
+        const originalSet = localStorage.setItem;
+        const write = vi.spyOn(localStorage, 'setItem').mockImplementation((k, v) => {
+            if (!k.startsWith('sj-chart-drawings-pending:')) throw new Error('QuotaExceededError');
+            originalSet(k, v);
+        });
+        const applied = vi.fn();
+        withDrawingWriter(a, () => applyDrawingHistory(history.undo()!, applied));
+        expect(applied).toHaveBeenCalledWith(true);
+        let other: typeof import('./chart-drawings') | undefined;
+        if (path === 'other-window') {
+            writeDrawingJournal();
+            vi.resetModules();
+            other = await import('./chart-drawings');
+            other.__setDrawingLocksForTest(null);
+        }
+        const api = other ?? { withDrawingWriter, updateDrawing, writeDrawingJournal, getDrawings };
+        api.withDrawingWriter(b, () => api.updateDrawing('TXF', d.id, { name: 'B 的後續編輯' }));
+        expect(api.getDrawings('TXF')[0]?.name).toBe('B 的後續編輯');
+        api.writeDrawingJournal();
+        write.mockRestore();
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        fresh.__setDrawingLocksForTest(null);
+        try {
+            expect(fresh.getDrawings('TXF')).toHaveLength(1);
+            expect(fresh.getDrawings('TXF')[0]).toMatchObject({ id: d.id, name: 'B 的後續編輯' });
+            expect(drawingRevision(fresh.getDrawings('TXF')[0]!).split(':')[1]).toBe(b);
+            fresh.flushDrawingWrites();
+            expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[d.id]).toBeUndefined();
+            fresh.reloadDrawingsFromStorage();
+            expect(fresh.getDrawings('TXF')[0]?.name).toBe('B 的後續編輯');
+        } finally { other?.__resetDrawingsForTest(); fresh.__resetDrawingsForTest(); }
+    });
+
     function deletedDrawing() {
         const d = addDrawing('TXF', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!;
         flushDrawingWrites();
@@ -88,7 +187,7 @@ describe('圖表實例 writer', () => {
         expect(getDrawings('TXF').map((x) => x.id)).toEqual([d.id]);
     });
 
-    it.each(['edit', 'journal', 'foreign-delete'] as const)('失敗的復原仍可 %s；撤銷資料不會脫離復原物件', async (path) => {
+    it.each(['edit', 'journal', 'foreign-delete'] as const)('失敗的復原仍可 %s；獨立撤銷紀錄持續保留', async (path) => {
         const { d, history } = deletedDrawing();
         const originalSet = localStorage.setItem;
         const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
@@ -109,7 +208,9 @@ describe('圖表實例 writer', () => {
             writeDrawingJournal();
             expect(drawingsSaveFailed()).toBe(true);
             const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
-            expect(journal.ops.TXF[d.id]).toMatchObject({ id: d.id, restoreTombstone: { revision: expect.any(String) } });
+            expect(journal.ops.TXF[d.id]).toMatchObject({ id: d.id });
+            expect(journal.ops.TXF[d.id].restoreTombstone).toBeUndefined();
+            expect(journal.restores.TXF[d.id]).toMatchObject({ writer: expect.any(String), tombstone: { revision: expect.any(String) } });
         }
         write.mockRestore();
         if (path === 'journal') {

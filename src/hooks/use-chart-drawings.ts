@@ -34,7 +34,7 @@ import {
     moveDrawing,
     removeDrawings,
     replaceDrawings,
-    setDrawingSettings,
+    setDrawingSettings as saveDrawingSettings,
     setDrawingsLocked,
     showAllDrawings,
     toolDef,
@@ -175,6 +175,9 @@ export interface Box {
 }
 
 export interface ChartDrawingsApi {
+    // UI 根節點的 capture 防線；序號也供下單入口核對本次武裝。
+    onInteraction: () => void;
+    interactionSequence: () => number;
     tool: DrawingToolId | null;
     setTool: (t: DrawingToolId | null) => void;
     drawings: Drawing[];
@@ -339,11 +342,19 @@ export function useChartDrawings(opts: {
     getBarsRef.current = opts.getBars;
     const onEnterDrawingModeRef = useRef(opts.onEnterDrawingMode);
     onEnterDrawingModeRef.current = opts.onEnterDrawingMode;
+    const interactionSequenceRef = useRef(0);
     const enterDrawingMode = useCallback(() => {
+        interactionSequenceRef.current++;
         // 同一個滑鼠／鍵盤事件內的 chart click 不能等 React render 才解除武裝。
         stateRef.current.tradeArmed = false;
         onEnterDrawingModeRef.current();
     }, []);
+    const interactionSequence = useCallback(() => interactionSequenceRef.current, []);
+    // 設定與物件交易各有單一入口，程式呼叫也一律使武裝序號失效。
+    const setDrawingSettings = useCallback((patch: Partial<DrawingSettings>) => {
+        enterDrawingMode();
+        saveDrawingSettings(patch);
+    }, [enterDrawingMode]);
 
     // ── 復原 ─────────────────────────────────────────────────────────
     const bumpHistory = useCallback(() => setHistoryVer((v) => v + 1), []);
@@ -379,6 +390,7 @@ export function useChartDrawings(opts: {
     // 包一次操作：只記這個 writer 實際寫入的物件。
     const tx = useCallback(
         (fn: () => void, tag?: string) => {
+            enterDrawingMode();
             beginOperation();
             // 物件列表／樣式／刪除等操作接手時，先撤回尚未結束的拖曳。
             cancelDragRef.current?.();
@@ -392,7 +404,7 @@ export function useChartDrawings(opts: {
                 bumpHistory();
             }
         },
-        [beginOperation, bumpHistory, writer],
+        [beginOperation, bumpHistory, writer, enterDrawingMode],
     );
 
     const applyHistory = useCallback(
@@ -1153,7 +1165,7 @@ export function useChartDrawings(opts: {
                 claimKeyboard(token);
                 const group = toolDef(t).group;
                 const last = stateRef.current.settings.groupLast;
-                if (last[group] !== t) setDrawingSettings({ groupLast: { ...last, [group]: t } });
+                if (last[group] !== t) saveDrawingSettings({ groupLast: { ...last, [group]: t } });
             }
             setTool(t);
             stateRef.current.tool = t;
@@ -1187,6 +1199,7 @@ export function useChartDrawings(opts: {
             if (e.key === 'Escape') {
                 // 已被 modal 的 Esc 收走就不重複處理
                 if (e.defaultPrevented) return;
+                enterDrawingMode();
                 // 畫圖 UI 用掉的 Esc 一律吃掉（preventDefault）並清掉 Esc×2
                 // 的「第一下」：use-hotkeys 看到 defaultPrevented 就不算，也
                 // 不會跟更早的一下湊成兩下。連按兩下 Esc 確保取消畫圖是很
@@ -1229,7 +1242,9 @@ export function useChartDrawings(opts: {
             }
             if (e.key !== 'Delete' && e.key !== 'Backspace') return;
             // 焦點必須真的在這張圖上（圖表本體或它的工具列）
-            if (!focused || !s.selectedIds.length) return;
+            if (!focused) return;
+            enterDrawingMode();
+            if (!s.selectedIds.length) return;
             if (!s.drawings.some((d) => s.selectedIds.includes(d.id) && !d.locked)) return;
             e.preventDefault();
             removeSelected();
@@ -1240,7 +1255,7 @@ export function useChartDrawings(opts: {
         // 它武裝刪單視窗；Delete 也要先於其他面板處理
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-    }, [listening, pushState, token, hostRef, undo, redo, clearMeasure, setToolChecked, removeSelected]);
+    }, [listening, pushState, token, hostRef, undo, redo, clearMeasure, setToolChecked, removeSelected, enterDrawingMode]);
 
     // ── 對外操作 ─────────────────────────────────────────────────────
     const selectedList = useMemo(
@@ -1598,6 +1613,8 @@ export function useChartDrawings(opts: {
     }, [hostRef]);
 
     return {
+        onInteraction: enterDrawingMode,
+        interactionSequence,
         tool,
         setTool: setToolChecked,
         drawings,

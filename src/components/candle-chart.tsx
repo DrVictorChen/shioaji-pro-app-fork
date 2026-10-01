@@ -350,6 +350,12 @@ export function CandleChart({
     // refs so the chart click handler always sees current values
     const modeRef = useRef(mode);
     modeRef.current = mode;
+    const armedDrawingSequenceRef = useRef<number | null>(null);
+    const setTradeMode = (next: TradeMode) => {
+        modeRef.current = next;
+        armedDrawingSequenceRef.current = next === 'observe' ? null : drawingsRef.current?.interactionSequence() ?? null;
+        setMode(next);
+    };
     const contractRef = useRef(contract);
     contractRef.current = contract;
     const lastPriceRef = useRef<number | null>(null);
@@ -456,6 +462,10 @@ export function CandleChart({
             // 第二道防線：畫圖選取／草稿／拖曳／文字／量測均不能進入下單路徑。
             if (drawingsRef.current?.drawingBusy()) return;
             const m = modeRef.current;
+            // 武裝以後只要發生畫圖互動，這次授權就失效；即使 mode 的更新
+            // 尚未 render 或某入口未清模式，也不得進入 placeQuickOrder。
+            if (m !== 'observe' && (armedDrawingSequenceRef.current === null ||
+                armedDrawingSequenceRef.current !== drawingsRef.current?.interactionSequence())) return;
             if (!param.point) return;
             const raw = candles.coordinateToPrice(param.point.y);
             if (raw === null) return;
@@ -473,6 +483,8 @@ export function CandleChart({
             const odd = market === 'S' && settings.lot === 'IntradayOdd';
             const view = orderAccountRef.current;
             const account: Account | undefined = view.active;
+            modeRef.current = 'observe';
+            armedDrawingSequenceRef.current = null;
             setMode('observe'); // one-shot
             if (m !== 'alert' && (view.missing || !account)) {
                 notify({ kind: 'err', title: '圖表下單未送出', body: view.missing ? '圖表設定的固定帳號已不可用，請在下單設定重新選擇' : '沒有可用的下單帳號' });
@@ -1783,7 +1795,7 @@ export function CandleChart({
                         title={`交易模式：${m.label}`}
                         // 再按一次退出交易模式。頂端不再有「游標」按鈕，
                         // 這是留在頂端的解除方式（另一個是點左側工具列）
-                        onClick={() => setMode(mode === m.key ? 'observe' : m.key)}
+                        onClick={() => setTradeMode(mode === m.key ? 'observe' : m.key)}
                     >
                         {m.label}
                     </button>

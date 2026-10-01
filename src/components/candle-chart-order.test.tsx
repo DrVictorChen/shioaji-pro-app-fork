@@ -5,6 +5,8 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'rea
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
 
+vi.mock('react-dom', () => ({ createPortal: (children: unknown) => children }));
+
 vi.hoisted(() => {
     const store = new Map<string, string>();
     (globalThis as any).localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v), removeItem: (k: string) => store.delete(k), key: () => null, length: 0 };
@@ -18,11 +20,14 @@ const m = vi.hoisted(() => ({
     roundClose: 100 as number | null,
     oddClose: 100 as number | null,
     drawingBusy: false,
+    skipDisarm: false,
 }));
 vi.mock('../hooks/use-chart-drawings', async (importOriginal) => {
     const real = await importOriginal<typeof import('../hooks/use-chart-drawings')>();
     return { ...real, useChartDrawings: (...args: Parameters<typeof real.useChartDrawings>) => {
-        const api = real.useChartDrawings(...args);
+        const api = real.useChartDrawings({ ...args[0], onEnterDrawingMode: () => {
+            if (!m.skipDisarm) args[0].onEnterDrawingMode();
+        } });
         return { ...api, drawingBusy: () => m.drawingBusy || api.drawingBusy() };
     } };
 });
@@ -55,7 +60,7 @@ vi.mock('lightweight-charts', async () => {
 });
 
 import { CandleChart } from './candle-chart';
-import { ChartDrawingTools, ChartObjectList } from './chart-drawing-tools';
+import { ChartDrawingTools, ChartDrawingOverlays, ChartObjectList, DrawingSettingsDialog, Popover, TextEditor } from './chart-drawing-tools';
 import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE } from '../lib/chart-drawings';
 import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
 
@@ -72,11 +77,18 @@ const button = (root: ReactTestInstance, label: string) => root.findAll(n => n.t
 const flush = async () => { for (let i = 0; i < 6; i++) await act(async () => {}); };
 async function mount(props: Record<string, unknown>) {
     await act(async () => {
-        view = create(createElement(CandleChart, props as any), { createNodeMock: () => ({ clientWidth: 800, clientHeight: 400, getBoundingClientRect: () => ({ width: 800, height: 400, left: 0, top: 0 }), addEventListener() {}, removeEventListener() {}, style: {} }) });
+        view = create(createElement(CandleChart, props as any), { createNodeMock: () => ({ clientWidth: 800, clientHeight: 400, getBoundingClientRect: () => ({ width: 800, height: 400, left: 0, top: 0 }), addEventListener() {}, removeEventListener() {}, contains: () => true, hasAttribute: () => true, focus() {}, style: {} }) });
     });
     await flush();
 }
 const clickChart = async () => { await act(async () => { m.click.at(-1)!({ point: { x: 10, y: 10 } }); }); await flush(); };
+// react-test-renderer 不派送 DOM 事件；沿實際 host ancestry 執行 capture，
+// 再執行子按鈕事件，保留 stopPropagation 無法阻擋 capture 的時序。
+function capture(target: ReactTestInstance, kind: 'PointerDown' | 'KeyDown') {
+    const path: ReactTestInstance[] = [];
+    for (let n: ReactTestInstance | null = target; n; n = n.parent) path.unshift(n);
+    for (const n of path) if (typeof n.type === 'string') n.props[`on${kind}Capture`]?.({});
+}
 
 beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -90,6 +102,7 @@ beforeEach(() => {
     m.accounts = [S1, S2, F1];
     m.roundClose = 100; m.oddClose = 100;
     m.drawingBusy = false;
+    m.skipDisarm = false;
     __resetDrawingsForTest();
     (globalThis as any).localStorage.setItem('sj-pro-chart-order-defaults', '{}');
 });
@@ -97,6 +110,130 @@ afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlob
 
 describe('chart order settings button', () => {
     const drawingApi = () => view.root.findByType(ChartDrawingTools).props.api as ChartDrawingsApi;
+
+    it.each(['點價買', '點價賣'].flatMap(side => ['隱藏', '顯示', '鎖定', '解鎖', '刪除', '收起物件列表', '清除全部'].map(action => [side, action])))
+    ('武裝%s後操作%s，capture 先解除武裝且後續空白點擊不下單', async (side, action) => {
+        await mount({ contract: stk });
+        let id!: string;
+        await act(async () => { id = addDrawing('2330', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!.id; });
+        if (action === '顯示') await act(async () => drawingApi().setHidden(id, true));
+        if (action === '解鎖') await act(async () => drawingApi().setLocked(id, true));
+        await act(async () => drawingApi().setObjectListOpen(true));
+        await act(async () => button(view.root, side!).props.onClick());
+        const target = view.root.findAll(n => n.type === 'button' && String(n.props['aria-label'] ?? '').startsWith(action!))[0]!;
+        expect(target).toBeDefined();
+        await act(async () => {
+            capture(target, 'PointerDown');
+            // capture 本身已封住同步到達的 chart click，尚未執行子操作。
+            m.click.at(-1)!({ point: { x: 10, y: 10 } });
+            target.props.onClick({ stopPropagation() {} });
+        });
+        await clickChart();
+        expect(m.place).not.toHaveBeenCalled();
+        await act(async () => button(view.root, side!).props.onClick());
+        await clickChart();
+        expect(m.place).toHaveBeenCalledTimes(1); // 新武裝可正常下單
+    });
+
+    it.each(['PointerDown', 'KeyDown'] as const)('武裝後設定對話框的%s即使沒有改物件，也使後續空白點擊不下單', async (kind) => {
+        await mount({ contract: stk });
+        let drawing!: NonNullable<ReturnType<typeof addDrawing>>;
+        await act(async () => { drawing = addDrawing('2330', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!; });
+        let dialog!: ReactTestRenderer;
+        await act(async () => { dialog = create(createElement(DrawingSettingsDialog, { api: drawingApi(), drawing, onClose: vi.fn() })); });
+        try {
+            await act(async () => button(view.root, '點價買').props.onClick());
+            const target = dialog.root.findAllByProps({ role: 'tab' })[0]!;
+            await act(async () => capture(target, kind));
+            await clickChart();
+            expect(m.place).not.toHaveBeenCalled();
+        } finally { await act(async () => dialog.unmount()); }
+    });
+
+    it.each([false, true])('畫圖 API 操作即使未經 UI capture，也使本次武裝失效（模式解除遺漏=%s）', async (skipDisarm) => {
+        await mount({ contract: stk });
+        let id!: string;
+        await act(async () => { id = addDrawing('2330', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!.id; });
+        await act(async () => button(view.root, '點價買').props.onClick());
+        m.skipDisarm = skipDisarm;
+        await act(async () => {
+            drawingApi().setHidden(id, true);
+            m.click.at(-1)!({ point: { x: 10, y: 10 } });
+        });
+        await clickChart();
+        expect(m.place).not.toHaveBeenCalled();
+    });
+
+    it.each(['浮動工具列', '文字編輯框', '彈出工具選單'].flatMap(surface => (['PointerDown', 'KeyDown'] as const).map(kind => [surface, kind] as const)))
+    ('武裝後%s的%s先使武裝失效', async (surface, kind) => {
+        await mount({ contract: stk });
+        let drawing!: NonNullable<ReturnType<typeof addDrawing>>;
+        await act(async () => { drawing = addDrawing('2330', 'text', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE, { text: '註記' })!; });
+        const api = drawingApi();
+        const overlayApi = { ...api, selected: drawing, selectedList: [drawing], selectedIds: [drawing.id], selectionBox: { left: 10, top: 10, right: 50, bottom: 50 }, hostSize: { width: 800, height: 400 } };
+        let ui!: ReactTestRenderer;
+        await act(async () => {
+            ui = create(surface === '浮動工具列' ? createElement(ChartDrawingOverlays, { api: overlayApi })
+                : surface === '文字編輯框' ? createElement(TextEditor, { initial: '註記', box: { left: 0, top: 0 }, onCommit: api.commitText, onInteraction: api.onInteraction })
+                : createElement(Popover, { anchor: null, label: '工具選單', onClose: vi.fn(), onInteraction: api.onInteraction, children: createElement('button', {}, '工具') }));
+        });
+        try {
+            await act(async () => button(view.root, '點價賣').props.onClick());
+            const target = surface === '文字編輯框' ? ui.root.findByType('textarea') : ui.root.findAllByType('button')[0]!;
+            await act(async () => capture(target, kind));
+            await clickChart();
+            expect(m.place).not.toHaveBeenCalled();
+        } finally { await act(async () => ui.unmount()); }
+    });
+
+    it.each([
+        { key: 'h', code: 'KeyH', altKey: true },
+        { key: 'z', code: 'KeyZ', ctrlKey: true },
+        { key: 'z', code: 'KeyZ', ctrlKey: true, shiftKey: true },
+        { key: 'y', code: 'KeyY', ctrlKey: true },
+        { key: 'Delete' }, { key: 'Backspace' }, { key: 'Escape' },
+    ])('畫圖快捷鍵 $key（$code）後空白點擊不下單', async (key) => {
+        const events = new EventTarget();
+        const w = window as any;
+        const saved = { add: w.addEventListener, remove: w.removeEventListener, active: document.activeElement };
+        w.addEventListener = events.addEventListener.bind(events);
+        w.removeEventListener = events.removeEventListener.bind(events);
+        (document as any).activeElement = {};
+        onTestFinished(() => { w.addEventListener = saved.add; w.removeEventListener = saved.remove; (document as any).activeElement = saved.active; });
+        await mount({ contract: stk });
+        await act(async () => drawingApi().setTool('horizontal')); // 鍵盤歸此圖
+        await act(async () => button(view.root, '點價買').props.onClick());
+        const sequence = drawingApi().interactionSequence();
+        await act(async () => { events.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), key)); });
+        expect(drawingApi().interactionSequence()).toBeGreaterThan(sequence);
+        await clickChart();
+        expect(m.place).not.toHaveBeenCalled();
+    });
+
+    it.each(['設定對話框', '彈出工具選單'])('%s的原生 Esc 關閉早於 UI capture，後續空白點擊仍不下單', async (surface) => {
+        const events = new EventTarget();
+        const w = window as any;
+        const saved = { add: w.addEventListener, remove: w.removeEventListener };
+        w.addEventListener = events.addEventListener.bind(events);
+        w.removeEventListener = events.removeEventListener.bind(events);
+        onTestFinished(() => { w.addEventListener = saved.add; w.removeEventListener = saved.remove; });
+        await mount({ contract: stk });
+        let drawing!: NonNullable<ReturnType<typeof addDrawing>>;
+        await act(async () => { drawing = addDrawing('2330', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!; });
+        let ui!: ReactTestRenderer;
+        const onClose = vi.fn(() => ui.unmount());
+        await act(async () => {
+            ui = create(surface === '設定對話框' ? createElement(DrawingSettingsDialog, { api: drawingApi(), drawing, onClose })
+                : createElement(Popover, { anchor: null, label: '工具選單', onClose, onInteraction: drawingApi().onInteraction, children: null }));
+        });
+        try {
+            await act(async () => button(view.root, '點價買').props.onClick());
+            await act(async () => { events.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key: 'Escape' })); });
+            expect(onClose).toHaveBeenCalledOnce();
+            await clickChart();
+            expect(m.place).not.toHaveBeenCalled();
+        } finally { await act(async () => ui.unmount()); }
+    });
 
     it.each(['點價買', '點價賣'])('武裝%s後物件列表選取，同一事件圖表 click 不會呼叫 placeQuickOrder', async (side) => {
         await mount({ contract: stk });

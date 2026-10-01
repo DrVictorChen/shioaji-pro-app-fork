@@ -139,6 +139,12 @@ function keepChartFocus(api: ChartDrawingsApi) {
     };
 }
 
+// 所有可互動的畫圖 UI（包含 portal）在根節點先解除武裝。
+// capture 早於子元件 stopPropagation，亦涵蓋沒有資料變更的按鍵／點擊。
+function drawingCapture(onInteraction: () => void) {
+    return { onPointerDownCapture: onInteraction, onKeyDownCapture: onInteraction };
+}
+
 // 輸入法（注音、倉頡…）組字中的按鍵：確認候選字的 Enter、取消組字的
 // Esc 都屬於輸入法，不能當成「完成」或「取消」
 export function isImeKey(e: { nativeEvent?: { isComposing?: boolean }; keyCode?: number }): boolean {
@@ -160,6 +166,7 @@ export function Popover({
     children,
     label,
     onMouseDown,
+    onInteraction,
 }: {
     anchor: HTMLElement | null;
     // esc：Esc 關閉；outside：點外面關閉（焦點留在點到的地方，不搶回圖表）
@@ -167,11 +174,12 @@ export function Popover({
     children: ReactNode;
     label: string;
     onMouseDown?: (e: ReactMouseEvent) => void;
+    onInteraction: () => void;
 }) {
     const popRef = useRef<HTMLDivElement | null>(null);
     const [pos, setPos] = useState<CSSProperties>({ position: 'fixed', visibility: 'hidden' });
     const closeRef = useRef(onClose);
-    closeRef.current = onClose;
+    closeRef.current = (reason) => { onInteraction(); onClose(reason); };
 
     // Esc 關閉：useEscClose 一律 preventDefault，這一下不會算進 Esc×2
     // 全部刪單，也不會穿透去取消圖上的選取。輸入框裡的 Esc 由輸入框自己
@@ -227,6 +235,7 @@ export function Popover({
             role='dialog'
             aria-label={label}
             onMouseDown={onMouseDown}
+            {...drawingCapture(onInteraction)}
         >
             {children}
         </div>
@@ -317,7 +326,7 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
     };
 
     return (
-        <div className={styles.rail} onMouseDown={keepChartFocus(api)} onScroll={hideTip}>
+        <div className={styles.rail} {...drawingCapture(api.onInteraction)} onMouseDown={keepChartFocus(api)} onScroll={hideTip}>
             <button
                 className={styles.railBtn[api.tool === null ? 'active' : 'normal']}
                 aria-pressed={api.tool === null}
@@ -433,6 +442,7 @@ export function ChartDrawingTools({ api }: { api: ChartDrawingsApi }) {
 
             {flyout && (
                 <Popover
+                    onInteraction={api.onInteraction}
                     anchor={flyout.anchor}
                     label={`${DRAWING_GROUPS.find((g) => g.group === flyout.group)!.label}工具`}
                     onClose={() => setFlyout(null)}
@@ -562,6 +572,7 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
                     style={{ left: pos.left, top: pos.top }}
                     role='toolbar'
                     data-drawing-overlay=''
+                    {...drawingCapture(api.onInteraction)}
                     aria-label='畫圖物件工具列'
                     onMouseDown={(e) => {
                         // 不要讓這一下落到圖表（取消選取、平移）
@@ -641,7 +652,7 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
             )}
 
             {showBar && menu?.kind === 'color' && (
-                <Popover anchor={menu.anchor} label='顏色' onClose={() => setMenu(null)}>
+                <Popover anchor={menu.anchor} label='顏色' onClose={() => setMenu(null)} onInteraction={api.onInteraction}>
                     <span className={styles.palette}>
                         {DRAWING_PALETTE.map((c) => (
                             <button
@@ -673,7 +684,7 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
                 </Popover>
             )}
             {showBar && menu?.kind === 'width' && (
-                <Popover anchor={menu.anchor} label='線寬' onClose={() => setMenu(null)}>
+                <Popover anchor={menu.anchor} label='線寬' onClose={() => setMenu(null)} onInteraction={api.onInteraction}>
                     {WIDTHS.map((w) => (
                         <button
                             key={w}
@@ -697,6 +708,7 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
 
             {api.editingTextId && api.editBox && (
                 <TextEditor
+                    onInteraction={api.onInteraction}
                     key={api.editingTextId}
                     initial={api.drawings.find((d) => d.id === api.editingTextId)?.text ?? ''}
                     onDraftChange={api.updateTextDraft}
@@ -715,11 +727,13 @@ export function TextEditor({
     box,
     onCommit,
     onDraftChange,
+    onInteraction,
 }: {
     initial: string;
     box: { left: number; top: number };
     onCommit: (text: string | null) => void;
     onDraftChange?: (text: string) => void;
+    onInteraction: () => void;
 }) {
     const [value, setValue] = useState(initial);
     const done = useRef(false);
@@ -738,6 +752,7 @@ export function TextEditor({
             ref={ref}
             className={styles.textEditor}
             data-drawing-overlay=''
+            {...drawingCapture(onInteraction)}
             style={{ left: box.left, top: box.top }}
             value={value}
             maxLength={MAX_TEXT_LENGTH}
@@ -840,6 +855,8 @@ export function DrawingSettingsDialog({
     useEscClose(() => {
         const active = typeof document !== 'undefined' ? document.activeElement : null;
         if (isTextInput(active) && dialogRef.current?.contains(active!)) return;
+        // modal 的 window capture 可能先關閉並卸載 UI；不能等根節點 keydown。
+        sourceApi.onInteraction();
         closeRef.current();
     });
     const d = drawing;
@@ -849,7 +866,7 @@ export function DrawingSettingsDialog({
     const [text, setText] = useState(d.text ?? '');
 
     const body = (
-        <div className={styles.overlay} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+        <div className={styles.overlay} {...drawingCapture(api.onInteraction)} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
             <div
                 ref={dialogRef}
                 className={styles.dialog}
@@ -1191,7 +1208,7 @@ function FibSection({ api, drawing }: { api: ChartDrawingsApi; drawing: Drawing 
             <span className={styles.hint}>預設終點＝0、起點＝1；反轉後起點＝0。標籤放在回撤範圍外側，延伸到圖表邊緣時改貼畫面內緣。</span>
 
             {colorFor && fib.levels[colorFor.index] && (
-                <Popover anchor={colorFor.anchor} label='比例顏色' onClose={() => setColorFor(null)}>
+                <Popover anchor={colorFor.anchor} label='比例顏色' onClose={() => setColorFor(null)} onInteraction={api.onInteraction}>
                     <span className={styles.palette}>
                         {FIB_COLOR_CHOICES[api.themeMode].map((c) => (
                             <button
@@ -1240,7 +1257,7 @@ export function ChartObjectList({ api }: { api: ChartDrawingsApi }) {
     const indexOf = (id: string) => api.drawings.findIndex((d) => d.id === id);
 
     return (
-        <aside className={styles.list} aria-label='物件列表' onMouseDown={keepChartFocus(api)}>
+        <aside className={styles.list} {...drawingCapture(api.onInteraction)} aria-label='物件列表' onMouseDown={keepChartFocus(api)}>
             <div className={styles.listHeader}>
                 <span>
                     物件列表 <span className={styles.listCount}>{api.drawings.length}</span>

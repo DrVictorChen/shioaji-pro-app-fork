@@ -49,7 +49,7 @@ describe('設定對話框：規則 R 與欄位 diff', () => {
         const anchors = [{ time: 1000, price: 25000 }, { time: 2000, price: 25100 }];
         const d = addDrawing('TXF', tool, tool === 'text' ? anchors.slice(0, 1) : anchors, DEFAULT_DRAWING_STYLE, { text: '原文' })!;
         flushDrawingWrites();
-        const api = { symbolKey: 'TXF', themeMode: 'dark', rename: vi.fn(), setText: vi.fn(), setAnchor: vi.fn(), setFib: vi.fn(), applyStyle: vi.fn(), formatPrice: String } as unknown as ChartDrawingsApi;
+        const api = { symbolKey: 'TXF', themeMode: 'dark', onInteraction: vi.fn(), rename: vi.fn(), setText: vi.fn(), setAnchor: vi.fn(), setFib: vi.fn(), applyStyle: vi.fn(), formatPrice: String } as unknown as ChartDrawingsApi;
         const onClose = vi.fn();
         await act(async () => { view = create(createElement(DrawingSettingsDialog, { drawing: d, api, onClose })); });
         return { d, api, onClose };
@@ -220,7 +220,7 @@ describe('彈出層（工具組、色盤、線寬）：Esc 與點外面關閉', 
         const onClose = vi.fn();
         await act(async () => {
             view = create(
-                createElement(Popover, { anchor, onClose, label: '測試', children: null }),
+                createElement(Popover, { anchor, onClose, onInteraction: vi.fn(), label: '測試', children: null }),
                 // popRef 需要一個 contains()：面板內的元素只有 popChild 與 priceInput
                 { createNodeMock: () => ({ contains: (n: unknown) => n === popChild || n === priceInput, ownerDocument: anchor.ownerDocument, scrollHeight: 300, offsetWidth: 240 }) },
             );
@@ -310,7 +310,7 @@ describe('輸入法組字中的 Enter／Esc 不算完成或取消', () => {
     it('文字註記：選字的 Enter 不提交，組字結束後的 Enter 才提交', async () => {
         const onCommit = vi.fn();
         await act(async () => {
-            view = create(createElement(TextEditor, { initial: '', box: { left: 0, top: 0 }, onCommit }));
+            view = create(createElement(TextEditor, { initial: '', box: { left: 0, top: 0 }, onCommit, onInteraction: vi.fn() }));
         });
         const ta = () => view.root.findByType('textarea');
         await act(async () => ta().props.onChange({ target: { value: '月線' } }));
