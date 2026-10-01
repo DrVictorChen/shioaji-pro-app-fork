@@ -38,6 +38,16 @@ describe('只退回這一步動到的物件', () => {
         expect(run([a2, c2], h.undo())).toEqual([a1, c2]);
     });
 
+    it('只復原內容時，不移動物件而蓋掉遠端對鄰居的圖層調整', () => {
+        const h = new DrawingHistory();
+        const [a, b, c] = [mk('a'), mk('b'), mk('c')];
+        const renamed = { ...a, name: '本地' };
+        h.push('TXF', [a, b, c], [renamed, b, c]);
+        expect(ids(run([c, renamed, b], h.undo()))).toEqual(['c', 'a', 'b']);
+        h.push('TXF', [a, b, c], [c, renamed, b], undefined, 1000, ['a']);
+        expect(ids(run([c, renamed, b], h.undo()))).toEqual(['c', 'a', 'b']);
+    });
+
     it('拖曳／文字這類跨時間的操作只記指定的物件：期間別的視窗的改動不會被復原', () => {
         const h = new DrawingHistory();
         const a1 = mk('a', 100);
@@ -77,6 +87,20 @@ describe('只退回這一步動到的物件', () => {
 });
 
 describe('DrawingHistory', () => {
+    it('invalidate 同時移除所有 undo／redo 中的指定物件，保留多物件步驟其餘部分與其他商品', () => {
+        const h = new DrawingHistory();
+        const a = mk('a');
+        const b = mk('b');
+        h.push('OTHER', [a], [{ ...a, name: '另一商品' }]);
+        h.push('TXF', [a], [{ ...a, name: '第一步' }]);
+        h.push('TXF', [a, b], [{ ...a, hidden: true }, { ...b, hidden: true }]);
+        h.undo();
+        expect(h.invalidate('TXF', new Set(['a']))).toBe(true);
+        expect(h.redo()!.changes.map((c) => c.id)).toEqual(['b']);
+        expect(h.undo()!.changes.map((c) => c.id)).toEqual(['b']);
+        expect(h.undo()!.key).toBe('OTHER');
+        expect(h.canUndo).toBe(false);
+    });
     it('復原後可重做；新的一步清掉重做', () => {
         const h = new DrawingHistory();
         const s0: Drawing[] = [];

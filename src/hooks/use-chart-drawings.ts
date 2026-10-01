@@ -22,6 +22,8 @@ import {
     duplicateDrawing,
     getDrawings,
     getDrawingVersion,
+    subscribeDrawingRemoteChanges,
+    noteDrawingHistoryConflict,
     MAX_NAME_LENGTH,
     MAX_TEXT_LENGTH,
     MEASURE_COLORS,
@@ -293,7 +295,9 @@ export function useChartDrawings(opts: {
     const measureDoneRef = useRef(false); // 量測第二點已定（再點一下清除）
     const layerRef = useRef<DrawingLayer | null>(null);
     // 文字編輯開始前的清單；新建的文字取消＝整筆不留、也不進復原
-    const textTxRef = useRef<{ before: Drawing[]; created: boolean } | null>(null);
+    const textTxRef = useRef<{ before: Drawing[]; created: boolean; invalidated?: boolean } | null>(null);
+    const cancelDragRef = useRef<(() => void) | null>(null);
+    const historyBusyRef = useRef(false);
 
     // 事件處理器裡要讀的最新值
     const live = {
@@ -321,6 +325,18 @@ export function useChartDrawings(opts: {
 
     // ── 復原 ─────────────────────────────────────────────────────────
     const bumpHistory = useCallback(() => setHistoryVer((v) => v + 1), []);
+    useEffect(() => subscribeDrawingRemoteChanges((key, ids) => {
+        const changed = historyRef.current.invalidate(key, ids);
+        const info = textTxRef.current;
+        if (key === stateRef.current.symbolKey && info && ids.has(stateRef.current.editingTextId ?? '')) {
+            info.invalidated = true;
+            noteDrawingHistoryConflict();
+        }
+        if (changed) {
+            noteDrawingHistoryConflict();
+            bumpHistory();
+        }
+    }), [bumpHistory]);
     // 包一次操作：前後清單不同就記成一步
     const tx = useCallback(
         (fn: () => void, tag?: string) => {
@@ -340,18 +356,22 @@ export function useChartDrawings(opts: {
         (step: HistoryStep | null) => {
             if (!step) return;
             // 只動這一步記錄的物件；別的視窗、別的操作的改動維持現況
-            historyRef.current.applied(step, applyDrawingHistory(step));
-            // 選取裡已經不存在的物件拿掉
-            const ids = new Set(getDrawings(step.key).map((d) => d.id));
-            setSelectedIds((cur) =>
-                cur.every((id) => ids.has(id)) ? cur : cur.filter((id) => ids.has(id)),
-            );
-            bumpHistory();
+            historyBusyRef.current = true;
+            applyDrawingHistory(step, (versions) => {
+                historyRef.current.applied(step, versions);
+                // 選取裡已經不存在的物件拿掉
+                const ids = new Set(getDrawings(step.key).map((d) => d.id));
+                setSelectedIds((cur) =>
+                    cur.every((id) => ids.has(id)) ? cur : cur.filter((id) => ids.has(id)),
+                );
+                bumpHistory();
+                historyBusyRef.current = false;
+            });
         },
         [bumpHistory],
     );
-    const undo = useCallback(() => applyHistory(historyRef.current.undo()), [applyHistory]);
-    const redo = useCallback(() => applyHistory(historyRef.current.redo()), [applyHistory]);
+    const undo = useCallback(() => { if (!historyBusyRef.current) applyHistory(historyRef.current.undo()); }, [applyHistory]);
+    const redo = useCallback(() => { if (!historyBusyRef.current) applyHistory(historyRef.current.redo()); }, [applyHistory]);
 
     // ── layer 掛載 ───────────────────────────────────────────────────
     // 注意：這個 effect 必須在 candle-chart 建立圖表的 effect 之後註冊
@@ -571,6 +591,12 @@ export function useChartDrawings(opts: {
         // startAnchors：按下當下的時間／價格 — 拖單一控制點時，其他點原樣保留
         type DragItem = { id: string; tool: DrawingTool; plan: DragPlan; startAnchors: DrawingAnchor[] };
         let drag: { items: DragItem[]; before: Drawing[]; key: string } | null = null;
+        const unsubscribeRemote = subscribeDrawingRemoteChanges((key, ids) => {
+            if (drag?.key !== key) return;
+            const keep = drag.items.filter((item) => !ids.has(item.id));
+            if (keep.length !== drag.items.length) noteDrawingHistoryConflict();
+            drag.items = keep;
+        });
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
         // 拖曳中的 mousemove 合併到下一個 animation frame 才寫進 store —
@@ -806,6 +832,7 @@ export function useChartDrawings(opts: {
                 document.removeEventListener('mouseup', up, true);
                 activeMove = null;
                 activeUp = null;
+                cancelDragRef.current = null;
                 if (frame !== null) cancelRaf(frame);
                 frame = null;
                 pendingPt = null;
@@ -833,6 +860,26 @@ export function useChartDrawings(opts: {
             document.addEventListener('mouseup', up, true);
             activeMove = move;
             activeUp = up;
+            cancelDragRef.current = () => {
+                document.removeEventListener('mousemove', move, true);
+                document.removeEventListener('mouseup', up, true);
+                activeMove = null;
+                activeUp = null;
+                if (frame !== null) cancelRaf(frame);
+                frame = null;
+                pendingPt = null;
+                if (drag) {
+                    const originals = new Map(drag.before.map((d) => [d.id, d]));
+                    const ids = new Set(drag.items.map((item) => item.id));
+                    replaceDrawings(drag.key, getDrawings(drag.key).map((d) => {
+                        const original = originals.get(d.id);
+                        return ids.has(d.id) && original ? { ...d, anchors: original.anchors } : d;
+                    }));
+                }
+                drag = null;
+                cancelDragRef.current = null;
+                setChartInteractive(true);
+            };
         };
 
         // 雙擊文字註記 = 編輯文字
@@ -916,6 +963,8 @@ export function useChartDrawings(opts: {
         host.addEventListener('mousemove', hover, true);
         host.addEventListener('dblclick', dbl, true);
         return () => {
+            unsubscribeRemote();
+            cancelDragRef.current = null;
             host.removeEventListener('mousedown', down, true);
             host.removeEventListener('mousemove', hover, true);
             host.removeEventListener('dblclick', dbl, true);
@@ -1014,7 +1063,9 @@ export function useChartDrawings(opts: {
                 // 的「第一下」：use-hotkeys 看到 defaultPrevented 就不算，也
                 // 不會跟更早的一下湊成兩下。連按兩下 Esc 確保取消畫圖是很
                 // 自然的習慣，這兩下絕不能變成撤掉全部委託。
-                if (measureRef.current) {
+                if (cancelDragRef.current) {
+                    cancelDragRef.current();
+                } else if (measureRef.current) {
                     clearMeasure();
                     if (s.tool === 'measure') setTool(null);
                 } else if (draftRef.current || s.tool) {
@@ -1276,6 +1327,7 @@ export function useChartDrawings(opts: {
             textTxRef.current = null;
             setEditingTextId(null);
             if (!id) return;
+            if (info?.invalidated) return;
             const value = text === null ? null : text.slice(0, MAX_TEXT_LENGTH).replace(/\s+$/, '');
             if (info?.created && !value) {
                 // 新建後沒打字（或取消）：不留下空的文字框，也不進復原
@@ -1283,6 +1335,7 @@ export function useChartDrawings(opts: {
                 setSelectedIds([]);
                 return;
             }
+            if (text === null) return; // Esc 取消既有文字，不建立歷史
             if (value) updateDrawing(key, id, { text: value });
             if (info) {
                 const after = getDrawings(key);

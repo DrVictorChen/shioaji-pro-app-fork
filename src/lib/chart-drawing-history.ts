@@ -6,13 +6,15 @@
 // 放回原本的圖層位置（接在原本排在它前面的那個物件後面）。
 
 import type { Drawing } from './chart-drawings';
+import { drawingRevision, type Revision } from './chart-drawing-revision';
 
 export interface HistoryChange {
     id: string;
     before: Drawing | null; // null＝這一步新增的
     after: Drawing | null; // null＝這一步刪掉的
-    beforeVersion: number | null; // 缺席時也保留墓碑版本
-    afterVersion: number | null;
+    beforeVersion: Revision | null; // 缺席時也保留墓碑版本
+    afterVersion: Revision | null;
+    moved?: boolean;
 }
 
 export interface HistoryStep {
@@ -57,8 +59,13 @@ export function diffDrawings(
                 id,
                 before: x,
                 after: y,
-                beforeVersion: x?.updatedAt ?? null,
-                afterVersion: y?.updatedAt ?? null,
+                beforeVersion: x ? drawingRevision(x) : null,
+                afterVersion: y ? drawingRevision(y) : null,
+                // 指定 ids 的跨時間操作只改座標／文字，期間鄰居的排序
+                // 改變不算這個物件的圖層移動。
+                moved: !ids && !!x && !!y &&
+                    before.filter((d) => a.has(d.id)).findIndex((d) => d.id === id) !==
+                    after.filter((d) => b.has(d.id)).findIndex((d) => d.id === id),
             });
         }
     }
@@ -77,6 +84,10 @@ export function applyChanges(
     for (const c of changes) {
         const target = c[side];
         const i = next.findIndex((d) => d.id === c.id);
+        if (i >= 0 && target && c.before && c.after && !c.moved) {
+            next[i] = target;
+            continue;
+        }
         if (i >= 0) next.splice(i, 1);
         if (!target) continue;
         // 接在目標順序裡排在它前面、而且現在還在的物件後面
@@ -101,7 +112,7 @@ export class DrawingHistory {
 
     constructor(
         private readonly _limit = HISTORY_LIMIT,
-        private readonly versionOf?: (key: string, id: string) => number | null,
+        private readonly versionOf?: (key: string, id: string) => Revision | null,
     ) {}
 
     get canUndo(): boolean {
@@ -144,6 +155,7 @@ export class DrawingHistory {
                 const previous = last.changes.find((l) => l.id === c.id)!;
                 previous.after = c.after;
                 previous.afterVersion = c.afterVersion;
+                previous.moved ||= c.moved;
             }
             last.afterOrder = afterOrder;
             last.at = now;
@@ -169,9 +181,9 @@ export class DrawingHistory {
         return { key: e.key, changes: e.changes, side: 'after', order: e.afterOrder };
     }
 
-    // 只有成功套用的物件才可再反向操作。復原／重做的新時間戳要接回
+    // 只有成功套用的物件才可再反向操作。復原／重做的新 revision 要接回
     // 相同舊版本的歷史邊界，連續復原與重做才不會把自己的寫入當成衝突。
-    applied(step: HistoryStep, versions: Map<string, number | null>) {
+    applied(step: HistoryStep, versions: Map<string, Revision | null>) {
         for (const c of step.changes) {
             if (!versions.has(c.id)) continue;
             const old = step.side === 'before' ? c.beforeVersion : c.afterVersion;
@@ -193,5 +205,19 @@ export class DrawingHistory {
     clear() {
         this._undo = [];
         this._redo = [];
+    }
+
+    // 遠端新版本永久切斷此物件的所有歷史；多物件步驟保留其餘物件。
+    invalidate(key: string, ids: ReadonlySet<string>) {
+        let changed = false;
+        for (const e of [...this._undo, ...this._redo]) {
+            if (e.key !== key) continue;
+            const keep = e.changes.filter((c) => !ids.has(c.id));
+            if (keep.length !== e.changes.length) changed = true;
+            e.changes.splice(0, e.changes.length, ...keep);
+        }
+        this._undo = this._undo.filter((e) => e.changes.length);
+        this._redo = this._redo.filter((e) => e.changes.length);
+        return changed;
     }
 }

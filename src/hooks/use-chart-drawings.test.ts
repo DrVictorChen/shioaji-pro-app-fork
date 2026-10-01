@@ -12,6 +12,7 @@ import {
 } from './use-chart-drawings';
 import {
     __resetDrawingsForTest,
+    __setDrawingLocksForTest,
     addDrawing,
     DEFAULT_DRAWING_STYLE,
     getDrawingSettings,
@@ -26,6 +27,9 @@ import type { ContractBase } from '../lib/types/contract';
 import { useHotkeys } from './use-hotkeys';
 import { AXIS_LABEL_H, axisLabelBox } from '../lib/chart-drawing-layer';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
+import { drawingRevision } from '../lib/chart-drawing-revision';
+
+const remoteRevision = (d: Drawing) => `${(Number(drawingRevision(d).split(':')[0]) + 100).toString().padStart(16, '0')}:remote`;
 
 // Esc×2 全部刪單的整合測試：開啟風控設定、攔下刪單
 const hk = vi.hoisted(() => ({ cancelAll: vi.fn(async () => {}), notify: vi.fn() }));
@@ -96,6 +100,8 @@ afterEach(async () => {
 });
 
 describe('跨視窗改動後的復原／重做', () => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10000); });
+    afterEach(() => vi.useRealTimers());
     const KEY = 'sj-pro-chart-drawings';
     const TKEY = 'sj-pro-chart-drawing-tombstones';
     async function setup() {
@@ -115,7 +121,7 @@ describe('跨視窗改動後的復原／重做', () => {
     it('刪 A 後另一視窗改 B，復原 A 不覆寫 B，持久化仍是 250', async () => {
         const { api, a, b } = await setup();
         await act(async () => { api().removeOne(a.id); flushDrawingWrites(); });
-        const remote = { ...b, anchors: [{ time: 1, price: 250 }], updatedAt: Date.now() + 1000 };
+        const remote = { ...b, anchors: [{ time: 1, price: 250 }], revision: remoteRevision(b) };
         store.set(KEY, JSON.stringify({ TXF: [remote] }));
         await act(async () => reloadDrawingsFromStorage());
         await act(async () => { api().undo(); flushDrawingWrites(); });
@@ -143,7 +149,7 @@ describe('跨視窗改動後的復原／重做', () => {
         const { api, a, b } = await setup();
         await act(async () => { api().rename(a.id, '本地'); flushDrawingWrites(); });
         const remoteAt = getDrawings('TXF')[0]!.updatedAt + 1000;
-        store.set(KEY, JSON.stringify({ TXF: deleted ? [b] : [{ ...a, name: '遠端', updatedAt: remoteAt }, b] }));
+        store.set(KEY, JSON.stringify({ TXF: deleted ? [b] : [{ ...a, name: '遠端', revision: remoteRevision(getDrawings('TXF')[0]!) }, b] }));
         if (deleted) store.set(TKEY, JSON.stringify({ TXF: { [a.id]: remoteAt } }));
         // 不先送 storage 事件：復原也必須讀到已落地的最新版本。
         await act(async () => { api().undo(); flushDrawingWrites(); });
@@ -179,7 +185,7 @@ describe('跨視窗改動後的復原／重做', () => {
         await act(async () => api().rename(a.id, '本地'));
         await act(async () => { api().undo(); flushDrawingWrites(); });
         const remoteAt = getDrawings('TXF')[0]!.updatedAt + 1000;
-        store.set(KEY, JSON.stringify({ TXF: deleted ? [b] : [{ ...a, name: '遠端', updatedAt: remoteAt }, b] }));
+        store.set(KEY, JSON.stringify({ TXF: deleted ? [b] : [{ ...a, name: '遠端', revision: remoteRevision(getDrawings('TXF')[0]!) }, b] }));
         if (deleted) store.set(TKEY, JSON.stringify({ TXF: { [a.id]: remoteAt } }));
         await act(async () => { api().redo(); flushDrawingWrites(); });
         expect(saved().find((d) => d.id === a.id)?.name).toBe(deleted ? undefined : '遠端');
@@ -191,7 +197,7 @@ describe('跨視窗改動後的復原／重做', () => {
         const { api, a, b } = await setup();
         await act(async () => { api().removeOne(a.id); flushDrawingWrites(); });
         const tombs = JSON.parse(store.get(TKEY)!);
-        tombs.TXF[a.id] += 1000;
+        tombs.TXF[a.id].revision = remoteRevision(getDrawings('TXF')[0] ?? a);
         store.set(TKEY, JSON.stringify(tombs));
         await act(async () => { api().undo(); flushDrawingWrites(); });
         expect(saved().map((d) => d.id)).toEqual([b.id]);
@@ -202,7 +208,7 @@ describe('跨視窗改動後的復原／重做', () => {
         const { api, a, b } = await setup();
         await act(async () => api().lockAll());
         await act(async () => flushDrawingWrites());
-        const remote = { ...getDrawings('TXF')[1]!, name: '遠端', updatedAt: Date.now() + 1000 };
+        const remote = { ...getDrawings('TXF')[1]!, name: '遠端', revision: remoteRevision(getDrawings('TXF')[1]!) };
         store.set(KEY, JSON.stringify({ TXF: [getDrawings('TXF')[0], remote] }));
         await act(async () => { api().undo(); flushDrawingWrites(); });
         expect(api().drawings[0]!.locked).toBe(false);
@@ -226,6 +232,60 @@ describe('跨視窗改動後的復原／重做', () => {
         expect(saved().map((d) => d.id)).toEqual([b.id, a.id]);
         expect(saved()[1]!.updatedAt).toBe(a.updatedAt);
         expect(takeDrawingNotices()).toEqual([]);
+    });
+
+    it.each([false, true])('遠端新版本移除同物件的所有 undo／redo 邊界（墓碑=%s）', async (deleted) => {
+        const { api, a, b } = await setup();
+        await act(async () => api().rename(a.id, '一步'));
+        await act(async () => api().setHidden(a.id, true));
+        await act(async () => { api().undo(); flushDrawingWrites(); });
+        expect(api().canUndo).toBe(true);
+        expect(api().canRedo).toBe(true);
+        const d = getDrawings('TXF')[0]!;
+        store.set(KEY, JSON.stringify({ TXF: deleted ? [b] : [{ ...d, name: '遠端', revision: remoteRevision(d) }, b] }));
+        if (deleted) store.set(TKEY, JSON.stringify({ TXF: { [a.id]: { revision: remoteRevision(d), updatedAt: Date.now() } } }));
+        await act(async () => reloadDrawingsFromStorage());
+        expect(api().canUndo).toBe(false);
+        expect(api().canRedo).toBe(false);
+        if (!deleted) {
+            await act(async () => api().setHidden(a.id, true));
+            await act(async () => api().undo());
+            expect(api().drawings[0]).toMatchObject({ name: '遠端', hidden: false });
+            expect(api().canUndo).toBe(false); // 不得走回遠端版本之前
+        }
+    });
+
+    it.each(['undo', 'redo'] as const)('等 Web Lock 時 B 先落地，%s 在鎖內重讀後放棄該物件', async (action) => {
+        const { api, a } = await setup();
+        await act(async () => { api().rename(a.id, '本地'); flushDrawingWrites(); });
+        if (action === 'redo') await act(async () => api().undo());
+        const queue: (() => unknown)[] = [];
+        __setDrawingLocksForTest({ request: (_name, cb) => { queue.push(cb); return Promise.resolve(); } });
+        const before = store.get(KEY);
+        await act(async () => api()[action]());
+        expect(store.get(KEY)).toBe(before); // 還沒拿到鎖，不能寫
+        const d = saved()[0]!;
+        const remote = { ...d, name: 'B 先落地', revision: remoteRevision(d) };
+        store.set(KEY, JSON.stringify({ TXF: [remote, saved()[1]] }));
+        await act(async () => { queue.shift()!(); });
+        expect(saved()[0]).toMatchObject(remote);
+        expect(api().drawings[0]).toMatchObject(remote);
+        expect(api().canUndo).toBe(false);
+        expect(api().canRedo).toBe(false);
+        expect(takeDrawingNotices()).toEqual([expect.stringMatching(/其他視窗.*略過/)]);
+        expect(queue).toHaveLength(0); // 沒有在鎖內另外排一把鎖
+    });
+
+    it('未落地的本地版本與 B 的改動交錯，復原仍不能蓋掉 B', async () => {
+        const { api, a } = await setup();
+        await act(async () => api().rename(a.id, '節流中'));
+        const d = saved()[0]!;
+        const remote = { ...d, name: '遠端', revision: remoteRevision(getDrawings('TXF')[0]!) };
+        store.set(KEY, JSON.stringify({ TXF: [remote, saved()[1]] }));
+        await act(async () => api().undo());
+        await act(async () => { vi.advanceTimersByTime(300); });
+        expect(saved()[0]).toMatchObject(remote);
+        expect(api().canRedo).toBe(false);
     });
 });
 
@@ -1267,6 +1327,60 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
         expect(api().drawings.map((d) => d.anchors[0]!.price)).toEqual([25000, 24800]);
         expect(api().drawings.some((d) => d.id === theirs.id)).toBe(true);
+    });
+
+    it.each([false, true])('拖曳途中遠端改同物件，不再寫入或建立歷史（墓碑=%s）', async (deleted) => {
+        const api = await setup();
+        const d = addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE)!;
+        await act(async () => flushDrawingWrites());
+        await down(50, 200);
+        const remote = { ...d, anchors: [{ time: 1000, price: 24900 }], revision: remoteRevision(d) };
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: deleted ? [] : [remote] }));
+        if (deleted) store.set('sj-pro-chart-drawing-tombstones', JSON.stringify({ TXF: { [d.id]: { revision: remoteRevision(d), updatedAt: d.updatedAt } } }));
+        await act(async () => reloadDrawingsFromStorage());
+        await up(50, 150);
+        expect(api().canUndo).toBe(false);
+        expect(api().canRedo).toBe(false);
+        if (deleted) expect(api().drawings).toEqual([]);
+        else expect(api().drawings[0]).toMatchObject(remote);
+    });
+
+    it('Esc 取消已移動的拖曳會回原位，不建立歷史，mouseup 不再提交', async () => {
+        const api = await setup();
+        addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => {});
+        await down(50, 200);
+        await act(async () => docL.get('mousemove')?.(ev(50, 150)));
+        expect(api().drawings[0]!.anchors[0]!.price).toBe(25050);
+        const e = await key({ key: 'Escape' });
+        expect(e.defaultPrevented).toBe(true);
+        await up(50, 100);
+        expect(api().drawings[0]!.anchors[0]!.price).toBe(25000);
+        expect(api().canUndo).toBe(false);
+        expect(api().canRedo).toBe(false);
+    });
+
+    it.each([null, '本地輸入'])('文字編輯途中遠端改同物件，結束（%s）不建立歷史或蓋掉遠端', async (value) => {
+        const api = await setup();
+        const d = addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+        await act(async () => flushDrawingWrites());
+        await act(async () => api().editText(d.id));
+        const remote = { ...d, text: '遠端輸入', revision: remoteRevision(d) };
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [remote] }));
+        await act(async () => reloadDrawingsFromStorage());
+        await act(async () => api().commitText(value));
+        expect(api().drawings[0]).toMatchObject(remote);
+        expect(api().canUndo).toBe(false);
+    });
+
+    it('取消既有文字編輯時，期間其他物件的改動不會建立文字歷史', async () => {
+        const api = await setup();
+        const d = addDrawing('TXF', 'text', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE, { text: '原文' })!;
+        await act(async () => api().editText(d.id));
+        await act(async () => { addDrawing('TXF', 'horizontal', [{ time: 1000, price: 24900 }], DEFAULT_DRAWING_STYLE); });
+        await act(async () => api().commitText(null));
+        expect(api().drawings[0]!.text).toBe('原文');
+        expect(api().canUndo).toBe(false);
     });
 
     it('量測結果顯示中算「畫圖佔用滑鼠」：委託線只能從把手區拖', async () => {

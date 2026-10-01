@@ -41,6 +41,7 @@ import {
     type DrawingAnchor,
 } from './chart-drawings';
 import { defaultFibLevels, defaultFibOptions } from './chart-drawing-fib';
+import { drawingRevision } from './chart-drawing-revision';
 
 const store = new Map<string, string>();
 
@@ -608,13 +609,14 @@ describe('review 修正：跨視窗鎖、墓碑、上限、設定合併', () => 
         removeDrawing('TXF', a.id);
         flushDrawingWrites();
         const tombs = JSON.parse(store.get(TKEY)!);
-        expect(typeof tombs.TXF[a.id]).toBe('number');
+        expect(tombs.TXF[a.id]).toMatchObject({ revision: expect.any(String), updatedAt: expect.any(Number) });
         // 別的視窗還拿著 a 的舊版本，整份寫回
         store.set(KEY, JSON.stringify({ TXF: [{ ...a }] }));
         reloadDrawingsFromStorage();
         expect(getDrawings('TXF')).toEqual([]);
-        // 刪除之後才修改的版本（updatedAt 較新）才會留下
-        store.set(KEY, JSON.stringify({ TXF: [{ ...a, updatedAt: tombs.TXF[a.id] + 10 }] }));
+        // 刪除之後才修改的 revision 才會留下，時間可以完全相同。
+        const counter = Number(tombs.TXF[a.id].revision.split(':')[0]) + 1;
+        store.set(KEY, JSON.stringify({ TXF: [{ ...a, revision: `${counter.toString().padStart(16, '0')}:remote` }] }));
         reloadDrawingsFromStorage();
         expect(getDrawings('TXF').map((d) => d.id)).toEqual([a.id]);
     });
@@ -766,6 +768,84 @@ describe('關窗日誌也帶圖層順序', () => {
         flushDrawingWrites();
         const saved = JSON.parse(store.get('sj-pro-chart-drawings')!).TXF.map((d: { id: string }) => d.id);
         expect(saved).toEqual([b.id, a.id]);
+    });
+});
+
+describe('revision 與相對圖層移動的跨視窗合併', () => {
+    const KEY = 'sj-pro-chart-drawings';
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10000); });
+    afterEach(() => vi.useRealTimers());
+
+    it.each(['flush', 'reload', 'journal'] as const)('兩視窗各移不同物件，兩個移動都保留（%s）', async (path) => {
+        const [a, b, c, d] = Array.from({ length: 4 }, () => addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!);
+        flushDrawingWrites();
+        vi.resetModules();
+        const other = await import('./chart-drawings');
+        other.__setDrawingLocksForTest(null);
+        // 初始 A B C D；本視窗 A 到頂，另一視窗 C 到底。
+        moveDrawing('TXF', a!.id, 3);
+        other.moveDrawing('TXF', c!.id, 0);
+        other.flushDrawingWrites();
+        const expected = [c!.id, b!.id, d!.id, a!.id];
+        if (path === 'reload') {
+            reloadDrawingsFromStorage();
+            expect(getDrawings('TXF').map((x) => x.id)).toEqual(expected);
+        } else if (path === 'journal') {
+            writeDrawingJournal();
+            const name = [...store.keys()].find((k) => k.startsWith('sj-chart-drawings-pending:'))!;
+            const journal = JSON.parse(store.get(name)!);
+            expect(journal.order.TXF).toEqual([{ id: a!.id, after: d!.id, revision: expect.any(String) }]);
+        }
+        flushDrawingWrites();
+        expect(JSON.parse(store.get(KEY)!).TXF.map((x: { id: string }) => x.id)).toEqual(expected);
+        other.reloadDrawingsFromStorage();
+        expect(other.getDrawings('TXF').map((x) => x.id)).toEqual(expected);
+        other.__resetDrawingsForTest();
+    });
+
+    it('同 counter 的兩個 writer 仍有全序，後落地的較小 revision 不會蓋掉較大 revision', async () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        vi.resetModules();
+        const other = await import('./chart-drawings');
+        other.__setDrawingLocksForTest(null);
+        updateDrawing('TXF', a.id, { name: 'A' });
+        other.updateDrawing('TXF', a.id, { name: 'B' });
+        const mine = getDrawings('TXF')[0]!;
+        const theirs = other.getDrawings('TXF')[0]!;
+        expect(drawingRevision(mine).split(':')[0]).toBe(drawingRevision(theirs).split(':')[0]);
+        expect(drawingRevision(mine)).not.toBe(drawingRevision(theirs));
+        const winner = drawingRevision(mine) > drawingRevision(theirs) ? mine : theirs;
+        const first = winner === mine ? flushDrawingWrites : other.flushDrawingWrites;
+        const second = winner === mine ? other.flushDrawingWrites : flushDrawingWrites;
+        first();
+        second();
+        expect(JSON.parse(store.get(KEY)!).TXF[0]).toMatchObject({ name: winner.name, revision: winner.revision });
+        other.__resetDrawingsForTest();
+    });
+
+    it('同一時間的遠端更新由 revision 決定，時鐘倒退也不影響後續版本', () => {
+        const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        const remote = { ...a, name: '遠端', revision: '0000000000000100:remote' };
+        store.set(KEY, JSON.stringify({ TXF: [remote] }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF')[0]).toMatchObject(remote);
+        vi.setSystemTime(1);
+        updateDrawing('TXF', a.id, { name: '本地新操作' });
+        expect(drawingRevision(getDrawings('TXF')[0]!) > remote.revision).toBe(true);
+        flushDrawingWrites();
+        expect(JSON.parse(store.get(KEY)!).TXF[0].name).toBe('本地新操作');
+    });
+
+    it('節流期間多次移動同物件，依操作順序重放，保留其他移動', () => {
+        const [a, b, c, d] = Array.from({ length: 4 }, () => addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!);
+        flushDrawingWrites();
+        moveDrawing('TXF', a!.id, 3);
+        moveDrawing('TXF', b!.id, 3);
+        moveDrawing('TXF', a!.id, 0);
+        flushDrawingWrites();
+        expect(JSON.parse(store.get(KEY)!).TXF.map((x: { id: string }) => x.id)).toEqual([a!.id, c!.id, d!.id, b!.id]);
     });
 });
 
