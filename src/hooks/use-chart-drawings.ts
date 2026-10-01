@@ -14,12 +14,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 import {
     addDrawing,
+    applyDrawingHistory,
     anchorCount,
     clearDrawings,
     defaultStyleFor,
     drawingSymbolKey,
     duplicateDrawing,
     getDrawings,
+    getDrawingVersion,
     MAX_NAME_LENGTH,
     MAX_TEXT_LENGTH,
     MEASURE_COLORS,
@@ -57,7 +59,7 @@ import {
     type Point,
     type Projector,
 } from '../lib/chart-drawing-geometry';
-import { applyChanges, DrawingHistory, type HistoryChange } from '../lib/chart-drawing-history';
+import { DrawingHistory, type HistoryStep } from '../lib/chart-drawing-history';
 import { sanitizeFibOptions, type FibOptions } from '../lib/chart-drawing-fib';
 import { DrawingLayer, type DrawingDraft, type MeasureOverlay } from '../lib/chart-drawing-layer';
 import { escStackDepth } from './use-esc-close';
@@ -282,7 +284,7 @@ export function useChartDrawings(opts: {
     const [token] = useState(() => ({}));
     // 這張圖目前是否握有鍵盤（最後被點的圖）— 握有時才掛 keydown listener
     const [isOwner, setIsOwner] = useState(false);
-    const historyRef = useRef(new DrawingHistory());
+    const historyRef = useRef(new DrawingHistory(undefined, getDrawingVersion));
 
     // 高頻狀態（繪製中的點、量測跟著游標跑）走 ref 直接推給 layer，
     // 不經過 React state — 每次 mousemove 重繪整棵樹太貴
@@ -335,20 +337,10 @@ export function useChartDrawings(opts: {
     );
 
     const applyHistory = useCallback(
-        (
-            step: {
-                key: string;
-                changes: HistoryChange[];
-                side: 'before' | 'after';
-                order: string[];
-            } | null,
-        ) => {
+        (step: HistoryStep | null) => {
             if (!step) return;
             // 只動這一步記錄的物件；別的視窗、別的操作的改動維持現況
-            replaceDrawings(
-                step.key,
-                applyChanges(getDrawings(step.key), step.changes, step.side, step.order),
-            );
+            historyRef.current.applied(step, applyDrawingHistory(step));
             // 選取裡已經不存在的物件拿掉
             const ids = new Set(getDrawings(step.key).map((d) => d.id));
             setSelectedIds((cur) =>

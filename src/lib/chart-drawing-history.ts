@@ -11,6 +11,15 @@ export interface HistoryChange {
     id: string;
     before: Drawing | null; // null＝這一步新增的
     after: Drawing | null; // null＝這一步刪掉的
+    beforeVersion: number | null; // 缺席時也保留墓碑版本
+    afterVersion: number | null;
+}
+
+export interface HistoryStep {
+    key: string;
+    changes: HistoryChange[];
+    side: 'before' | 'after';
+    order: string[];
 }
 
 export interface HistoryEntry {
@@ -26,11 +35,6 @@ export interface HistoryEntry {
 export const HISTORY_LIMIT = 100;
 const COALESCE_MS = 800;
 
-function predecessor(order: string[], id: string): string | null {
-    const i = order.indexOf(id);
-    return i > 0 ? order[i - 1]! : null;
-}
-
 // before → after 之間，這一步動到的物件。ids 給了就只看這些（拖曳、文字
 // 編輯這種跨時間的操作，期間別處的改動不算進來）
 export function diffDrawings(
@@ -40,16 +44,23 @@ export function diffDrawings(
 ): HistoryChange[] {
     const b = new Map(before.map((d) => [d.id, d]));
     const a = new Map(after.map((d) => [d.id, d]));
-    const bo = before.map((d) => d.id);
-    const ao = after.map((d) => d.id);
     const scope = ids ? new Set(ids) : new Set([...b.keys(), ...a.keys()]);
     const out: HistoryChange[] = [];
     for (const id of scope) {
         const x = b.get(id) ?? null;
         const y = a.get(id) ?? null;
         if (!x && !y) continue;
-        const moved = !!x && !!y && predecessor(bo, id) !== predecessor(ao, id) && !ids;
-        if (x !== y || moved) out.push({ id, before: x, after: y });
+        // 前驅因新增／刪除／移動而改變，不代表這個鄰居也被修改。
+        // 調整圖層的呼叫端會替實際移動的物件建立新版本。
+        if (x !== y) {
+            out.push({
+                id,
+                before: x,
+                after: y,
+                beforeVersion: x?.updatedAt ?? null,
+                afterVersion: y?.updatedAt ?? null,
+            });
+        }
     }
     return out;
 }
@@ -88,7 +99,10 @@ export class DrawingHistory {
     private _undo: HistoryEntry[] = [];
     private _redo: HistoryEntry[] = [];
 
-    constructor(private readonly _limit = HISTORY_LIMIT) {}
+    constructor(
+        private readonly _limit = HISTORY_LIMIT,
+        private readonly versionOf?: (key: string, id: string) => number | null,
+    ) {}
 
     get canUndo(): boolean {
         return this._undo.length > 0;
@@ -110,6 +124,9 @@ export class DrawingHistory {
         if (before === after) return;
         const changes = diffDrawings(before, after, ids);
         if (!changes.length) return;
+        for (const c of changes) {
+            if (!c.after) c.afterVersion = this.versionOf?.(key, c.id) ?? null;
+        }
         const beforeOrder = before.map((d) => d.id);
         const afterOrder = after.map((d) => d.id);
         const last = this._undo[this._undo.length - 1];
@@ -119,9 +136,15 @@ export class DrawingHistory {
             last.tag === tag &&
             last.key === key &&
             now - last.at < COALESCE_MS &&
-            changes.every((c) => last.changes.some((l) => l.id === c.id))
+            changes.every((c) =>
+                last.changes.some((l) => l.id === c.id && l.afterVersion === c.beforeVersion),
+            )
         ) {
-            for (const c of changes) last.changes.find((l) => l.id === c.id)!.after = c.after;
+            for (const c of changes) {
+                const previous = last.changes.find((l) => l.id === c.id)!;
+                previous.after = c.after;
+                previous.afterVersion = c.afterVersion;
+            }
             last.afterOrder = afterOrder;
             last.at = now;
         } else {
@@ -131,19 +154,40 @@ export class DrawingHistory {
         this._redo = [];
     }
 
-    // 回傳要套用的步驟；呼叫端用 applyChanges 套到目前清單
-    undo(): { key: string; changes: HistoryChange[]; side: 'before'; order: string[] } | null {
+    // 回傳待套用的步驟；呼叫端檢查版本後，透過 applied 接回成功寫入的版本
+    undo(): HistoryStep | null {
         const e = this._undo.pop();
         if (!e) return null;
         this._redo.push(e);
         return { key: e.key, changes: e.changes, side: 'before', order: e.beforeOrder };
     }
 
-    redo(): { key: string; changes: HistoryChange[]; side: 'after'; order: string[] } | null {
+    redo(): HistoryStep | null {
         const e = this._redo.pop();
         if (!e) return null;
         this._undo.push(e);
         return { key: e.key, changes: e.changes, side: 'after', order: e.afterOrder };
+    }
+
+    // 只有成功套用的物件才可再反向操作。復原／重做的新時間戳要接回
+    // 相同舊版本的歷史邊界，連續復原與重做才不會把自己的寫入當成衝突。
+    applied(step: HistoryStep, versions: Map<string, number | null>) {
+        for (const c of step.changes) {
+            if (!versions.has(c.id)) continue;
+            const old = step.side === 'before' ? c.beforeVersion : c.afterVersion;
+            const next = versions.get(c.id)!;
+            for (const e of [...this._undo, ...this._redo]) {
+                if (e.key !== step.key) continue;
+                for (const change of e.changes) {
+                    if (change.id !== c.id) continue;
+                    if (change.beforeVersion === old) change.beforeVersion = next;
+                    if (change.afterVersion === old) change.afterVersion = next;
+                }
+            }
+        }
+        step.changes.splice(0, step.changes.length, ...step.changes.filter((c) => versions.has(c.id)));
+        this._undo = this._undo.filter((e) => e.changes.length);
+        this._redo = this._redo.filter((e) => e.changes.length);
     }
 
     clear() {

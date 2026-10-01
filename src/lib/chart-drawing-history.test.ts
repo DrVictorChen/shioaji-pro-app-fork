@@ -62,8 +62,17 @@ describe('只退回這一步動到的物件', () => {
     it('調整圖層可復原，別的視窗新增的物件位置不動', () => {
         const h = new DrawingHistory();
         const [a, b, c, z] = [mk('a'), mk('b'), mk('c'), mk('z')];
-        h.push('TXF', [a, b, c], [c, a, b]);
+        h.push('TXF', [a, b, c], [{ ...c, updatedAt: 1 }, a, b]);
         expect(ids(run([c, a, b, z], h.undo()))).toEqual(['a', 'b', 'c', 'z']);
+    });
+
+    it('刪除或移動只記實際改動的物件，不記前驅改變的鄰居', () => {
+        const [a, b, c] = [mk('a'), mk('b'), mk('c')];
+        const h = new DrawingHistory();
+        h.push('TXF', [a, b, c], [b, c]);
+        expect(h.undo()!.changes.map((change) => change.id)).toEqual(['a']);
+        h.push('TXF', [a, b, c], [{ ...c, updatedAt: 1 }, a, b]);
+        expect(h.undo()!.changes.map((change) => change.id)).toEqual(['c']);
     });
 });
 

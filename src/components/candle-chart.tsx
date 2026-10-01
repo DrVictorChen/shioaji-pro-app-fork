@@ -1470,11 +1470,11 @@ export function CandleChart({
         });
     }, [drawingsSaveFailed]);
 
-    // 合併後超過上限、載入時截斷異常資料 — 不默默丟掉，告訴使用者
+    // 物件上限、載入截斷、復原／重做衝突共用畫圖通知
     const drawingNotices = useDrawingNotices();
     useEffect(() => {
         if (!drawingNotices.length) return;
-        for (const body of takeDrawingNotices()) notify({ kind: 'err', title: '畫圖物件數量', body });
+        for (const body of takeDrawingNotices()) notify({ kind: 'err', title: '畫圖工具', body });
     }, [drawingNotices]);
 
     // draw trigger price lines on the candle series

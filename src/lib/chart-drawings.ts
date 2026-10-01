@@ -10,6 +10,7 @@
 import { useSyncExternalStore } from 'react';
 import type { ContractBase } from './types/contract';
 import { defaultFibOptions, sanitizeFibOptions, type FibOptions } from './chart-drawing-fib';
+import { applyChanges, type HistoryStep } from './chart-drawing-history';
 
 export type DrawingTool =
     | 'horizontal' // 水平線：單一價位，橫貫整個 pane
@@ -474,7 +475,7 @@ export function capDrawings(list: Drawing[], max = HARD_MAX_DRAWINGS_PER_SYMBOL)
     return list.filter((d) => keep.has(d.id));
 }
 
-// 給 UI 顯示的通知（合併後超過上限、載入時截斷異常資料）
+// 給 UI 顯示的通知（物件上限、載入截斷、復原／重做衝突）
 let notices: string[] = [];
 const noticed = new Set<string>(); // 同一則只通知一次（載入／同步會重跑）
 function noteDrawings(msg: string) {
@@ -935,6 +936,42 @@ export function getDrawings(key: string): Drawing[] {
     return store[key] ?? EMPTY;
 }
 
+// 目前版本包含尚未落地的刪除；缺席的物件以墓碑版本識別。
+export function getDrawingVersion(key: string, id: string, tombs: Tombs = loadTombs()): number | null {
+    const drawing = getDrawings(key).find((d) => d.id === id);
+    if (drawing) return drawing.updatedAt;
+    const op = pending.get(key)?.get(id);
+    const at = tombs[key]?.[id];
+    if (typeof op === 'number') return Math.max(op, at ?? op);
+    return at ?? null;
+}
+
+// 在替歷史快照蓋新時間戳以前，先合併最新持久化資料（storage 事件可能
+// 還沒送達）。僅允許反向操作仍是歷史預期版本的物件，含刪除墓碑。
+export function applyDrawingHistory(step: HistoryStep): Map<string, number | null> {
+    const tombs = loadTombs();
+    store = applyPending(loadView(tombs), tombs);
+    const current = getDrawings(step.key);
+    const expectedSide = step.side === 'before' ? 'after' : 'before';
+    const changes = step.changes.filter((c) => {
+        const exists = current.some((d) => d.id === c.id);
+        const expected = expectedSide === 'after' ? c.afterVersion : c.beforeVersion;
+        const version = getDrawingVersion(step.key, c.id, tombs);
+        const matches = exists === !!c[expectedSide] && version === expected;
+        if (matches && version !== null) lastStamp = Math.max(lastStamp, version);
+        return matches;
+    });
+    if (changes.length) {
+        commit(step.key, applyChanges(current, changes, step.side, step.order));
+    } else {
+        emit();
+    }
+    if (changes.length !== step.changes.length) {
+        noteDrawings('部分畫圖物件已被其他視窗修改或刪除，已略過這些物件的復原／重做。');
+    }
+    return new Map(changes.map((c) => [c.id, getDrawingVersion(step.key, c.id, tombs)]));
+}
+
 export function getDrawingSettings(): DrawingSettings {
     return settings;
 }
@@ -1009,6 +1046,7 @@ export function addDrawing(
 // 把 key 的清單換成 next，並把有變動的物件記進待寫入（依 id）
 function commit(key: string, nextIn: Drawing[]) {
     const before = store[key] ?? EMPTY;
+    for (const d of before) lastStamp = Math.max(lastStamp, d.updatedAt);
     const now = stamp();
     const ids = new Set(nextIn.map((d) => d.id));
     for (const d of before) if (!ids.has(d.id)) record(key, d.id, now);
@@ -1020,11 +1058,13 @@ function commit(key: string, nextIn: Drawing[]) {
         record(key, d.id, stamped);
         return stamped;
     });
-    // 共同物件的相對順序變了（調整圖層）— 記下想要的順序
-    const common = (list: Drawing[], other: Map<string, unknown> | Set<string>) =>
-        list.filter((d) => other.has(d.id)).map((d) => d.id);
-    const a = common(before, ids);
-    const b = common(next, prev);
+    // 合併預設把新物件加在尾端；調整圖層或復原刪除插回中間時，
+    // 需要另外保存順序，不能只比較共同物件的相對位置。
+    const a = [
+        ...before.filter((d) => ids.has(d.id)),
+        ...next.filter((d) => !prev.has(d.id)),
+    ].map((d) => d.id);
+    const b = next.map((d) => d.id);
     if (a.length !== b.length || a.some((id, i) => id !== b[i])) {
         pendingOrder.set(key, next.map((d) => d.id));
     }
@@ -1048,7 +1088,7 @@ export function moveDrawing(key: string, id: string, toIndex: number) {
     if (to === from) return;
     const next = [...list];
     const [item] = next.splice(from, 1);
-    next.splice(to, 0, item!);
+    next.splice(to, 0, { ...item! }); // 只讓實際移動的物件取得新版本／進入歷史
     commit(key, next);
 }
 
