@@ -1,3 +1,4 @@
+import { canTrade } from '../lib/account-tradable';
 // src/components/bottom-dock-account.tsx — 帳務/交割 tab。
 // 報表風卡片牆＋donut 改成交易工具：資金狀態緊湊數字列（含風險指標色條）、
 // 交割行事曆（T+0/T+1/T+2）、今日已實現損益（可展開明細）、交易額度、
@@ -598,7 +599,7 @@ interface AccountPaneProps {
 export function AccountPane(props: AccountPaneProps) {
     const { accounts } = useAccounts();
     const privacy = usePrivacyMode();
-    const visible = accounts.filter(a => a.signed && (a.account_type === 'S' || a.account_type === 'F')
+    const visible = accounts.filter(a => canTrade(a) && (a.account_type === 'S' || a.account_type === 'F')
         && (props.market === 'all' || a.account_type === props.market)
         && (!props.scopeAccount || accountMatches(a, props.scopeAccount)));
     const key = visible.map(a => `${a.account_type}:${a.broker_id}:${a.account_id}`).sort().join('|');
@@ -662,7 +663,7 @@ function AccountPaneContent({ positions, balance, margin, funds, market, scopeAc
         market !== 'S' && (!scopeAccount || scopeAccount.account_type === 'F');
 
     const { accounts } = useAccounts();
-    const queryAccounts = accounts.filter(a => a.signed && (a.account_type === 'S' || a.account_type === 'F')
+    const queryAccounts = accounts.filter(a => canTrade(a) && (a.account_type === 'S' || a.account_type === 'F')
         && (!scopeAccount || (a.account_type === scopeAccount.account_type && a.broker_id === scopeAccount.broker_id && a.account_id === scopeAccount.account_id))
         && (a.account_type === 'S' ? showStock : showFut));
     const stockAccounts = queryAccounts.filter(a => a.account_type === 'S');

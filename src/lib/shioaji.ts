@@ -1,3 +1,4 @@
+import { canTrade } from './account-tradable';
 import { getApiBase } from './runtime';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { noteMutationIntent } from './mutation-intent';
@@ -837,7 +838,7 @@ async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tr
     if (trade.account && trade.order.account && (['account_type', 'broker_id', 'account_id'] as const).some(
         key => trade.account![key] !== trade.order.account![key])) refuse('委託帳戶資料矛盾，未送出改刪單');
     const reference = trade.account ?? trade.order.account;
-    const account = getAccountState().accounts.find(a => a.signed && reference
+    const account = getAccountState().accounts.find(a => canTrade(a) && reference
         && a.account_type === reference.account_type && a.broker_id === reference.broker_id && a.account_id === reference.account_id);
     if (!account) refuse('缺少已驗證的委託帳戶，未送出改刪單');
     const futures = ['FUT', 'OPT'].includes(trade.contract.security_type ?? '');
@@ -922,7 +923,7 @@ function observeCancel(
             locallyCancelled: () => locallyCancelled(tradeId, account),
             guard: () => {
                 if (target.base !== getApiBase()) throw new Error('刪單後伺服器已切換');
-                if (!getAccountState().accounts.some(a => a.signed && a.account_type === type
+                if (!getAccountState().accounts.some(a => canTrade(a) && a.account_type === type
                     && a.broker_id === account.broker_id && a.account_id === account.account_id)) {
                     throw new Error('刪單後委託帳戶已不可用');
                 }

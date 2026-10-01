@@ -1,3 +1,4 @@
+import { canTrade } from './account-tradable';
 import { onTradeMutation } from './trade-mutations';
 import { useEffect, useSyncExternalStore } from 'react';
 import { getAccountState, refreshAccounts, useAccounts } from './account-store';
@@ -266,7 +267,7 @@ function prepareQuotes() {
     }
 }
 
-const tradableAccounts = () => getAccountState().accounts.filter(a => a.signed && ['S', 'F'].includes(a.account_type));
+const tradableAccounts = () => getAccountState().accounts.filter(a => canTrade(a) && ['S', 'F'].includes(a.account_type));
 
 type Problem = [ReconcileReason, string];
 
@@ -474,7 +475,7 @@ const HEALTH_REASONS: Partial<Record<string, Problem>> = {
     ProjectionFailed: ['projection-failed', '伺服器無法套用部分回報；請手動對帳'],
 };
 
-/** Read trade_cache_health for every signed account. Triggered only by a
+/** Read trade_cache_health for every tradable account. Triggered only by a
  *  reconnect, a detected sequence gap or a manual reconciliation — never by a
  *  timer. When every cache is Healthy on the same sidecar instance, the orders
  *  view is resynced cache-only (refresh:false) without accounting quota. */
@@ -793,7 +794,7 @@ function start() {
     });
     const stopResponses = onTradeResponse(({ trade, account: requestedAccount }) => {
         const ref = trade.order.account ?? requestedAccount;
-        const account = getAccountState().accounts.find(a => a.signed && a.account_type === ref?.account_type
+        const account = getAccountState().accounts.find(a => canTrade(a) && a.account_type === ref?.account_type
             && a.account_id === ref?.account_id && a.broker_id === ref?.broker_id);
         if (!account) return;
         const old = state.trades.find(t => t.order.id === trade.order.id && t.account && accountKey(t.account) === accountKey(account));

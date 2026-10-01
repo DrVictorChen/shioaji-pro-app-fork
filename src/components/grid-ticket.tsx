@@ -268,7 +268,7 @@ export function GridTicket({
             isFuturesContract(contract) ? 'F' : 'S',
         );
         if (!gridAccount) {
-            notify({ kind: 'err', title: '鋪單未送出', body: '缺少有效且已簽署的下單帳戶' });
+            notify({ kind: 'err', title: '鋪單未送出', body: '缺少有效的下單帳戶' });
             return;
         }
         // 從確認到送完都鎖住單位切換
@@ -385,7 +385,7 @@ export function GridTicket({
             notify({ kind: 'err', title: '鋪單跟隨已停止', body });
         };
         if (!followAccount) {
-            stop('缺少有效且已簽署的下單帳戶');
+            stop('缺少有效的下單帳戶');
             return;
         }
         setFollowAccountShown(followAccount);

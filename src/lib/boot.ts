@@ -1,3 +1,4 @@
+import { canTrade } from './account-tradable';
 // src/lib/boot.ts — startup orchestration:
 // 1. Desktop: auto-start the bundled shioaji server when keys are saved.
 // 2. If the app booted while the server was unreachable, watch /health and
@@ -52,6 +53,7 @@ import { FAST_START_SCHEDULE, pollDelay } from './poll-until';
 import { setServerIdentityVerified } from './server-identity';
 import { logNotice, notify } from './trade';
 import { isChildWindow } from './window-role';
+import { knownServerInfo, subscribeServerInfo } from './server-info-store';
 
 let booted = false;
 let tradingStarted = false;
@@ -477,17 +479,31 @@ async function serverVersionOk(): Promise<boolean> {
 }
 
 // Shioaji 1.7.7 restores the token's original trade subscriptions on cached
-// login. Check each signed account before subscribing: a duplicate subscribe
+// login. Check each tradable account before subscribing: a duplicate subscribe
 // can clear another account's relay record on the same session (sw#183).
 // A missing/failed health route falls back to subscribe for older servers.
 // Share the account read with the early trading snapshot and update the store.
 let tradeSubscriptionInFlight: Promise<void> | null = null;
+let stopTradeSubscriptionMode: (() => void) | undefined;
+let tradeSubscriptionModeQueued = false;
 export function subscribeTradeReports(): Promise<void> {
+    // Install only once subscriptions are actually used (main window). A
+    // late /info must revisit accounts skipped while the mode was unknown.
+    if (!stopTradeSubscriptionMode) {
+        let simulation = knownServerInfo()?.simulation === true;
+        stopTradeSubscriptionMode = subscribeServerInfo(() => {
+            const next = knownServerInfo()?.simulation === true;
+            if (next === simulation) return;
+            simulation = next;
+            if (tradeSubscriptionInFlight) tradeSubscriptionModeQueued = true;
+            else void subscribeTradeReports().catch(() => undefined);
+        });
+    }
     if (tradeSubscriptionInFlight) return tradeSubscriptionInFlight;
     const run = (async () => {
         try {
             const accounts = await loadAccountsShared();
-            for (const account of accounts.filter(a => a.signed)) {
+            for (const account of accounts.filter(a => canTrade(a))) {
                 let subscribed = false;
                 try {
                     const health = await fetchTradeCacheHealth(account.account_type as 'S' | 'F', account);
@@ -495,7 +511,7 @@ export function subscribeTradeReports(): Promise<void> {
                 } catch {
                     // Pre-1.7.6 sidecar or a transient health read failure.
                 }
-                if (!subscribed) await subscribeTradeEvents(account);
+                if (!subscribed && canTrade(account)) await subscribeTradeEvents(account);
             }
         } catch (error) {
             notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
@@ -503,6 +519,13 @@ export function subscribeTradeReports(): Promise<void> {
         }
     })();
     tradeSubscriptionInFlight = run;
-    void run.finally(() => { tradeSubscriptionInFlight = null; }).catch(() => undefined);
+    void run.finally(() => {
+        tradeSubscriptionInFlight = null;
+        if (tradeSubscriptionModeQueued) {
+            tradeSubscriptionModeQueued = false;
+            void subscribeTradeReports().catch(() => undefined);
+        }
+    }).catch(() => undefined);
     return run;
 }
+import.meta.hot?.dispose(() => { stopTradeSubscriptionMode?.(); });
