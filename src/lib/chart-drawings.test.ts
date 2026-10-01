@@ -797,6 +797,132 @@ describe('關窗日誌：pagehide 不在鎖外動主項目', () => {
     });
 });
 
+describe('設定 revision：舊關窗日誌不能覆蓋新設定', () => {
+    const KEY = 'sj-pro-chart-drawing-settings';
+    const cases = [
+        ['shareContinuousMonth', false, true],
+        ['defaultStyle', { width: 1, dash: 'solid', fillOpacity: 0.1 }, { width: 4, dash: 'dashed', fillOpacity: 0.4 }],
+        ['toolColors', { trend: '#111111' }, { trend: '#222222' }],
+        ['magnet', true, false],
+        ['favorites', ['trend'], ['box']],
+        ['groupLast', { lines: 'trend' }, { lines: 'ray' }],
+        ['objectListOpen', true, false],
+        ['lineOpacity', 0.2, 0.8],
+    ] as const;
+
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it.each(cases)('A 留下 %s 舊設定日誌，B 改同欄位後，讀取與合併都保留 B', async (field, old, newer) => {
+        addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
+        flushDrawingWrites();
+        setDrawingSettings({ [field]: old });
+        writeDrawingJournal();
+        vi.resetModules();
+        const other = await import('./chart-drawings');
+        other.__setDrawingLocksForTest(null);
+        try {
+            expect(other.getDrawingSettings()[field]).toEqual(old);
+            other.setDrawingSettings({ [field]: newer });
+            other.flushDrawingSettings();
+            reloadDrawingSettingsFromStorage();
+            expect(getDrawingSettings()[field]).toEqual(newer);
+            flushDrawingWrites();
+            expect(JSON.parse(store.get(KEY)!)[field]).toEqual(newer);
+            other.reloadDrawingSettingsFromStorage();
+            expect(other.getDrawingSettings()[field]).toEqual(newer);
+            expect([...store.keys()].filter((k) => k.startsWith('sj-chart-drawings-pending:'))).toEqual([]);
+            if (field === 'shareContinuousMonth') {
+                expect(getDrawings(drawingSymbolKey({ code: 'TXFR1', security_type: 'FUT' }, getDrawingSettings().shareContinuousMonth))).toHaveLength(1);
+            }
+        } finally { other.__resetDrawingsForTest(); }
+    });
+
+    it.each(['reload', 'flush', 'journal'] as const)('同 counter 依 writer 全序，較舊的待寫入設定晚到也不能回退（%s）', async (path) => {
+        vi.resetModules();
+        const other = await import('./chart-drawings');
+        other.__setDrawingLocksForTest(null);
+        try {
+            withDrawingWriter('writer-z', () => setDrawingSettings({ magnet: true }));
+            other.withDrawingWriter('writer-a', () => other.setDrawingSettings({ magnet: false }));
+            flushDrawingSettings();
+            const winner = JSON.parse(store.get(KEY)!).settingRevisions.magnet;
+            expect(winner).toBe('0000000000000001:writer-z');
+            if (path === 'reload') other.reloadDrawingSettingsFromStorage();
+            else if (path === 'journal') {
+                other.writeDrawingJournal();
+                const raw = [...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1];
+                expect(JSON.parse(raw).settingRevisions.magnet).toBe('0000000000000001:writer-a');
+                flushDrawingWrites();
+            }
+            other.flushDrawingSettings();
+            expect(JSON.parse(store.get(KEY)!)).toMatchObject({ magnet: true, settingRevisions: { magnet: winner } });
+            other.reloadDrawingSettingsFromStorage();
+            expect(other.getDrawingSettings().magnet).toBe(true);
+        } finally { other.__resetDrawingsForTest(); }
+    });
+
+    it.each([false, true])('逐欄位合併所有日誌；名稱、at 與插入順序不影響 revision 勝負（反序 %s）', async (reverse) => {
+        store.set(KEY, JSON.stringify({
+            shareContinuousMonth: true, magnet: true,
+            settingRevisions: { shareContinuousMonth: '0000000000000010:main', magnet: '0000000000000010:main' },
+        }));
+        const entries = [
+            ['sj-chart-drawings-pending:0000-new', { at: 1, settings: { shareContinuousMonth: false, favorites: ['box'] },
+                settingRevisions: { shareContinuousMonth: '0000000000000011:new', favorites: '0000000000000012:new' } }],
+            ['sj-chart-drawings-pending:9999-old', { at: 999999, settings: { shareContinuousMonth: true, favorites: ['trend'], magnet: false },
+                settingRevisions: { shareContinuousMonth: '0000000000000009:old', favorites: '0000000000000009:old', magnet: '0000000000000009:old' } }],
+        ] as const;
+        for (const [key, value] of reverse ? [...entries].reverse() : entries) store.set(key, JSON.stringify(value));
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        fresh.__setDrawingLocksForTest(null);
+        try {
+            expect(fresh.getDrawingSettings()).toMatchObject({ shareContinuousMonth: false, magnet: true, favorites: ['box'] });
+            fresh.flushDrawingWrites();
+            expect(JSON.parse(store.get(KEY)!)).toMatchObject({ shareContinuousMonth: false, magnet: true, favorites: ['box'],
+                settingRevisions: { shareContinuousMonth: '0000000000000011:new', magnet: '0000000000000010:main', favorites: '0000000000000012:new' } });
+            fresh.withDrawingWriter('next', () => fresh.setDrawingSettings({ magnet: false }));
+            fresh.flushDrawingSettings();
+            expect(JSON.parse(store.get(KEY)!).settingRevisions.magnet).toBe('0000000000000013:next');
+        } finally { fresh.__resetDrawingsForTest(); }
+    });
+
+    it('舊格式設定與日誌可載入；新修改升級版本後舊日誌不能回退', async () => {
+        store.set(KEY, JSON.stringify({ defaultStyle: { width: 4, dash: 'dashed', fillOpacity: 0.3 } }));
+        store.set('sj-chart-drawings-pending:legacy', JSON.stringify({ at: 100, settings: { magnet: true } }));
+        reloadDrawingSettingsFromStorage();
+        expect(getDrawingSettings()).toMatchObject({ magnet: true, defaultStyle: { width: 4 } });
+        withDrawingWriter('upgrade', () => setDrawingSettings({ magnet: false }));
+        flushDrawingSettings();
+        expect(JSON.parse(store.get(KEY)!).settingRevisions.magnet).toBe('0000000000000101:upgrade');
+        flushDrawingWrites();
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        try {
+            expect(fresh.getDrawingSettings()).toMatchObject({ magnet: false, defaultStyle: { width: 4 } });
+        } finally { fresh.__resetDrawingsForTest(); }
+    });
+
+    it.each(['main', 'journal'] as const)('清除可選設定仍保留 revision，舊日誌不能復活 lineOpacity（%s）', async (path) => {
+        setDrawingSettings({ lineOpacity: 0.2 });
+        writeDrawingJournal();
+        setDrawingSettings({ lineOpacity: undefined });
+        if (path === 'main') flushDrawingSettings();
+        else writeDrawingJournal();
+        vi.resetModules();
+        const fresh = await import('./chart-drawings');
+        fresh.__setDrawingLocksForTest(null);
+        try {
+            expect(fresh.getDrawingSettings().lineOpacity).toBeUndefined();
+            fresh.flushDrawingWrites();
+            const persisted = JSON.parse(store.get(KEY)!);
+            expect(persisted.lineOpacity).toBeUndefined();
+            expect(persisted.settingRevisions.lineOpacity).toBeDefined();
+        } finally { fresh.__resetDrawingsForTest(); }
+    });
+});
+
 describe('關窗日誌也帶圖層順序', () => {
     it('關窗前調整的圖層順序，下一個寫入者照樣套用', () => {
         const a = addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE)!;

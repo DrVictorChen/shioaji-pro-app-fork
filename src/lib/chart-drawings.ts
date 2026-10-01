@@ -11,7 +11,7 @@ import { useSyncExternalStore } from 'react';
 import type { ContractBase } from './types/contract';
 import { defaultFibOptions, sanitizeFibOptions, type FibOptions } from './chart-drawing-fib';
 import { applyChanges, type HistoryStep } from './chart-drawing-history';
-import { drawingRevision, tombRevision, isRevision, isTombstone, tombWriters, mergeTombstones, type Revision, type Tombstone } from './chart-drawing-revision';
+import { drawingRevision, tombRevision, legacyRevision, isRevision, isTombstone, tombWriters, mergeTombstones, type Revision, type Tombstone } from './chart-drawing-revision';
 
 export type DrawingTool =
     | 'horizontal' // 水平線：單一價位，橫貫整個 pane
@@ -249,6 +249,13 @@ const DEFAULT_SETTINGS: DrawingSettings = {
     groupLast: {},
     objectListOpen: false,
 };
+
+type SettingRevisions = Partial<Record<keyof DrawingSettings, Revision>>;
+type SettingsView = { values: DrawingSettings; revisions: SettingRevisions };
+const SETTING_KEYS: (keyof DrawingSettings)[] = [
+    'shareContinuousMonth', 'defaultStyle', 'toolColors', 'magnet',
+    'favorites', 'groupLast', 'objectListOpen', 'lineOpacity',
+];
 
 // 某個工具的下一個新物件樣式：使用者挑過的顏色優先，否則依主題取預設色
 export function defaultStyleFor(
@@ -525,14 +532,49 @@ function loadStore(tombs: Tombs = loadTombs()): Store {
     }
 }
 
-function loadSettings(): DrawingSettings {
+function readSettingRevisions(values: unknown, raw: unknown, legacyAt = 0): SettingRevisions {
+    const fields = values && typeof values === 'object' && !Array.isArray(values) ? values : {};
+    const revisions = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const out: SettingRevisions = {};
+    for (const key of SETTING_KEYS) {
+        const revision = revisions[key];
+        if (isRevision(revision)) out[key] = revision;
+        else if (Object.hasOwn(fields, key)) out[key] = legacyRevision(legacyAt);
+        if (out[key]) observeRevision(out[key]!);
+    }
+    return out;
+}
+
+function loadSettings(): SettingsView {
     try {
         const raw = localStorage.getItem(SETTINGS_KEY);
-        if (!raw) return DEFAULT_SETTINGS;
-        return sanitizeSettings(JSON.parse(raw));
+        const parsed = raw ? JSON.parse(raw) : null;
+        return {
+            values: sanitizeSettings(parsed),
+            revisions: readSettingRevisions(parsed, parsed?.settingRevisions),
+        };
     } catch {
-        return DEFAULT_SETTINGS;
+        return { values: DEFAULT_SETTINGS, revisions: {} };
     }
+}
+
+// 值與 revision 一起比較／寫入，不能在清掉日誌後丟失勝出版本。
+function mergeSettings(base: SettingsView, patch: Partial<DrawingSettings>, revisions: SettingRevisions): SettingsView {
+    const values = { ...base.values };
+    const nextRevisions = { ...base.revisions };
+    for (const key of SETTING_KEYS) {
+        const revision = revisions[key];
+        if (!revision) continue;
+        observeRevision(revision);
+        if (revision <= (nextRevisions[key] ?? '')) continue;
+        (values as unknown as Record<string, unknown>)[key] = patch[key];
+        nextRevisions[key] = revision;
+    }
+    return { values: sanitizeSettings(values), revisions: nextRevisions };
+}
+
+function serializeSettings(view: SettingsView): string {
+    return JSON.stringify({ ...view.values, settingRevisions: view.revisions });
 }
 
 // ── 關窗日誌 ─────────────────────────────────────────────────────────
@@ -592,6 +634,7 @@ interface Journal {
     ops: Map<string, Map<string, Op>>;
     order: OrderOps;
     settings: Partial<DrawingSettings>;
+    settingRevisions: SettingRevisions;
 }
 
 function journalNames(): string[] {
@@ -617,6 +660,8 @@ function loadJournals(): Journal[] {
                 ops?: Record<string, Record<string, unknown>>;
                 order?: Record<string, unknown>;
                 settings?: Record<string, unknown>;
+                settingRevisions?: Record<string, unknown>;
+                at?: number;
             } | null;
             if (!raw || typeof raw !== 'object') continue;
             const ops = new Map<string, Map<string, Op>>();
@@ -632,8 +677,9 @@ function loadJournals(): Journal[] {
                 }
                 if (m.size) ops.set(key, m);
             }
-            const settingsPatch =
-                raw.settings && typeof raw.settings === 'object' ? (raw.settings as Partial<DrawingSettings>) : {};
+            const settingRevisions = readSettingRevisions(raw.settings, raw.settingRevisions,
+                typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : 0);
+            const settingsPatch = pickSettings(sanitizeSettings(raw.settings), Object.keys(settingRevisions) as (keyof DrawingSettings)[]);
             const order: OrderOps = new Map();
             for (const [key, ids] of Object.entries(raw.order ?? {})) {
                 if (!Array.isArray(ids)) continue;
@@ -651,7 +697,7 @@ function loadJournals(): Journal[] {
                 }
                 if (moves.length) order.set(key, moves);
             }
-            out.push({ name, raw: text, ops, order, settings: settingsPatch });
+            out.push({ name, raw: text, ops, order, settings: settingsPatch, settingRevisions });
         } catch {
             // 壞掉的日誌略過（寫入者會把它刪掉）
         }
@@ -686,15 +732,15 @@ function loadView(tombs: Tombs = loadTombs(), journals: Journal[] = loadJournals
     return applyJournals(loadStore(tombs), tombs, journals);
 }
 
-function loadSettingsView(journals: Journal[] = loadJournals()): DrawingSettings {
-    if (!journals.some((j) => Object.keys(j.settings).length)) return loadSettings();
-    return sanitizeSettings(Object.assign({}, loadSettings(), ...journals.map((j) => j.settings)));
+function loadSettingsView(journals: Journal[] = loadJournals()): SettingsView {
+    return journals.reduce((base, j) => mergeSettings(base, j.settings, j.settingRevisions), loadSettings());
 }
 
 // 實際的初始載入在檔案最後面（所有常數都初始化之後才讀 localStorage，
 // 不會碰到尚未初始化的 const — TDZ）
 let store: Store = {};
 let settings: DrawingSettings = DEFAULT_SETTINGS;
+let settingRevisions: SettingRevisions = {};
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -869,13 +915,13 @@ function writeDrawingsNow(view?: { base: Store; tombs: Tombs; journals: Journal[
     const snapshot = new Map([...pending].map(([k, ops]) => [k, new Map(ops)]));
     const orderSnap = new Map(pendingOrder);
     const next = applyOps(base, snapshot, tombs, orderSnap);
-    const journalSettings = journals.filter((j) => Object.keys(j.settings).length);
+    const journalSettings = journals.some((j) => Object.keys(j.settingRevisions).length)
+        ? loadSettingsView(journals) : undefined;
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
         localStorage.setItem(TOMB_KEY, JSON.stringify(tombs));
-        if (journalSettings.length) {
-            // 關窗日誌裡的設定也併進主設定（本視窗還沒寫出的欄位之後照常寫）
-            localStorage.setItem(SETTINGS_KEY, JSON.stringify(loadSettingsView(journalSettings)));
+        if (journalSettings) {
+            localStorage.setItem(SETTINGS_KEY, serializeSettings(journalSettings));
         }
         // 已併進主項目的日誌刪掉 — 只刪內容與讀到時相同的那一版（每次
         // 關窗寫的是新的項目名稱，照理不會變；比對內容是第二道保險）
@@ -899,6 +945,7 @@ function writeDrawingsNow(view?: { base: Store; tombs: Tombs; journals: Journal[
         if (!cur.size) pending.delete(key);
     }
     for (const [key, order] of orderSnap) if (pendingOrder.get(key) === order) pendingOrder.delete(key);
+    if (journalSettings) acceptSettingsView(journalSettings);
     rememberRemoteWrites(next, tombs);
     store = applyPending(next, tombs);
     emit();
@@ -917,8 +964,7 @@ export function flushDrawingWrites() {
     withLock(writeDrawingsNow);
 }
 
-// 設定依欄位合併：本視窗改過哪幾個欄位就只寫那幾個，別的視窗同時改的
-// 其他欄位（例如一邊開共用、一邊改樣式）都留下
+// 設定依欄位與 revision 合併，待寫入的舊版本也不能蓋掉遠端新版本。
 const pendingSettingKeys = new Set<keyof DrawingSettings>();
 
 function pickSettings(from: DrawingSettings, keys: Iterable<keyof DrawingSettings>): Partial<DrawingSettings> {
@@ -927,17 +973,33 @@ function pickSettings(from: DrawingSettings, keys: Iterable<keyof DrawingSetting
     return out;
 }
 
+function pendingSettingRevisions(): SettingRevisions {
+    return Object.fromEntries([...pendingSettingKeys].map((key) => [key, settingRevisions[key]]));
+}
+
+function acceptSettingsView(view: SettingsView) {
+    const next = mergeSettings(view, pickSettings(settings, pendingSettingKeys), pendingSettingRevisions());
+    for (const key of pendingSettingKeys) {
+        if (next.revisions[key] !== settingRevisions[key]) pendingSettingKeys.delete(key);
+    }
+    settings = next.values;
+    settingRevisions = next.revisions;
+}
+
 function writeSettingsNow() {
     if (!pendingSettingKeys.size) return;
     const keys = [...pendingSettingKeys];
     const written = pickSettings(settings, keys);
-    const merged = { ...loadSettingsView(), ...written };
+    const revisions = pendingSettingRevisions();
+    const merged = mergeSettings(loadSettingsView(), written, revisions);
     try {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+        localStorage.setItem(SETTINGS_KEY, serializeSettings(merged));
     } catch {
         return; // 設定寫不進去只影響下次開啟的預設樣式，不另外提示
     }
-    for (const k of keys) if (settings[k] === written[k]) pendingSettingKeys.delete(k);
+    for (const k of keys) if (settingRevisions[k] === revisions[k]) pendingSettingKeys.delete(k);
+    acceptSettingsView(merged);
+    emit();
 }
 
 export function flushDrawingSettings() {
@@ -964,7 +1026,7 @@ export function writeDrawingJournal() {
     if (!pending.size && !pendingOrder.size && !pendingSettingKeys.size) return;
     // 每次都寫新的項目名稱（時間＋視窗＋序號）：bfcache 回來後又改了東西
     // 再關一次時，另一個視窗正在合併、準備刪除的舊日誌不會連新內容一起
-    // 被刪掉。名稱以時間開頭，依名稱排序就是寫入順序
+    // 被刪掉。合併先後由各欄位／物件的 revision 決定，名稱只用於識別日誌。
     const name = `${JOURNAL_PREFIX}${Date.now().toString(36).padStart(9, '0')}:${WINDOW_ID}:${++journalSeq}`;
     const ops: Record<string, Record<string, Op>> = {};
     for (const [key, byId] of pending) ops[key] = Object.fromEntries(byId);
@@ -974,6 +1036,7 @@ export function writeDrawingJournal() {
         ops,
         order,
         settings: pickSettings(settings, pendingSettingKeys),
+        settingRevisions: pendingSettingRevisions(),
     };
     try {
         localStorage.setItem(name, JSON.stringify(journal));
@@ -1006,8 +1069,7 @@ export function reloadDrawingsFromStorage() {
 }
 
 export function reloadDrawingSettingsFromStorage() {
-    // 本視窗還沒寫出去的欄位保留自己的
-    settings = { ...loadSettingsView(), ...pickSettings(settings, pendingSettingKeys) };
+    acceptSettingsView(loadSettingsView());
     emit();
 }
 
@@ -1230,8 +1292,14 @@ export function getDrawingSettings(): DrawingSettings {
 }
 
 export function setDrawingSettings(patch: Partial<DrawingSettings>) {
+    // 先觀察主項目與日誌的版本；bfcache 恢復或漏收 storage 事件也不會
+    // 替新操作蓋上比已知遠端小的 counter。
+    acceptSettingsView(loadSettingsView());
     settings = { ...settings, ...patch };
-    for (const k of Object.keys(patch) as (keyof DrawingSettings)[]) pendingSettingKeys.add(k);
+    for (const k of SETTING_KEYS) if (Object.hasOwn(patch, k)) {
+        settingRevisions[k] = nextRevision();
+        pendingSettingKeys.add(k);
+    }
     persistSettings();
 }
 
@@ -1457,6 +1525,7 @@ export function __resetDrawingsForTest() {
     saveErrorNoticePending = false;
     store = {};
     settings = DEFAULT_SETTINGS;
+    settingRevisions = {};
     try {
         localStorage.removeItem(STORAGE_KEY);
         localStorage.removeItem(SETTINGS_KEY);
@@ -1471,4 +1540,4 @@ export function __resetDrawingsForTest() {
 // 放在最後：loadView／loadSettingsView 會用到上面所有常數與函式
 store = loadView();
 rememberRemoteWrites(store, loadTombs());
-settings = loadSettingsView();
+acceptSettingsView(loadSettingsView());
