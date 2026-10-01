@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { createAccountQuery } from './account-query';
 // src/lib/boot.ts — startup orchestration:
 // 1. Desktop: auto-start the bundled shioaji server when keys are saved.
 // 2. If the app booted while the server was unreachable, watch /health and
@@ -506,15 +507,20 @@ export function subscribeTradeReports(): Promise<void> {
     const run = (async () => {
         try {
             const accounts = await loadAccountsShared();
+            const query = createAccountQuery();
             for (const account of accounts.filter(a => canTrade(a))) {
                 let subscribed = false;
                 try {
-                    const health = await fetchTradeCacheHealth(account.account_type as 'S' | 'F', account);
+                    const health = await query.read(account.account_type as 'S' | 'F', account,
+                        current => fetchTradeCacheHealth(current.account_type as 'S' | 'F', current));
+                    query.assertCurrent();
                     subscribed = !health.reasons.some(r => r.reason === 'NotSubscribed');
                 } catch {
                     // Pre-1.7.6 sidecar or a transient health read failure.
                 }
-                if (!subscribed && canTrade(account)) await subscribeTradeEvents(account);
+                query.assertCurrent();
+                const current = query.account(account.account_type as 'S' | 'F', account);
+                if (!subscribed) await subscribeTradeEvents(current);
             }
         } catch (error) {
             notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });

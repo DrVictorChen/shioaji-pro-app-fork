@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { createAccountQuery } from './account-query';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { getApiBase } from './runtime';
 import { cancellationSummary } from './trade-mutations';
@@ -340,21 +341,20 @@ export async function placeStockExitByShares(
 // cancel every working order across stock + futures accounts
 export async function cancelAllOrders(): Promise<number> {
     trackActivity('全刪委託');
+    const query = createAccountQuery();
     // 與 tradesPoll 同款帳戶 fan-out（issue #19）— dock 看得到的委託，
     // 全刪就必須刪得到；只查選中帳戶會靜默漏掉其他帳戶的掛單，通知
     // 卻顯示 N/N 像是全刪完
     const tradable = getAccountState().accounts.filter(
         (a) => canTrade(a) && (a.account_type === 'S' || a.account_type === 'F'),
     );
+    if (!tradable.length) throw new Error('尚未取得可查詢帳戶；未執行全部刪單');
     // Rare, safety-critical: always the authoritative update_status read
     // (refresh:true), never the sidecar cache (ADR 0003).
-    const fetches =
-        tradable.length > 0
-            ? tradable.map((a) =>
-                  fetchTrades(a.account_type as 'S' | 'F', a, { refresh: true }),
-              )
-            : [fetchTrades('S', undefined, { refresh: true }), fetchTrades('F', undefined, { refresh: true })];
+    const fetches = tradable.map(a => query.read(a.account_type as 'S' | 'F', a,
+        current => fetchTrades(current.account_type as 'S' | 'F', current, { refresh: true })));
     const rs = await Promise.allSettled(fetches);
+    query.assertCurrent();
     const failedAccounts = rs.filter(r => r.status === 'rejected').length;
     const merged = rs.flatMap((r) =>
         r.status === 'fulfilled' ? r.value : [],

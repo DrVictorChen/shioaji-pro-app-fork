@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { createAccountQuery } from './account-query';
 // src/lib/trigger-engine.ts — client-side stop-loss / take-profit triggers.
 //
 // Execution model (#102):
@@ -838,7 +839,9 @@ function scheduleIocCheck(id: string, previous?: string) {
         const rec = exits.find(e => e.id === id);
         if (!rec || rec.status !== 'working' || !rec.orderId || !executing) return;
         if (currentProtectionEnv() !== rec.env) return;
-        void fetchTrades(rec.account.account_type, rec.account, { refresh: false }).then(rows => {
+        const query = createAccountQuery();
+        void query.read(rec.account.account_type, rec.account, current => fetchTrades(rec.account.account_type, current, { refresh: false })).then(rows => {
+            query.assertCurrent();
             const trade = rows.find(t => t.order.id === rec.orderId);
             if (!trade) {
                 if (previous === undefined) scheduleIocCheck(id, ''); // second (last) read

@@ -190,6 +190,7 @@ export function ComboTicket() {
     const tradesQuery = useQuery<ComboTrade[]>(
         useCallback(() => fetchComboTrades(), [selectedFutures]),
         `combo-trades:${selectedFutures?.broker_id}:${selectedFutures?.account_id}`, !!selectedFutures,
+        selectedFutures ? [selectedFutures] : [],
     );
 
     // 到價監控 (issue #2): combos only fill IOC, so watch the book and fire

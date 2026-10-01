@@ -715,6 +715,7 @@ function AccountPaneContent({ positions, balance, margin, funds, market, scopeAc
             [showStock, selKey],
         ),
         `settlements:${selKey}:${showStock}`,
+        true, stockAccounts,
     );
 
     // 今日已實現損益：profit_loss 給列表/筆數；profitloss_sum 給權威總額。
@@ -748,6 +749,7 @@ function AccountPaneContent({ positions, balance, margin, funds, market, scopeAc
     const { data: pnl, refresh: refreshPnl, loading: loadingPnl, error: errorPnl } = useQuery<PnlData>(
         pnlFetcher,
         `realized-pnl:${selKey}:${showStock}:${showFut}`,
+        true, queryAccounts,
     );
 
     // 交易額度（證券）
@@ -764,6 +766,7 @@ function AccountPaneContent({ positions, balance, margin, funds, market, scopeAc
             [showStock, selKey],
         ),
         `trading-limits:${selKey}:${showStock}`,
+        true, stockAccounts,
     );
 
     // 預收券款/圈存（證券、查詢類）— 個別 catch，任一失敗不拖垮整區
@@ -788,6 +791,7 @@ function AccountPaneContent({ positions, balance, margin, funds, market, scopeAc
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [showStock, selKey]),
         `reserves:${selKey}:${showStock}`,
+        true, stockAccounts,
     );
 
     const refreshReports = useCallback(async () => {

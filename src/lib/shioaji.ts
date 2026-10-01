@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { createAccountQuery } from './account-query';
 import { getApiBase } from './runtime';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { noteMutationIntent } from './mutation-intent';
@@ -849,6 +850,7 @@ const loadTradingState = () => (tradingStateModule ??= import('./trading-state')
 
 async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tradeId: string; trade: Trade; account: Account; tradingState: typeof import('./trading-state') }> {
     const base = getApiBase();
+    const query = createAccountQuery();
     const requestedMark = readMark();
     const refuse = (message: string): never => { throw Object.assign(new Error(message), { mutationNotStarted: true }); };
     const tradingState = await loadTradingState();
@@ -874,11 +876,14 @@ async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tr
     // lost is shared (one per account per baseline loss, e.g. a whole popout
     // cancel-all). Only an order missing from that read gets one fresh read.
     const read = async (mark: number) => {
-        try { return await sharedAuthoritativeTrades(base, account!, mark, () => fetchTrades(account!.account_type as 'S' | 'F', account!, { refresh: true })); }
+        try { return await query.read(account!.account_type as 'S' | 'F', account!, current =>
+            sharedAuthoritativeTrades(`${base}|mode:${query.version}`, current, mark,
+                () => fetchTrades(current.account_type as 'S' | 'F', current, { refresh: true }))); }
         catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { mutationNotStarted: true }); }
     };
     const code = (t: Trade) => t.contract.target_code || t.contract.code;
     const resolveId = (rows: Trade[]) => {
+        query.assertCurrent();
         const candidates = rows.filter(r => (!r.order.account || (r.order.account.broker_id === account!.broker_id && r.order.account.account_id === account!.account_id))
             && ((seqno && r.order.seqno === seqno) || (ordno && r.order.ordno === ordno)));
         const found = candidates[0];
@@ -939,22 +944,22 @@ function observeCancel(
         // the current sidecar knows (re-resolved when there was no baseline).
         const before: Trade = { ...target.trade, order: { ...target.trade.order, id: target.tradeId } };
         const type = account.account_type as 'S' | 'F';
+        const query = createAccountQuery();
+        query.account(type, account);
         const { trade } = await verifyCancellation(before, account, {
-            scope: target.base,
+            scope: `${target.base}|mode:${query.version}`,
             // A re-resolved trade_id means no continuous baseline: skip the cache.
             cacheTrusted: () => target.tradeId === tradeId && cancelCacheTrusted(),
             locallyCancelled: () => locallyCancelled(tradeId, account),
             guard: () => {
                 if (target.base !== getApiBase()) throw new Error('刪單後伺服器已切換');
-                if (!getAccountState().accounts.some(a => canTrade(a) && a.account_type === type
-                    && a.broker_id === account.broker_id && a.account_id === account.account_id)) {
-                    throw new Error('刪單後委託帳戶已不可用');
-                }
+                query.assertCurrent();
             },
-            readTrades: refresh => fetchTrades(type, account, { refresh }),
-            readHealth: () => fetchTradeCacheHealth(type, account),
+            readTrades: refresh => query.read(type, account, current => fetchTrades(type, current, { refresh })),
+            readHealth: () => query.read(type, account, current => fetchTradeCacheHealth(type, current)),
             batch,
         });
+        query.assertCurrent();
         // A trade_id re-resolved after a sidecar restart is the same order the
         // caller named; report it under the caller's id so the App's row and
         // the Agent's order_id match. Status and quantities are the broker's.
@@ -987,21 +992,23 @@ export function updateOrderQty(tradeId: string, quantity: number) {
     }, target.account); });
 }
 
-// explicit account selector — omitted falls back to the store's selected
-// account (then the server default). 全部帳戶 mode fans out one request per
+// Explicit account selector — omitted resolves the store's selected account.
+// Missing/unqualified accounts never fall through to a server default.
+// 全部帳戶 mode fans out one request per
 // account and merges client-side.
 export interface AccountSelector {
     broker_id: string;
     account_id: string;
 }
 
-function accountBody(accountType: AccountTypeName, account?: AccountSelector) {
-    const acc = account ?? accountFor(accountType as 'S' | 'F');
-    return {
-        account_type: accountType,
-        broker_id: acc?.broker_id,
-        account_id: acc?.account_id,
-    };
+function accountQueryPost<T>(path: string, type: AccountTypeName, selector?: AccountSelector, extra: Record<string, unknown> = {}): Promise<T> {
+    const query = createAccountQuery();
+    return query.read(type, selector, account => apiPost<T>(path, {
+        ...extra,
+        account_type: type,
+        broker_id: account.broker_id,
+        account_id: account.account_id,
+    }, { beforeDispatch: query.assertCurrent }));
 }
 
 export interface FetchTradesOptions {
@@ -1017,13 +1024,8 @@ export function fetchTrades(
     account?: AccountSelector,
     options?: FetchTradesOptions,
 ) {
-    return apiPost<Trade[]>(
-        '/api/v1/order/trades',
-        {
-            ...accountBody(accountType, account),
-            ...(options?.refresh === undefined ? {} : { refresh: options.refresh }),
-        },
-    );
+    return accountQueryPost<Trade[]>('/api/v1/order/trades', accountType, account,
+        options?.refresh === undefined ? {} : { refresh: options.refresh });
 }
 
 /** Shioaji 1.7.6+: health of the sidecar's process-local Trade cache for one
@@ -1033,10 +1035,7 @@ export function fetchTradeCacheHealth(
     accountType: 'S' | 'F',
     account?: AccountSelector,
 ) {
-    return apiPost<TradeCacheHealth>(
-        '/api/v1/order/trade_cache_health',
-        accountBody(accountType, account),
-    );
+    return accountQueryPost<TradeCacheHealth>('/api/v1/order/trade_cache_health', accountType, account);
 }
 
 // ---- portfolio ----
@@ -1047,24 +1046,16 @@ export function fetchPositions(
 ) {
     // stocks use Share unit so odd lots aren't truncated (issue #2);
     // futures stay in contracts (Common)
-    return apiPost<(StockPosition | FuturePosition)[]>(
-        '/api/v1/portfolio/position_unit',
-        {
-            ...accountBody(accountType, account),
-            unit: accountType === 'S' ? 'Share' : 'Common',
-        },
-    );
+    return accountQueryPost<(StockPosition | FuturePosition)[]>('/api/v1/portfolio/position_unit', accountType, account,
+        { unit: accountType === 'S' ? 'Share' : 'Common' });
 }
 
 export function fetchAccountBalance(account?: AccountSelector) {
-    return apiPost<AccountBalance>(
-        '/api/v1/portfolio/account_balance',
-        accountBody('S', account),
-    );
+    return accountQueryPost<AccountBalance>('/api/v1/portfolio/account_balance', 'S', account);
 }
 
 export function fetchMargin(account?: AccountSelector) {
-    return apiPost<Margin>('/api/v1/portfolio/margin', accountBody('F', account));
+    return accountQueryPost<Margin>('/api/v1/portfolio/margin', 'F', account);
 }
 
 export interface Settlement {
@@ -1075,10 +1066,7 @@ export interface Settlement {
 }
 
 export function fetchSettlements(account?: AccountSelector) {
-    return apiPost<Settlement[]>(
-        '/api/v1/portfolio/settlements',
-        accountBody('S', account),
-    );
+    return accountQueryPost<Settlement[]>('/api/v1/portfolio/settlements', 'S', account);
 }
 
 // ---- realized P&L 已實現損益（帳務/交割 tab）----
@@ -1120,8 +1108,7 @@ export function fetchProfitLoss(
     beginDate = todayStr(),
     endDate = todayStr(),
 ) {
-    return apiPost<ProfitLoss[]>('/api/v1/portfolio/profit_loss', {
-        ...accountBody(accountType, account),
+    return accountQueryPost<ProfitLoss[]>('/api/v1/portfolio/profit_loss', accountType, account, {
         begin_date: beginDate,
         end_date: endDate,
     });
@@ -1179,10 +1166,9 @@ export function fetchProfitLossSummary(
     beginDate = todayStr(),
     endDate = todayStr(),
 ) {
-    return apiPost<ProfitLossSummaryTotal>(
-        '/api/v1/portfolio/profitloss_sum',
+    return accountQueryPost<ProfitLossSummaryTotal>(
+        '/api/v1/portfolio/profitloss_sum', accountType, account,
         {
-            ...accountBody(accountType, account),
             begin_date: beginDate,
             end_date: endDate,
         },
@@ -1203,10 +1189,7 @@ export interface TradingLimits {
 }
 
 export function fetchTradingLimits(account?: AccountSelector) {
-    return apiPost<TradingLimits>(
-        '/api/v1/portfolio/trading_limits',
-        accountBody('S', account),
-    );
+    return accountQueryPost<TradingLimits>('/api/v1/portfolio/trading_limits', 'S', account);
 }
 
 // ---- 預收券款/圈存（查詢類 only）----
@@ -1225,10 +1208,7 @@ export interface ReserveStocksSummary {
 }
 
 export function fetchStockReserveSummary(account?: AccountSelector) {
-    return apiPost<ReserveStocksSummary>(
-        '/api/v1/order/stock_reserve_summary',
-        accountBody('S', account),
-    );
+    return accountQueryPost<ReserveStocksSummary>('/api/v1/order/stock_reserve_summary', 'S', account);
 }
 
 export interface ReserveStockDetailRow {
@@ -1245,10 +1225,7 @@ export interface ReserveStocksDetail {
 }
 
 export function fetchStockReserveDetail(account?: AccountSelector) {
-    return apiPost<ReserveStocksDetail>(
-        '/api/v1/order/stock_reserve_detail',
-        accountBody('S', account),
-    );
+    return accountQueryPost<ReserveStocksDetail>('/api/v1/order/stock_reserve_detail', 'S', account);
 }
 
 export interface EarmarkStockDetailRow {
@@ -1267,10 +1244,7 @@ export interface EarmarkStocksDetail {
 }
 
 export function fetchEarmarkingDetail(account?: AccountSelector) {
-    return apiPost<EarmarkStocksDetail>(
-        '/api/v1/order/earmarking_detail',
-        accountBody('S', account),
-    );
+    return accountQueryPost<EarmarkStocksDetail>('/api/v1/order/earmarking_detail', 'S', account);
 }
 
 // ---- combo (spread) orders ----
@@ -1451,10 +1425,7 @@ export function cancelComboOrder(tradeId: string) {
 }
 
 export function fetchComboTrades() {
-    return apiPost<ComboTrade[]>(
-        '/api/v1/order/combotrades',
-        accountBody('F'),
-    );
+    return accountQueryPost<ComboTrade[]>('/api/v1/order/combotrades', 'F');
 }
 
 // ---- server watchlists ----

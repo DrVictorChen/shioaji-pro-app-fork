@@ -3,9 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     accounts: vi.fn(), health: vi.fn(), subscribe: vi.fn(), notify: vi.fn(), snapshots: vi.fn(),
     simulation: undefined as boolean | undefined,
+    version: 0,
+    currentAccounts: [] as import('./types/portfolio').Account[],
     modeChanged: undefined as (() => void) | undefined,
 }));
 vi.mock('./server-info-store', () => ({
+    getServerModeVersion: () => mocks.version,
     knownServerInfo: () => mocks.simulation === undefined ? undefined : { simulation: mocks.simulation },
     subscribeServerInfo: (listener: () => void) => { mocks.modeChanged = listener; return () => { mocks.modeChanged = undefined; }; },
 }));
@@ -15,7 +18,10 @@ vi.mock('./shioaji', () => ({
     fetchTradeCacheHealth: mocks.health,
     subscribeTradeEvents: mocks.subscribe,
 }));
-vi.mock('./account-store', () => ({ loadAccountsShared: mocks.accounts }));
+vi.mock('./account-store', () => ({
+    loadAccountsShared: async () => { mocks.currentAccounts = await mocks.accounts(); return mocks.currentAccounts; },
+    getAccountState: () => ({ accounts: mocks.currentAccounts }),
+}));
 vi.mock('./trading-state', () => ({ startTradingState: vi.fn(), refreshTradingStateForModeChange: mocks.snapshots }));
 vi.mock('./trade', () => ({ notify: mocks.notify }));
 vi.mock('./stream', () => ({}));
@@ -40,6 +46,8 @@ beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
     mocks.simulation = undefined;
+    mocks.version = 0;
+    mocks.currentAccounts = [];
     mocks.modeChanged = undefined;
     ({ subscribeTradeReports } = await import('./boot'));
     mocks.accounts.mockResolvedValue([stock, futures]);
@@ -79,14 +87,35 @@ describe('subscribeTradeReports', () => {
         mocks.accounts.mockResolvedValue([stock, unsigned]);
         mocks.health.mockImplementationOnce(() => pending.promise.then(() => health()));
         const run = subscribeTradeReports();
+        const discarded = expect(run).rejects.toThrow('模式已變更');
         await vi.waitFor(() => expect(mocks.health).toHaveBeenCalledOnce());
         mocks.simulation = true;
+        mocks.version += 1;
         mocks.modeChanged!();
         mocks.health.mockResolvedValue(health('NotSubscribed'));
         pending.resolve();
-        await run;
+        await discarded;
         await vi.waitFor(() => expect(mocks.subscribe).toHaveBeenCalledWith(unsigned));
         expect(unsigned.signed).toBe(false);
+    });
+
+    it.each(['production', 'unknown', 'roundtrip', 'removed'] as const)('does not apply stale health or subscribe from it after %s', async change => {
+        mocks.simulation = true;
+        const pending = deferred();
+        mocks.health.mockImplementationOnce(() => pending.promise.then(() => health('NotSubscribed')));
+        const run = subscribeTradeReports();
+        const discarded = expect(run).rejects.toThrow('已丟棄回應');
+        await vi.waitFor(() => expect(mocks.health).toHaveBeenCalledOnce());
+        if (change === 'removed') mocks.currentAccounts = [];
+        else {
+            mocks.simulation = change === 'unknown' ? undefined : false;
+            mocks.version += 1;
+            if (change === 'roundtrip') { mocks.simulation = true; mocks.version += 1; }
+        }
+        pending.resolve();
+        await discarded;
+        expect(mocks.subscribe).not.toHaveBeenCalled();
+        expect(mocks.health).toHaveBeenCalledOnce();
     });
     it('preserves existing subscriptions on cached login', async () => {
         await subscribeTradeReports();

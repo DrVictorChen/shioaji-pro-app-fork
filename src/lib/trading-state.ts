@@ -1,5 +1,5 @@
 import { canTrade } from './account-tradable';
-import { getServerModeVersion } from './server-info-store';
+import { createAccountQuery } from './account-query';
 import { onTradeMutation } from './trade-mutations';
 import { useEffect, useSyncExternalStore } from 'react';
 import { getAccountState, refreshAccounts, useAccounts } from './account-store';
@@ -352,16 +352,8 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
     let ordersRead = false;
     const run: Promise<void> = inFlight = (async () => {
         if (resyncInFlight) await resyncInFlight;
-        const modeBefore = getServerModeVersion();
-        const assertMode = () => {
-            if (getServerModeVersion() !== modeBefore) throw new Error('查詢期間伺服器模式已變更，已丟棄回應；請重新更新');
-        };
-        const queryAccount = (account: Account) => {
-            assertMode();
-            const current = getAccountState().accounts.find(a => accountKey(a) === accountKey(account));
-            if (!current || !canTrade(current)) throw new Error('查詢帳戶已不可用，已丟棄回應；請重新更新');
-            return current;
-        };
+        const query = createAccountQuery();
+        const queryAccount = (account: Account) => query.account(account.account_type as 'S' | 'F', account);
         const before = eventSequence;
         const connectionBefore = connectionEpoch;
         const clockBefore = reasonClock;
@@ -427,7 +419,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         problems.orders.push(['query-failed', `${account.account_type} 委託查詢失敗，保留上次資料`]);
                     }
                 });
-                assertMode();
+                query.assertCurrent();
                 if (readAccount) {
                     // concurrently too; results keep the account order
                     const funds: AccountFunds[] = await mapLimit(accounts, ACCOUNT_READ_CONCURRENCY, async (account): Promise<AccountFunds> => {
@@ -525,11 +517,16 @@ export function checkTradeCacheHealth(trigger: HealthTrigger): Promise<void> {
         const accounts = tradableAccounts();
         if (!accounts.length) return;
         const base = getApiBase();
+        const query = createAccountQuery();
         const clockBefore = reasonClock;
         const eventsBefore = eventSequence;
         const epochBefore = connectionEpoch;
-        const results = await Promise.allSettled(accounts.map(a => fetchTradeCacheHealth(a.account_type as 'S' | 'F', a)));
+        const results = await Promise.allSettled(accounts.map(a => query.read(a.account_type as 'S' | 'F', a,
+            current => fetchTradeCacheHealth(current.account_type as 'S' | 'F', current))));
         if (base !== getApiBase()) return;
+        // A stale health read must neither change continuity nor trigger a
+        // subscription or a cache read using the earlier account list.
+        try { query.assertCurrent(); } catch { return; }
         // An older server lacks the route; health only ever adds information,
         // so a failed read leaves every existing reason untouched.
         if (results.some(r => r.status === 'rejected')) {
@@ -570,7 +567,7 @@ export function checkTradeCacheHealth(trigger: HealthTrigger): Promise<void> {
         healthyGapStreak = trigger === 'gap' && allHealthy ? healthyGapStreak + 1 : 0;
         if (allHealthy && trigger !== 'manual' && ordersBaseline && !inFlight
             && reasonState.orders.size > 0 && getStreamStatus() === 'live') {
-            resyncInFlight = resyncOrdersFromCache(accounts, { clockBefore, eventsBefore, epochBefore });
+            resyncInFlight = resyncOrdersFromCache(accounts, { clockBefore, eventsBefore, epochBefore }, query);
             await resyncInFlight.finally(() => { resyncInFlight = null; });
         }
         schedulePublish();
@@ -583,13 +580,15 @@ export function checkTradeCacheHealth(trigger: HealthTrigger): Promise<void> {
     return run;
 }
 
-async function resyncOrdersFromCache(accounts: Account[], before: { clockBefore: number; eventsBefore: number; epochBefore: number }) {
+async function resyncOrdersFromCache(accounts: Account[], before: { clockBefore: number; eventsBefore: number; epochBefore: number }, query: ReturnType<typeof createAccountQuery>) {
     const base = getApiBase();
     queryEvents = [];
     queryOverflow = false;
     try {
-        const rows = await Promise.all(accounts.map(a => fetchTrades(a.account_type as 'S' | 'F', a, { refresh: false })));
+        const rows = await Promise.all(accounts.map(a => query.read(a.account_type as 'S' | 'F', a,
+            current => fetchTrades(current.account_type as 'S' | 'F', current, { refresh: false }))));
         if (base !== getApiBase()) return;
+        query.assertCurrent();
         const saved = state.trades;
         const problems: Problem[] = [];
         const merged = accounts.every((account, i) => mergeOrders(account, rows[i]!, accounts, problems, 'upsert'));

@@ -213,6 +213,48 @@ it('discards buffered funds if mode changes while another account is still waiti
     expect(store.getTradingState().queries.account.updatedAt).toBe(before.queries.account.updatedAt);
 });
 
+it.each(['health', 'cache', 'buffered-cache'] as const)('guards cache resync across mode/account changes while waiting for %s', async stage => {
+    const info = await import('./server-info-store');
+    for (const change of ['production', 'unknown', 'roundtrip', 'account'] as const) {
+        info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+        mocks.account.signed = false;
+        mocks.extraAccounts = [{ ...mocks.account, account_id: 'b' }];
+        mocks.health.mockResolvedValue({ state: 'Healthy', reasons: [] });
+        mocks.trades.mockResolvedValue([]);
+        vi.advanceTimersByTime(1600);
+        await act(async () => { await store.refreshTradingState(); });
+        await emit(order());
+        await act(async () => { mocks.status = 'down'; mocks.statusChanged!(); });
+        mocks.status = 'live';
+        const before = store.getTradingState();
+        const cached = { ...before.trades[0]!, status: { ...before.trades[0]!.status, status: 'Cancelled' as const, cancel_quantity: 3 } };
+        const health = deferred<{ state: string; reasons: never[] }>();
+        const cache = deferred<typeof cached[]>();
+        mocks.health.mockClear(); mocks.trades.mockClear();
+        if (stage === 'health') mocks.health.mockReturnValue(health.promise);
+        else mocks.trades.mockImplementation((_type: string, account: Account) =>
+            stage === 'buffered-cache' && account.account_id === 'a' ? Promise.resolve([cached]) : cache.promise);
+        let run!: Promise<void>;
+        await act(async () => { run = store.checkTradeCacheHealth('reconnect'); });
+        expect(mocks.health).toHaveBeenCalledTimes(2);
+        if (stage !== 'health') expect(mocks.trades).toHaveBeenCalledTimes(2);
+        if (change === 'account') mocks.account = { ...mocks.account, account_id: 'removed' };
+        else if (change === 'unknown') info.forgetServerInfo('http://fixture.invalid');
+        else {
+            info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+            if (change === 'roundtrip') info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+        }
+        health.resolve({ state: 'Healthy', reasons: [] });
+        cache.resolve([cached]);
+        await act(async () => { await run; });
+        if (stage === 'health') expect(mocks.trades).not.toHaveBeenCalled();
+        expect(store.getTradingState().trades).toBe(before.trades);
+        expect(store.getTradingState().queries.orders).toBe(before.queries.orders);
+        expect(store.hasOrdersBaseline()).toBe(true);
+        mocks.account.account_id = 'a';
+    }
+});
+
 describe('shared trading state with isolated broker fixtures', () => {
     it('marks each accounting read of a refresh with its duration, accounts by type/order only (#142)', async () => {
         const timing = await import('./startup-timing');
