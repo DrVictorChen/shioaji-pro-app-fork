@@ -125,16 +125,18 @@ export function fetchCaExpire(personId: string) {
     );
 }
 
-export function subscribeTradeEvents(account: {
+export async function subscribeTradeEvents(account: {
     broker_id: string;
     account_id: string;
     account_type: string;
 }) {
+    const query = createAccountQuery();
+    const current = query.account(account.account_type as AccountTypeName, account);
     return apiPost<unknown>('/api/v1/auth/subscribe_trade', {
-        broker_id: account.broker_id,
-        account_id: account.account_id,
-        account_type: account.account_type,
-    });
+        broker_id: current.broker_id,
+        account_id: current.account_id,
+        account_type: current.account_type,
+    }, { beforeDispatch: query.assertCurrent });
 }
 
 // ---- contracts ----
@@ -563,9 +565,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 // apiPost errors lead with the HTTP status — 4xx means the request itself is
-// wrong (unsupported code, bad ranking) and retrying can't help
+// wrong (unsupported code, bad ranking) and retrying can't help. A request
+// rejected before dispatch must also stop, rather than retry in another mode.
 function isPermanentApiError(reason: unknown): boolean {
-    return reason instanceof Error && /^4\d\d\b/.test(reason.message);
+    return reason instanceof Error && (/^4\d\d\b/.test(reason.message)
+        || (reason as { subscriptionNotStarted?: boolean }).subscriptionNotStarted === true);
 }
 
 async function updateCapabilitySubscription(
