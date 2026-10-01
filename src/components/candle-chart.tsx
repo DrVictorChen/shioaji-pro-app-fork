@@ -453,6 +453,8 @@ export function CandleChart({
         volSeriesRef.current = vol;
 
         chart.subscribeClick((param) => {
+            // 第二道防線：畫圖選取／草稿／拖曳／文字／量測均不能進入下單路徑。
+            if (drawingsRef.current?.drawingBusy()) return;
             const m = modeRef.current;
             if (!param.point) return;
             const raw = candles.coordinateToPrice(param.point.y);
@@ -1448,7 +1450,10 @@ export function CandleChart({
         seriesRef: candleSeriesRef,
         getTimes: () => barTimesRef.current,
         tradeArmed: mode !== 'observe',
-        onEnterDrawingMode: () => setMode('observe'),
+        onEnterDrawingMode: () => {
+            modeRef.current = 'observe';
+            setMode('observe');
+        },
         themeMode: baseMode(themeSettings),
         getBars: () => barsRef.current,
         // 量測換算損益：期貨／選擇權＝口數 × 乘數；股票＝張數 × 1000 股

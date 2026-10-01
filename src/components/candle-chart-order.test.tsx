@@ -17,7 +17,15 @@ const m = vi.hoisted(() => ({
     accounts: [] as Account[],
     roundClose: 100 as number | null,
     oddClose: 100 as number | null,
+    drawingBusy: false,
 }));
+vi.mock('../hooks/use-chart-drawings', async (importOriginal) => {
+    const real = await importOriginal<typeof import('../hooks/use-chart-drawings')>();
+    return { ...real, useChartDrawings: (...args: Parameters<typeof real.useChartDrawings>) => {
+        const api = real.useChartDrawings(...args);
+        return { ...api, drawingBusy: () => m.drawingBusy || api.drawingBusy() };
+    } };
+});
 vi.mock('../lib/trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: async () => {}, updateOrderPrice: async () => {} }));
 vi.mock('../lib/trigger-engine', () => ({ addTrigger: m.addTrigger, removeTrigger: vi.fn(), useTriggers: () => [] }));
@@ -47,6 +55,9 @@ vi.mock('lightweight-charts', async () => {
 });
 
 import { CandleChart } from './candle-chart';
+import { ChartDrawingTools, ChartObjectList } from './chart-drawing-tools';
+import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE } from '../lib/chart-drawings';
+import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
 
 const S1 = { account_type: 'S', broker_id: 'B', account_id: '1111121', signed: true, person_id: '', username: '' } as Account;
 const S2 = { ...S1, account_id: '2222207' } as Account;
@@ -78,11 +89,43 @@ beforeEach(() => {
     m.click.length = 0;
     m.accounts = [S1, S2, F1];
     m.roundClose = 100; m.oddClose = 100;
+    m.drawingBusy = false;
+    __resetDrawingsForTest();
     (globalThis as any).localStorage.setItem('sj-pro-chart-order-defaults', '{}');
 });
 afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
 
 describe('chart order settings button', () => {
+    const drawingApi = () => view.root.findByType(ChartDrawingTools).props.api as ChartDrawingsApi;
+
+    it.each(['點價買', '點價賣'])('武裝%s後物件列表選取，同一事件圖表 click 不會呼叫 placeQuickOrder', async (side) => {
+        await mount({ contract: stk });
+        let id!: string;
+        await act(async () => { id = addDrawing('2330', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!.id; });
+        await act(async () => drawingApi().setObjectListOpen(true));
+        await act(async () => button(view.root, side).props.onClick());
+        const row = view.root.findByType(ChartObjectList).findByProps({ role: 'option' });
+        await act(async () => {
+            row.props.onClick({ shiftKey: false });
+            m.click.at(-1)!({ point: { x: 10, y: 10 } });
+        });
+        expect(drawingApi().selected?.id).toBe(id);
+        expect(m.place).not.toHaveBeenCalled();
+        await clickChart();
+        expect(m.place).not.toHaveBeenCalled();
+    });
+
+    it.each(['點價買', '點價賣'])('武裝%s時若畫圖仍忙碌，即使入口漏解除交易，click 防線也擋住快速下單', async (side) => {
+        await mount({ contract: stk });
+        await act(async () => button(view.root, side).props.onClick());
+        m.drawingBusy = true;
+        await clickChart();
+        expect(m.place).not.toHaveBeenCalled();
+        m.drawingBusy = false;
+        await clickChart();
+        expect(m.place).toHaveBeenCalledTimes(1); // 確認測試確實走到可下單路徑
+    });
+
     it('replaces the 量 input and 零股 toggle with one chip that shows only quantity and unit', async () => {
         await mount({ contract: stk });
         expect(text(chip())).toBe('1 張');

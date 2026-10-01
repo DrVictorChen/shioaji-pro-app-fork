@@ -51,6 +51,92 @@ import { DrawingHistory } from './chart-drawing-history';
 const store = new Map<string, string>();
 
 describe('圖表實例 writer', () => {
+    function deletedDrawing() {
+        const d = addDrawing('TXF', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!;
+        flushDrawingWrites();
+        const history = new DrawingHistory();
+        history.begin('TXF', getDrawingHistoryStart());
+        const before = getDrawings('TXF');
+        removeDrawing('TXF', d.id);
+        history.push('TXF', before, getDrawings('TXF'));
+        flushDrawingWrites();
+        return { d, history };
+    }
+
+    it.each(['sj-pro-chart-drawings', 'sj-pro-chart-drawing-tombstones'] as const)('復原刪除寫入 %s 配額失敗後，物件與墓碑撤銷一起保留並重試', (failKey) => {
+        const { d, history } = deletedDrawing();
+        const originalSet = localStorage.setItem;
+        const write = vi.spyOn(localStorage, 'setItem').mockImplementation((k, v) => {
+            if (k === failKey) throw new Error('QuotaExceededError');
+            originalSet(k, v);
+        });
+        const applied = vi.fn();
+        applyDrawingHistory(history.undo()!, applied);
+        expect(applied).toHaveBeenCalledWith(true);
+        expect(getDrawings('TXF').map((x) => x.id)).toEqual([d.id]);
+        expect(drawingsSaveFailed()).toBe(true);
+        reloadDrawingsFromStorage();
+        flushDrawingWrites();
+        expect(getDrawings('TXF').map((x) => x.id)).toEqual([d.id]);
+        expect(drawingsSaveFailed()).toBe(true);
+        write.mockRestore();
+        flushDrawingWrites();
+        expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF.map((x: { id: string }) => x.id)).toEqual([d.id]);
+        expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[d.id]).toBeUndefined();
+        expect(drawingsSaveFailed()).toBe(false);
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((x) => x.id)).toEqual([d.id]);
+    });
+
+    it.each(['edit', 'journal', 'foreign-delete'] as const)('失敗的復原仍可 %s；撤銷資料不會脫離復原物件', async (path) => {
+        const { d, history } = deletedDrawing();
+        const originalSet = localStorage.setItem;
+        const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
+        applyDrawingHistory(history.undo()!, vi.fn());
+        expect(drawingsSaveFailed()).toBe(true);
+        if (path === 'edit') {
+            updateDrawing('TXF', d.id, { name: '復原後編輯' });
+            expect(getDrawings('TXF')[0]?.name).toBe('復原後編輯');
+        } else if (path === 'foreign-delete') {
+            const tombs = JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!);
+            tombs.TXF[d.id].writers.push('foreign'); // 同一 revision 的遠端刪除聯集仍否決復原
+            store.set('sj-pro-chart-drawing-tombstones', JSON.stringify(tombs));
+        } else {
+            write.mockImplementation((k, v) => {
+                if (!k.startsWith('sj-chart-drawings-pending:')) throw new Error('QuotaExceededError');
+                originalSet(k, v);
+            });
+            writeDrawingJournal();
+            expect(drawingsSaveFailed()).toBe(true);
+            const journal = JSON.parse([...store.entries()].find(([k]) => k.startsWith('sj-chart-drawings-pending:'))![1]);
+            expect(journal.ops.TXF[d.id]).toMatchObject({ id: d.id, restoreTombstone: { revision: expect.any(String) } });
+        }
+        write.mockRestore();
+        if (path === 'journal') {
+            vi.resetModules();
+            const fresh = await import('./chart-drawings');
+            fresh.__setDrawingLocksForTest(null);
+            try {
+                expect(fresh.getDrawings('TXF').map((x) => x.id)).toEqual([d.id]);
+                fresh.flushDrawingWrites();
+                expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF[0].id).toBe(d.id);
+                expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[d.id]).toBeUndefined();
+            } finally { fresh.__resetDrawingsForTest(); }
+        } else {
+            reloadDrawingsFromStorage();
+            flushDrawingWrites();
+            if (path === 'edit') {
+                expect(getDrawings('TXF')[0]?.name).toBe('復原後編輯');
+                expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF?.[d.id]).toBeUndefined();
+                expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF[0].restoreTombstone).toBeUndefined();
+                expect(drawingsSaveFailed()).toBe(false);
+            } else {
+                expect(getDrawings('TXF')).toEqual([]);
+                expect(JSON.parse(store.get('sj-pro-chart-drawing-tombstones')!).TXF[d.id].writers).toContain('foreign');
+            }
+        }
+    });
+
     it('排隊的歷史保留原圖表 writer；復原／重做也通知其他圖表', () => {
         const a = createDrawingWriter();
         const b = createDrawingWriter();
@@ -813,6 +899,35 @@ describe('設定 revision：舊關窗日誌不能覆蓋新設定', () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
 
+    it.each(cases)('無 revision 的晚關日誌只補缺漏欄位，不能覆蓋主資料 %s', (field, old, newer) => {
+        store.set(KEY, JSON.stringify({ [field]: newer, settingRevisions: { [field]: '0000000000000001:new' } }));
+        store.set('sj-chart-drawings-pending:legacy', JSON.stringify({ at: 9999999999999, settings: { [field]: old } }));
+        reloadDrawingSettingsFromStorage();
+        expect(getDrawingSettings()[field]).toEqual(newer);
+        flushDrawingWrites();
+        expect(JSON.parse(store.get(KEY)!)[field]).toEqual(newer);
+    });
+
+    it('無 revision 的日誌不能覆蓋同樣無 revision 的主欄位，但可補缺漏', () => {
+        store.set(KEY, JSON.stringify({ magnet: false }));
+        store.set('sj-chart-drawings-pending:legacy', JSON.stringify({ at: 9999999999999, settings: { magnet: true, favorites: ['box'] } }));
+        reloadDrawingSettingsFromStorage();
+        expect(getDrawingSettings()).toMatchObject({ magnet: false, favorites: ['box'] });
+        flushDrawingWrites();
+        expect(JSON.parse(store.get(KEY)!)).toMatchObject({ magnet: false, favorites: ['box'] });
+    });
+
+    it('舊格式日誌物件沿用 updatedAt 相容規則，關窗 at 不影響物件勝負', () => {
+        const main = { id: 'legacy', tool: 'horizontal', anchors: [{ time: 1, price: 100 }], style: DEFAULT_DRAWING_STYLE, createdAt: 1, updatedAt: 100, name: '主資料' };
+        const old = { ...main, updatedAt: 50, name: '舊日誌' };
+        store.set('sj-pro-chart-drawings', JSON.stringify({ TXF: [main] }));
+        store.set('sj-chart-drawings-pending:legacy', JSON.stringify({ at: 9999999999999, ops: { TXF: { legacy: old, missing: { ...old, id: 'missing' } } } }));
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').map((d) => [d.id, d.name])).toEqual([['legacy', '主資料'], ['missing', '舊日誌']]);
+        flushDrawingWrites();
+        expect(JSON.parse(store.get('sj-pro-chart-drawings')!).TXF.map((d: { id: string; name: string }) => [d.id, d.name])).toEqual([['legacy', '主資料'], ['missing', '舊日誌']]);
+    });
+
     it.each(cases)('A 留下 %s 舊設定日誌，B 改同欄位後，讀取與合併都保留 B', async (field, old, newer) => {
         addDrawing('TXF', 'trend', anchors, DEFAULT_DRAWING_STYLE);
         flushDrawingWrites();
@@ -895,7 +1010,7 @@ describe('設定 revision：舊關窗日誌不能覆蓋新設定', () => {
         expect(getDrawingSettings()).toMatchObject({ magnet: true, defaultStyle: { width: 4 } });
         withDrawingWriter('upgrade', () => setDrawingSettings({ magnet: false }));
         flushDrawingSettings();
-        expect(JSON.parse(store.get(KEY)!).settingRevisions.magnet).toBe('0000000000000101:upgrade');
+        expect(JSON.parse(store.get(KEY)!).settingRevisions.magnet).toBe('0000000000000001:upgrade');
         flushDrawingWrites();
         vi.resetModules();
         const fresh = await import('./chart-drawings');

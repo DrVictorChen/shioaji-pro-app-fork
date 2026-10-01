@@ -450,11 +450,42 @@ describe('跨視窗改動後的復原／重做', () => {
 });
 
 describe('交易模式與畫圖模式一次只有一種', () => {
+    it.each([false, true])('武裝交易後從物件列表選取（多選=%s），同步解除交易並阻擋下單', async (additive) => {
+        const onEnterDrawingMode = vi.fn();
+        let api!: ChartDrawingsApi;
+        await mount({ receive: (v) => (api = v), tradeArmed: true, onEnterDrawingMode });
+        const d = addDrawing('TXF', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!;
+        await act(async () => {
+            api.select(d.id, additive);
+            expect(onEnterDrawingMode).toHaveBeenCalledTimes(1);
+            expect(api.drawingBusy()).toBe(true); // React 尚未 render 的同一事件
+        });
+        expect(api.selected?.id).toBe(d.id);
+    });
+
+    it.each(['undo', 'redo'] as const)('武裝交易後進入畫圖歷史 %s，也解除交易', async (operation) => {
+        const onEnterDrawingMode = vi.fn();
+        let api!: ChartDrawingsApi;
+        const props = { receive: (v: ChartDrawingsApi) => (api = v), onEnterDrawingMode };
+        const root = await mount({ ...props, tradeArmed: false });
+        const d = addDrawing('TXF', 'horizontal', [{ time: 1, price: 100 }], DEFAULT_DRAWING_STYLE)!;
+        await act(async () => api.rename(d.id, '新名稱'));
+        if (operation === 'redo') await act(async () => api.undo());
+        await act(async () => root.update(createElement(Probe, { ...props, tradeArmed: true })));
+        onEnterDrawingMode.mockClear();
+        await act(async () => api[operation]());
+        expect(onEnterDrawingMode).toHaveBeenCalledTimes(1);
+        expect(api.drawings[0]?.name).toBe(operation === 'redo' ? '新名稱' : undefined);
+    });
+
     it('選畫圖工具會請頂端解除交易模式', async () => {
         const onEnterDrawingMode = vi.fn();
         let api!: ChartDrawingsApi;
         await mount({ receive: (v) => (api = v), tradeArmed: false, onEnterDrawingMode });
-        await act(async () => api.setTool('trend'));
+        await act(async () => {
+            api.setTool('trend');
+            expect(api.drawingBusy()).toBe(true);
+        });
         expect(onEnterDrawingMode).toHaveBeenCalledTimes(1);
         expect(api.tool).toBe('trend');
     });
@@ -1179,15 +1210,15 @@ describe('滑鼠：交易模式與委託線優先於畫圖物件', () => {
         expect(api().selected?.tool).toBe('horizontal');
     });
 
-    it('武裝點價買賣時，按在畫圖物件上不攔截 — 這一下要變成下單', async () => {
+    it('武裝點價買賣時，按在畫圖物件上解除武裝並選取', async () => {
         const api = await setup(true);
         let e!: ReturnType<typeof pressOnLine>;
         await act(async () => {
             e = pressOnLine();
         });
-        expect(e.preventDefault).not.toHaveBeenCalled();
-        expect(e.stopPropagation).not.toHaveBeenCalled();
-        expect(api().selected).toBeNull();
+        expect(e.preventDefault).toHaveBeenCalled();
+        expect(e.stopPropagation).toHaveBeenCalled();
+        expect(api().selected?.tool).toBe('horizontal');
     });
 
     it('委託線已接手的一下（defaultPrevented），畫圖物件不跟著拖', async () => {
@@ -1211,6 +1242,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
     let priceBase = 25200;
     let currentContext = '1:false';
     let tradeArmed = false;
+    const enterMode = vi.fn();
     let beforeContextEffect: (() => void) | null = null;
     let renderEditor = false;
     let receiveApi: (v: ChartDrawingsApi) => void;
@@ -1269,7 +1301,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
                 seriesRef: refs.series,
                 getTimes: () => [1000, 1060, 1120, 1180],
                 tradeArmed,
-                onEnterDrawingMode: () => {},
+                onEnterDrawingMode: enterMode,
                 pnlPerPoint: 200,
                 getBars: () => v2Bars,
             });
@@ -1288,6 +1320,7 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         priceBase = 25200;
         currentContext = '1:false';
         tradeArmed = false;
+        enterMode.mockClear();
         beforeContextEffect = null;
         renderEditor = false;
         vi.stubGlobal('document', {
@@ -1313,6 +1346,36 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         return () => api;
     }
 
+    it.each(['body', 'anchor', 'shift', 'locked', 'text', 'double-text', 'shortcut', 'list-multi'] as const)(
+        '武裝交易後進入畫圖 %s，先解除交易且同步擋住圖表 click', async (entry) => {
+            const api = await setup();
+            let drawing!: Drawing;
+            await act(async () => {
+                drawing = addDrawing('TXF', entry.includes('text') ? 'text' : 'trend',
+                    entry.includes('text') ? [{ time: 1000, price: 25000 }] : [{ time: 1000, price: 25000 }, { time: 1120, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+                if (entry === 'locked') api().select(drawing.id);
+            });
+            if (entry === 'locked') await act(async () => api().toggleLock());
+            await down(300, 300); // 取得鍵盤，但不選物件
+            tradeArmed = true;
+            await act(async () => roots.at(-1)!.update(createElement(V2Probe, { receive: receiveApi })));
+            expect(api().selectedIds).toEqual([]);
+            enterMode.mockClear();
+            await act(async () => {
+                if (entry === 'shortcut') {
+                    keyL.forEach((l) => l({ key: 't', code: 'KeyT', altKey: true, preventDefault: vi.fn() }));
+                } else if (entry === 'text') api().editText(drawing.id);
+                else if (entry === 'list-multi') api().select(drawing.id, true);
+                else if (entry === 'double-text') hostL.get('dblclick')!(ev(0, 200));
+                else hostL.get('mousedown')!(ev(entry === 'body' || entry === 'locked' ? 10 : 0, entry === 'body' || entry === 'locked' ? 150 : 200, { shiftKey: entry === 'shift' }));
+                expect(enterMode).toHaveBeenCalled();
+                expect(api().drawingBusy()).toBe(true);
+            });
+            if (entry === 'shortcut') expect(api().tool).toBe('trend');
+            else expect(api().selectedIds).toContain(drawing.id);
+        },
+    );
+
     const ev = (x: number, y: number, extra: Record<string, unknown> = {}) => ({
         button: 0,
         clientX: x,
@@ -1331,6 +1394,23 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
     const up = async (x: number, y: number) => {
         await act(async () => docL.get('mouseup')?.(ev(x, y)));
     };
+
+    it.each(['draft', 'drag', 'text', 'measure'] as const)('下單防線在沒有選取時仍辨識畫圖 %s，取消後才解除', async (interaction) => {
+        const api = await setup();
+        if (interaction === 'drag') {
+            await act(async () => { addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1120, price: 25100 }], DEFAULT_DRAWING_STYLE); });
+            await down(0, 200);
+        } else {
+            await act(async () => api().setTool(interaction === 'draft' ? 'trend' : interaction));
+            await down(0, 200);
+            if (interaction === 'measure') await down(20, 100); // 量完仍顯示
+        }
+        await act(async () => api().select(null));
+        expect(api().selectedIds).toEqual([]);
+        expect(api().drawingBusy()).toBe(true);
+        await act(async () => api().setTool(null));
+        expect(api().drawingBusy()).toBe(false);
+    });
     const key = async (k: Record<string, unknown>) => {
         const e = {
             key: '',

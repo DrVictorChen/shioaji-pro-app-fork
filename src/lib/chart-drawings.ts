@@ -532,14 +532,14 @@ function loadStore(tombs: Tombs = loadTombs()): Store {
     }
 }
 
-function readSettingRevisions(values: unknown, raw: unknown, legacyAt = 0): SettingRevisions {
+function readSettingRevisions(values: unknown, raw: unknown): SettingRevisions {
     const fields = values && typeof values === 'object' && !Array.isArray(values) ? values : {};
     const revisions = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
     const out: SettingRevisions = {};
     for (const key of SETTING_KEYS) {
         const revision = revisions[key];
         if (isRevision(revision)) out[key] = revision;
-        else if (Object.hasOwn(fields, key)) out[key] = legacyRevision(legacyAt);
+        else if (Object.hasOwn(fields, key)) out[key] = legacyRevision(0);
         if (out[key]) observeRevision(out[key]!);
     }
     return out;
@@ -672,13 +672,17 @@ function loadJournals(): Journal[] {
                     if (isTombstone(v)) m.set(id, v);
                     else {
                         const d = sanitizeDrawing(v);
-                        if (d && d.id === id) m.set(id, d);
+                        if (d && d.id === id) {
+                            const restore = (v as Partial<RestoringDrawing>).restoreTombstone;
+                            m.set(id, isTombstone(restore) && tombWriters(restore).every((w) => w === drawingRevision(d).split(':')[1])
+                                ? { ...d, restoreTombstone: restore } : d);
+                        }
                     }
                 }
                 if (m.size) ops.set(key, m);
             }
-            const settingRevisions = readSettingRevisions(raw.settings, raw.settingRevisions,
-                typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : 0);
+            // 舊日誌只能補缺漏欄位，關窗時間不是設定的修改版本。
+            const settingRevisions = readSettingRevisions(raw.settings, raw.settingRevisions);
             const settingsPatch = pickSettings(sanitizeSettings(raw.settings), Object.keys(settingRevisions) as (keyof DrawingSettings)[]);
             const order: OrderOps = new Map();
             for (const [key, ids] of Object.entries(raw.order ?? {})) {
@@ -756,7 +760,9 @@ function emit() {
 // 兩個視窗不會同時讀到同一份舊資料再各自寫回。收到別的視窗寫入時也是
 // 「對方版本 → 疊上本視窗還沒寫出去的改動」。同一個物件兩邊都改時，
 // revision 較大的一方勝出；刪除永遠勝出。
-type Op = Drawing | Tombstone;
+// 撤銷的確切墓碑與復原物件共用同一筆 op；失敗、重試、關窗日誌都一起保留。
+type RestoringDrawing = Drawing & { restoreTombstone?: Tombstone };
+type Op = RestoringDrawing | Tombstone;
 const pending = new Map<string, Map<string, Op>>();
 // 只重放實際移動的物件，不覆蓋遠端對其他物件的排序。
 const pendingOrder: OrderOps = new Map();
@@ -769,6 +775,10 @@ function record(key: string, id: string, op: Op) {
     if (!ops) {
         ops = new Map();
         pending.set(key, ops);
+    }
+    const previous = ops.get(id);
+    if (!isTombstone(op) && op.restoreTombstone === undefined && previous && !isTombstone(previous) && previous.restoreTombstone !== undefined) {
+        op = { ...op, restoreTombstone: previous.restoreTombstone };
     }
     ops.set(id, op);
     const revision = isTombstone(op) ? tombRevision(op) : drawingRevision(op);
@@ -785,6 +795,19 @@ function record(key: string, id: string, op: Op) {
     }
 }
 
+function restoreTombstones(tombs: Tombs, ops: Map<string, Map<string, Op>>) {
+    for (const [key, byId] of ops) for (const [id, op] of byId) {
+        if (isTombstone(op) || op.restoreTombstone === undefined) continue;
+        const current = tombs[key]?.[id];
+        const original = op.restoreTombstone;
+        // 只撤銷歷史操作已核對的那一版；遠端新刪除或 writer 聯集仍優先。
+        if (current !== undefined && tombRevision(current) === tombRevision(original) &&
+            tombWriters(current).slice().sort().join(':') === tombWriters(original).slice().sort().join(':')) {
+            delete tombs[key]![id];
+        }
+    }
+}
+
 function applyOps(
     base: Store,
     ops: Map<string, Map<string, Op>>,
@@ -792,6 +815,7 @@ function applyOps(
     order: OrderOps = pendingOrder,
 ): Store {
     if (!ops.size && !order.size) return base;
+    restoreTombstones(tombs, ops);
     const out: Store = { ...base };
     for (const [key, byId] of ops) {
         const list = [...(out[key] ?? [])];
@@ -804,9 +828,13 @@ function applyOps(
             } else if (buried(tombs, key, op)) {
                 if (i >= 0) list.splice(i, 1);
             } else if (i >= 0) {
-                if (drawingRevision(list[i]!) <= drawingRevision(op)) list[i] = op;
+                if (drawingRevision(list[i]!) <= drawingRevision(op)) {
+                    const { restoreTombstone: _restore, ...drawing } = op;
+                    list[i] = _restore === undefined ? op : drawing;
+                }
             } else {
-                list.push(op);
+                const { restoreTombstone: _restore, ...drawing } = op;
+                list.push(_restore === undefined ? op : drawing);
             }
         }
         // 合併時不刪使用者的物件：兩個視窗各自在 199 個時再加一個，合併
@@ -1208,6 +1236,7 @@ function rememberRemoteWrites(base: Store, tombs: Tombs) {
     }
 }
 function acceptRemoteChanges(base: Store, tombs: Tombs, journals: Journal[]) {
+    restoreTombstones(tombs, pending);
     const results = new Map<string, { changed: Set<string>; changedIds: Map<string, Set<string>>; writes: ReturnType<typeof remoteWritesOf> }>();
     for (const writer of new Set([activeWriter, ...observedRemoteWrites.keys(), ...remoteListeners.values()])) {
         const writes = remoteWritesOf(base, tombs, journals, writer);
@@ -1275,11 +1304,15 @@ export function applyDrawingHistory(step: HistoryStep, applied: (success: boolea
             applied(false);
             return;
         }
+        const restores = new Map<string, Tombstone>();
         for (const c of step.changes) if (c[step.side]) {
+            const pendingDelete = pending.get(step.key)?.get(c.id);
+            const tomb = isTombstone(pendingDelete) ? pendingDelete : tombs[step.key]?.[c.id];
+            if (tomb !== undefined) restores.set(c.id, tomb);
             if (tombs[step.key]) delete tombs[step.key]![c.id];
             if (isTombstone(pending.get(step.key)?.get(c.id))) pending.get(step.key)?.delete(c.id);
         }
-        commit(step.key, applyChanges(getDrawings(step.key), step.changes, step.side, step.order), tombs);
+        commit(step.key, applyChanges(getDrawings(step.key), step.changes, step.side, step.order), tombs, restores);
         // 復原／重做也是這張圖的新寫入，其他圖表立即套用遠端清空規則。
         acceptRemoteChanges(base, tombs, journals);
         writeDrawingsNow({ base, tombs, journals });
@@ -1367,9 +1400,10 @@ export function addDrawing(
 }
 
 // 把 key 的清單換成 next，並把有變動的物件記進待寫入（依 id）
-function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs) {
+function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs, restores?: Map<string, Tombstone>) {
     const tombs = historyTombs ?? loadTombs();
     if (!historyTombs) loadView(tombs); // 尚未併進主項目的關窗日誌也可能已有墓碑。
+    restoreTombstones(tombs, pending);
     nextIn = nextIn.filter((d) => !buried(tombs, key, d) && !isTombstone(pending.get(key)?.get(d.id)));
     const before = store[key] ?? EMPTY;
     for (const d of before) {
@@ -1386,7 +1420,8 @@ function commit(key: string, nextIn: Drawing[], historyTombs?: Tombs) {
     const next = nextIn.map((d) => {
         if (prev.get(d.id) === d) return d;
         const stamped = { ...d, updatedAt: now, revision: nextRevision() };
-        record(key, d.id, stamped);
+        const restoreTombstone = restores?.get(d.id);
+        record(key, d.id, restoreTombstone === undefined ? stamped : { ...stamped, restoreTombstone });
         return stamped;
     });
     // 合併預設把新物件加在尾端；調整圖層或復原刪除插回中間時，

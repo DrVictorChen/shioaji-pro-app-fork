@@ -339,6 +339,11 @@ export function useChartDrawings(opts: {
     getBarsRef.current = opts.getBars;
     const onEnterDrawingModeRef = useRef(opts.onEnterDrawingMode);
     onEnterDrawingModeRef.current = opts.onEnterDrawingMode;
+    const enterDrawingMode = useCallback(() => {
+        // 同一個滑鼠／鍵盤事件內的 chart click 不能等 React render 才解除武裝。
+        stateRef.current.tradeArmed = false;
+        onEnterDrawingModeRef.current();
+    }, []);
 
     // ── 復原 ─────────────────────────────────────────────────────────
     const bumpHistory = useCallback(() => setHistoryVer((v) => v + 1), []);
@@ -413,14 +418,16 @@ export function useChartDrawings(opts: {
     );
     const undo = useCallback(() => {
         if (historyBusyRef.current) return;
+        enterDrawingMode();
         cancelInteractionsRef.current(true);
         applyHistory(historyRef.current.undo());
-    }, [applyHistory]);
+    }, [applyHistory, enterDrawingMode]);
     const redo = useCallback(() => {
         if (historyBusyRef.current) return;
+        enterDrawingMode();
         cancelInteractionsRef.current(true);
         applyHistory(historyRef.current.redo());
-    }, [applyHistory]);
+    }, [applyHistory, enterDrawingMode]);
 
     // ── layer 掛載 ───────────────────────────────────────────────────
     // 注意：這個 effect 必須在 candle-chart 建立圖表的 effect 之後註冊
@@ -773,9 +780,11 @@ export function useChartDrawings(opts: {
         const finishCreate = (created: Drawing | null, before: Drawing[]) => {
             draftRef.current = null;
             setTool(null); // 與圖表既有的交易模式一樣是一次性
+            stateRef.current.tool = null;
             pushState();
             if (!created) return;
             setSelectedIds([created.id]);
+            stateRef.current.selectedIds = [created.id];
             if (created.tool === 'text') {
                 // 文字：先開輸入框，確定後才算一步（取消＝整筆不留）
                 textTxRef.current = { id: created.id, key: stateRef.current.symbolKey, context: stateRef.current.contextKey, before, created: true };
@@ -796,9 +805,6 @@ export function useChartDrawings(opts: {
             finishTextRef.current();
             // 圖表本體取得鍵盤焦點 — Delete 只在焦點還在這張圖時作用
             focusHost();
-            // 交易模式武裝中：這一下是點價下單，畫圖物件不能攔（選取、拖曳
-            // 都會吃掉事件，圖表的 click 就不會觸發）
-            if (stateRef.current.tradeArmed) return;
             // 委託線拖曳（同一個 host 上先註冊的 handler）已經吃掉這一下
             if (e.defaultPrevented) return;
             const layer = layerOf();
@@ -820,6 +826,7 @@ export function useChartDrawings(opts: {
             }
 
             if (armed) {
+                enterDrawingMode();
                 e.preventDefault();
                 e.stopPropagation(); // 這一下屬於畫圖，不要變成平移或點價
                 const anchor = anchorAt(projector, pt, armed);
@@ -878,10 +885,12 @@ export function useChartDrawings(opts: {
                 return;
             }
             const id = picked.drawing.id;
+            enterDrawingMode();
             let nextSel: readonly string[];
             if (e.shiftKey) {
                 // Shift：加入／移出多選
                 nextSel = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+                stateRef.current.selectedIds = nextSel;
                 setSelectedIds(nextSel);
                 if (!nextSel.includes(id)) {
                     e.preventDefault();
@@ -892,6 +901,7 @@ export function useChartDrawings(opts: {
                 nextSel = cur.includes(id) ? cur : [id];
                 if (nextSel !== cur) setSelectedIds(nextSel);
             }
+            stateRef.current.selectedIds = nextSel;
             if (picked.drawing.locked) {
                 // 選起來就好，不攔截這一下 — 大面積的鎖定方框若吃掉事件，
                 // 在它上面就再也拖不動圖表了。鎖定＝不能動它，不是不能
@@ -1001,13 +1011,14 @@ export function useChartDrawings(opts: {
 
         // 雙擊文字註記 = 編輯文字
         const dbl = (e: MouseEvent) => {
-            if (stateRef.current.tradeArmed || stateRef.current.tool || onOverlay(e)) return;
+            if (stateRef.current.tool || onOverlay(e)) return;
             const layer = layerOf();
             const pt = layer?.pointOf(e);
             const projector = layer?.projector();
             if (!layer || !pt || !projector) return;
             const picked = pick(projector, pt);
             if (picked?.drawing.tool !== 'text' || picked.drawing.locked) return;
+            enterDrawingMode();
             beginOperation();
             e.preventDefault();
             e.stopPropagation();
@@ -1015,6 +1026,7 @@ export function useChartDrawings(opts: {
             cancelInteractionsRef.current(true);
             textTxRef.current = { id: picked.drawing.id, key: stateRef.current.symbolKey, context: stateRef.current.contextKey, before: getDrawings(stateRef.current.symbolKey), created: false };
             setSelectedIds([picked.drawing.id]);
+            stateRef.current.selectedIds = [picked.drawing.id];
             setEditingTextId(picked.drawing.id);
         };
 
@@ -1097,11 +1109,11 @@ export function useChartDrawings(opts: {
             if (frame !== null) cancelRaf(frame);
             if (drag) setChartInteractive(true); // 拖曳中被卸載 — 別讓圖表卡住
         };
-    }, [hostRef, chartRef, pushState, token, clearMeasure, beginOperation, bumpHistory, writer, cancelText]);
+    }, [hostRef, chartRef, pushState, token, clearMeasure, beginOperation, bumpHistory, writer, cancelText, enterDrawingMode]);
 
     // 交易模式武裝時收起畫圖工具、量測並取消選取：兩者不會同時吃同一下
     // 點擊，武裝點價買賣時按 Delete 也不會刪到剛才選著的畫圖物件
-    useEffect(() => {
+    useLayoutEffect(() => {
         if (!tradeArmed) return;
         cancelInteractionsRef.current(true);
     }, [tradeArmed]);
@@ -1130,11 +1142,11 @@ export function useChartDrawings(opts: {
 
     const setToolChecked = useCallback(
         (t: DrawingToolId | null) => {
+            enterDrawingMode();
             cancelInteractionsRef.current(true);
             toolContextRef.current = stateRef.current.contextKey;
             // 動到左側工具列就離開交易模式 — 包含按「游標」，那是這一側的
             // 中性狀態，也是從交易模式脫身的方式之一
-            onEnterDrawingModeRef.current();
             if (t) {
                 clearMeasure();
                 setSelectedIds([]);
@@ -1144,9 +1156,10 @@ export function useChartDrawings(opts: {
                 if (last[group] !== t) setDrawingSettings({ groupLast: { ...last, [group]: t } });
             }
             setTool(t);
+            stateRef.current.tool = t;
             pushState();
         },
-        [clearMeasure, pushState, token],
+        [clearMeasure, pushState, token, enterDrawingMode],
     );
 
     const removeSelected = useCallback(() => {
@@ -1209,7 +1222,7 @@ export function useChartDrawings(opts: {
             }
             const shortcut = toolShortcutOf(e);
             if (shortcut) {
-                if (!focused || s.tradeArmed) return;
+                if (!focused) return;
                 e.preventDefault();
                 setToolChecked(s.tool === shortcut ? null : shortcut);
                 return;
@@ -1376,14 +1389,16 @@ export function useChartDrawings(opts: {
 
     const select = useCallback(
         (id: string | null, additive = false) => {
-            if (id) claimKeyboard(token);
-            setSelectedIds((cur) => {
-                if (!id) return [];
-                if (!additive) return [id];
-                return cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
-            });
+            if (id) {
+                enterDrawingMode();
+                claimKeyboard(token);
+            }
+            const cur = stateRef.current.selectedIds;
+            const next = !id ? [] : !additive ? [id] : cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+            stateRef.current.selectedIds = next;
+            setSelectedIds(next);
         },
-        [token],
+        [token, enterDrawingMode],
     );
 
     // 輸入框改價：同樣吸附到合法跳動價位，與拖曳的結果一致
@@ -1434,12 +1449,14 @@ export function useChartDrawings(opts: {
     const editText = useCallback((id: string) => {
         const d = stateRef.current.drawings.find((x) => x.id === id);
         if (!d || d.tool !== 'text' || d.locked) return;
+        enterDrawingMode();
         cancelInteractionsRef.current(true);
         historyRef.current.begin(stateRef.current.symbolKey, getDrawingHistoryStart());
         textTxRef.current = { id, key: stateRef.current.symbolKey, context: stateRef.current.contextKey, before: getDrawings(stateRef.current.symbolKey), created: false };
         setSelectedIds([id]);
+        stateRef.current.selectedIds = [id];
         setEditingTextId(id);
-    }, []);
+    }, [enterDrawingMode]);
 
     // text＝null：取消編輯（新建的文字整筆不留）
     const commitText = useCallback(
@@ -1562,7 +1579,8 @@ export function useChartDrawings(opts: {
     // 量測完成後還顯示著的那段時間也算：這時點一下是「清除量測」，
     // 不能被委託線接去改價
     const drawingBusy = useCallback(
-        () => stateRef.current.selectedIds.length > 0 || !!measureRef.current,
+        () => !!(stateRef.current.tool || stateRef.current.selectedIds.length || draftRef.current ||
+            measureRef.current || cancelDragRef.current || textTxRef.current),
         [],
     );
     const drawingLabelAt = useCallback((clientY: number) => {
