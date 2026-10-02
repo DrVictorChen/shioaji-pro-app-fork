@@ -1,3 +1,4 @@
+import { canTrade } from '../lib/account-tradable';
 import { RefreshButton } from './refresh-button';
 import { fetchChartHistory, nextChartHistoryRevision } from '../lib/chart-history';
 // src/components/candle-chart.tsx — K-bar candlestick + volume chart
@@ -290,7 +291,7 @@ export function CandleChart({
     useEffect(ensureAccounts, []);
     const orderAccountView: ChartOrderAccountView = useMemo(() => {
         const m = orderMarket ?? 'S';
-        const eligible = accountState.accounts.filter(a => a.signed && a.account_type === m);
+        const eligible = accountState.accounts.filter(a => canTrade(a) && a.account_type === m);
         const global = m === 'S' ? accountState.selectedStock : accountState.selectedFutures;
         const resolved = resolveFlashAccount(accountState.accounts, m, orderSettings.accountKey, global, true);
         const labels = flashAccountLabels(eligible, privacy);

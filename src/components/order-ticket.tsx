@@ -1,3 +1,4 @@
+import { canTrade } from '../lib/account-tradable';
 // src/components/order-ticket.tsx — buy/sell ticket with two-step EXECUTE.
 // Stock vs futures aware; price autofills from the live quote.
 
@@ -50,7 +51,10 @@ import type {
 import {
     contractMultiplier,
     futuresTaxRate,
+    priceCents,
+    stockSellTax,
     stockTaxRate,
+    stockTradeFee,
 } from '../lib/utils/contract-cost';
 import { fmtPrice } from '../lib/utils/format';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
@@ -285,7 +289,7 @@ export function OrderTicket({
                 if (invalid) throw new Error(invalid);
                 entryAccount = captureSelectedAccount(isFutures ? 'F' : 'S');
                 if (!entryAccount) {
-                    throw new Error('括號單需要有效的已簽署下單帳戶');
+                    throw new Error('括號單需要有效的下單帳戶');
                 }
                 bracketEnv = currentProtectionEnv();
                 if (!bracketEnv) {
@@ -298,7 +302,7 @@ export function OrderTicket({
             const orderAccount =
                 entryAccount ?? captureSelectedAccount(isFutures ? 'F' : 'S');
             if (!orderAccount) {
-                throw new Error('缺少有效且已簽署的下單帳戶，請重新選擇帳戶');
+                throw new Error('缺少有效的下單帳戶，請重新選擇帳戶');
             }
             if (getRiskSettings().confirmManualOrders) {
                 const approved = await requestOrderConfirm({
@@ -421,9 +425,9 @@ export function OrderTicket({
         setSplitArmed(false);
     }, [activeAccountKey]);
     const acctTag = isFutures ? '[期]' : '[證]';
-    // same-type SIGNED accounts are the routing candidates（未簽署不可下單）
+    // 同市場的可交易帳戶可分倉；模擬模式允許未簽署帳戶。
     const routable = accounts.filter(
-        (a) => a.signed && a.account_type === (isFutures ? 'F' : 'S'),
+        (a) => canTrade(a) && a.account_type === (isFutures ? 'F' : 'S'),
     );
     const multi = routable.length >= 2;
     const production = simulation === false;
@@ -533,6 +537,10 @@ export function OrderTicket({
             // 逐戶送出（sequential — deterministic order, per-order risk）
             for (const { account, qty: q } of allocation) {
                 const label = `${account.broker_id}-${maskAccountId(account.account_id, priv)}`;
+                if (!canTrade(account) || !isAccountAvailable(account)) {
+                    fail.push(`${label}: ${ACCOUNT_CHANGED_MESSAGE}；已停止後續分倉`);
+                    break;
+                }
                 const blocked = checkOrderAllowed(q, isFutures ? undefined : orderLot);
                 if (blocked) {
                     fail.push(`${label}: ${blocked}`);
@@ -584,6 +592,7 @@ export function OrderTicket({
                     fail.push(
                         `${label}: ${e instanceof Error ? e.message : String(e)}`,
                     );
+                    if ((e as { tradingGateRejected?: boolean })?.tradingGateRejected) break;
                 }
             }
             notify({
@@ -1412,12 +1421,13 @@ function CostEstimate({
     }
     const shares = odd ? qty : qty * 1000;
     const notional = price * shares;
-    const fee = Math.max(odd ? 1 : 20, Math.round(notional * 0.001425));
+    const cents = priceCents(price) * shares;
+    const fee = stockTradeFee(cents, { odd });
     const baseTaxRate = stockTaxRate(contract);
     // 一般股票當沖賣出減半；ETF 與權證固定 0.1%。
     const taxRate =
         baseTaxRate === 0.003 && daytrade ? 0.0015 : baseTaxRate;
-    const tax = action === 'Sell' ? Math.round(notional * taxRate) : 0;
+    const tax = action === 'Sell' ? stockSellTax(cents, taxRate) : 0;
     return (
         <span className={styles.costRow}>
             金額 {fmtPrice(notional, 0)} · 手續費 ≈ {fee}

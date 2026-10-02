@@ -1,3 +1,4 @@
+import { canTrade } from '../lib/account-tradable';
 import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // src/components/flash-order.tsx — 閃電下單 price ladder (DOM trader).
 // Fixed-window ladder anchored in tick space: the viewport always renders
@@ -254,7 +255,7 @@ export function FlashOrder({
     const [localKeys, setLocalKeys] = useState<FlashAccountKeys>(accountKeys ?? {});
     const panelKeys = onAccountKeysChange ? (accountKeys ?? {}) : localKeys;
     const globalAccount = market === 'S' ? accountState.selectedStock : accountState.selectedFutures;
-    const eligible = accountState.accounts.filter(a => a.signed && a.account_type === market);
+    const eligible = accountState.accounts.filter(a => canTrade(a) && a.account_type === market);
     const resolved = resolveFlashAccount(accountState.accounts, market, panelKeys[market], globalAccount, followMain);
     const activeAccount = resolved.account;
     // account list not fetched yet (startup / a fresh popout): a saved key

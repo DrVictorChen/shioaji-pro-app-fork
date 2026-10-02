@@ -4,6 +4,8 @@
 // moves so the ladder keeps its distance. Grid orders are tagged with
 // custom_field so only our own orders are touched.
 
+import { canTrade } from '../lib/account-tradable';
+
 import { RefreshCw, Zap } from 'lucide-react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useQuote, useTradingLive } from '../hooks/use-stream';
@@ -271,7 +273,7 @@ export function GridTicket({
             isFuturesContract(contract) ? 'F' : 'S',
         );
         if (!gridAccount) {
-            notify({ kind: 'err', title: '鋪單未送出', body: '缺少有效且已簽署的下單帳戶' });
+            notify({ kind: 'err', title: '鋪單未送出', body: '缺少有效的下單帳戶' });
             return;
         }
         // 從確認到送完都鎖住單位切換
@@ -314,6 +316,9 @@ export function GridTicket({
         let ok = 0;
         for (const price of prices) {
             try {
+                if (!canTrade(gridAccount) || !usableCapturedAccount(gridAccount)) {
+                    throw Object.assign(new Error(`${ACCOUNT_CHANGED_MESSAGE}；已停止後續鋪單`), { tradingGateRejected: true });
+                }
                 await placeAt(price, gridAccount, batch);
                 ok += 1;
             } catch (e) {
@@ -322,6 +327,7 @@ export function GridTicket({
                     title: `鋪單失敗 @${fmtPrice(price)}`,
                     body: e instanceof Error ? e.message : String(e),
                 });
+                if ((e as { tradingGateRejected?: boolean })?.tradingGateRejected) break;
             }
         }
         notify({
@@ -388,7 +394,7 @@ export function GridTicket({
             notify({ kind: 'err', title: '鋪單跟隨已停止', body });
         };
         if (!followAccount) {
-            stop('缺少有效且已簽署的下單帳戶');
+            stop('缺少有效的下單帳戶');
             return;
         }
         setFollowAccountShown(followAccount);
@@ -435,6 +441,7 @@ export function GridTicket({
                 let ops = 0;
                 for (const t of mine) {
                     if (ops >= MAX_OPS_PER_CYCLE || changed()) break;
+                    if (!canTrade(followAccount) || !usableCapturedAccount(followAccount)) { stop('跟隨啟動時的帳戶已不可用'); return; }
                     const k = keyOf(t.status.modified_price || t.order.price);
                     if (!desired.has(k) && !unresolvedCancels.current.has(t.order.id)) {
                         ops += 1;
@@ -457,6 +464,7 @@ export function GridTicket({
                 }
                 for (const k of desired) {
                     if (ops >= MAX_OPS_PER_CYCLE || changed()) break;
+                    if (!canTrade(followAccount) || !usableCapturedAccount(followAccount)) { stop('跟隨啟動時的帳戶已不可用'); return; }
                     // skip levels visible in trades OR placed moments ago
                     // (the poll hasn't caught up — re-placing would double)
                     if (!have.has(k) && !recentPlace.current.has(k)) {
