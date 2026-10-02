@@ -224,9 +224,42 @@ it('odd 500 股 → futures → stock: 每檔量 resets instead of becoming 500 
     expect(text(view.root)).toContain('每檔量(口)');
     await act(async () => { view.update(createElement(GridTicket, { contract, trades: [] })); });
     expect(qtyIn().props.value).toBe(1);
-    expect(text(view.root)).toContain('每檔量(張)');
+    expect(text(view.root)).toContain('每檔量(股)');
     // whole lots do not carry into futures either
     await act(async () => { qtyIn().props.onChange({ target: { value: '7' } }); });
     await act(async () => { view.update(createElement(GridTicket, { contract: fut, trades: [] })); });
     expect(qtyIn().props.value).toBe(1);
+});
+
+it('remembers each symbol and reloads its unit without carrying quantities across units', async () => {
+    const qty = () => view.root.findAllByType('input')[3]!;
+    const render = async (c = contract) => { await act(async () => { view.update(createElement(GridTicket, { contract: c, trades: [] })); }); };
+    await act(async () => { view = create(createElement(GridTicket, { contract, trades: [] })); });
+    await act(async () => { btn('盤中零股').props.onClick(); });
+    await act(async () => { qty().props.onChange({ target: { value: '500' } }); });
+    await render({ ...contract, reference: 101 });
+    expect(qty().props.value).toBe(500);
+    await render({ ...contract, code: '2317' });
+    expect(qty().props.value).toBe(1);
+    expect(text(view.root)).toContain('每檔量(張)');
+    await act(async () => { qty().props.onChange({ target: { value: '7' } }); });
+    await render();
+    expect(qty().props.value).toBe(1);
+    expect(text(view.root)).toContain('每檔量(股)');
+    await act(async () => view.unmount());
+    await act(async () => { view = create(createElement(GridTicket, { contract, trades: [] })); });
+    expect(text(view.root)).toContain('每檔量(股)');
+    expect(qty().props.value).toBe(1);
+    await act(async () => { qty().props.onChange({ target: { value: '500' } }); });
+    await render({ ...contract, security_type: 'FUT' });
+    expect(qty().props.value).toBe(1);
+    expect(btn('盤中零股')).toBeUndefined();
+    expect(text(view.root)).toContain('每檔量(口)');
+    await render();
+    expect(text(view.root)).toContain('每檔量(股)');
+    await act(async () => { btn('整股').props.onClick(); });
+    expect(qty().props.value).toBe(1);
+    await render({ ...contract, code: '2317' });
+    await render();
+    expect(text(view.root)).toContain('每檔量(張)');
 });

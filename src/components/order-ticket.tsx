@@ -35,6 +35,7 @@ import {
 import { checkOrderAllowed, getRiskSettings } from '../lib/risk';
 import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, ODD_LOT_WAITING, oddLotReferencePrice, orderQtyUnit, stockOrderProblem } from '../lib/odd-lot';
 import { currentProtectionEnv } from '../lib/protection-env';
+import { loadOrderLotPreference, saveOrderLotPreference, TICKET_LOTS } from '../lib/order-lot-preference';
 import { fetchInfo, placeFuturesOrder, placeStockOrder } from '../lib/shioaji';
 import { notify } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
@@ -77,7 +78,8 @@ export function OrderTicket({
     const [qty, setQty] = useState(1);
     const [priceType, setPriceType] = useState('LMT');
     const [orderType, setOrderType] = useState<OrderType>('ROD');
-    const [orderLot, setOrderLot] = useState<StockOrderLot>('Common');
+    const [orderLot, setOrderLot] = useState<StockOrderLot>(() => loadOrderLotPreference('ticket', contract, TICKET_LOTS, 'Common'));
+    const lotPreferences = useRef(new Map<string, StockOrderLot>());
     const [orderCond, setOrderCond] = useState<StockOrderCond>('Cash');
     // 盤中零股：帶價與括號單參考價只看零股行情（另一個撮合市場，#204）—
     // 零股成交價，否則零股最佳買賣中價／單邊；沒有零股行情就不帶價，
@@ -131,8 +133,10 @@ export function OrderTicket({
         // 期貨）變了，都歸 1 — 股數不會被當成張數或口數（#204）
         const classChanged = unitClassRef.current !== isFutures;
         unitClassRef.current = isFutures;
-        if (orderLotRef.current !== 'Common' || classChanged) setQty(1);
-        setOrderLot('Common');
+        const nextLot = isFutures ? 'Common' : lotPreferences.current.get(contract.code) ?? loadOrderLotPreference('ticket', contract, TICKET_LOTS, 'Common');
+        if (orderLotRef.current !== 'Common' || orderLotRef.current !== nextLot || classChanged) setQty(1);
+        setOrderLot(nextLot);
+        setFixedQty({});
         setOrderCond('Cash');
         setOctype('Auto');
         setDaytradeShort(false);
@@ -142,7 +146,7 @@ export function OrderTicket({
         setSplitOpen(false);
         setSplitArmed(false);
         setAcctMenuOpen(false);
-    }, [contract.code]);
+    }, [contract.code, isFutures]);
 
     // 正式環境判斷：chip 上的 danger 視覺（下錯戶的最後防線）
     useEffect(() => {
@@ -880,7 +884,7 @@ export function OrderTicket({
                                     ['Common', '整股'],
                                     ['IntradayOdd', '盤中零股'],
                                     ['Odd', '盤後零股'],
-                                ] as [StockOrderLot, string][]
+                                ] as const
                             ).map(([lot, label]) => (
                                 <button
                                     key={lot}
@@ -898,6 +902,8 @@ export function OrderTicket({
                                     }
                                     onClick={() => {
                                         if (lot === orderLot) return;
+                                        lotPreferences.current.set(contract.code, lot);
+                                        saveOrderLotPreference('ticket', contract, lot);
                                         setOrderLot(lot);
                                         // 單位改變時數量歸 1，避免 500 股變成 500 張；
                                         // 分倉固定量同理清空，確認步驟全部解除

@@ -24,6 +24,7 @@ import {
 import { useQuote, useTradingLive } from '../hooks/use-stream';
 import { displayBook } from '../lib/display-book';
 import { flashOrderSummary, loadFlashOrderDefault, normalizeChartOrder, saveFlashOrderDefault } from '../lib/chart-order-settings';
+import { loadOrderLotPreference, saveOrderLotPreference, QUICK_ORDER_LOTS } from '../lib/order-lot-preference';
 import { OrderSettingsButton } from './chart-order-popover';
 import { useDisplayBook } from '../hooks/use-display-book';
 import type { Snapshot } from '../lib/types/market';
@@ -275,9 +276,11 @@ export function FlashOrder({
     const defaultSnapshot = useRef<Record<FlashMarket, ReturnType<typeof loadFlashOrderDefault>> | null>(null);
     defaultSnapshot.current ??= { S: loadFlashOrderDefault('S'), F: loadFlashOrderDefault('F') };
     const defaultFor = (m: FlashMarket) => defaultSnapshot.current![m];
-    const [qty, setQty] = useState(() => defaultFor(market).qty);
+    const initialLot = () => loadOrderLotPreference('flash', contract, QUICK_ORDER_LOTS, defaultFor(market).lot);
+    const [qty, setQty] = useState(() => initialLot() === defaultFor(market).lot ? defaultFor(market).qty : 1);
     // 股票：整股（張）或盤中零股（股）（#204）— 每個面板自己的 state
-    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(() => defaultFor(market).lot);
+    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(initialLot);
+    const lotPreferences = useRef(new Map<string, 'Common' | 'IntradayOdd'>());
     const odd = market === 'S' && lot === 'IntradayOdd';
     // 盤中零股是另一個撮合市場：零股模式的五檔、成交價與單量一律取零股
     // 行情（intraday_odd，量以股計），只在這個面板處於零股時才訂閱；
@@ -343,24 +346,25 @@ export function FlashOrder({
         setArmed(false);
     }, [contract.code, accountKey]);
 
-    // 換商品回預設單位；單位變了（或原本是零股）數量也回預設 —
-    // 零股的股數不能沿用成張數
-    // 數量只在輸入時的單位有效：商品類別（股票／期貨）或單位一變就回預設 —
+    // 換商品優先恢復該代碼的單位，未選過則沿用面板預設。
+    // 數量只在輸入時的單位有效：商品類別（股票／期貨）或單位一變就歸 1 —
     // 比對的是切換「之前」的類別與單位（render 後的 odd 已經是新商品的值），
     // 500 股絕不會變成 500 口或 500 張（#204）
     const lotRef = useRef(lot);
     lotRef.current = lot;
     const unitClassRef = useRef<FlashMarket>(market);
-    const firstCode = useRef(true);
+    const symbolRef = useRef({ code: contract.code, market });
     useEffect(() => {
+        if (symbolRef.current.code === contract.code && symbolRef.current.market === market) return;
+        symbolRef.current = { code: contract.code, market };
         const prevClass = unitClassRef.current;
         unitClassRef.current = market;
-        if (firstCode.current) { firstCode.current = false; return; }
         const d = defaultFor(market);
-        if (prevClass !== market || lotRef.current !== d.lot || lotRef.current === 'IntradayOdd') setQty(d.qty);
-        setLot(d.lot);
+        const nextLot = market === 'F' ? 'Common' : lotPreferences.current.get(contract.code) ?? loadOrderLotPreference('flash', contract, QUICK_ORDER_LOTS, d.lot);
+        if (prevClass !== market || lotRef.current !== nextLot || lotRef.current === 'IntradayOdd') setQty(1);
+        setLot(nextLot);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [contract.code]);
+    }, [contract.code, market]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
     // click can't fire into a dead connection (issue #2)
@@ -871,6 +875,8 @@ export function FlashOrder({
                             // 換單位一律先上鎖，股數與張數不能互換
                             armedRef.current = false;
                             setArmed(false);
+                            lotPreferences.current.set(contract.code, next.lot);
+                            saveOrderLotPreference('flash', contract, next.lot);
                             setLot(next.lot);
                         }
                         setQty(next.qty);

@@ -37,6 +37,7 @@ import {
 import { fmtPrice } from '../lib/utils/format';
 import { isOddLot, ODD_LOT_MAX_SHARES, oddLotReferencePrice, orderQtyUnit, type OddBaseQuote } from '../lib/odd-lot';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
+import { loadOrderLotPreference, saveOrderLotPreference, QUICK_ORDER_LOTS } from '../lib/order-lot-preference';
 import * as styles from './order-ticket.css';
 import * as flash from './flash-order.css';
 import * as panel from './panel.css';
@@ -128,7 +129,8 @@ export function GridTicket({
     const [step, setStep] = useState(1); // ticks between levels
     const [qtyPer, setQtyPer] = useState(1);
     // 股票：整股（張）或盤中零股（股）（#204）
-    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>('Common');
+    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(() => loadOrderLotPreference('grid', contract, QUICK_ORDER_LOTS, 'Common'));
+    const lotPreferences = useRef(new Map<string, 'Common' | 'IntradayOdd'>());
     const futures = isFuturesContract(contract);
     const odd = !futures && lot === 'IntradayOdd';
     const unit = orderQtyUnit(futures, lot);
@@ -186,10 +188,11 @@ export function GridTicket({
         setFollow(false);
         const classChanged = unitClassRef.current !== futures;
         unitClassRef.current = futures;
-        if (lotStateRef.current !== 'Common' || classChanged) setQtyPer(1);
-        setLot('Common');
+        const nextLot = futures ? 'Common' : lotPreferences.current.get(contract.code) ?? loadOrderLotPreference('grid', contract, QUICK_ORDER_LOTS, 'Common');
+        if (lotStateRef.current !== 'Common' || lotStateRef.current !== nextLot || classChanged) setQtyPer(1);
+        setLot(nextLot);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [contract.code]);
+    }, [contract.code, futures]);
 
     // our working grid orders for this symbol
     const gridOrders = useMemo(
@@ -556,6 +559,8 @@ export function GridTicket({
                                 title={value === 'IntradayOdd' ? '盤中零股：每檔以股計（1～999 股），限價 ROD、僅現股' : '整股以張計'}
                                 onClick={() => {
                                     if (lot === value) return;
+                                    lotPreferences.current.set(contract.code, value);
+                                    saveOrderLotPreference('grid', contract, value);
                                     setLot(value);
                                     setQtyPer(1);
                                     setFollow(false);
