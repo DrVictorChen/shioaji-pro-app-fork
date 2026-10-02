@@ -43,3 +43,19 @@ it('tolerates denied reads and failed writes', () => {
     vi.stubGlobal('localStorage', { getItem: () => '{}', setItem: () => { throw new Error('quota'); } });
     expect(() => saveOrderLotPreference('flash', stock, 'Common')).not.toThrow();
 });
+
+it('re-reads before writing and merges only this symbol after another window writes', () => {
+    const key = 'sj-pro-order-lot-preferences';
+    saveOrderLotPreference('ticket', stock, 'Odd');
+    // 本視窗先讀取，另一視窗隨後更新不同商品與面板。
+    expect(loadOrderLotPreference('ticket', stock, TICKET_LOTS, 'Common')).toBe('Odd');
+    globalThis.localStorage.setItem(key, JSON.stringify({
+        ticket: { '2330': 'Odd', '2317': 'IntradayOdd' },
+        chart: { '2454': 'Common' },
+    }));
+    saveOrderLotPreference('ticket', stock, 'Common');
+    expect(JSON.parse(globalThis.localStorage.getItem(key)!)).toEqual({
+        ticket: { '2330': 'Common', '2317': 'IntradayOdd' },
+        chart: { '2454': 'Common' },
+    });
+});

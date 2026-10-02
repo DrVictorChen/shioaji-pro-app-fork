@@ -1,12 +1,12 @@
-import type { ContractInfo } from './types/contract';
+import type { ContractBase } from './types/contract';
 
 type Lot = 'Common' | 'IntradayOdd' | 'Odd';
-type Scope = 'ticket' | 'grid' | 'flash';
+type Scope = 'ticket' | 'grid' | 'flash' | 'chart';
 const KEY = 'sj-pro-order-lot-preferences';
 
 /** 各下單面板按商品代碼記住單位；不保存數量，也不改其他已開面板的單位。 */
 export function loadOrderLotPreference<T extends Lot>(
-    scope: Scope, contract: ContractInfo, supported: readonly T[], fallback: T,
+    scope: Scope, contract: ContractBase, supported: readonly T[], fallback: T,
 ): T {
     if (contract.security_type !== 'STK') return fallback;
     try {
@@ -17,7 +17,7 @@ export function loadOrderLotPreference<T extends Lot>(
     }
 }
 
-export function saveOrderLotPreference(scope: Scope, contract: ContractInfo, lot: Lot): void {
+export function saveOrderLotPreference(scope: Scope, contract: ContractBase, lot: Lot): void {
     if (contract.security_type !== 'STK') return;
     try {
         const raw = JSON.parse(globalThis.localStorage?.getItem(KEY) ?? '{}');
