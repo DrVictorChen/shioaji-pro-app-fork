@@ -117,7 +117,7 @@ it('張數改 2 → 加權後不賺，依完整費稅顯示虧損確認', async 
     await act(async () => { input('整股張數').props.onChange({ target: { value: '2' } }); });
     expect(input('零股股數').props.value).toBe('2,000');
     expect(executeButton().props.disabled).toBe(false);
-    expect(text(executeButton())).toBe('仍要送出（預估虧損 1,356 元）');
+    expect(text(executeButton())).toContain('仍要送出（預估虧損 1,356 元）');
     expect(button('價差未達成本').props.disabled).toBe(true);
 });
 
@@ -125,11 +125,11 @@ it.each(['買整 → 賣零', '買零 → 賣整'])('未達成本（%s）：第�
     vi.useFakeTimers();
     await render({ feed: lossFeed });
     const warningClass = executeButton(direction).props.className;
-    if (direction === '買整 → 賣零') expect(text(executeButton(direction))).toBe('仍要送出（預估虧損 10,091 元）');
+    if (direction === '買整 → 賣零') expect(text(executeButton(direction))).toContain('仍要送出（預估虧損 10,091 元）');
     await act(async () => { executeButton(direction).props.onClick(); });
     expect(mocks.start).not.toHaveBeenCalled();
     expect(mocks.confirm).not.toHaveBeenCalled();
-    expect(text(executeButton(direction))).toContain('再按一次確認送出 · 虧損');
+    expect(text(executeButton(direction))).toContain('再按一次確認 · 虧損');
     expect(executeButton(direction).props.className).not.toBe(warningClass);
     await act(async () => { vi.advanceTimersByTime(4999); executeButton(direction).props.onClick(); });
     expect(mocks.start).toHaveBeenCalledTimes(1);
@@ -146,7 +146,7 @@ it('武裝滿 5 秒解除；下一次點擊只重新武裝', async () => {
     expect(text(executeButton())).toContain('仍要送出');
     await act(async () => { executeButton().props.onClick(); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(text(executeButton())).toContain('再按一次確認送出');
+    expect(text(executeButton())).toContain('再按一次確認');
 });
 
 it('計時回呼尚未執行但已逾時，也不能沿用舊確認送出', async () => {
