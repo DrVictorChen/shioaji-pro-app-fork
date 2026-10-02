@@ -34,7 +34,19 @@ import {
     Star,
     X,
 } from 'lucide-react';
-import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+    inOrderLabelArea,
+    orderLineMayTakePointer,
+    useChartDrawings,
+    type ChartDrawingsApi,
+} from '../hooks/use-chart-drawings';
+import {
+    takeDrawingNotices,
+    takeDrawingSaveErrorNotice,
+    useDrawingNotices,
+    useDrawingsSaveFailed,
+} from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
 import {
     colorWithOpacity,
@@ -69,7 +81,9 @@ import { subscribeCustoms } from '../lib/custom-indicators';
 import type { IndicatorPoint } from '../lib/indicators';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
-import { getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
+import { canUpdateOrderPrice } from '../lib/odd-lot';
+import { resetEscCancelArm } from '../lib/esc-cancel-arm';
+import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
 import {
     chartModeHint,
@@ -109,6 +123,8 @@ import {
 } from '../lib/utils/kbars';
 import { roundToTick } from '../lib/utils/ticksize';
 import * as styles from './candle-chart.css';
+import { ChartDrawingOverlays, ChartDrawingTools, ChartObjectList } from './chart-drawing-tools';
+import { toolDef } from '../lib/chart-drawings';
 import { AsyncStatus } from './async-status';
 import * as panel from './panel.css';
 
@@ -123,10 +139,12 @@ const TIMEFRAMES = [
     { label: '1D', minutes: 1440, days: 240 },
 ] as const;
 
+// 圖表一次只在一種模式：交易模式（頂端工具列武裝）或畫圖／瀏覽模式
+// （左側工具列）。'observe' 不是頂端的按鈕，而是「沒有武裝交易工具」的
+// 中性狀態 — 中性時圖表就歸左側工具列管。
 type TradeMode = 'observe' | 'buy' | 'sell' | 'stop' | 'take' | 'alert';
 
 const TRADE_MODES: { key: TradeMode; label: string }[] = [
-    { key: 'observe', label: '游標' },
     { key: 'buy', label: '點價買' },
     { key: 'sell', label: '點價賣' },
     { key: 'stop', label: '停損' },
@@ -213,12 +231,19 @@ export function CandleChart({
             : contract.security_type === 'FUT' || contract.security_type === 'OPT' ? 'F' : null;
     const [localOrder, setLocalOrder] = useState<ChartOrderPanelState>(() => orderSettingsProp ?? {});
     const panelOrder = onOrderSettingsChange ? (orderSettingsProp ?? {}) : localOrder;
-    const [defaultsVer, setDefaultsVer] = useState(0);
+    // 沒有自訂過的市場用「設為預設」的值 — 圖表建立時就對股票與期貨兩種
+    // 市場各取一份快照，之後別的圖按「設為預設」不會改到這張圖（包括它之後
+    // 才切到的市場）；這張圖自己的「設為預設」才更新快照（#204）
+    const defaultSnapshot = useRef<Record<ChartOrderMarket, ChartOrderSettings> | null>(null);
+    defaultSnapshot.current ??= { S: loadChartOrderDefault('S'), F: loadChartOrderDefault('F') };
+    const defaultFor = (m: ChartOrderMarket) => defaultSnapshot.current![m];
+    const savedOrder = panelOrder[orderMarket ?? 'S'];
     const orderSettings: ChartOrderSettings = useMemo(() => {
         const m = orderMarket ?? 'S';
-        const saved = panelOrder[m];
-        return saved ? normalizeChartOrder(saved, m) : loadChartOrderDefault(m);
-    }, [panelOrder, orderMarket, defaultsVer]);
+        return savedOrder ? normalizeChartOrder(savedOrder, m) : defaultFor(m);
+        // defaultFor reads a per-chart snapshot, stable for the chart's lifetime
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [savedOrder, orderMarket]);
     const setOrderSettings = (next: ChartOrderSettings) => {
         if (!orderMarket) return;
         const value = { ...panelOrder, [orderMarket]: normalizeChartOrder(next, orderMarket) };
@@ -326,6 +351,12 @@ export function CandleChart({
     // refs so the chart click handler always sees current values
     const modeRef = useRef(mode);
     modeRef.current = mode;
+    const armedDrawingSequenceRef = useRef<number | null>(null);
+    const setTradeMode = (next: TradeMode) => {
+        modeRef.current = next;
+        armedDrawingSequenceRef.current = next === 'observe' ? null : drawingsRef.current?.interactionSequence() ?? null;
+        setMode(next);
+    };
     const contractRef = useRef(contract);
     contractRef.current = contract;
     const lastPriceRef = useRef<number | null>(null);
@@ -429,7 +460,13 @@ export function CandleChart({
         volSeriesRef.current = vol;
 
         chart.subscribeClick((param) => {
+            // 第二道防線：畫圖選取／草稿／拖曳／文字／量測均不能進入下單路徑。
+            if (drawingsRef.current?.drawingBusy()) return;
             const m = modeRef.current;
+            // 武裝以後只要發生畫圖互動，這次授權就失效；即使 mode 的更新
+            // 尚未 render 或某入口未清模式，也不得進入 placeQuickOrder。
+            if (m !== 'observe' && (armedDrawingSequenceRef.current === null ||
+                armedDrawingSequenceRef.current !== drawingsRef.current?.interactionSequence())) return;
             if (!param.point) return;
             const raw = candles.coordinateToPrice(param.point.y);
             if (raw === null) return;
@@ -447,6 +484,8 @@ export function CandleChart({
             const odd = market === 'S' && settings.lot === 'IntradayOdd';
             const view = orderAccountRef.current;
             const account: Account | undefined = view.active;
+            modeRef.current = 'observe';
+            armedDrawingSequenceRef.current = null;
             setMode('observe'); // one-shot
             if (m !== 'alert' && (view.missing || !account)) {
                 notify({ kind: 'err', title: '圖表下單未送出', body: view.missing ? '圖表設定的固定帳號已不可用，請在下單設定重新選擇' : '沒有可用的下單帳號' });
@@ -1257,15 +1296,57 @@ export function CandleChart({
         };
     }, [orderKey, themeKey, contract.code]);
 
+    // 畫圖工具武裝中（下方 useChartDrawings 每次 render 更新）。委託線的
+    // 拖曳 effect 宣告在畫圖 hook 之前，靠這個 ref 讀最新狀態
+    const drawingArmedRef = useRef(false);
+    const drawingsRef = useRef<ChartDrawingsApi | null>(null);
+    const cancelOrderDragRef = useRef<() => boolean>(() => false);
+    const orderDragContext = `${contract.security_type}:${contract.code}:${tf.minutes}:${dayOnly}:${historySeq}`;
+    const orderDragContextRef = useRef(orderDragContext);
+    orderDragContextRef.current = orderDragContext;
+    // 舊委託線被重建前也要還原／解除拖曳；render 後、effect 前的事件由 context 核對阻擋。
+    useLayoutEffect(() => { cancelOrderDragRef.current(); }, [orderDragContext, orderKey, themeKey]);
+
     // drag an order line to modify its price
     useEffect(() => {
         const host = hostRef.current;
         if (!host) return;
-        let dragging: { trade: Trade; line: IPriceLine; price: number } | null =
+        let sequence = 0;
+        let dragging: { trade: Trade; line: IPriceLine; price: number; originalPrice: number; sequence: number; drawingSequence: number; context: string } | null =
             null;
         // active document listeners — removed on unmount if a drag is live
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: (() => void) | null = null;
+
+        const releasePointer = () => {
+            if (activeMove) document.removeEventListener('mousemove', activeMove, true);
+            if (activeUp) document.removeEventListener('mouseup', activeUp, true);
+            activeMove = null;
+            activeUp = null;
+            window.removeEventListener('keydown', escape, true);
+            chartRef.current?.applyOptions({ handleScroll: true, handleScale: true });
+            if (host.style.cursor === 'ns-resize') host.style.cursor = '';
+        };
+        const cancel = () => {
+            sequence++;
+            const d = dragging;
+            dragging = null;
+            if (!d) return false;
+            // cleanup 時圖表可能已移除；仍必須釋放 document listeners。
+            try { d.line.applyOptions({ price: d.originalPrice }); } catch { /* series 已釋放 */ }
+            releasePointer();
+            return true;
+        };
+        cancelOrderDragRef.current = cancel;
+        const current = (d: NonNullable<typeof dragging>) => dragging === d && d.sequence === sequence &&
+            d.drawingSequence === drawingsRef.current?.interactionSequence() && d.context === orderDragContextRef.current;
+        const escape = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || !dragging) return;
+            drawingsRef.current?.onInteraction();
+            cancel();
+            e.preventDefault();
+            resetEscCancelArm();
+        };
 
         const yOf = (e: MouseEvent) =>
             e.clientY - host.getBoundingClientRect().top;
@@ -1274,25 +1355,60 @@ export function CandleChart({
             const series = candleSeriesRef.current;
             if (!series) return null;
             for (const t of workingOrdersRef.current) {
+                // 零股委託不能改價（#204）：委託線不可拖曳
+                if (!canUpdateOrderPrice(t.order)) continue;
                 const line = orderLinesRef.current.get(t.order.id);
                 if (!line) continue;
                 const coord = series.priceToCoordinate(line.options().price);
                 if (coord !== null && Math.abs(coord - y) <= 6) {
-                    return { trade: t, line };
+                    return { trade: t, line, coord };
                 }
             }
             return null;
         };
 
+        // 畫圖的浮動工具列／文字框蓋在委託線上時，那一下屬於它們
+        const onOverlay = (e: MouseEvent) =>
+            !!(e.target as HTMLElement | null)?.closest?.('[data-drawing-overlay]');
+
+        // 委託線能不能接手這一下（見 orderLineMayTakePointer）。右側把手
+        // 區＝價格軸上委託線自己的價格標籤（不含繪圖區）
+        const mayTake = (e: MouseEvent) => {
+            const d = drawingsRef.current;
+            const rect = host.getBoundingClientRect();
+            const axis = chartRef.current?.priceScale('right').width() ?? 60;
+            const onLabel = inOrderLabelArea(e.clientX - rect.left, rect.width, axis);
+            return orderLineMayTakePointer({
+                drawingLabelAtPointer: onLabel && (d?.drawingLabelAt(e.clientY) ?? false),
+                drawingArmed: drawingArmedRef.current,
+                defaultPrevented: e.defaultPrevented,
+                // 價格軸上沒有畫圖物件（只畫在繪圖區）；線端的命中容差不算
+                drawingHit: onLabel ? null : (d?.drawingAt(e) ?? null),
+                drawingBusy: d?.drawingBusy() ?? false,
+                inGrip: onLabel,
+            });
+        };
+
         const hover = (e: MouseEvent) => {
-            if (dragging) return;
-            host.style.cursor = findNear(yOf(e)) ? 'ns-resize' : '';
+            if (dragging || onOverlay(e)) return;
+            const near = findNear(yOf(e));
+            // 武裝畫圖工具、或這個位置歸畫圖物件時委託線不接手，游標交給畫圖
+            if (!near || !mayTake(e)) {
+                if (host.style.cursor === 'ns-resize') host.style.cursor = '';
+                return;
+            }
+            host.style.cursor = 'ns-resize';
         };
 
         const down = (e: MouseEvent) => {
-            if (e.button !== 0) return;
+            if (e.button !== 0 || onOverlay(e)) return;
+            // 「委託線優先」只在瀏覽模式：武裝畫圖工具時這一下屬於畫圖，
+            // 在委託價附近畫線不能變成改價；別的 handler 已經接手的一下
+            // 也不能同時拖畫圖又送出改價
             const hit = findNear(yOf(e));
-            if (!hit) return;
+            if (!hit || !mayTake(e)) return;
+            // 價格軸把手可接手，但不能與未結束的畫圖拖曳／文字／量測共存。
+            drawingsRef.current?.prepareOrderDrag();
             e.preventDefault();
             e.stopPropagation();
             chartRef.current?.applyOptions({
@@ -1303,11 +1419,17 @@ export function CandleChart({
                 trade: hit.trade,
                 line: hit.line,
                 price: hit.line.options().price,
+                originalPrice: hit.line.options().price,
+                sequence: ++sequence,
+                drawingSequence: drawingsRef.current?.interactionSequence() ?? -1,
+                context: orderDragContextRef.current,
             };
+            const session = dragging;
 
             const move = (ev: MouseEvent) => {
                 const series = candleSeriesRef.current;
-                if (!series || !dragging) return;
+                if (!series || dragging !== session) return;
+                if (!current(session)) { cancel(); return; }
                 const raw = series.coordinateToPrice(yOf(ev));
                 if (raw === null) return;
                 const np = roundToTick(contractRef.current, Number(raw));
@@ -1315,16 +1437,13 @@ export function CandleChart({
                 dragging.line.applyOptions({ price: np });
             };
             const up = () => {
-                document.removeEventListener('mousemove', move, true);
-                document.removeEventListener('mouseup', up, true);
-                activeMove = null;
-                activeUp = null;
-                chartRef.current?.applyOptions({
-                    handleScroll: true,
-                    handleScale: true,
-                });
+                // 遲到的舊 mouseup 不得接手新拖曳，更不能送出舊的改價。
+                if (dragging !== session) return;
+                if (!current(session)) { cancel(); return; }
+                releasePointer();
                 const d = dragging;
                 dragging = null;
+                sequence++;
                 if (!d) return;
                 const orig =
                     d.trade.status.modified_price || d.trade.order.price;
@@ -1354,20 +1473,70 @@ export function CandleChart({
             document.addEventListener('mouseup', up, true);
             activeMove = move;
             activeUp = up;
+            window.addEventListener('keydown', escape, true);
         };
 
         host.addEventListener('mousedown', down, true); // capture: beat chart pan
         host.addEventListener('mousemove', hover, true);
         return () => {
+            cancel();
+            cancelOrderDragRef.current = () => false;
             host.removeEventListener('mousedown', down, true);
             host.removeEventListener('mousemove', hover, true);
-            // unmounted mid-drag — drop the document listeners too
-            if (activeMove) {
-                document.removeEventListener('mousemove', activeMove, true);
-            }
-            if (activeUp) document.removeEventListener('mouseup', activeUp, true);
+            window.removeEventListener('keydown', escape, true);
         };
     }, []);
+
+    // 畫圖工具（issue #122 二／三）。宣告位置有兩個前提（同一個元件的
+    // effect 依宣告順序執行）：
+    // - 在建立圖表的 effect 之後 — 掛 primitive 時 candleSeriesRef 才有值
+    // - 在委託線拖曳的 effect 之後 — host 上的 mousedown／mousemove 由
+    //   委託線先處理：真實委託優先於畫圖物件，游標也由它先決定
+    const barTimesRef = useRef<number[]>([]);
+    useEffect(() => {
+        barTimesRef.current = barsRef.current.map((b) => b.time);
+    }, [dataVersion]);
+    const drawings = useChartDrawings({
+        contract,
+        contextKey: `${tf.minutes}:${dayOnly}:${historySeq}`,
+        hostRef,
+        chartRef,
+        seriesRef: candleSeriesRef,
+        getTimes: () => barTimesRef.current,
+        tradeArmed: mode !== 'observe',
+        onInvalidateInteraction: () => cancelOrderDragRef.current(),
+        onEnterDrawingMode: () => {
+            modeRef.current = 'observe';
+            setMode('observe');
+        },
+        themeMode: baseMode(themeSettings),
+        getBars: () => barsRef.current,
+        // 量測換算損益：期貨／選擇權＝口數 × 乘數；股票＝張數 × 1000 股
+        // （零股＝股數）。不知道乘數時不顯示損益
+        pnlPerPoint: drawingPnlPerPoint(contract, orderMarket, orderSettings),
+        chartBackground: colors.labelBg,
+    });
+    drawingArmedRef.current = drawings.tool !== null;
+    drawingsRef.current = drawings;
+
+    // 畫圖存不進 localStorage（配額滿）— 畫面上的物件還在，但關掉就沒了。
+    // 多張圖同時訂閱，notice 只由第一張拿到的圖發出
+    const drawingsSaveFailed = useDrawingsSaveFailed();
+    useEffect(() => {
+        if (!drawingsSaveFailed || !takeDrawingSaveErrorNotice()) return;
+        notify({
+            kind: 'err',
+            title: '畫圖未能儲存',
+            body: '瀏覽器儲存空間已滿，新的畫圖只保留到關閉視窗為止。請刪除部分畫圖後再試。',
+        });
+    }, [drawingsSaveFailed]);
+
+    // 物件上限、載入截斷、復原／重做衝突共用畫圖通知
+    const drawingNotices = useDrawingNotices();
+    useEffect(() => {
+        if (!drawingNotices.length) return;
+        for (const body of takeDrawingNotices()) notify({ kind: 'err', title: '畫圖工具', body });
+    }, [drawingNotices]);
 
     // draw trigger price lines on the candle series
     useEffect(() => {
@@ -1658,24 +1827,18 @@ export function CandleChart({
                 </button>
                 <span className={styles.toolbarDivider} />
                 {TRADE_MODES.filter(
-                    // 組合商品只能用組合單下單 — 圖上僅保留觀察/警示，
+                    // 組合商品只能用組合單下單 — 圖上僅保留警示，
                     // 點價買賣與觸價停損停利（flat code 會被 server 拒）
                     // 一律不給
-                    (m) =>
-                        !isCombo || m.key === 'observe' || m.key === 'alert',
+                    (m) => !isCombo || m.key === 'alert',
                 ).map((m) => (
                     <button
                         key={m.key}
-                        className={
-                            styles.modeBtn[
-                                mode === m.key
-                                    ? m.key === 'observe'
-                                        ? 'active'
-                                        : 'armed'
-                                    : 'normal'
-                            ]
-                        }
-                        onClick={() => setMode(m.key)}
+                        className={styles.modeBtn[mode === m.key ? 'armed' : 'normal']}
+                        title={`交易模式：${m.label}`}
+                        // 再按一次退出交易模式。頂端不再有「游標」按鈕，
+                        // 這是留在頂端的解除方式（另一個是點左側工具列）
+                        onClick={() => setTradeMode(mode === m.key ? 'observe' : m.key)}
                     >
                         {m.label}
                     </button>
@@ -1687,7 +1850,7 @@ export function CandleChart({
                         onChange={setOrderSettings}
                         onSaveDefault={() => {
                             saveChartOrderDefault(orderMarket, orderSettings);
-                            setDefaultsVer(v => v + 1);
+                            defaultSnapshot.current![orderMarket] = orderSettings;
                             notify({ kind: 'info', title: '已設為圖表下單預設', body: `新開的${orderMarket === 'F' ? '期貨' : '股票'}圖表使用這組設定（不含帳號）；其他現有圖表維持原設定。` });
                         }}
                         account={orderAccountView}
@@ -1732,6 +1895,8 @@ export function CandleChart({
                 )}
                 <RefreshButton label="更新歷史" loading={loading} onClick={() => setHistorySeq(nextChartHistoryRevision())} />
             </div>
+            <div className={styles.chartRow}>
+            <ChartDrawingTools api={drawings} />
             <div ref={hostRef} className={styles.chartHost}>
                 {loading && (
                     <div className={styles.emptyMsg}>
@@ -1747,7 +1912,12 @@ export function CandleChart({
                 )}
                 {mode !== 'observe' && (
                     <div className={styles.modeHint}>
-                        {chartModeHint(mode, orderSettings, orderMarket ?? 'S')}
+                        交易模式 · {chartModeHint(mode, orderSettings, orderMarket ?? 'S')}
+                    </div>
+                )}
+                {mode === 'observe' && drawings.tool && (
+                    <div className={styles.drawHint}>
+                        畫圖模式 · {toolDef(drawings.tool).label}：{DRAW_HINT[drawings.tool]}（Esc 取消）
                     </div>
                 )}
                 {(workingOrders.length > 0 ||
@@ -1880,7 +2050,36 @@ export function CandleChart({
                         </div>
                     );
                 })}
+                <ChartDrawingOverlays api={drawings} />
+            </div>
+            <ChartObjectList api={drawings} />
             </div>
         </div>
     );
+}
+
+const DRAW_HINT: Record<string, string> = {
+    horizontal: '點擊價位放置水平線',
+    vertical: '點擊時間放置垂直線',
+    trend: '點兩下決定起點與終點',
+    ray: '點兩下決定起點與方向',
+    extended: '點兩下決定斜率',
+    channel: '點兩下畫基準線，第三下決定通道寬度',
+    box: '點兩下決定方框的兩個對角',
+    fib: '點兩下：起點（1）到終點（0）',
+    text: '點一下放置文字，輸入後按 Enter',
+    measure: '點兩下量測價差、K 棒數與時間',
+};
+
+function drawingPnlPerPoint(
+    contract: ContractBase,
+    market: ChartOrderMarket | null | undefined,
+    s: ChartOrderSettings,
+): number | null {
+    if (market === 'F') {
+        const mult = (contract as { multiplier?: number }).multiplier;
+        return mult && mult > 0 ? mult * s.qty : null;
+    }
+    if (market === 'S') return s.qty * (s.lot === 'IntradayOdd' ? 1 : 1000);
+    return null;
 }

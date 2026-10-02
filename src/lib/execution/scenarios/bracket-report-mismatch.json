@@ -1,0 +1,278 @@
+{
+  "schema": "execution-conformance-v1",
+  "name": "bracket-report-mismatch",
+  "description": "Deals of another account are ignored; wrong code / side / missing account raise an issue and are not counted.",
+  "covers": [
+    "bracket",
+    "isolation"
+  ],
+  "steps": [
+    {
+      "event": {
+        "type": "connection",
+        "ts": 1000,
+        "live": true,
+        "env": "simulation",
+        "serverId": "local-a"
+      }
+    },
+    {
+      "event": {
+        "type": "command",
+        "ts": 1001,
+        "id": "c1001",
+        "command": {
+          "op": "create",
+          "program": {
+            "id": "b1",
+            "kind": "bracket",
+            "binding": {
+              "env": "simulation",
+              "serverId": "local-a",
+              "account": {
+                "accountType": "F",
+                "brokerId": "F002000",
+                "accountId": "1234567"
+              },
+              "contract": {
+                "market": "futures",
+                "quoteCode": "TXFR1",
+                "orderCode": "TXFJ6",
+                "securityType": "FUT"
+              }
+            },
+            "version": 1,
+            "status": "running",
+            "pauseReason": null,
+            "hold": null,
+            "ocoLevels": false,
+            "levels": [
+              {
+                "id": "L1",
+                "side": "Buy",
+                "qty": 2,
+                "entry": {
+                  "type": "external",
+                  "orderId": "o-entry"
+                },
+                "exit": {
+                  "type": "oco",
+                  "stop": {
+                    "price": 95,
+                    "condition": "below"
+                  },
+                  "take": {
+                    "price": 110,
+                    "condition": "above"
+                  },
+                  "order": {
+                    "priceType": "MKT",
+                    "timeInForce": "IOC",
+                    "octype": "Cover"
+                  }
+                },
+                "phase": "working",
+                "check": null,
+                "recross": [],
+                "pending": null,
+                "orders": [
+                  {
+                    "key": "simulation/local-a/b1/L1/entry/0/ext",
+                    "role": "entry",
+                    "leg": "entry",
+                    "cycle": 0,
+                    "qty": 2,
+                    "status": "working",
+                    "orderId": "o-entry",
+                    "filled": 0,
+                    "fills": {},
+                    "fillTs": {},
+                    "detail": null,
+                    "acknowledged": false
+                  }
+                ],
+                "position": 0,
+                "entryFilled": 0,
+                "unprotected": 0,
+                "cycles": 0,
+                "detail": null
+              }
+            ],
+            "generator": null,
+            "cycle": {
+              "rearmAfterExit": false,
+              "maxCycles": null,
+              "partialFill": "immediate"
+            },
+            "bounds": {
+              "upper": null,
+              "lower": null,
+              "onBreakUpper": "none",
+              "onBreakLower": "none"
+            },
+            "session": {
+              "resumeRule": "confirm",
+              "longDisconnectMs": 60000,
+              "silentStallMs": 90000
+            },
+            "risk": {
+              "maxWorkingEntries": null
+            },
+            "hooks": [],
+            "intentSeq": 0,
+            "issues": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1002,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o-entry",
+        "eventId": null,
+        "seq": "s1",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "9999999"
+        },
+        "code": "TXFJ6",
+        "action": "Buy",
+        "qty": 1,
+        "price": 100
+      },
+      "expect": {
+        "programs": {
+          "b1": {
+            "levels": {
+              "L1": {
+                "entryFilled": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1003,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o-entry",
+        "eventId": null,
+        "seq": "s2",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "MXFJ6",
+        "action": "Buy",
+        "qty": 1,
+        "price": 100
+      },
+      "expect": {
+        "notices": [
+          "issue.reportMismatch"
+        ],
+        "programs": {
+          "b1": {
+            "levels": {
+              "L1": {
+                "entryFilled": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1004,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o-entry",
+        "eventId": null,
+        "seq": "s3",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Sell",
+        "qty": 1,
+        "price": 100
+      },
+      "expect": {
+        "notices": [
+          "issue.reportMismatch"
+        ]
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1005,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o-entry",
+        "eventId": null,
+        "seq": "s4",
+        "account": null,
+        "code": "TXFJ6",
+        "action": "Buy",
+        "qty": 1,
+        "price": 100
+      },
+      "expect": {
+        "notices": [
+          "issue.reportMismatch"
+        ],
+        "programs": {
+          "b1": {
+            "levels": {
+              "L1": {
+                "entryFilled": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "deal",
+        "ts": 1006,
+        "env": "simulation",
+        "serverId": "local-a",
+        "orderId": "o-entry",
+        "eventId": null,
+        "seq": "s5",
+        "account": {
+          "brokerId": "F002000",
+          "accountId": "1234567"
+        },
+        "code": "TXFJ6",
+        "action": "Buy",
+        "qty": 1,
+        "price": 100
+      },
+      "expect": {
+        "programs": {
+          "b1": {
+            "levels": {
+              "L1": {
+                "entryFilled": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
