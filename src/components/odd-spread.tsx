@@ -10,7 +10,7 @@
 // 主視窗服務 lib/odd-spread-service（面板移除後仍繼續，重新開啟面板可看到）；
 // 行情：hooks/use-odd-spread-feed。
 
-import { Link2, Link2Off } from 'lucide-react';
+import { Link2, Link2Off, Minus, Plus } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAccounts, ensureAccounts } from '../lib/account-store';
 import { scopedFlashRows, accountMatches } from '../lib/flash-account';
@@ -480,6 +480,7 @@ export function OddSpreadView({
             <div className={styles.footer}>
                 <div className={styles.fRow}>
                     <span className={styles.fLabel}>整股</span>
+                    <button className={styles.smallBtn} aria-label='整股減 1 張' disabled={lots <= 0} onClick={() => setLots(v => Math.max(0, v - 1))}><Minus size={11} /></button>
                     <input
                         className={styles.input}
                         aria-label='整股張數'
@@ -490,6 +491,7 @@ export function OddSpreadView({
                             if (Number.isInteger(v) && v >= 0 && v <= 999) setLots(v);
                         }}
                     />
+                    <button className={styles.smallBtn} aria-label='整股加 1 張' disabled={lots >= 999} onClick={() => setLots(v => Math.min(999, v + 1))}><Plus size={11} /></button>
                     <span>張</span>
                     <button
                         className={styles.lockBtn[paired ? 'on' : 'off']}
@@ -503,6 +505,7 @@ export function OddSpreadView({
                         {paired ? <Link2 size={12} /> : <Link2Off size={12} />}配對
                     </button>
                     <span className={styles.fLabel}>零股</span>
+                    <button className={styles.smallBtn} aria-label='零股減 1 股' disabled={paired || oddShares <= 0} onClick={() => setOddShares(v => Math.max(0, v - 1))}><Minus size={11} /></button>
                     <input
                         className={styles.input}
                         aria-label='零股股數'
@@ -514,6 +517,7 @@ export function OddSpreadView({
                             if (Number.isInteger(v) && v >= 0 && v <= 999_000) setOddShares(v);
                         }}
                     />
+                    <button className={styles.smallBtn} aria-label='零股加 1 股' disabled={paired || oddShares >= 999_000} onClick={() => setOddShares(v => Math.min(999_000, v + 1))}><Plus size={11} /></button>
                     <span>股</span>
                     <span
                         className={styles.inventory}
