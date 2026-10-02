@@ -99,9 +99,10 @@ it.each(['production', 'unknown', 'removed'] as const)('refuses a verified cance
 
 it.each([cancelOrder, (id: string, opts: { beforeSend: () => void }) => cancelVerifiedOrder({ ...m.trades[0]!, order: { ...m.trades[0]!.order, id } }, m.accounts[0]!, opts)])('rechecks cancel identity preflight at the actual HTTP boundary', async cancel => {
     const beforeSend = vi.fn();
-    beforeSend.mockImplementationOnce(() => undefined).mockImplementation(() => { throw new Error('伺服器身分已變更'); });
+    beforeSend.mockImplementation(() => { throw new Error('伺服器身分已變更'); });
     await expect(cancel('id', { beforeSend })).rejects.toMatchObject({ mutationNotStarted: true, message: '伺服器身分已變更' });
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(beforeSend).toHaveBeenCalledOnce();
 });
 
 it('discards verified cancellation confirmation when the mode changes away and back during dispatch', async () => {

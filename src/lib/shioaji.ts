@@ -766,8 +766,7 @@ function sendOrderMutation<T>(
     opts?: Parameters<typeof apiPost>[2],
 ) {
     const base = getApiBase();
-    const beforeDispatch = () => {
-        opts?.beforeDispatch?.();
+    const assertAccountCurrent = () => {
         const current = account && getAccountState().accounts.find(a =>
             a.account_type === account.account_type && a.broker_id === account.broker_id && a.account_id === account.account_id);
         if (base !== getApiBase() || !canTrade(current)) {
@@ -775,8 +774,12 @@ function sendOrderMutation<T>(
                 { mutationNotStarted: true as const, tradingGateRejected: true as const });
         }
     };
-    try { beforeDispatch(); }
+    try { assertAccountCurrent(); }
     catch (error) { return Promise.reject(error); }
+    const beforeDispatch = () => {
+        assertAccountCurrent();
+        opts?.beforeDispatch?.();
+    };
     return apiPost<T>(path, body, { ...opts, beforeDispatch });
 }
 
@@ -813,7 +816,7 @@ export function placeStockOrder(
     contract: ContractBase,
     order: StockOrderReq,
     account?: Account,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; onResponse?: (res: Response) => void },
+    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void; onResponse?: (res: Response) => void },
 ) {
     // 零股不支援的組合（融資券／當沖／市價／IOC／超過 999 股）一律在送出前擋下（#204）
     const problem = stockOrderProblem(order);
@@ -829,7 +832,7 @@ export function placeFuturesOrder(
     contract: ContractBase,
     order: FuturesOrderReq,
     account?: Account,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void },
 ) {
     const selected = account ?? accountFor('F');
     return sendOrderMutation<Trade>('/api/v1/order/place_order', {

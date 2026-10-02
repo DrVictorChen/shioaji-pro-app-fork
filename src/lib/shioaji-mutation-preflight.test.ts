@@ -307,8 +307,10 @@ describe('mutation without an authoritative baseline on this sidecar', () => {
     });
 });
 it('cancel beforeSend runs right before the HTTP send; throwing refuses it (not started)', async () => {
+    const dispatch = vi.fn();
+    m.post.mockImplementationOnce(async (_path, _body, opts) => { opts.beforeDispatch(); dispatch(); });
     await expect(cancelOrder('fixture', { beforeSend: () => { throw new Error('環境已切換'); } })).rejects.toMatchObject({ mutationNotStarted: true, message: '環境已切換' });
-    expect(m.post).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
 });
 
 it('cancelVerifiedOrder cancels exactly the supplied server row, never resolving through local rows', async () => {
@@ -326,9 +328,11 @@ it('cancelVerifiedOrder cancels exactly the supplied server row, never resolving
 });
 
 it('cancelVerifiedOrder: beforeSend refusal sends nothing', async () => {
+    const dispatch = vi.fn();
+    m.post.mockImplementationOnce(async (_path, _body, opts) => { opts.beforeDispatch(); dispatch(); });
     const { cancelVerifiedOrder } = await import('./shioaji');
     const stock = { ...account, account_type: 'S' }; m.accounts = [stock];
     await expect(cancelVerifiedOrder({ ...row(), order: { ...row().order, id: 'X' } }, stock, { beforeSend: () => { throw new Error('環境已切換'); } }))
         .rejects.toMatchObject({ mutationNotStarted: true, message: '環境已切換' });
-    expect(m.post).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
 });

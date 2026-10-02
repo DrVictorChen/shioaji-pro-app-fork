@@ -253,10 +253,10 @@ export async function apiPost<T>(
     if (shouldProxyAgentHarnessMutation(isTauri, harnessEnabled, path)) {
         const bodyText = JSON.stringify(body);
         const { invoke } = await import('@tauri-apps/api/core');
-        let proxied: { status: number; body: string };
+        let proxied: { status: number; body: string; headers?: Record<string, string> };
         beforeDispatch();
         try {
-            proxied = await invoke<{ status: number; body: string }>(
+            proxied = await invoke<typeof proxied>(
                 'agent_harness_post',
                 {
                     url: base() + path,
@@ -276,9 +276,11 @@ export async function apiPost<T>(
             }
             throw error;
         }
+        const headers = new Headers(proxied.headers);
+        if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
         const res = new Response(proxied.body, {
             status: proxied.status,
-            headers: { 'Content-Type': 'application/json' },
+            headers,
         });
         opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res);

@@ -166,8 +166,8 @@ export async function placeQuickOrder(
         agentAuto?: boolean;
         // 呼叫端的帳戶仍是送單帳戶？確認期間改選帳戶就中止（閃電下單各視窗）
         isAccountCurrent?: () => boolean;
-        // runs synchronously after confirmation and risk checks, right
-        // before sending; throwing refuses the order (nothing is sent)
+        // Runs once at dispatch, after confirmation/risk checks and
+        // transport loading. Throwing refuses the order (nothing is sent).
         beforeSend?: () => void;
         // 待確認觸價單在人工確認視窗顯示持續更新的目前成交價。
         confirmLivePriceCode?: string;
@@ -214,14 +214,14 @@ export async function placeQuickOrder(
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     if (capturedAccount && !getAccountState().accounts.some(a => canTrade(a) && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined); if (blocked) throw mutationNotStartedError(blocked); }
-    if (opts?.beforeSend) {
+    const beforeDispatch = opts?.beforeSend ? () => {
         try {
-            opts.beforeSend();
+            opts.beforeSend?.();
         } catch (e) {
             // refused by the caller before sending: nothing was sent
             throw mutationNotStartedError(e instanceof Error ? e.message : String(e));
         }
-    }
+    } : undefined;
     trackActivity(
         '下單',
         `${contract.code} ${action === 'Buy' ? '買' : '賣'} ${quantity}${odd ? '股（零股）' : ''} @${price ?? '市價'}`,
@@ -243,6 +243,7 @@ export async function placeQuickOrder(
         opts?.orderType,
         opts?.customField,
         opts?.onResponse,
+        beforeDispatch,
     );
 }
 
@@ -260,6 +261,7 @@ async function sendOrder(
     orderType: OrderType = 'ROD',
     customField?: string,
     onResponse?: (res: Response) => void,
+    beforeDispatch?: () => void,
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -272,7 +274,7 @@ async function sendOrder(
               price_type: market ? 'MKT' : 'LMT',
               order_type: market ? 'IOC' : orderType,
               octype: ocType,
-          }, account, { agentInitiated, ...agentContext })
+          }, account, { agentInitiated, ...agentContext, ...(beforeDispatch ? { beforeDispatch } : {}) })
         : await placeStockOrder(contract, {
               action,
               price: price ?? 0,
@@ -281,7 +283,7 @@ async function sendOrder(
               order_type: market ? 'IOC' : orderType,
               order_lot: orderLot ?? 'Common',
               ...(customField ? { custom_field: customField } : {}),
-          }, account, { agentInitiated, ...agentContext, ...(onResponse ? { onResponse } : {}) });
+          }, account, { agentInitiated, ...agentContext, ...(onResponse ? { onResponse } : {}), ...(beforeDispatch ? { beforeDispatch } : {}) });
     return trade;
 }
 

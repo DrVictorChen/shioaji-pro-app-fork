@@ -120,11 +120,17 @@ it('passes a pending trigger quote code into the manual confirmation', async () 
 });
 it('beforeSend runs after confirmation; its refusal is mutationNotStarted and nothing is sent', async () => {
     const order: string[] = [];
+    const dispatch = vi.fn();
+    m.stock.mockImplementationOnce(async (_contract, _order, _account, opts) => {
+        opts.beforeDispatch();
+        dispatch();
+        return {};
+    });
     m.confirm.mockImplementation(async () => { order.push('confirm'); return true; });
     await expect(placeQuickOrder(contract, 'Buy', null, 1, { beforeSend: () => { order.push('before'); throw new Error('gone'); } }))
         .rejects.toMatchObject({ mutationNotStarted: true, message: 'gone' });
     expect(order).toEqual(['confirm', 'before']);
-    expect(m.stock).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
 });
 
 // #204 零股：沒有市價單；限價送出帶 IntradayOdd，風控以零股單位檢查
