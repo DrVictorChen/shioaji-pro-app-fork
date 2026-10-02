@@ -70,10 +70,13 @@ it.each(['/api/v1/order/place_order', '/api/v1/order/cancel_order'])('times out 
     expect(signal?.aborted).toBe(true);
 });
 
-it('apiPost hands the raw response (headers) to onResponse before parsing', async () => {
+it('apiPost rechecks before dispatch and hands raw response headers to onResponse before parsing', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{"ok":1}', { headers: { 'X-Shioaji-Instance': 'inst-A' } }))));
     const seen: (string | null)[] = [];
-    const out = await apiPost<{ ok: number }>('/api/v1/order/place_order', {}, { onResponse: r => { seen.push(r.headers.get('X-Shioaji-Instance')); } });
+    const out = await apiPost<{ ok: number }>('/api/v1/order/place_order', {}, {
+        beforeDispatch: () => { seen.push('dispatch'); },
+        onResponse: r => { seen.push(r.headers.get('X-Shioaji-Instance')); },
+    });
     expect(out).toEqual({ ok: 1 });
-    expect(seen).toEqual(['inst-A']);
+    expect(seen).toEqual(['dispatch', 'inst-A']);
 });

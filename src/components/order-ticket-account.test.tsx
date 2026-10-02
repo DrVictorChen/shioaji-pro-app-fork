@@ -27,6 +27,7 @@ vi.mock('../hooks/use-stream', () => ({ useQuote: () => ({ tick: { close: '100' 
 vi.mock('../lib/price-sync', () => ({ usePickedPrice: () => null }));
 vi.mock('../lib/allocation', () => ({ allocateByRatio: (t: number, w: number[]) => w.map(() => t), loadAllocPresets: () => [], saveAllocPreset: () => [], deleteAllocPreset: () => [] }));
 import { OrderTicket } from './order-ticket';
+import { beginServerInfoRequest, forgetServerInfo, observeServerInfo } from '../lib/server-info-store';
 
 const contract = { code: 'TMF', name: 'TMF', security_type: 'FUT', exchange: 'TAIFEX', reference: 100 } as unknown as ContractInfo;
 const text = (n: ReactTestInstance): string => n.children.map(c => typeof c === 'string' ? c : text(c)).join('');
@@ -40,6 +41,8 @@ beforeEach(() => {
     vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     vi.stubGlobal('document', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     m.selected = 'A'; m.confirmOn = true; m.dropped = false;
+    forgetServerInfo('');
+    h.accounts.forEach(a => { a.signed = true; });
     m.confirm.mockResolvedValue(true);
     m.future.mockResolvedValue({ status: { status: 'Submitted' }, order: { id: 'o1', seqno: '1' } });
 });
@@ -87,4 +90,20 @@ it('a selection change while armed disarms the ticket', async () => {
     await act(async () => { await exec().props.onClick(); });
     expect(m.confirm).not.toHaveBeenCalled();
     expect(m.future).not.toHaveBeenCalled();
+});
+
+it('split orders stop after the mode changes to production mid-batch', async () => {
+    h.accounts.forEach(a => { a.signed = false; });
+    observeServerInfo(beginServerInfoRequest(), { simulation: true } as import('../lib/shioaji').ServerInfo);
+    m.future.mockImplementationOnce(async () => {
+        observeServerInfo(beginServerInfoRequest(), { simulation: false } as import('../lib/shioaji').ServerInfo);
+        return { status: { status: 'Submitted' }, order: { id: 'o1', seqno: '1' } };
+    });
+    await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    const button = (label: string) => view.root.findAllByType('button').find(b => text(b).includes(label))!;
+    await act(async () => { button('多帳戶分倉').props.onClick(); });
+    await act(async () => { await button('分倉買進').props.onClick(); });
+    await act(async () => { await button('確認分倉').props.onClick(); });
+    expect(m.future).toHaveBeenCalledOnce();
+    expect(feedback()).toContain('1/2');
 });

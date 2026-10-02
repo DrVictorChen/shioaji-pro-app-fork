@@ -12,7 +12,7 @@ import {
 import { reportLedger } from './report-ledger';
 import { markStage } from './startup-timing';
 import { isChildWindow } from './window-role';
-import { knownServerInfo } from './server-info-store';
+import { forgetServerInfo, knownServerInfo } from './server-info-store';
 import { createSharedStream, type StreamWire } from './shared-stream';
 import { invalidateTradingMirror } from './trading-mirror-lease';
 
@@ -686,6 +686,7 @@ function connect() {
     // Only the Web Locks owner may create an EventSource, including retries
     // queued before ownership was handed to another window.
     if (shared && !shared.isOwner()) return;
+    forgetServerInfo(getApiBase());
     if (es) {
         // never expected while a connection is live: record it if it happens
         markStream('stream-restart', 'reason=connect-while-open');
