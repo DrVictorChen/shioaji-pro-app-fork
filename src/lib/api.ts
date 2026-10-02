@@ -206,7 +206,12 @@ export async function apiGet<T>(path: string, opts?: { signal?: AbortSignal; hea
 export async function apiPost<T>(
     path: string,
     body: unknown,
-    opts?: { timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void },
+    opts?: {
+        timeoutMs?: number; agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean;
+        beforeDispatch?: () => void;
+        // 讀取回應標頭（例如 X-Shioaji-Instance，SDK 1.7.8+）；在解析 body 前呼叫
+        onResponse?: (res: Response) => void;
+    },
 ): Promise<T> {
     // Trade reports are account-scoped; market-data subscriptions are not.
     // Loading the native transport (or serializing the body) can outlive a
@@ -248,10 +253,10 @@ export async function apiPost<T>(
     if (shouldProxyAgentHarnessMutation(isTauri, harnessEnabled, path)) {
         const bodyText = JSON.stringify(body);
         const { invoke } = await import('@tauri-apps/api/core');
-        let proxied: { status: number; body: string };
+        let proxied: { status: number; body: string; headers?: Record<string, string> };
         beforeDispatch();
         try {
-            proxied = await invoke<{ status: number; body: string }>(
+            proxied = await invoke<typeof proxied>(
                 'agent_harness_post',
                 {
                     url: base() + path,
@@ -271,10 +276,13 @@ export async function apiPost<T>(
             }
             throw error;
         }
+        const headers = new Headers(proxied.headers);
+        if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
         const res = new Response(proxied.body, {
             status: proxied.status,
-            headers: { 'Content-Type': 'application/json' },
+            headers,
         });
+        opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }
@@ -286,6 +294,7 @@ export async function apiPost<T>(
             body: JSON.stringify(body),
             signal,
         }, beforeDispatch);
+        opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res);
         return res.json() as Promise<T>;
     }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);

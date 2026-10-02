@@ -6,7 +6,7 @@ import type { ContractBase } from './types/contract';
 const m = vi.hoisted(() => ({ accounts: [] as Account[], trades: [] as Trade[], baseline: vi.fn() }));
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accounts }), accountFor: () => m.accounts[0] }));
 vi.mock('./trading-state', () => ({ getTradingState: () => ({ trades: m.trades }), hasOrdersBaseline: m.baseline, cancelCacheTrusted: vi.fn(), locallyCancelled: vi.fn() }));
-import { cancelComboOrder, cancelOrder, placeComboOrder, placeFuturesOrder, placeStockOrder, updateOrderPrice, updateOrderQty, type ServerInfo } from './shioaji';
+import { cancelComboOrder, cancelOrder, cancelVerifiedOrder, placeComboOrder, placeFuturesOrder, placeStockOrder, updateOrderPrice, updateOrderQty, type ServerInfo } from './shioaji';
 import { beginServerInfoRequest, forgetServerInfo, observeServerInfo } from './server-info-store';
 
 const mode = (simulation: boolean) => observeServerInfo(beginServerInfoRequest(), { simulation } as ServerInfo);
@@ -60,6 +60,59 @@ it('uses the current account row rather than a captured signed flag', async () =
     mode(false);
     await expect(placeFuturesOrder(contract, order, captured)).rejects.toMatchObject({ mutationNotStarted: true });
     expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it.each(['Common', 'IntradayOdd'] as const)('rechecks each spread %s placement at dispatch and preserves instance response headers', async order_lot => {
+    const account = m.accounts[0]!;
+    account.account_type = 'S';
+    const onResponse = vi.fn();
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify(m.trades[0]), { headers: { 'X-Shioaji-Instance': 'fixture-instance' } }));
+    await placeStockOrder({ ...contract, security_type: 'STK' }, { ...order, order_lot }, account, { onResponse });
+    expect(onResponse.mock.calls[0]![0].headers.get('X-Shioaji-Instance')).toBe('fixture-instance');
+
+    Object.assign(account, { toJSON: () => { mode(false); return { ...account, toJSON: undefined }; } });
+    await expect(placeStockOrder({ ...contract, security_type: 'STK' }, { ...order, order_lot }, account, { onResponse }))
+        .rejects.toMatchObject({ mutationNotStarted: true, tradingGateRejected: true });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(onResponse).toHaveBeenCalledOnce();
+});
+
+it('permits verified cancellation of an unsigned simulation account using the supplied server row', async () => {
+    const row = m.trades[0]!;
+    const cancelled = { ...row, status: { ...row.status, status: 'Cancelled', cancel_quantity: 1, deal_quantity: 0 } };
+    fetchMock.mockImplementation(async (url: string) => new Response(JSON.stringify(url.endsWith('/trades') ? [cancelled] : row)));
+    const onResponse = vi.fn();
+    await expect(cancelVerifiedOrder(row, m.accounts[0]!, { onResponse })).resolves.toMatchObject({ status: { status: 'Cancelled' } });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual({ trade_id: row.order.id });
+    expect(onResponse).toHaveBeenCalledOnce();
+    expect(m.accounts[0]!.signed).toBe(false);
+});
+
+it.each(['production', 'unknown', 'removed'] as const)('refuses a verified cancellation when its current account is %s', async change => {
+    const account = m.accounts[0]!;
+    if (change === 'production') mode(false);
+    else if (change === 'unknown') forgetServerInfo('');
+    else m.accounts = [];
+    await expect(cancelVerifiedOrder(m.trades[0]!, { ...account, signed: true })).rejects.toMatchObject({ mutationNotStarted: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it.each([cancelOrder, (id: string, opts: { beforeSend: () => void }) => cancelVerifiedOrder({ ...m.trades[0]!, order: { ...m.trades[0]!.order, id } }, m.accounts[0]!, opts)])('rechecks cancel identity preflight at the actual HTTP boundary', async cancel => {
+    const beforeSend = vi.fn();
+    beforeSend.mockImplementation(() => { throw new Error('伺服器身分已變更'); });
+    await expect(cancel('id', { beforeSend })).rejects.toMatchObject({ mutationNotStarted: true, message: '伺服器身分已變更' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(beforeSend).toHaveBeenCalledOnce();
+});
+
+it('discards verified cancellation confirmation when the mode changes away and back during dispatch', async () => {
+    m.accounts[0]!.signed = true;
+    fetchMock.mockImplementation(async () => {
+        mode(false); mode(true);
+        return new Response(JSON.stringify(m.trades[0]));
+    });
+    await expect(cancelVerifiedOrder(m.trades[0]!, m.accounts[0]!)).rejects.toMatchObject({ mutationOutcomeUnknown: true });
+    expect(fetchMock).toHaveBeenCalledOnce();
 });
 
 const mutations = [

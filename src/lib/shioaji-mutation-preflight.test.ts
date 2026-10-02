@@ -306,3 +306,33 @@ describe('mutation without an authoritative baseline on this sidecar', () => {
         expect(m.post).not.toHaveBeenCalled();
     });
 });
+it('cancel beforeSend runs right before the HTTP send; throwing refuses it (not started)', async () => {
+    const dispatch = vi.fn();
+    m.post.mockImplementationOnce(async (_path, _body, opts) => { opts.beforeDispatch(); dispatch(); });
+    await expect(cancelOrder('fixture', { beforeSend: () => { throw new Error('環境已切換'); } })).rejects.toMatchObject({ mutationNotStarted: true, message: '環境已切換' });
+    expect(dispatch).not.toHaveBeenCalled();
+});
+
+it('cancelVerifiedOrder cancels exactly the supplied server row, never resolving through local rows', async () => {
+    const { cancelVerifiedOrder } = await import('./shioaji');
+    const stock = { ...account, account_type: 'S' }; m.accounts = [stock];
+    // Local trading-state holds a stale row X that actually belongs to another order Y
+    m.rows = [{ ...row(), account: stock, order: { ...row().order, id: 'X', seqno: 'seqY', ordno: 'ordY', account: stock } } as AccountedTrade];
+    m.baseline = false; // would force the local re-resolution path in cancelOrder
+    const ours = { ...row(), account: undefined, order: { ...row().order, id: 'X', seqno: 'seqOurs', ordno: 'ordOurs', custom_field: 'oabc00', account: stock } } as unknown as AccountedTrade;
+    m.readback = () => [{ ...ours, status: { ...ours.status, status: 'Cancelled', cancel_quantity: 3, order_quantity: 0 } }];
+    await cancelVerifiedOrder(ours, stock);
+    expect(m.post.mock.calls[0]).toEqual(['/api/v1/order/cancel_order', { trade_id: 'X' }, expect.objectContaining({ beforeDispatch: expect.any(Function) })]);
+    // no authoritative re-resolution by the stale row's seqno/ordno before the cancel
+    expect(m.post.mock.calls.findIndex(c => c[0] === '/api/v1/order/trades')).toBeGreaterThan(0);
+});
+
+it('cancelVerifiedOrder: beforeSend refusal sends nothing', async () => {
+    const dispatch = vi.fn();
+    m.post.mockImplementationOnce(async (_path, _body, opts) => { opts.beforeDispatch(); dispatch(); });
+    const { cancelVerifiedOrder } = await import('./shioaji');
+    const stock = { ...account, account_type: 'S' }; m.accounts = [stock];
+    await expect(cancelVerifiedOrder({ ...row(), order: { ...row().order, id: 'X' } }, stock, { beforeSend: () => { throw new Error('環境已切換'); } }))
+        .rejects.toMatchObject({ mutationNotStarted: true, message: '環境已切換' });
+    expect(dispatch).not.toHaveBeenCalled();
+});

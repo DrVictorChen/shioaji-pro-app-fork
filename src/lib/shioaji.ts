@@ -61,6 +61,8 @@ export interface ServerInfo {
     description: string;
     protocols: string[];
     simulation: boolean;
+    /** SDK 1.7.8+：sidecar 程序的 instance id（每次啟動不同） */
+    instance_id?: string;
     agent_harness?: Health['agent_harness'];
 }
 
@@ -764,7 +766,7 @@ function sendOrderMutation<T>(
     opts?: Parameters<typeof apiPost>[2],
 ) {
     const base = getApiBase();
-    const beforeDispatch = () => {
+    const assertAccountCurrent = () => {
         const current = account && getAccountState().accounts.find(a =>
             a.account_type === account.account_type && a.broker_id === account.broker_id && a.account_id === account.account_id);
         if (base !== getApiBase() || !canTrade(current)) {
@@ -772,8 +774,12 @@ function sendOrderMutation<T>(
                 { mutationNotStarted: true as const, tradingGateRejected: true as const });
         }
     };
-    try { beforeDispatch(); }
+    try { assertAccountCurrent(); }
     catch (error) { return Promise.reject(error); }
+    const beforeDispatch = () => {
+        assertAccountCurrent();
+        opts?.beforeDispatch?.();
+    };
     return apiPost<T>(path, body, { ...opts, beforeDispatch });
 }
 
@@ -810,7 +816,7 @@ export function placeStockOrder(
     contract: ContractBase,
     order: StockOrderReq,
     account?: Account,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void; onResponse?: (res: Response) => void },
 ) {
     // 零股不支援的組合（融資券／當沖／市價／IOC／超過 999 股）一律在送出前擋下（#204）
     const problem = stockOrderProblem(order);
@@ -826,7 +832,7 @@ export function placeFuturesOrder(
     contract: ContractBase,
     order: FuturesOrderReq,
     account?: Account,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void },
 ) {
     const selected = account ?? accountFor('F');
     return sendOrderMutation<Trade>('/api/v1/order/place_order', {
@@ -838,7 +844,7 @@ export function placeFuturesOrder(
 /** Preflight for cancel/update. Shioaji 1.7.6 fixed Sinotrade/Shioaji#235
  * (production futures cache lacked ordno), so the temporary same-account
  * update_status before every futures mutation is gone. The request still
- * needs one unambiguous local order of a signed account whose market matches
+ * needs one unambiguous local order of a tradable account whose market matches
  * the product, on the server that is still current.
  *
  * trade_id only exists in the sidecar process that observed the order. When
@@ -911,27 +917,83 @@ async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tr
  *  — the cancel was sent, its effect is unknown, and it is never resent. */
 export function cancelOrder(
     tradeId: string,
-    opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; batch?: CancelBatchMember },
+    opts?: {
+        agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; batch?: CancelBatchMember;
+        onResponse?: (res: Response) => void;
+        // runs synchronously right before the HTTP cancel is sent; throwing
+        // refuses it (mutationNotStarted) — e.g. the caller's bound environment changed
+        beforeSend?: () => void;
+    },
 ) {
-    const { batch, ...requestOpts } = opts ?? {};
+    const { batch, beforeSend, ...requestOpts } = opts ?? {};
     // A batch member that fails before verification still arrives, so the
     // batch's shared confirmation read is not held back.
-    return observeCancel(tradeId, requestOpts, batch).finally(() => batch?.arrive());
+    return observeCancel(tradeId, requestOpts, batch, beforeSend).finally(() => batch?.arrive());
+}
+
+/**
+ * Cancel an order identified by a row the caller has just read from the server
+ * (POST /order/trades on the current sidecar, under the caller's verified server
+ * identity). Unlike cancelOrder, nothing is resolved through the App's local
+ * trading-state rows: a stale local row carrying the same trade_id (e.g. a trade
+ * id reused by another order after a sidecar restart) can never redirect the
+ * cancel. The trade_id and the quantities used for confirmation all come from
+ * the supplied server row; confirmation reads the same sidecar's cache.
+ */
+export function cancelVerifiedOrder(
+    row: Trade,
+    account: Account,
+    opts?: { beforeSend?: () => void; onResponse?: (res: Response) => void },
+): Promise<Trade> {
+    const tradeId = row.order.id;
+    return observeTradeMutation(tradeId, async () => {
+        const base = getApiBase();
+        const refuse = (message: string): never => { throw Object.assign(new Error(message), { mutationNotStarted: true }); };
+        if (!tradeId) refuse('缺少委託編號，未送出刪單');
+        const type = account.account_type as 'S' | 'F';
+        const query = createAccountQuery();
+        await sendOrderMutation<Trade>('/api/v1/order/cancel_order', { trade_id: tradeId }, account, {
+            onResponse: opts?.onResponse,
+            beforeDispatch: () => {
+                try {
+                    opts?.beforeSend?.();
+                    query.account(type, account);
+                } catch (e) {
+                    throw Object.assign(e instanceof Error ? e : new Error(String(e)), { mutationNotStarted: true });
+                }
+            }
+        });
+        const { trade } = await verifyCancellation(row, account, {
+            scope: `${base}|mode:${query.version}`,
+            // The row came from this sidecar's own cache just now: its cache is the reference.
+            cacheTrusted: () => true,
+            locallyCancelled: () => false,
+            guard: () => {
+                if (base !== getApiBase()) throw new Error('刪單後伺服器已切換');
+                query.assertCurrent();
+            },
+            readTrades: refresh => query.read(type, account, current => fetchTrades(type, current, { refresh })),
+            readHealth: () => query.read(type, account, current => fetchTradeCacheHealth(type, current)),
+        });
+        query.assertCurrent();
+        return markConfirmedCancellation({ ...trade, account });
+    });
 }
 
 /** Cancel several orders: every request is sent first, then each account's
  *  cancels share one authoritative confirmation read (refresh:true) instead of
  *  one per order. Used by every batch path (flash 全刪, 鋪單全撤, 全部刪單,
  *  batch cancel). Single cancels use cancelOrder. */
-export function cancelOrders(tradeIds: string[], onSettled?: () => void): Promise<PromiseSettledResult<Trade>[]> {
+export function cancelOrders(tradeIds: string[], onSettled?: () => void, beforeSend?: () => void, onResponse?: (res: Response) => void): Promise<PromiseSettledResult<Trade>[]> {
     const batch = createCancelBatch(tradeIds.length);
-    return Promise.allSettled(tradeIds.map(id => cancelOrder(id, { batch: batch.member() }).finally(() => onSettled?.())));
+    return Promise.allSettled(tradeIds.map(id => cancelOrder(id, { batch: batch.member(), beforeSend, onResponse }).finally(() => onSettled?.())));
 }
 
 function observeCancel(
     tradeId: string,
-    opts: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean },
+    opts: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; onResponse?: (res: Response) => void },
     batch: CancelBatchMember | undefined,
+    beforeSend?: () => void,
 ) {
     return observeTradeMutation(tradeId, async () => {
         const target = await prepareOrderMutation(tradeId);
@@ -942,7 +1004,13 @@ function observeCancel(
             '/api/v1/order/cancel_order',
             { trade_id: target.tradeId },
             account,
-            opts,
+            { ...opts, beforeDispatch: () => {
+                try {
+                    beforeSend?.();
+                } catch (e) {
+                    throw Object.assign(e instanceof Error ? e : new Error(String(e)), { mutationNotStarted: true });
+                }
+            } },
         );
         // Quantities come from the local order at the start; the id is the one
         // the current sidecar knows (re-resolved when there was no baseline).

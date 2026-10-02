@@ -50,7 +50,10 @@ import type {
 import {
     contractMultiplier,
     futuresTaxRate,
+    priceCents,
+    stockSellTax,
     stockTaxRate,
+    stockTradeFee,
 } from '../lib/utils/contract-cost';
 import { fmtPrice } from '../lib/utils/format';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
@@ -1412,12 +1415,13 @@ function CostEstimate({
     }
     const shares = odd ? qty : qty * 1000;
     const notional = price * shares;
-    const fee = Math.max(odd ? 1 : 20, Math.round(notional * 0.001425));
+    const cents = priceCents(price) * shares;
+    const fee = stockTradeFee(cents, { odd });
     const baseTaxRate = stockTaxRate(contract);
     // 一般股票當沖賣出減半；ETF 與權證固定 0.1%。
     const taxRate =
         baseTaxRate === 0.003 && daytrade ? 0.0015 : baseTaxRate;
-    const tax = action === 'Sell' ? Math.round(notional * taxRate) : 0;
+    const tax = action === 'Sell' ? stockSellTax(cents, taxRate) : 0;
     return (
         <span className={styles.costRow}>
             金額 {fmtPrice(notional, 0)} · 手續費 ≈ {fee}

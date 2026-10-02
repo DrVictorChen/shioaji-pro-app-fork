@@ -146,8 +146,18 @@ function emitQuote(code: string, oddLot = false) {
     }
 }
 
+// 連線世代：串流每次「非 live → live」就＋1。sidecar 重啟必然中斷串流，所以同一
+// 世代內的伺服器程序不變；process-local 的 trade_id 只在同一世代可信（整零價差）。
+// 看門狗 stale→live 也會＋1（保守：多一次以標記重新接回，不會誤信）。
+let connectionEpoch = 0;
+/** 目前的串流連線世代（0＝本頁尚未連上） */
+export function streamConnectionEpoch(): number {
+    return status === 'live' ? connectionEpoch : -1;
+}
+
 function setStatus(s: StreamStatus) {
     if (status !== s) {
+        if (s === 'live') connectionEpoch += 1;
         status = s;
         statusListeners.forEach((l) => l());
     }

@@ -76,6 +76,34 @@ describe('agent harness native POST proxy', () => {
         expect(mocks.invoke).not.toHaveBeenCalled();
     });
 
+    it.each([200, 403])('preserves native response headers before parsing a %s response', async status => {
+        mocks.invoke.mockResolvedValue({
+            status,
+            body: status === 200 ? '{"trade_id":"t-1"}' : '{"message":"denied"}',
+            headers: {
+                'content-type': 'application/json; charset=utf-8',
+                'x-shioaji-instance': 'instance-A',
+                'x-request-id': 'request-A',
+            },
+        });
+        const onResponse = vi.fn();
+        const pending = apiPost('/api/v1/order/place_order', {}, { onResponse });
+        if (status === 200) await expect(pending).resolves.toEqual({ trade_id: 't-1' });
+        else await expect(pending).rejects.toThrow('403 denied');
+        expect(onResponse).toHaveBeenCalledOnce();
+        const response = onResponse.mock.calls[0]![0] as Response;
+        expect(response.headers.get('X-Shioaji-Instance')).toBe('instance-A');
+        expect(response.headers.get('X-Request-Id')).toBe('request-A');
+        expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
+    });
+
+    it('keeps the JSON content type for native responses without headers', async () => {
+        mocks.invoke.mockResolvedValue({ status: 200, body: '{}' });
+        const onResponse = vi.fn();
+        await apiPost('/api/v1/order/place_order', {}, { onResponse });
+        expect(onResponse.mock.calls[0]![0].headers.get('Content-Type')).toBe('application/json');
+    });
+
     it('marks an Agent mutation for native production approval', async () => {
         mocks.invoke.mockResolvedValue({ status: 200, body: '{}' });
 
