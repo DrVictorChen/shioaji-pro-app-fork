@@ -616,7 +616,7 @@ function SpreadExecuteButton({ q, blocked, label, contextKey, onExecute }: {
         return () => clearTimeout(timer);
     }, [confirmation, key, belowCostOnly]);
     const loss = int(Math.max(0, -(q.pnl ?? 0)));
-    const buttonText = belowCostOnly ? confirming ? `再按一次確認送出 · 虧損 ${loss} 元` : `仍要送出（預估虧損 ${loss} 元）` : label;
+    const buttonText = belowCostOnly ? confirming ? `${label} · 再按一次確認 · 虧損 ${loss} 元` : `${label} · 仍要送出（預估虧損 ${loss} 元）` : label;
     return (
         <button
             className={styles.bigBtn[!on ? 'off' : belowCostOnly ? confirming ? 'danger' : 'warn' : 'on']}
