@@ -84,15 +84,19 @@ it('stops the batch when simulation becomes production after the first order', a
     expect(m.notify.mock.calls.some(c => c[0].kind === 'err' && c[0].body.includes('帳戶'))).toBe(true);
 });
 
-it('follow refills use the account captured when follow started and only look at its orders', async () => {
+it('follow refills only look at the captured account; a later selection change stops follow', async () => {
     // account B already has grid orders at 99/98 — they must not count for A,
     // and B's stray order at 90 must not be cancelled by A's follow loop
     await render([gridTrade(accounts[1]!, 99, 'b99'), gridTrade(accounts[1]!, 98, 'b98'), gridTrade(accounts[1]!, 90, 'b90')]);
     await act(async () => { btn('動態跟隨現價').props.onClick(); });
-    m.selected = 'B'; // a later in-window change does not move the loop
     await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
     expect(m.cancel).not.toHaveBeenCalled();
     expect(m.future.mock.calls.map(c => [c[1].price, c[2]])).toEqual([[99, accounts[0]], [98, accounts[0]], [97, accounts[0]], [96, accounts[0]]]);
+    m.future.mockClear();
+    m.selected = 'B';
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(m.future).not.toHaveBeenCalled();
+    expect(text(btn('動態跟隨'))).toBe('動態跟隨現價');
 });
 
 it('follow stops and notifies when its account becomes unusable', async () => {

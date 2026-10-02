@@ -80,6 +80,20 @@ it('passes the captured account explicitly even without the confirmation dialog'
     expect(m.future.mock.calls[0]![2]).toBe(accounts[0]);
 });
 
+it.each(['symbol', 'unmount'])('aborts a ticket confirmation on %s change', async change => {
+    let release!: () => void;
+    m.confirm.mockImplementationOnce(() => new Promise<boolean>(r => { release = () => r(true); }));
+    const props = { contract, onPlaced: vi.fn() };
+    await act(async () => { view = create(createElement(OrderTicket, props)); });
+    await act(async () => { await exec().props.onClick(); });
+    let pending!: Promise<unknown>;
+    await act(async () => { pending = exec().props.onClick(); });
+    if (change === 'unmount') await act(async () => view.unmount());
+    else await act(async () => { view.update(createElement(OrderTicket, { ...props, contract: { ...contract, code: 'TXF' } })); });
+    await act(async () => { release(); await pending; });
+    expect(m.future).not.toHaveBeenCalled();
+});
+
 it('a selection change while armed disarms the ticket', async () => {
     await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
     await act(async () => { await exec().props.onClick(); });
@@ -107,3 +121,34 @@ it('split orders stop after the mode changes to production mid-batch', async () 
     expect(m.future).toHaveBeenCalledOnce();
     expect(feedback()).toContain('1/2');
 });
+
+it.each(['confirmation', 'first order', 'dispatch', 'unmount', 'switch back'])(
+    'stops split orders when the symbol changes during %s', async phase => {
+        let release!: () => void;
+        const wait = new Promise<void>(r => { release = r; });
+        const dispatched = vi.fn();
+        const result = { status: { status: 'Submitted' }, order: { id: 'o1', seqno: '1' } };
+        if (phase === 'confirmation') m.confirm.mockImplementationOnce(async () => { await wait; return true; });
+        else m.future.mockImplementationOnce(async (_c, _o, _a, opts) => {
+            if (phase !== 'dispatch') dispatched();
+            await wait;
+            if (phase === 'dispatch') { opts.beforeDispatch(); dispatched(); }
+            return result;
+        });
+        const props = { contract, onPlaced: vi.fn() };
+        await act(async () => { view = create(createElement(OrderTicket, props)); });
+        const button = (label: string) => view.root.findAllByType('button').find(b => text(b).includes(label))!;
+        await act(async () => { button('多帳戶分倉').props.onClick(); });
+        await act(async () => { await button('分倉買進').props.onClick(); });
+        let pending!: Promise<unknown>;
+        await act(async () => { pending = button('確認分倉').props.onClick(); });
+        if (phase === 'unmount') await act(async () => view.unmount());
+        else {
+            await act(async () => { view.update(createElement(OrderTicket, { ...props, contract: { ...contract, code: 'TXF' } })); });
+            if (phase === 'switch back') await act(async () => { view.update(createElement(OrderTicket, props)); });
+        }
+        await act(async () => { release(); await pending; });
+        expect(m.future).toHaveBeenCalledTimes(phase === 'confirmation' ? 0 : 1);
+        expect(dispatched).toHaveBeenCalledTimes(phase === 'confirmation' || phase === 'dispatch' ? 0 : 1);
+    },
+);

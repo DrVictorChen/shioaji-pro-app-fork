@@ -1,6 +1,6 @@
 // #204 K 線圖下單設定：工具列一顆按鈕（數量＋單位）、彈出面板只列適用選項、
 // 點價與停損停利實際使用這組設定（帳號、單位、數量、委託、開平倉）
-import { createElement } from 'react';
+import { createElement, useState } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
@@ -78,6 +78,8 @@ import { CandleChart } from './candle-chart';
 import { ChartDrawingTools, ChartDrawingOverlays, ChartObjectList, DrawingSettingsDialog, Popover, TextEditor } from './chart-drawing-tools';
 import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE, DRAWING_TOOL_DEFS } from '../lib/chart-drawings';
 import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
+import { loadOrderLotPreference, saveOrderLotPreference, QUICK_ORDER_LOTS } from '../lib/order-lot-preference';
+import type { ChartOrderPanelState } from '../lib/chart-order-settings';
 
 const S1 = { account_type: 'S', broker_id: 'B', account_id: '1111121', signed: true, person_id: '', username: '' } as Account;
 const S2 = { ...S1, account_id: '2222207' } as Account;
@@ -134,8 +136,43 @@ beforeEach(() => {
     m.updatePrice.mockReset().mockResolvedValue(undefined);
     __resetDrawingsForTest();
     (globalThis as any).localStorage.setItem('sj-pro-chart-order-defaults', '{}');
+    (globalThis as any).localStorage.setItem('sj-pro-order-lot-preferences', '{}');
 });
 afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
+
+it.each(['symbol', 'switch back', 'unit', 'account', 'unmount'])(
+    'refuses a pending chart order at dispatch after %s changes', async change => {
+        let release!: () => void;
+        const wait = new Promise<void>(r => { release = r; });
+        const dispatched = vi.fn();
+        m.place.mockImplementation(async (_c, _s, _p, _q, opts) => {
+            await wait;
+            opts.beforeSend();
+            dispatched();
+            return { status: { status: 'Submitted' } };
+        });
+        const props = { contract: stk };
+        await mount(props);
+        await act(async () => { button(view.root, '點價買').props.onClick(); });
+        await clickChart();
+        expect(m.place).toHaveBeenCalledOnce();
+        if (change === 'unmount') await act(async () => view.unmount());
+        else if (change === 'unit') {
+            await act(async () => { chip().props.onClick(); });
+            await act(async () => { button(pop()!, '盤中零股（股）').props.onClick(); });
+        } else if (change === 'account') {
+            m.accounts = [S2, S1, F1];
+            await act(async () => { view.update(createElement(CandleChart, props)); });
+        } else {
+            await act(async () => { view.update(createElement(CandleChart, { contract: { ...stk, code: '2317' } })); });
+            if (change === 'switch back') await act(async () => { view.update(createElement(CandleChart, props)); });
+        }
+        await act(async () => { release(); });
+        await flush();
+        expect(dispatched).not.toHaveBeenCalled();
+        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗' });
+    },
+);
 
 describe('chart order settings button', () => {
     const drawingApi = () => view.root.findByType(ChartDrawingTools).props.api as ChartDrawingsApi;
@@ -481,6 +518,92 @@ describe('chart order settings button', () => {
         expect(String(chip().props.title)).toContain('點價買／賣以 ROD 限價送出 1 張');
     });
 
+    it.each([false, true])('按商品恢復單位，換單位不把 500 股變成張數（受控=%s）', async controlled => {
+        function Chart({ contract }: { contract: typeof stk }) {
+            const [settings, setSettings] = useState<ChartOrderPanelState>({});
+            return createElement(CandleChart, { contract, ...(controlled ? {
+                orderSettings: { ...settings, ...(settings.S ? { S: { ...settings.S } } : {}) },
+                onOrderSettingsChange: setSettings,
+            } : {}) });
+        }
+        await mount({ contract: stk });
+        await act(async () => view.update(createElement(Chart, { contract: stk })));
+        await flush();
+        await act(async () => chip().props.onClick());
+        await act(async () => button(pop()!, '盤中零股（股）').props.onClick());
+        await act(async () => button(pop()!, '500').props.onClick());
+        expect(text(chip())).toBe('500 股');
+        const other = { ...stk, code: '2317', name: '鴻海' };
+        await act(async () => view.update(createElement(Chart, { contract: other })));
+        await flush();
+        expect(text(chip())).toBe('1 張');
+        // 受控設定經序列化或父元件重建後，舊市場值也不能蓋回商品單位。
+        await act(async () => view.update(createElement(Chart, { contract: { ...other } })));
+        expect(text(chip())).toBe('1 張');
+        await act(async () => button(pop()!, '整股（張）').props.onClick());
+        await act(async () => view.update(createElement(Chart, { contract: stk })));
+        await flush();
+        expect(text(chip())).toBe('1 股');
+        await act(async () => button(view.root, '點價買').props.onClick());
+        await clickChart();
+        expect(m.place.mock.calls.at(-1)!.slice(1, 4)).toEqual(['Buy', 100, 1]);
+        expect(m.place.mock.calls.at(-1)![4]).toMatchObject({ orderLot: 'IntradayOdd' });
+        await act(async () => button(pop()!, '500').props.onClick());
+        await act(async () => button(pop()!, '整股（張）').props.onClick());
+        expect(text(chip())).toBe('1 張');
+        expect(loadOrderLotPreference('chart', stk, QUICK_ORDER_LOTS, 'IntradayOdd')).toBe('Common');
+    });
+
+    it('新圖表恢復商品單位且不將既存股數當成張數；期貨設定保持原樣', async () => {
+        saveOrderLotPreference('chart', stk, 'Common');
+        await mount({ contract: stk, orderSettings: { S: { lot: 'IntradayOdd', qty: 500, accountKey: 'S:B:2222207' }, F: { qty: 5, orderType: 'IOC', octype: 'Cover' } } });
+        expect(text(chip())).toBe('1 張');
+        await act(async () => view.update(createElement(CandleChart, { contract: fut })));
+        await flush();
+        expect(text(chip())).toBe('5 口');
+        await act(async () => button(view.root, '點價買').props.onClick());
+        await clickChart();
+        expect(m.place.mock.calls.at(-1)![3]).toBe(5);
+        expect(m.place.mock.calls.at(-1)![4]).toMatchObject({ orderType: 'IOC', ocType: 'Cover', account: F1 });
+        expect(m.place.mock.calls.at(-1)![4].orderLot).toBeUndefined();
+    });
+
+    it('重新開圖恢復圖表專屬的單位；同為零股的商品切換也不沿用股數', async () => {
+        saveOrderLotPreference('ticket', stk, 'Odd');
+        await mount({ contract: stk });
+        expect(text(chip())).toBe('1 張');
+        await act(async () => chip().props.onClick());
+        await act(async () => button(pop()!, '盤中零股（股）').props.onClick());
+        await act(async () => button(pop()!, '500').props.onClick());
+        await act(async () => view.unmount());
+        await mount({ contract: stk });
+        expect(text(chip())).toBe('1 股');
+        expect(loadOrderLotPreference('ticket', stk, ['Odd', 'Common'], 'Common')).toBe('Odd');
+        await act(async () => chip().props.onClick());
+        await act(async () => button(pop()!, '500').props.onClick());
+        const other = { ...stk, code: '2317' };
+        saveOrderLotPreference('chart', other, 'IntradayOdd');
+        await act(async () => view.update(createElement(CandleChart, { contract: other })));
+        await flush();
+        expect(text(chip())).toBe('1 股');
+    });
+
+    it('儲存失敗時仍保留這張圖每檔商品的單位', async () => {
+        vi.spyOn(globalThis.localStorage, 'setItem').mockImplementation(() => { throw new Error('quota'); });
+        try {
+            await mount({ contract: stk });
+            await act(async () => chip().props.onClick());
+            await act(async () => button(pop()!, '盤中零股（股）').props.onClick());
+            await act(async () => button(pop()!, '500').props.onClick());
+            await act(async () => view.update(createElement(CandleChart, { contract: { ...stk, code: '2317' } })));
+            await flush();
+            expect(text(chip())).toBe('1 張');
+            await act(async () => view.update(createElement(CandleChart, { contract: stk })));
+            await flush();
+            expect(text(chip())).toBe('1 股');
+        } finally { vi.restoreAllMocks(); }
+    });
+
     it('stock odd lot: hides the ROD/IOC/FOK row, summarises, and 點價買 sends IntradayOdd shares with the chosen account', async () => {
         const onOrderSettingsChange = vi.fn();
         let state: any = {};
@@ -634,7 +757,7 @@ describe('chart order settings button', () => {
         await act(async () => { other.unmount(); fresh.unmount(); });
     });
 
-    it('a futures chart that later switches to a stock keeps the stock default it had when it was created', async () => {
+    it('a futures chart that later switches to an unremembered stock keeps its initial stock default', async () => {
         const nodeMock = { createNodeMock: () => ({ clientWidth: 800, clientHeight: 400, getBoundingClientRect: () => ({ width: 800, height: 400, left: 0, top: 0 }), addEventListener() {}, removeEventListener() {}, style: {} }) };
         const futProps = { contract: fut, panelId: 'f', orderSettings: undefined, onOrderSettingsChange: vi.fn() };
         let futChart!: ReactTestRenderer;
@@ -646,7 +769,7 @@ describe('chart order settings button', () => {
         await act(async () => { button(pop()!, '500').props.onClick(); });
         await act(async () => { button(pop()!, '設為預設').props.onClick(); });
         // the futures chart moves to a stock: 1 張, not 500 股
-        await act(async () => { futChart.update(createElement(CandleChart, { ...futProps, contract: stk } as any)); });
+        await act(async () => { futChart.update(createElement(CandleChart, { ...futProps, contract: { ...stk, code: '2317' } } as any)); });
         await flush();
         const futChip = futChart.root.findAll(n => n.type === 'button' && String(n.props['aria-label'] ?? '').startsWith('圖表下單設定'))[0]!;
         expect(text(futChip)).toBe('1 張');

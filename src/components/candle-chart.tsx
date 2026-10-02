@@ -86,6 +86,7 @@ import { canUpdateOrderPrice } from '../lib/odd-lot';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
+import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import {
     chartModeHint,
     chartPlaceOptions,
@@ -98,6 +99,7 @@ import {
     type ChartOrderSettings,
 } from '../lib/chart-order-settings';
 import { ensureAccounts, useAccounts } from '../lib/account-store';
+import { loadOrderLotPreference, saveOrderLotPreference, QUICK_ORDER_LOTS } from '../lib/order-lot-preference';
 import { accountMatches, resolveFlashAccount } from '../lib/flash-account';
 import { flashAccountLabels } from '../lib/flash-display';
 import { usePrivacyMode } from '../lib/privacy';
@@ -239,20 +241,52 @@ export function CandleChart({
     defaultSnapshot.current ??= { S: loadChartOrderDefault('S'), F: loadChartOrderDefault('F') };
     const defaultFor = (m: ChartOrderMarket) => defaultSnapshot.current![m];
     const savedOrder = panelOrder[orderMarket ?? 'S'];
-    const orderSettings: ChartOrderSettings = useMemo(() => {
+    const marketSettings: ChartOrderSettings = useMemo(() => {
         const m = orderMarket ?? 'S';
         return savedOrder ? normalizeChartOrder(savedOrder, m) : defaultFor(m);
         // defaultFor reads a per-chart snapshot, stable for the chart's lifetime
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [savedOrder, orderMarket]);
+    const lotPreferences = useRef(new Map<string, ChartOrderSettings['lot']>());
+    const stockSettingsFor = (initial: boolean, previous?: ChartOrderSettings) => {
+        const lot = lotPreferences.current.get(contract.code) ?? loadOrderLotPreference(
+            'chart', contract, QUICK_ORDER_LOTS, initial ? marketSettings.lot : defaultFor('S').lot,
+        );
+        // 換商品不沿用上一檔的單位；股數不能成為張數，零股換檔也歸 1。
+        const reset = lot !== marketSettings.lot || (previous && (previous.lot !== lot || previous.lot === 'IntradayOdd'));
+        return normalizeChartOrder({ ...marketSettings, lot, ...(reset ? { qty: 1 } : {}) }, 'S');
+    };
+    const [stockOrder, setStockOrder] = useState(() => ({
+        code: contract.code, source: savedOrder,
+        settings: orderMarket === 'S' ? stockSettingsFor(true) : marketSettings,
+    }));
+    // 在 render 中先套用新商品，確保行情訂閱與送單 ref 不會短暫使用舊單位。
+    if (orderMarket === 'S' && stockOrder.code !== contract.code) {
+        setStockOrder({ code: contract.code, source: savedOrder, settings: stockSettingsFor(false, stockOrder.settings) });
+    } else if (orderMarket === 'S' && stockOrder.source !== savedOrder) {
+        // 父元件更新帳戶／委託或重建設定物件時，仍以本商品單位解讀數量。
+        const previousSource = normalizeChartOrder(stockOrder.source ?? defaultFor('S'), 'S');
+        const lot = stockOrder.settings.lot;
+        const qty = marketSettings.lot !== lot ? 1
+            : marketSettings.qty === previousSource.qty ? stockOrder.settings.qty : marketSettings.qty;
+        setStockOrder({ ...stockOrder, source: savedOrder, settings: normalizeChartOrder({ ...marketSettings, lot, qty }, 'S') });
+    }
+    const orderSettings = orderMarket === 'S' ? stockOrder.settings : marketSettings;
     const setOrderSettings = (next: ChartOrderSettings) => {
         if (!orderMarket) return;
-        const value = { ...panelOrder, [orderMarket]: normalizeChartOrder(next, orderMarket) };
+        const settings = normalizeChartOrder({ ...next, ...(next.lot !== orderSettings.lot ? { qty: 1 } : {}) }, orderMarket);
+        if (orderMarket === 'S') {
+            lotPreferences.current.set(contract.code, settings.lot);
+            saveOrderLotPreference('chart', contract, settings.lot);
+            setStockOrder({ code: contract.code, source: savedOrder, settings });
+        }
+        const value = { ...panelOrder, [orderMarket]: settings };
         if (onOrderSettingsChange) onOrderSettingsChange(value);
         else setLocalOrder(value);
     };
     const orderSettingsRef = useRef(orderSettings);
     orderSettingsRef.current = orderSettings;
+    const captureContext = useOrderContext(contract, orderSettings.lot);
     // 帳號：沒固定就跟隨主畫面；固定的帳號不可用時絕不改用別的帳號
     const accountState = useAccounts();
     const privacy = usePrivacyMode();
@@ -497,7 +531,11 @@ export function CandleChart({
             const isAccountCurrent = () => accountMatches(orderAccountRef.current.active, account);
             if (m === 'buy' || m === 'sell') {
                 const action = m === 'buy' ? 'Buy' : 'Sell';
-                placeQuickOrder(c, action, price, qty, { ...chartPlaceOptions(settings, market), account, isAccountCurrent })
+                const isContextCurrent = captureContext();
+                placeQuickOrder(c, action, price, qty, { ...chartPlaceOptions(settings, market), account, isAccountCurrent, beforeSend: () => {
+                    if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                    if (!isAccountCurrent()) throw new Error('帳戶已變更，已停止後續下單');
+                } })
                     .then((trade) =>
                         notify({
                             kind: 'ok',
