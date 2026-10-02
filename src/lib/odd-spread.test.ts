@@ -119,14 +119,14 @@ describe('quoteDirection — 設計稿數字', () => {
         expect(q.block).toBeNull();
         expect(q.canExecute).toBe(true);
     });
-    it('買零→賣整：−20.00 元/股、−182 bps、淨 −25.10、價差未達成本', () => {
+    it('買零→賣整：−20.00 元/股、−182 bps、淨 −25.10，但零股量不足優先阻擋', () => {
         const q = quoteDirection('buyOddSellRound', input());
         expect(q.buyPrice).toBe(1100);
         expect(q.sellPrice).toBe(1080);
         expect(q.grossPerShare).toBe(-20);
         expect(q.grossBps).toBe(-182);
         expect(q.netPerShare).toBe(-25.1);
-        expect(q.block).toBe('belowCost');
+        expect(q.block).toBe('oddDepth');
         expect(q.canExecute).toBe(false);
         expect(q.maxLots).toBe(0);
     });
@@ -138,6 +138,18 @@ describe('quoteDirection — 設計稿數字', () => {
 });
 
 describe('quoteDirection — 擋下原因', () => {
+    it('最佳價未達成本，量足且庫存足時才回 belowCost，保留完整虧損試算', () => {
+        const odd: SideBook = { bids: [{ price: 1080, vol: 5000 }], asks: [{ price: 1100, vol: 5000 }] };
+        const q = quoteDirection('buyRoundSellOdd', input({ odd }));
+        expect(q.block).toBe('belowCost');
+        expect(q.canExecute).toBe(false);
+        expect(q.pnl).toBe(-10091);
+        expect(q.sellLeg?.orders.map(o => o.quantity)).toEqual([999, 1]);
+        expect(quoteDirection('buyRoundSellOdd', input({ odd, inventoryShares: 999 })).block).toBe('inventory');
+        expect(quoteDirection('buyRoundSellOdd', input({ odd, inventoryShares: null })).block).toBe('inventory');
+        expect(quoteDirection('buyRoundSellOdd', input({ odd, round: { ...ROUND, asks: [{ price: 1085, vol: 1 }] }, lots: 2 })).block).toBe('roundDepth');
+        expect(quoteDirection('buyRoundSellOdd', input({ odd, lots: 0 })).block).toBe('noQuote');
+    });
     it('零股量不足', () => {
         const q = quoteDirection('buyRoundSellOdd', input({ lots: 8 }));
         expect(q.block).toBe('oddDepth');

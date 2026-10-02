@@ -287,17 +287,16 @@ export function quoteDirection(direction: SpreadDirection, input: SpreadInput): 
         weightedNetPerShare: p.matched > 0 ? round2(p.pnl / p.matched) : null,
         pnl: p.pnl,
     };
-    // 最佳一檔都不賺 → 任何量都不賺
-    if (netPerShare <= 0) return { ...result, block: 'belowCost' };
+    // belowCost 必須是唯一阻擋原因，才能由面板提供虧損確認。
     const oddLeg = buyOdd ? p.buy : p.sell;
     const roundLeg = buyOdd ? p.sell : p.buy;
     if (oddLeg.short) return { ...result, block: 'oddDepth' };
     if (roundLeg.short) return { ...result, block: 'roundDepth' };
-    if (p.pnl <= 0) return { ...result, block: 'belowCost' };
     const sellShares = p.sell.shares;
     if (input.inventoryShares === null || input.inventoryShares < sellShares) {
         return { ...result, block: 'inventory' };
     }
+    if (netPerShare <= 0 || p.pnl <= 0) return { ...result, block: 'belowCost' };
     return { ...result, block: null, canExecute: true };
 }
 

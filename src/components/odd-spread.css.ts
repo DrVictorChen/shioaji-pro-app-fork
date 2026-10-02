@@ -410,6 +410,8 @@ const bigBtnBase = style({
 
 export const bigBtn = styleVariants({
     on: [bigBtnBase, { color: vars.color.success, borderColor: vars.color.success, background: successMix(13, 'rgba(22, 179, 137, 0.13)'), cursor: 'pointer', ':hover': { background: successMix(22, 'rgba(22, 179, 137, 0.22)') } }],
+    warn: [bigBtnBase, { color: vars.color.amber, borderColor: vars.color.amber, background: AMBER_DIM, cursor: 'pointer', ':hover': { background: AMBER_TAG } }],
+    danger: [bigBtnBase, { color: vars.color.danger, borderColor: vars.color.danger, background: vars.color.panelRaised, cursor: 'pointer' }],
     off: [bigBtnBase, { color: vars.color.mutedForeground, borderColor: vars.color.border, background: vars.color.muted, cursor: 'not-allowed' }],
 });
 

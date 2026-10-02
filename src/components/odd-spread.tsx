@@ -82,6 +82,8 @@ const toneOf = (v: number | null) => (v === null || v === 0 ? 'flat' : v > 0 ? '
 const chgTone = (v: number | null) => (v === null || v === 0 ? 'flat' : v > 0 ? 'up' : 'down');
 const chgText = (v: number | null) => (v === null ? '' : `${v > 0 ? '▲' : v < 0 ? '▼' : ''}${fmtPrice(Math.abs(v), 0)}`);
 const levelsText = (orders: { price: number; quantity: number }[]) => orders.map(o => `${fmtPrice(o.price)}×${int(o.quantity)}`).join('、');
+// 比較完整試算，避免價格、吃檔計畫或數量變更後沿用虧損確認。
+const quoteKey = (q: SpreadQuote) => JSON.stringify(q);
 
 export interface OddSpreadViewProps {
     contract: ContractInfo;
@@ -186,8 +188,8 @@ export function OddSpreadView({
     const effOdd = paired ? lots * SHARES_PER_LOT : oddShares;
 
     // 送出前重新驗證用的最新值（確認視窗期間可能改變）
-    const latest = useRef({ contract, account, feed, inventoryShares, fees });
-    latest.current = { contract, account, feed, inventoryShares, fees };
+    const latest = useRef({ contract, account, feed, inventoryShares, fees, lots, effOdd, live, execUnavailable, clickLocks, execs });
+    latest.current = { contract, account, feed, inventoryShares, fees, lots, effOdd, live, execUnavailable, clickLocks, execs };
 
     useEffect(() => { setArmed(false); }, [contract.code, account?.account_id]);
     useEffect(() => { if (!live) setArmed(false); }, [live]);
@@ -225,13 +227,14 @@ export function OddSpreadView({
         if (!account) return '沒有可用的證券帳戶';
         if (provisional && !running) return '先確認較早的未送出委託';
         if (running) return liveExecs.some(isPaused) ? '執行暫停（環境已切換）' : liveExecs.some(r => r.state.phase === 'unknown') ? '有委託結果未確認' : '價差單執行中';
+        if (clickLocks.length > 0) return '有點價委託結果未確認';
         if (busy) return '確認中';
         if (q.block === 'inventory' && inventoryShares === null) return '庫存未知';
         return q.block ? BLOCK_LABEL[q.block] : null;
     };
 
-    const execute = useCallback(async (q: SpreadQuote) => {
-        if (!q.canExecute || !q.buyLeg || !q.sellLeg || !account || running || busy || execUnavailable) return;
+    const execute = useCallback(async (q: SpreadQuote, allowBelowCost = false) => {
+        if (!(q.canExecute || (allowBelowCost && q.block === 'belowCost')) || !q.buyLeg || !q.sellLeg || !account || !live || running || provisional || busy || execUnavailable || clickLocks.length > 0) return;
         // 點擊當下綁定商品、帳戶、環境（API base＋模擬／正式）與計畫；確認後只送這一份
         const env = currentEnv();
         if (env.simulation === undefined) {
@@ -268,12 +271,16 @@ export function OddSpreadView({
             const problem = !envMatches(bound.env) ? '確認期間伺服器或模擬／正式環境已切換'
                 : now.contract.code !== bound.contract.code ? '確認期間商品已切換'
                 : !accountMatches(now.account, bound.account) ? '確認期間帳戶已變更'
+                : !now.live || now.execUnavailable || now.clickLocks.length > 0 || now.execs.some(r => r.state.started && (!isTerminalPhase(r.state.phase) || r.state.slots.some(x => x.status === 'unknown'))) ? '確認期間連線或執行鎖已變動'
                     : (() => {
                         const fresh = quoteDirection(bound.direction, {
                             round: now.feed.round, odd: now.feed.odd, lots: bound.lots, oddShares: bound.oddShares,
                             fees: bound.fees, inventoryShares: now.inventoryShares,
                         });
-                        return fresh.canExecute ? null : `確認期間行情或庫存已變動：${fresh.block ? BLOCK_LABEL[fresh.block] : '無法執行'}`;
+                        if (allowBelowCost && (now.lots !== bound.lots || now.effOdd !== bound.oddShares || JSON.stringify(now.fees) !== JSON.stringify(bound.fees) || quoteKey(fresh) !== quoteKey(q))) {
+                            return '確認期間價差、數量或費用已變動';
+                        }
+                        return fresh.canExecute || (allowBelowCost && fresh.block === 'belowCost') ? null : `確認期間行情或庫存已變動：${fresh.block ? BLOCK_LABEL[fresh.block] : '無法執行'}`;
                     })();
             if (problem) {
                 notify({ kind: 'err', title: '整零價差未送出', body: `${problem}，這筆沒有送出，請重新確認` });
@@ -285,7 +292,7 @@ export function OddSpreadView({
         } finally {
             setBusy(false);
         }
-    }, [account, running, busy, execUnavailable, mode, contract, fees, prefs.maxSlipTicks]);
+    }, [account, live, running, provisional, busy, execUnavailable, clickLocks.length, mode, contract, fees, prefs.maxSlipTicks]);
 
     // 點量下單：同閃電下單，要先啟用點價；依設定跳委託確認。
     // 送出前先加上持久化的點價鎖（重新整理或關閉面板也不遺失）：全部確定送出或
@@ -568,20 +575,18 @@ export function OddSpreadView({
                     {DIRECTIONS.map(d => {
                         const q = quotes[d];
                         const blocked = blockText(q);
-                        const on = q.canExecute && !blocked;
                         const text = d === 'buyRoundSellOdd'
                             ? `買整賣零　${lots} 張 ↔ ${int(effOdd)} 股`
                             : `買零賣整　${int(effOdd)} 股 ↔ ${lots} 張`;
                         return (
-                            <button
+                            <SpreadExecuteButton
                                 key={d}
-                                className={styles.bigBtn[on ? 'on' : 'off']}
-                                disabled={!on}
-                                title={blocked ?? `${DIRECTION_LABEL[d]}：加權淨價差 ${signed(q.weightedNetPerShare ?? 0)} 元/股`}
-                                onClick={() => void execute(q)}
-                            >
-                                {text}
-                            </button>
+                                q={q}
+                                blocked={blocked}
+                                label={text}
+                                contextKey={JSON.stringify([contract.code, account?.account_type, account?.broker_id, account?.account_id, mode, fees])}
+                                onExecute={allowBelowCost => void execute(q, allowBelowCost)}
+                            />
                         );
                     })}
                 </div>
@@ -590,6 +595,46 @@ export function OddSpreadView({
                 點左側量＝整股限價、點右側量＝零股限價（同閃電下單）· 黃底為可套利價位：零股買價高於整股賣價，或零股賣價低於整股買價
             </div>
         </div>
+    );
+}
+
+function SpreadExecuteButton({ q, blocked, label, contextKey, onExecute }: {
+    q: SpreadQuote; blocked: string | null; label: string; contextKey: string; onExecute: (allowBelowCost: boolean) => void;
+}) {
+    const [confirmation, setConfirmation] = useState<{ key: string; expiresAt: number } | null>(null);
+    const key = `${contextKey}:${quoteKey(q)}`;
+    const belowCostOnly = q.block === 'belowCost' && blocked === BLOCK_LABEL.belowCost;
+    const on = (q.canExecute && !blocked) || belowCostOnly;
+    const confirming = belowCostOnly && confirmation?.key === key && Date.now() < confirmation.expiresAt;
+    useEffect(() => {
+        if (!confirmation) return;
+        if (!belowCostOnly || confirmation.key !== key) {
+            setConfirmation(null);
+            return;
+        }
+        const timer = setTimeout(() => setConfirmation(null), Math.max(0, confirmation.expiresAt - Date.now()));
+        return () => clearTimeout(timer);
+    }, [confirmation, key, belowCostOnly]);
+    const loss = int(Math.max(0, -(q.pnl ?? 0)));
+    const buttonText = belowCostOnly ? confirming ? `再按一次確認送出 · 虧損 ${loss} 元` : `仍要送出（預估虧損 ${loss} 元）` : label;
+    return (
+        <button
+            className={styles.bigBtn[!on ? 'off' : belowCostOnly ? confirming ? 'danger' : 'warn' : 'on']}
+            disabled={!on}
+            aria-label={`${DIRECTION_LABEL[q.direction]}：${buttonText}`}
+            title={blocked ?? `${DIRECTION_LABEL[q.direction]}：加權淨價差 ${signed(q.weightedNetPerShare ?? 0)} 元/股`}
+            onClick={() => {
+                if (!on) return;
+                if (belowCostOnly && (!confirmation || confirmation.key !== key || Date.now() >= confirmation.expiresAt)) {
+                    setConfirmation({ key, expiresAt: Date.now() + 5000 });
+                    return;
+                }
+                setConfirmation(null);
+                onExecute(belowCostOnly);
+            }}
+        >
+            {buttonText}
+        </button>
     );
 }
 

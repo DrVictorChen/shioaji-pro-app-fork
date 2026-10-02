@@ -64,6 +64,8 @@ const buttons = () => view.root.findAllByType('button');
 const button = (label: string) => buttons().find(b => text(b).includes(label))!;
 const input = (label: string) => view.root.findAll(n => n.type === 'input' && n.props['aria-label'] === label)[0]!;
 const base: OddSpreadViewProps = { contract, feed, inventoryShares: 3420, live: true, account, execUnavailable: null };
+const lossFeed: OddSpreadFeed = { ...feed, odd: { bids: [{ price: 1080, vol: 5000 }], asks: [{ price: 1100, vol: 5000 }] } };
+const executeButton = (direction = '買整 → 賣零') => buttons().find(b => String(b.props['aria-label'] ?? '').startsWith(direction))!;
 const render = async (p: Partial<OddSpreadViewProps> = {}) => {
     await act(async () => { view = create(createElement(OddSpreadView, { ...base, ...p })); });
 };
@@ -80,7 +82,7 @@ beforeEach(() => {
     vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ discount: 0.6, taxRate: null }), setItem: vi.fn() });
     vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
 });
-afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
+afterEach(async () => { await act(async () => view?.unmount()); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it('顯示設計稿的兩個方向與價格梯', async () => {
     await render();
@@ -89,7 +91,7 @@ it('顯示設計稿的兩個方向與價格梯', async () => {
         expect(all).toContain(s);
     }
     expect(button('以 1 張執行').props.disabled).toBe(false);
-    expect(button('價差未達成本').props.disabled).toBe(true);
+    expect(button('零股量不足').props.disabled).toBe(true);
     expect(button('買整賣零').props.disabled).toBe(false);
     expect(button('買零賣整').props.disabled).toBe(true);
     const rows = view.root.findAll(n => n.type === 'div' && typeof n.props.className === 'string' && n.props.className.includes('ladderRow'));
@@ -110,12 +112,138 @@ it('彈出視窗：兩腳送單停用並說明原因', async () => {
     expect(button('請在主視窗執行').props.disabled).toBe(true);
 });
 
-it('張數改 2 → 加權後不賺，停用並說明', async () => {
+it('張數改 2 → 加權後不賺，依完整費稅顯示虧損確認', async () => {
     await render();
     await act(async () => { input('整股張數').props.onChange({ target: { value: '2' } }); });
     expect(input('零股股數').props.value).toBe('2,000');
-    expect(button('買整賣零').props.disabled).toBe(true);
-    expect(buttons().filter(b => text(b) === '價差未達成本')).toHaveLength(2);
+    expect(executeButton().props.disabled).toBe(false);
+    expect(text(executeButton())).toBe('仍要送出（預估虧損 1,356 元）');
+    expect(button('價差未達成本').props.disabled).toBe(true);
+});
+
+it.each(['買整 → 賣零', '買零 → 賣整'])('未達成本（%s）：第一次只武裝，5 秒內第二次才交給原送單流程', async direction => {
+    vi.useFakeTimers();
+    await render({ feed: lossFeed });
+    const warningClass = executeButton(direction).props.className;
+    if (direction === '買整 → 賣零') expect(text(executeButton(direction))).toBe('仍要送出（預估虧損 10,091 元）');
+    await act(async () => { executeButton(direction).props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.confirm).not.toHaveBeenCalled();
+    expect(text(executeButton(direction))).toContain('再按一次確認送出 · 虧損');
+    expect(executeButton(direction).props.className).not.toBe(warningClass);
+    await act(async () => { vi.advanceTimersByTime(4999); executeButton(direction).props.onClick(); });
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    expect(mocks.start.mock.calls[0]![0].plan.direction).toBe(direction === '買整 → 賣零' ? 'buyRoundSellOdd' : 'buyOddSellRound');
+    expect(mocks.start.mock.calls[0]![0].plan.oddOrders.map((o: { quantity: number }) => o.quantity)).toEqual([999, 1]);
+    expect(text(executeButton(direction))).toContain('仍要送出');
+});
+
+it('武裝滿 5 秒解除；下一次點擊只重新武裝', async () => {
+    vi.useFakeTimers();
+    await render({ feed: lossFeed });
+    await act(async () => { executeButton().props.onClick(); });
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    expect(text(executeButton())).toContain('仍要送出');
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(text(executeButton())).toContain('再按一次確認送出');
+});
+
+it('計時回呼尚未執行但已逾時，也不能沿用舊確認送出', async () => {
+    vi.useFakeTimers();
+    await render({ feed: lossFeed });
+    await act(async () => { executeButton().props.onClick(); });
+    vi.setSystemTime(Date.now() + 5000);
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it.each(['價差', '商品', '帳戶', '數量', '零股數量', '費用', '送單方式'])('%s 變動後解除武裝，改回原值也須重新確認', async change => {
+    await render({ feed: lossFeed });
+    await act(async () => { executeButton().props.onClick(); });
+    if (change === '價差') {
+        await rerender({ feed: { ...lossFeed, odd: { ...lossFeed.odd, bids: [{ price: 1075, vol: 5000 }] } } });
+        await rerender({ feed: lossFeed });
+    } else if (change === '商品' || change === '帳戶') {
+        await rerender({ feed: lossFeed, ...(change === '商品' ? { contract: { ...contract, code: '2317' } as ContractInfo } : { account: otherAccount }) });
+        await rerender({ feed: lossFeed });
+    } else if (change === '數量') {
+        await act(async () => { input('整股張數').props.onChange({ target: { value: '2' } }); });
+    } else if (change === '零股數量') {
+        await act(async () => { button('配對').props.onClick(); });
+        await act(async () => { input('零股股數').props.onChange({ target: { value: '500' } }); });
+    } else if (change === '費用') {
+        await act(async () => { input('證交稅率（%）').props.onChange({ target: { value: '0.15' } }); });
+    } else {
+        await act(async () => { view.root.findByType('select').props.onChange({ target: { value: 'simultaneous' } }); });
+    }
+    expect(text(executeButton())).toContain('仍要送出');
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it.each([
+    { live: false }, { account: undefined }, { inventoryShares: null }, { inventoryShares: 999 },
+    { initialLots: 0 }, { execUnavailable: '只能在主視窗執行' },
+    { feed: { ...lossFeed, odd: { ...lossFeed.odd, bids: [{ price: 1080, vol: 999 }] } } },
+    { feed: { ...lossFeed, round: { ...lossFeed.round, asks: [{ price: 1085, vol: 0.5 }] } } },
+    { clickLocks: [{ id: 'locked', code: '2330', account: 'S-BR-A', text: '結果未確認', at: 0 }] },
+])('其他停用原因不提供虧損強制送出：%j', async props => {
+    await render({ feed: lossFeed, ...props });
+    expect(executeButton().props.disabled).toBe(true);
+    expect(text(executeButton())).not.toContain('仍要送出');
+    await act(async () => { executeButton().props.onClick(); executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it('零股賣出超過可賣量，即使未達成本仍不可點', async () => {
+    await render({ feed: lossFeed, inventoryShares: 1500 });
+    await act(async () => { button('配對').props.onClick(); });
+    await act(async () => { input('零股股數').props.onChange({ target: { value: '2000' } }); });
+    expect(executeButton().props.disabled).toBe(true);
+    await act(async () => { executeButton().props.onClick(); executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it.each(['執行中', '結果不明', '較早未確認', '斷線'])('武裝後出現%s，仍不可點；解除阻擋後須重新武裝', async reason => {
+    await render({ feed: lossFeed });
+    await act(async () => { executeButton().props.onClick(); });
+    const props = reason === '斷線' ? { live: false } : {
+        execs: [rec({
+            phase: reason === '較早未確認' ? 'failed' : reason === '結果不明' ? 'unknown' : 'oddPending',
+            slots: reason === '執行中' ? [] : [{ key: 'odd:0', leg: 'odd', action: 'Sell', price: 1080, quantity: 999, status: 'unknown', filled: 0 }],
+        })],
+    } satisfies Partial<OddSpreadViewProps>;
+    await rerender({ feed: lossFeed, ...props });
+    expect(executeButton().props.disabled).toBe(true);
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    await rerender({ feed: lossFeed });
+    expect(text(executeButton())).toContain('仍要送出');
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it('有利價差維持一次點擊執行', async () => {
+    await render();
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    expect(text(executeButton())).toContain('買整賣零');
+});
+
+it('虧損第二次確認後仍依設定跳委託確認，期間價差改變則不送', async () => {
+    mocks.risk.confirmManualOrders = true;
+    let approve!: (value: boolean) => void;
+    mocks.confirm.mockImplementationOnce(() => new Promise(resolve => { approve = resolve; }));
+    await render({ feed: lossFeed });
+    await act(async () => { executeButton().props.onClick(); });
+    await act(async () => { executeButton().props.onClick(); });
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
+    expect(mocks.start).not.toHaveBeenCalled();
+    await rerender({ feed: { ...lossFeed, odd: { ...lossFeed.odd, bids: [{ price: 1075, vol: 5000 }] } } });
+    await act(async () => { approve(true); });
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間價差、數量或費用已變動');
 });
 
 it('執行：把點擊當下的商品、帳戶與計畫交給主視窗服務', async () => {
