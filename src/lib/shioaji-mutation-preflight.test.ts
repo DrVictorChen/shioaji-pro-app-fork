@@ -8,6 +8,7 @@ vi.mock('./api', () => ({ apiPost: m.post, apiGet: vi.fn(), apiPut: vi.fn(), api
 vi.mock('./account-store', () => ({ accountFor: vi.fn(() => { throw new Error('no selected fallback'); }), getAccountState: () => ({ accounts: m.accounts }) }));
 vi.mock('./trading-state', () => ({ getTradingState: () => ({ trades: m.rows }), cancelCacheTrusted: () => m.trusted, locallyCancelled: () => false, hasOrdersBaseline: () => m.baseline, ordersBaselineLostMark: () => m.lostMark }));
 import { cancelOrder, cancelOrders, fetchTradeCacheHealth, fetchTrades, updateOrderPrice, updateOrderQty } from './shioaji';
+import { beginServerInfoRequest, observeServerInfo } from './server-info-store';
 const account: Account = { account_type: 'F', broker_id: 'fixture', account_id: 'owner', signed: true, username: '', person_id: '' };
 const row = (): AccountedTrade => ({ account, contract: { code: 'QEFI6', security_type: 'FUT', exchange: 'TAIFEX', target_code: null }, order: { id: 'fixture', action: 'Buy', price: 489, seqno: 'seq', ordno: 'ord', quantity: 3, account }, status: { status: 'Submitted', id: 'fixture', status_code: '00', msg: '', order_ts: 1700000000, order_quantity: 3, modified_price: 0, deals: [], deal_quantity: 0, cancel_quantity: 0 } } as AccountedTrade);
 beforeEach(async () => {
@@ -205,6 +206,7 @@ it('sends refresh only when explicitly chosen and keeps the server default other
     m.post.mockResolvedValue([]);
     await fetchTrades('F', account);
     await fetchTrades('F', account, { refresh: false });
+    m.accounts.push({ ...account, account_type: 'S', broker_id: 'b', account_id: 'a' });
     await fetchTrades('S', { broker_id: 'b', account_id: 'a' }, { refresh: true });
     expect(m.post.mock.calls.map(c => c[1])).toEqual([
         { account_type: 'F', broker_id: 'fixture', account_id: 'owner' },
@@ -215,7 +217,18 @@ it('sends refresh only when explicitly chosen and keeps the server default other
 it('reads trade cache health for an explicit account', async () => {
     m.post.mockResolvedValue({ state: 'Healthy', reasons: [] });
     await expect(fetchTradeCacheHealth('F', account)).resolves.toEqual({ state: 'Healthy', reasons: [] });
-    expect(m.post).toHaveBeenCalledWith('/api/v1/order/trade_cache_health', { account_type: 'F', broker_id: 'fixture', account_id: 'owner' });
+    expect(m.post).toHaveBeenCalledWith('/api/v1/order/trade_cache_health', { account_type: 'F', broker_id: 'fixture', account_id: 'owner' }, { beforeDispatch: expect.any(Function) });
+});
+
+it('does not reuse a completed authoritative preflight from an earlier mode generation', async () => {
+    const mode = (simulation: boolean) => observeServerInfo(beginServerInfoRequest(), { simulation } as import('./shioaji').ServerInfo);
+    mode(true);
+    m.baseline = false;
+    m.readback = () => [row()];
+    await updateOrderPrice('fixture', 100);
+    mode(false); mode(true);
+    await updateOrderPrice('fixture', 101);
+    expect(m.post.mock.calls.filter(c => c[0] === '/api/v1/order/trades')).toHaveLength(2);
 });
 
 // Review finding: after a sidecar restart outside the App the new process does

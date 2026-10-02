@@ -1,3 +1,5 @@
+import { canTrade } from './account-tradable';
+import { createAccountQuery } from './account-query';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { getApiBase } from './runtime';
 import { cancellationSummary } from './trade-mutations';
@@ -178,8 +180,8 @@ export async function placeQuickOrder(
         throw mutationNotStartedError('指數商品僅提供行情，不可下單');
     }
     const expectedAccountType = isFuturesContract(contract) ? 'F' : 'S';
-    if (!capturedAccount || !capturedAccount.signed || capturedAccount.account_type !== expectedAccountType
-        || !getAccountState().accounts.some(a => a.signed && a.account_type === expectedAccountType
+    if (!capturedAccount || !canTrade(capturedAccount) || capturedAccount.account_type !== expectedAccountType
+        || !getAccountState().accounts.some(a => canTrade(a) && a.account_type === expectedAccountType
             && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) {
         throw mutationNotStartedError('缺少有效且符合商品市場的下單帳戶，請重新選擇帳戶');
     }
@@ -206,7 +208,7 @@ export async function placeQuickOrder(
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
-    if (capturedAccount && !getAccountState().accounts.some(a => a.signed && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
+    if (capturedAccount && !getAccountState().accounts.some(a => canTrade(a) && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined); if (blocked) throw mutationNotStartedError(blocked); }
     if (opts?.beforeSend) {
         try {
@@ -339,21 +341,20 @@ export async function placeStockExitByShares(
 // cancel every working order across stock + futures accounts
 export async function cancelAllOrders(): Promise<number> {
     trackActivity('全刪委託');
+    const query = createAccountQuery();
     // 與 tradesPoll 同款帳戶 fan-out（issue #19）— dock 看得到的委託，
     // 全刪就必須刪得到；只查選中帳戶會靜默漏掉其他帳戶的掛單，通知
     // 卻顯示 N/N 像是全刪完
     const tradable = getAccountState().accounts.filter(
-        (a) => a.signed && (a.account_type === 'S' || a.account_type === 'F'),
+        (a) => canTrade(a) && (a.account_type === 'S' || a.account_type === 'F'),
     );
+    if (!tradable.length) throw new Error('尚未取得可查詢帳戶；未執行全部刪單');
     // Rare, safety-critical: always the authoritative update_status read
     // (refresh:true), never the sidecar cache (ADR 0003).
-    const fetches =
-        tradable.length > 0
-            ? tradable.map((a) =>
-                  fetchTrades(a.account_type as 'S' | 'F', a, { refresh: true }),
-              )
-            : [fetchTrades('S', undefined, { refresh: true }), fetchTrades('F', undefined, { refresh: true })];
+    const fetches = tradable.map(a => query.read(a.account_type as 'S' | 'F', a,
+        current => fetchTrades(current.account_type as 'S' | 'F', current, { refresh: true })));
     const rs = await Promise.allSettled(fetches);
+    query.assertCurrent();
     const failedAccounts = rs.filter(r => r.status === 'rejected').length;
     const merged = rs.flatMap((r) =>
         r.status === 'fulfilled' ? r.value : [],
