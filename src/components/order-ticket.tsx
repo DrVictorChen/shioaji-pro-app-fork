@@ -4,6 +4,7 @@ import { canTrade } from '../lib/account-tradable';
 
 import { Check, ChevronDown } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import { TICKET_ACTION_EVENT } from '../hooks/use-hotkeys';
 import { useQuote, useTradingLive } from '../hooks/use-stream';
 import {
@@ -106,6 +107,7 @@ export function OrderTicket({
     const priceTouched = useRef(false);
     const orderLotRef = useRef(orderLot);
     orderLotRef.current = orderLot;
+    const captureContext = useOrderContext(contract, orderLot);
 
     // ---- multi-account: chip + split-order (分倉) state ----
     const [acctMenuOpen, setAcctMenuOpen] = useState(false);
@@ -249,6 +251,7 @@ export function OrderTicket({
         }
         setArmed(false);
         setBusy(true);
+        const isContextCurrent = captureContext();
         try {
             const blocked = checkOrderAllowed(qty, isFutures ? undefined : orderLot);
             if (blocked) throw new Error(blocked);
@@ -328,6 +331,11 @@ export function OrderTicket({
             if (!isSelectedAccountUnchanged(orderAccount)) {
                 throw new Error(ACCOUNT_CHANGED_MESSAGE);
             }
+            const dispatch = { beforeDispatch: () => {
+                if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+                if (!isSelectedAccountUnchanged(orderAccount)) throw Object.assign(new Error(ACCOUNT_CHANGED_MESSAGE), { tradingGateRejected: true });
+            } };
+            dispatch.beforeDispatch();
             const trade = isFutures
                 ? await placeFuturesOrder(contract, {
                       action,
@@ -336,7 +344,7 @@ export function OrderTicket({
                       price_type: priceType as 'LMT' | 'MKT' | 'MKP',
                       order_type: orderType,
                       octype,
-                  }, orderAccount)
+                  }, orderAccount, dispatch)
                 : await placeStockOrder(contract, {
                       action,
                       price: p,
@@ -352,7 +360,7 @@ export function OrderTicket({
                           orderCond === 'Cash'
                               ? true
                               : undefined,
-                  }, orderAccount);
+                  }, orderAccount, dispatch);
             setFeedback({
                 kind: 'ok',
                 text: `▸ ${trade.status.status} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,
@@ -494,6 +502,10 @@ export function OrderTicket({
         }
         setSplitArmed(false);
         setSplitBusy(true);
+        const isContextCurrent = captureContext();
+        const beforeDispatch = () => {
+            if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+        };
         try {
             if (!splitValid || allocation.length === 0) {
                 throw new Error('分倉設定無效');
@@ -537,6 +549,10 @@ export function OrderTicket({
             // 逐戶送出（sequential — deterministic order, per-order risk）
             for (const { account, qty: q } of allocation) {
                 const label = `${account.broker_id}-${maskAccountId(account.account_id, priv)}`;
+                if (!isContextCurrent()) {
+                    fail.push(`${label}: ${ORDER_CONTEXT_CHANGED_MESSAGE}`);
+                    break;
+                }
                 if (!canTrade(account) || !isAccountAvailable(account)) {
                     fail.push(`${label}: ${ACCOUNT_CHANGED_MESSAGE}；已停止後續分倉`);
                     break;
@@ -547,6 +563,10 @@ export function OrderTicket({
                     continue;
                 }
                 try {
+                    const dispatch = { beforeDispatch: () => {
+                        beforeDispatch();
+                        if (!canTrade(account) || !isAccountAvailable(account)) throw Object.assign(new Error(ACCOUNT_CHANGED_MESSAGE), { tradingGateRejected: true });
+                    } };
                     const trade = isFutures
                         ? await placeFuturesOrder(
                               contract,
@@ -562,6 +582,7 @@ export function OrderTicket({
                                   octype,
                               },
                               account,
+                              dispatch,
                           )
                         : await placeStockOrder(
                               contract,
@@ -584,6 +605,7 @@ export function OrderTicket({
                                           : undefined,
                               },
                               account,
+                              dispatch,
                           );
                     ok.push(
                         `${label} ${q}${qtyUnit} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,

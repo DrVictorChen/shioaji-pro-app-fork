@@ -1,4 +1,5 @@
 import { canTrade } from '../lib/account-tradable';
+import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // src/components/flash-order.tsx — 閃電下單 price ladder (DOM trader).
 // Fixed-window ladder anchored in tick space: the viewport always renders
@@ -318,6 +319,7 @@ export function FlashOrder({
     // refs so hot-path callbacks stay referentially stable (rows are memo'd)
     const contractRef = useRef(contract);
     contractRef.current = contract;
+    const captureContext = useOrderContext(contract, lot);
     const armedRef = useRef(armed);
     const armedAccountKey = useRef(accountKey);
     armedRef.current = armed && armedAccountKey.current === accountKey;
@@ -635,6 +637,8 @@ export function FlashOrder({
         const capturedAccount = accountRef.current;
         if (!armedRef.current || !capturedAccount) return;
         const oddLot = oddRef.current;
+        const capturedContract = contractRef.current;
+        const isContextCurrent = captureContext();
         const q = Math.max(1, qtyRef.current);
         if (oddLot && price === null) {
             notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: ODD_LOT_TEXT.priceType });
@@ -646,20 +650,24 @@ export function FlashOrder({
         force();
         try {
             const trade = await placeQuickOrder(
-                contractRef.current,
+                capturedContract,
                 action,
                 price,
                 q,
                 {
                     account: capturedAccount,
                     isAccountCurrent: stillPanelAccount(capturedAccount),
+                    beforeSend: () => {
+                        if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                        if (!accountMatches(accountRef.current, capturedAccount)) throw new Error('帳戶已變更，已停止後續下單');
+                    },
                     ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
                 },
             );
             notify({
                 kind: 'ok',
                 title: `⚡ ${oddLot ? '零股' : ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
-                body: `${contractRef.current.code} ${q}${oddLot ? ' 股' : ''} @ ${
+                body: `${capturedContract.code} ${q}${oddLot ? ' 股' : ''} @ ${
                     price === null ? '市價' : fmtPrice(price)
                 } (${trade.status.status})`,
             });
@@ -671,7 +679,7 @@ export function FlashOrder({
             inflightRef.current.delete(key);
             force();
         }
-    }, [stillPanelAccount]);
+    }, [stillPanelAccount, captureContext]);
 
     const onCell = useCallback(
         (action: Action, price: number) => void send(action, price),
@@ -743,12 +751,17 @@ export function FlashOrder({
         if (inflightRef.current.has(key)) return;
         inflightRef.current.add(key);
         const contract = contractRef.current;
+        const isContextCurrent = captureContext();
+        const beforeSend = () => {
+            if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+            if (!accountMatches(accountRef.current, account)) throw new Error('帳戶已變更，已停止後續下單');
+        };
         const action = pos.net > 0 ? 'Sell' : 'Buy';
         try {
             if (account.account_type === 'S') {
-                await placeStockExitByShares(contract, action, Math.abs(pos.net), account, { isAccountCurrent: stillPanelAccount(account) });
+                await placeStockExitByShares(contract, action, Math.abs(pos.net), account, { isAccountCurrent: stillPanelAccount(account), beforeSend });
             } else {
-                await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account) });
+                await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account), beforeSend });
             }
             notify({ kind: 'info', title: '⚡ 平倉已送出', body: '請以委託與成交回報確認結果' });
             onOrdersChangedRef.current?.();
@@ -756,7 +769,7 @@ export function FlashOrder({
             if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
             else notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
         } finally { inflightRef.current.delete(key); }
-    }, [pos, stillPanelAccount]);
+    }, [pos, stillPanelAccount, captureContext]);
 
     // ---- render ----
 

@@ -296,7 +296,7 @@ export async function placeStockExitByShares(
     action: Action,
     shares: number,
     account?: Account,
-    opts?: { isAccountCurrent?: () => boolean },
+    opts?: { isAccountCurrent?: () => boolean; beforeSend?: () => void },
 ): Promise<Trade[]> {
     const capturedAccount = account ?? getAccountState().selectedStock ?? undefined;
     const base = getApiBase();
@@ -330,6 +330,8 @@ export async function placeStockExitByShares(
             await placeQuickOrder(contract, action, null, lots, {
                 source: 'auto',
                 account: capturedAccount,
+                isAccountCurrent: opts?.isAccountCurrent,
+                beforeSend: opts?.beforeSend,
             }),
         );
     }
@@ -343,6 +345,8 @@ export async function placeStockExitByShares(
                 orderLot: 'IntradayOdd',
                 source: 'auto',
                 account: capturedAccount,
+                isAccountCurrent: opts?.isAccountCurrent,
+                beforeSend: opts?.beforeSend,
             }),
         );
     }

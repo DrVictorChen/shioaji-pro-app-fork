@@ -86,6 +86,7 @@ import { canUpdateOrderPrice } from '../lib/odd-lot';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
 import { notify, placeQuickOrder } from '../lib/trade';
+import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import {
     chartModeHint,
     chartPlaceOptions,
@@ -285,6 +286,7 @@ export function CandleChart({
     };
     const orderSettingsRef = useRef(orderSettings);
     orderSettingsRef.current = orderSettings;
+    const captureContext = useOrderContext(contract, orderSettings.lot);
     // 帳號：沒固定就跟隨主畫面；固定的帳號不可用時絕不改用別的帳號
     const accountState = useAccounts();
     const privacy = usePrivacyMode();
@@ -529,7 +531,11 @@ export function CandleChart({
             const isAccountCurrent = () => accountMatches(orderAccountRef.current.active, account);
             if (m === 'buy' || m === 'sell') {
                 const action = m === 'buy' ? 'Buy' : 'Sell';
-                placeQuickOrder(c, action, price, qty, { ...chartPlaceOptions(settings, market), account, isAccountCurrent })
+                const isContextCurrent = captureContext();
+                placeQuickOrder(c, action, price, qty, { ...chartPlaceOptions(settings, market), account, isAccountCurrent, beforeSend: () => {
+                    if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                    if (!isAccountCurrent()) throw new Error('帳戶已變更，已停止後續下單');
+                } })
                     .then((trade) =>
                         notify({
                             kind: 'ok',

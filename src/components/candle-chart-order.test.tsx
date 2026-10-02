@@ -140,6 +140,40 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
 
+it.each(['symbol', 'switch back', 'unit', 'account', 'unmount'])(
+    'refuses a pending chart order at dispatch after %s changes', async change => {
+        let release!: () => void;
+        const wait = new Promise<void>(r => { release = r; });
+        const dispatched = vi.fn();
+        m.place.mockImplementation(async (_c, _s, _p, _q, opts) => {
+            await wait;
+            opts.beforeSend();
+            dispatched();
+            return { status: { status: 'Submitted' } };
+        });
+        const props = { contract: stk };
+        await mount(props);
+        await act(async () => { button(view.root, '點價買').props.onClick(); });
+        await clickChart();
+        expect(m.place).toHaveBeenCalledOnce();
+        if (change === 'unmount') await act(async () => view.unmount());
+        else if (change === 'unit') {
+            await act(async () => { chip().props.onClick(); });
+            await act(async () => { button(pop()!, '盤中零股（股）').props.onClick(); });
+        } else if (change === 'account') {
+            m.accounts = [S2, S1, F1];
+            await act(async () => { view.update(createElement(CandleChart, props)); });
+        } else {
+            await act(async () => { view.update(createElement(CandleChart, { contract: { ...stk, code: '2317' } })); });
+            if (change === 'switch back') await act(async () => { view.update(createElement(CandleChart, props)); });
+        }
+        await act(async () => { release(); });
+        await flush();
+        expect(dispatched).not.toHaveBeenCalled();
+        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗' });
+    },
+);
+
 describe('chart order settings button', () => {
     const drawingApi = () => view.root.findByType(ChartDrawingTools).props.api as ChartDrawingsApi;
 

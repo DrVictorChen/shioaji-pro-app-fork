@@ -58,6 +58,22 @@ it('rechecks connection after confirmation and does not send a leg', async () =>
     m.confirm.mockImplementation(async () => { m.live='connecting'; return true; });
     await expect(placeStockExitByShares(contract,'Sell',1000,account)).rejects.toThrow('LIVE'); expect(m.stock).not.toHaveBeenCalled();
 });
+
+it.each(['context', 'account'])('rechecks %s before the odd remainder of a stock exit', async change => {
+    let current = true;
+    const dispatched = vi.fn();
+    m.stock.mockImplementation(async (_c, _o, _a, opts) => {
+        opts.beforeDispatch();
+        dispatched();
+        current = false; // the first leg's response arrives after the panel changed
+        return {};
+    });
+    await expect(placeStockExitByShares(contract, 'Sell', 1500, account, {
+        isAccountCurrent: () => change !== 'account' || current,
+        beforeSend: () => { if (change === 'context' && !current) throw new Error('商品已變更'); },
+    })).rejects.toMatchObject({ mutationNotStarted: true });
+    expect(dispatched).toHaveBeenCalledOnce();
+});
 it('passes explicit Cover and retains Auto default', async () => {
     const future = {...contract,security_type:'FUT',exchange:'TAIFEX'} as ContractBase;
     m.selected = {...account, account_type:'F'}; m.accounts=[m.selected];
