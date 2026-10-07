@@ -281,12 +281,13 @@ export function supertrend(
         const mid = (b.high + b.low) / 2;
         let upper = mid + mult * a;
         let lower = mid - mult * a;
-        // band ratchet
-        if (!Number.isNaN(prevUpper) && (upper > prevUpper || prevClose > prevUpper)) {
-            upper = Math.min(upper, prevUpper);
+        // band ratchet（標準 SuperTrend）：新帶比前帶更緊、或前一根收盤已越過前帶時
+        // 才採用新帶；否則沿用前帶。收盤越過前帶時必須重設，不能取 min/max 卡住舊帶。
+        if (!Number.isNaN(prevUpper) && !(upper < prevUpper || prevClose > prevUpper)) {
+            upper = prevUpper;
         }
-        if (!Number.isNaN(prevLower) && (lower < prevLower || prevClose < prevLower)) {
-            lower = Math.max(lower, prevLower);
+        if (!Number.isNaN(prevLower) && !(lower > prevLower || prevClose < prevLower)) {
+            lower = prevLower;
         }
         if (trendUp && b.close < lower) trendUp = false;
         else if (!trendUp && b.close > upper) trendUp = true;
