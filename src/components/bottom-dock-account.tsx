@@ -316,16 +316,18 @@ function PnlSection({
         if (codesKey.length === 0) return;
         let alive = true;
         void Promise.allSettled(
-            codesKey.map((code) => resolveContract(code)),
+            codesKey.map((code) => resolveContract(code.trim())),
         ).then((rs) => {
             if (!alive) return;
             setNames((prev) => {
                 const next = { ...prev };
-                for (const r of rs) {
+                // 以列上的代號為 key（#240）：券商損益的代號可能帶空白或與合約查詢回傳的
+                // 正規代號不同，用回傳的 code 當 key 會查不到而只顯示代號
+                rs.forEach((r, index) => {
                     if (r.status === 'fulfilled' && r.value.name) {
-                        next[r.value.code] = r.value.name;
+                        next[codesKey[index]!] = r.value.name;
                     }
-                }
+                });
                 return next;
             });
         });

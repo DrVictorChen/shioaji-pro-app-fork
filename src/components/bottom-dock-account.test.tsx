@@ -63,3 +63,20 @@ it('adds matching settlement dates and rejects mismatched dates; incomplete fund
     expect(JSON.stringify(view!.toJSON())).not.toContain('1,000,249');
     expect(JSON.stringify(view!.toJSON())).not.toContain('999,999');
 });
+it('#240 shows the contract name in realized rows even when the broker code is not the canonical contract code', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
+    // Fresh account keys: the pane keeps the previous test's snapshot per account set.
+    fixture.accounts.forEach(a => { a.account_type = 'F'; a.account_id = `${a.account_id}-240`; });
+    const { resolveContract } = await import('../lib/shioaji');
+    vi.mocked(resolveContract).mockImplementation(async (code: string) => ({ code: code.trim(), name: code.trim() === 'REFJ6' ? '測試期貨10' : '' }) as never);
+    fixture.pnl.mockImplementation(async (_market, account) => account.account_id === 'A-240'
+        ? [{ id: 1, code: 'REFJ6   ', pnl: 300, quantity: 3, date: '20261007', direction: 'Buy', entry_price: 1, cover_price: 2, fee: 0, tax: 0 }] : []);
+    fixture.summary.mockResolvedValue({ total: { pnl: 300 }, profitloss_sum: [] });
+    await act(async () => { view = create(createElement(AccountPane, { positions: [], market: 'F', scopeAccount: null })); });
+    const toggle = view!.root.findAll(node => node.type === 'button' && node.props.title === '展開明細')[0]!;
+    await act(async () => { toggle.props.onClick(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(vi.mocked(resolveContract)).toHaveBeenCalledWith('REFJ6');
+    expect(JSON.stringify(view!.toJSON())).toContain('測試期貨10');
+});
