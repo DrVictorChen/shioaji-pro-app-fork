@@ -34,4 +34,9 @@ describe('supertrend band ratchet (#239)', () => {
             expect(v!).toBeGreaterThan(bars[i]!.close);
         }
     });
+
+    it('鏡射資料：翻多後盤整不會每根多空交替（下軌重設）', () => {
+        const mirrored = bars.map(b => ({ ...b, open: 200 - b.open, high: 200 - b.low, low: 200 - b.high, close: 200 - b.close }));
+        expect(trendString(mirrored)).toBe('.........UUUUUUUUUUDDDDDDDDDDDDDUUUUUUUUUUUUU');
+    });
 });
