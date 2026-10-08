@@ -84,6 +84,7 @@ export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spe
     const live = series.filter(r => !expired(r, now));
     const contract = link.month === 'near' ? live[0] : link.month === 'next' ? live[1] : live.find(r => r.delivery_month === link.month);
     if (!contract) {
+        if (link.month === 'next' && live.length > 0) return { status: 'unlisted', month: 'next' };
         if (link.month === 'near' || link.month === 'next') return { status: 'none' };
         const listed = series.some(r => r.delivery_month === link.month);
         return listed || link.month < taipei(now).day.replace('-', '').slice(0, 6)

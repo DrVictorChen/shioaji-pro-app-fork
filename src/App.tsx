@@ -120,7 +120,7 @@ import {
     withLinkMode,
     type LinkMode,
 } from './lib/workspace';
-import { normalizeFlashLink, type FlashLink, type LinkGroupId } from './lib/flash-link';
+import { isLinkGroup, normalizeFlashLink, type FlashLink, type LinkGroupId } from './lib/flash-link';
 import { FlashLinkHost } from './components/flash-link-host';
 import { SettingsInfoRow } from './components/chart-order-popover';
 import { mainFlashSelection } from './lib/order-account';
@@ -622,7 +622,8 @@ function BlockView(props: BlockViewProps) {
                 link={{
                     mode: linkMode,
                     groups: linkGroups,
-                    onMode: (mode) => onLinkMode(block.id, mode, contract?.code ?? selected?.code ?? null),
+                    // 目前的來源代碼：鎖定／群組用自己的代碼（即使合約還在載入），跟自選才用選取
+                    onMode: (mode) => onLinkMode(block.id, mode, sourceCode ?? contract?.code ?? null),
                     onGroupCode,
                 }}
                 onRemove={() => {
@@ -1323,14 +1324,21 @@ function MainApp() {
         (id: string, flashLink: FlashLink) => patchBlock(id, { flashLink }),
         [patchBlock],
     );
+    // 同一群組連續輸入時只套用最後一次（較早的查詢晚回來不能蓋掉）
+    const groupCodeSeq = useRef<Partial<Record<LinkGroupId, number>>>({});
     const setBlockLinkMode = useCallback(
-        (id: string, mode: LinkMode, currentCode: string | null) =>
-            updateWorkspace(withLinkMode(workspaceRef.current, id, mode, currentCode)),
+        (id: string, mode: LinkMode, currentCode: string | null) => {
+            const ws = workspaceRef.current;
+            const prev = ws.blocks.find((b) => b.id === id);
+            // 群組成員變動（離開、重新開始）時，該組還在查的代碼作廢，不能事後蓋掉
+            for (const g of [prev ? blockLinkMode(prev) : null, mode]) {
+                if (isLinkGroup(g)) groupCodeSeq.current[g] = (groupCodeSeq.current[g] ?? 0) + 1;
+            }
+            updateWorkspace(withLinkMode(ws, id, mode, currentCode));
+        },
         [updateWorkspace],
     );
     // 群組換代碼：先確認代碼存在，再讓全組同一次一起換
-    // 同一群組連續輸入時只套用最後一次（較早的查詢晚回來不能蓋掉）
-    const groupCodeSeq = useRef<Partial<Record<LinkGroupId, number>>>({});
     const setGroupCode = useCallback((group: LinkGroupId, code: string) => {
         const seq = (groupCodeSeq.current[group] ?? 0) + 1;
         groupCodeSeq.current[group] = seq;

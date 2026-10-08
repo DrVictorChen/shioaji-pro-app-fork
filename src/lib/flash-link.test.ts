@@ -62,6 +62,10 @@ describe('pickStockFuture', () => {
         expect(pickStockFuture(stdOnly, link({ spec: 'mini' }), now)).toEqual({ status: 'noMini' });
         expect(pickStockFuture(stdOnly, link(), now)).toMatchObject({ hasMini: false });
     });
+    it('次月 when only one month is listed is a month problem, not "no stock futures"', () => {
+        const one = rows.filter(r => r.code === 'CDFJ6');
+        expect(pickStockFuture(one, link({ month: 'next' }), now)).toEqual({ status: 'unlisted', month: 'next' });
+    });
     it('no futures at all', () => {
         expect(pickStockFuture([], link(), now)).toEqual({ status: 'none' });
     });

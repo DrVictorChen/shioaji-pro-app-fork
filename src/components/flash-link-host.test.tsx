@@ -172,3 +172,12 @@ it('after a contract expires the futures list is fetched again (newly listed mon
     expect(mocks.fetchFutures).toHaveBeenCalledTimes(2);
     expect(text(r.root)).toContain('ladder CDFK6');
 });
+
+it('次月 missing for a one-month stock offers 改為近月, not 改為現股', async () => {
+    const onLinkChange = vi.fn();
+    const r = await mount(stock('2317', '鴻海'), { kind: 'future', month: 'next' }, { onLinkChange });
+    expect(text(r.root)).toContain('2317 沒有次月合約');
+    const btn = r.root.findAllByType('button').find(b => text(b).includes('改為近月'))!;
+    await act(async () => { btn.props.onClick(); });
+    expect(onLinkChange).toHaveBeenCalledWith(expect.objectContaining({ month: 'near' }));
+});

@@ -174,7 +174,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
             button('改為近月', () => set({ month: 'near' })));
     }
     if (pick?.status === 'unlisted') {
-        return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有 ${monthLabel(pick.month)} 合約`, undefined,
+        return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有${pick.month === 'next' ? '次月' : ` ${monthLabel(pick.month)} `}合約`, undefined,
             button('改為近月', () => set({ month: 'near' })));
     }
     if (pick?.status !== 'ok' || !picked) return <div className={styles.waiting}>載入個股期…</div>;
