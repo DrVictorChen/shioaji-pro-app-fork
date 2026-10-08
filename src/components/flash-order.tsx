@@ -49,6 +49,9 @@ const EDGE = 2; // auto-recenter when last price gets this close to the edge
 
 const keyOf = (p: number) => p.toFixed(2);
 const FOLLOW_GLOBAL = '__follow__';
+// 面板 id → 最後的數量（含輸入時的類別＋單位）。鎖定代碼換到尚未載入的
+// 商品時面板會暫時卸載，重新掛載後同單位仍沿用數量；只在記憶體，不存檔
+const panelQtyMemory = new Map<string, { unit: string; qty: number }>();
 const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
 
 function accountChangedBeforeSend(error: unknown): boolean {
@@ -230,6 +233,7 @@ export function FlashOrder({
     reconcilePending = false,
     lot: savedLot,
     onLotChange,
+    panelId,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -253,6 +257,8 @@ export function FlashOrder({
     // onLotChange. Undefined = never chosen → the 設為預設 unit.
     lot?: FlashLot;
     onLotChange?: (lot: FlashLot) => void;
+    // workspace block id: keeps the quantity across a remount (see panelQtyMemory)
+    panelId?: string;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -297,7 +303,14 @@ export function FlashOrder({
     const unitKey = `${market}:${lot}`;
     const unitKeyRef = useRef(unitKey);
     unitKeyRef.current = unitKey;
-    const [qtyEntry, setQtyEntry] = useState(() => ({ unit: unitKey, qty: lot === defaultFor(market).lot ? defaultFor(market).qty : 1 }));
+    const [qtyEntry, setQtyEntry] = useState(() => {
+        const kept = panelId ? panelQtyMemory.get(panelId) : undefined;
+        if (kept?.unit === unitKey) return kept;
+        return { unit: unitKey, qty: lot === defaultFor(market).lot ? defaultFor(market).qty : 1 };
+    });
+    useEffect(() => {
+        if (panelId) panelQtyMemory.set(panelId, qtyEntry);
+    }, [panelId, qtyEntry]);
     const qty = qtyEntry.unit === unitKey ? qtyEntry.qty : 1;
     const setQty = useCallback((v: number | ((prev: number) => number)) => setQtyEntry(prev => {
         const unit = unitKeyRef.current;

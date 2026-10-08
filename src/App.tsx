@@ -312,6 +312,7 @@ function BlockBody({
                     onAccountKeysChange={(keys) => onFlashAccountsChange(block.id, keys)}
                     lot={block.flashLot}
                     onLotChange={(flashLot) => onFlashLotChange(block.id, flashLot)}
+                    panelId={block.id}
                 />
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
