@@ -1366,7 +1366,7 @@ export function ChartObjectList({ api }: { api: ChartDrawingsApi }) {
                             </button>
                             {canSendBehind(d) && (
                                 <button
-                                    className={styles.iconBtn}
+                                    className={isBehindCandles(d) ? styles.iconBtnOn : styles.iconBtn}
                                     aria-label={isBehindCandles(d) ? `${drawingLabel(d)} 移到 K 棒前方` : `${drawingLabel(d)} 移到 K 棒後方`}
                                     title={isBehindCandles(d) ? 'K 棒後方（點一下移到前方）' : 'K 棒前方（點一下移到後方）'}
                                     aria-pressed={isBehindCandles(d)}

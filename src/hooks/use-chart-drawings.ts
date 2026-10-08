@@ -710,7 +710,8 @@ export function useChartDrawings(opts: {
         const pick = (projector: Projector, pt: Point) => {
             const layer = layerOf();
             if (!layer) return null;
-            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice);
+            const sel = stateRef.current.selectedIds;
+            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => sel.includes(d.id));
         };
 
         const measureLabel = (a: DrawingAnchor, b: DrawingAnchor) => {
@@ -1663,7 +1664,7 @@ export function useChartDrawings(opts: {
         if (!layer || !pt || !projector) return null;
         const { drawings: list, selectedIds: sel } = stateRef.current;
         if (!list.length) return null;
-        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice);
+        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => sel.includes(d.id));
         if (!picked) return null;
         return sel.includes(picked.drawing.id) ? 'selected' : 'other';
     }, []);

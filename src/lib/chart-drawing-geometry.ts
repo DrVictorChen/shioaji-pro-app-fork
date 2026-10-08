@@ -379,7 +379,10 @@ export function hitTest(
     at: Point,
     tolerance = HIT_TOLERANCE,
     extra?: ShapeExtra,
+    only?: 'overlay',
 ): Hit | null {
+    // only='overlay'：只測永遠畫在上層的部分 — 控制點與斐波那契價位標籤。
+    // K 棒後方的物件這兩樣仍畫在上層，點選順序要跟畫面一致。
     // 命中範圍加大後相鄰控制點可能同時落在範圍內 — 取最近的那個
     let nearest = -1;
     let nearestDist = ANCHOR_RADIUS + tolerance;
@@ -394,6 +397,7 @@ export function hitTest(
     if (nearest >= 0) return { kind: 'anchor', index: nearest };
     const shape = shapeOf(tool, pts, size, extra);
     if (!shape) return null;
+    if (only === 'overlay' && shape.kind !== 'fib') return null;
     tolerance = Math.max(tolerance, (extra?.style?.width ?? 0) / 2);
     const near = (seg: Segment) => distanceToSegment(at, seg.a, seg.b) <= tolerance;
     if (shape.kind === 'line') {
@@ -411,6 +415,7 @@ export function hitTest(
         const band = fib.bandOpacity > 0 && ys.length > 1 && inX && at.y >= Math.min(...ys) && at.y <= Math.max(...ys);
         const labels = fibLabels(shape, fib, extra?.anchors ?? pts.map((p) => ({ time: p.x, price: p.y })), size.width, extra?.formatPrice);
         const label = labels.some((r) => r.text && at.x >= r.left - tolerance - 2 && at.x <= r.right + tolerance + 2 && at.y >= r.top - tolerance - 2 && at.y <= r.bottom + tolerance + 2);
+        if (only === 'overlay') return label ? { kind: 'body' } : null;
         const hit =
             band || label ||
             (inX && shape.levels.some((l) => Math.abs(at.y - l.y) <= tolerance)) ||
@@ -426,8 +431,9 @@ export function hitTest(
     return inside ? { kind: 'body' } : null;
 }
 
-// 從一疊物件裡挑出游標點到的那個。後畫的疊在上面，所以從尾端往前找；
-// 畫在 K 棒前方的物件整層蓋在後方物件之上，所以先找前方、再找後方。
+// 從一疊物件裡挑出游標點到的那個。後畫的疊在上面，所以從尾端往前找。
+// 順序與畫面一致：先找上層（前方物件整個、後方物件的標籤與選取控制點，
+// 依清單順序），再找 K 棒後方物件的本體。
 //
 // 篩選規則只有一條：隱藏的跳過。**鎖定的照樣選得到** — 鎖定擋的是拖曳，
 // 不是選取；選不到就沒辦法解鎖或改樣式，物件會永遠黏在圖上拿不掉。
@@ -447,16 +453,26 @@ export function pickDrawing<
     at: Point,
     tolerance = HIT_TOLERANCE,
     formatPrice?: (price: number) => string,
+    // 選取中的物件（控制點只在選取時畫出來）
+    isSelected?: (d: T) => boolean,
 ): { drawing: T; hit: Hit; points: Point[] } | null {
     for (let pass = 0; pass < 2; pass++) {
-        const wantBehind = pass === 1;
         for (let i = list.length - 1; i >= 0; i--) {
             const d = list[i]!;
             if (d.hidden) continue;
-            if ((d.behind === true && d.tool !== 'text') !== wantBehind) continue;
+            const behind = d.behind === true && d.tool !== 'text';
+            if (pass === 1 && !behind) continue;
             const points = projectAnchors(projector, d.anchors);
             if (!points) continue;
-            const hit = hitTest(d.tool, points, size, at, tolerance, { ...d, formatPrice });
+            const extra = { ...d, formatPrice };
+            let hit: Hit | null;
+            if (!behind || pass === 1) {
+                hit = hitTest(d.tool, points, size, at, tolerance, extra);
+            } else {
+                hit = hitTest(d.tool, points, size, at, tolerance, extra, 'overlay');
+                // 沒選取時控制點沒畫出來，不算上層命中（留給本體那一輪）
+                if (hit?.kind === 'anchor' && !isSelected?.(d)) hit = null;
+            }
             if (hit) return { drawing: d, hit, points };
         }
     }

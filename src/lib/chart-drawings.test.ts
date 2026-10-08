@@ -1008,6 +1008,22 @@ describe('K 棒前方／後方', () => {
     });
 });
 
+describe('K 棒前方／後方：存檔與重新載入', () => {
+    it('後方寫入存檔後重載仍在；切回前方後存檔裡沒有 behind 欄位', () => {
+        const a = addDrawing('TXF', 'trend', [{ time: 1, price: 2 }, { time: 2, price: 3 }], DEFAULT_DRAWING_STYLE)!;
+        setDrawingsBehind('TXF', [a.id], true);
+        flushDrawingWrites();
+        reloadDrawingsFromStorage();
+        expect(getDrawings('TXF').find((d) => d.id === a.id)!.behind).toBe(true);
+        setDrawingsBehind('TXF', [a.id], false);
+        flushDrawingWrites();
+        reloadDrawingsFromStorage();
+        const saved = getDrawings('TXF').find((d) => d.id === a.id)!;
+        expect('behind' in saved).toBe(false);
+        expect(JSON.stringify(saved)).not.toContain('behind');
+    });
+});
+
 describe('線寬', () => {
     it('可選 0.5px，原有的 1–4 保留', () => {
         expect([...LINE_WIDTHS]).toEqual([0.5, 1, 2, 3, 4]);
