@@ -231,3 +231,53 @@ it('an invalid remembered quantity gives exactly one notice (StrictMode re-runs 
     expect(String(mocks.notify.mock.calls[0]![0].body)).toContain('5000 股');
     expect(o.state.qtyMemory).toEqual({ Common: 3 });
 });
+
+it('a layout switch that brings another remembered quantity for the same unit shows it at once and is disarmed', async () => {
+    let r!: ReactTestRenderer;
+    const Wrapped = ({ mem, click }: { mem: Setting; click: boolean }) => {
+        useLayoutEffect(() => {
+            if (!click) return;
+            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+        }, [click]);
+        return createElement(FlashOrder, props(stk, { lot: 'Common', onLotChange: () => undefined, qtyMemory: mem, onQtyMemoryChange: () => undefined }));
+    };
+    await act(async () => { r = create(createElement(Wrapped, { mem: { Common: 3 }, click: false })); });
+    roots.push(r);
+    expect(qty(r).props.value).toBe(3);
+    await act(async () => { button(r, '啟用閃電下單').props.onClick(); });
+    // the saved layout (same block id) remembers 8 張
+    await act(async () => { r.update(createElement(Wrapped, { mem: { Common: 8 }, click: true })); });
+    expect(mocks.place).not.toHaveBeenCalled();
+    expect(qty(r).props.value).toBe(8);
+    expect(text(r.root)).toContain('啟用閃電下單');
+});
+
+it('editing the quantity while armed keeps it armed and sends the new quantity', async () => {
+    const o = owner('Common', { Common: 3 });
+    const r = await mountOwned(o, stk);
+    await act(async () => { button(r, '啟用閃電下單').props.onClick(); });
+    await typeQty(r, 4);
+    expect(o.state.qtyMemory).toEqual({ Common: 4 });
+    const cell = r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!;
+    await act(async () => { cell.props.onClick(); });
+    expect(mocks.place.mock.calls[0]![3]).toBe(4);
+});
+
+it('with it off, a reload is 1 even when 設為預設 has a larger quantity', async () => {
+    mocks.store.set(DEFAULTS_KEY, JSON.stringify({ S: { lot: 'Common', qty: 7 } }));
+    const r = await mountOwned(owner('Common', false), stk);
+    expect(qty(r).props.value).toBe(1);
+    // …while a panel with it on (nothing remembered yet) starts from 設為預設
+    const on = await mountOwned(owner('Common'), stk);
+    expect(qty(on).props.value).toBe(7);
+});
+
+it('clearing the quantity field drops that unit from memory instead of snapping back', async () => {
+    const o = owner('Common', { Common: 3, IntradayOdd: 500 });
+    const r = await mountOwned(o, stk);
+    await typeQty(r, 0);
+    expect(qty(r).props.value).toBe(0);
+    expect(o.state.qtyMemory).toEqual({ IntradayOdd: 500 });
+    await typeQty(r, 6);
+    expect(o.state.qtyMemory).toEqual({ Common: 6, IntradayOdd: 500 });
+});

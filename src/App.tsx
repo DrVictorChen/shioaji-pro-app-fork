@@ -317,7 +317,6 @@ function BlockBody({
                     onAccountKeysChange={(keys) => onFlashAccountsChange(block.id, keys)}
                     lot={block.flashLot}
                     onLotChange={(flashLot) => onFlashLotChange(block.id, flashLot)}
-                    panelId={block.id}
                     qtyMemory={block.flashQty}
                     onQtyMemoryChange={(flashQty) => onFlashQtyChange(block.id, flashQty)}
                 />
@@ -581,7 +580,7 @@ function BlockView(props: BlockViewProps) {
                                       ...popoutSessionParam(block),
                                       ...flashParams,
                                   },
-                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global, flashSeed) : undefined,
+                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global, { lot: flashSeed.lot }) : undefined,
                               );
                           }
                         : undefined

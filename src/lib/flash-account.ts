@@ -213,9 +213,10 @@ export function flashPopoutParams(panelKeys: FlashAccountKeys | undefined, globa
 
 /**
  * Called only when the opener has confirmed that it created a window. A panel
- * passes its unit and 記住數量 setting so the popout opens on them; a tile (no
- * panel) passes none and keeps what its window last used.
+ * passes its unit so the popout opens on it; a tile (no panel) passes none and
+ * keeps the unit its window last used. The popout's 記住數量 setting is its own:
+ * only a brand-new window id is seeded with the panel's (flashPopoutParams).
  */
-export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, panel?: FlashPanelSeed): void {
-    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global), panel);
+export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, panel?: Pick<FlashPanelSeed, 'lot'>): void {
+    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global), panel?.lot ? { lot: panel.lot } : undefined);
 }

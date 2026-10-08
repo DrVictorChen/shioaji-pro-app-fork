@@ -233,19 +233,4 @@ it('a symbol change keeping the unit and quantity never stays armed, even before
     expect(qty(r).props.value).toBe(500);
 });
 
-it('keeps the quantity when the panel remounts on another stock (pinned code still loading), per panel id', async () => {
-    const first = await mount(stk, { ...owned('IntradayOdd').extra(), panelId: 'flash-1' });
-    await act(async () => { qty(first).props.onChange({ target: { value: '500' } }); });
-    await act(async () => first.unmount());
-    roots.splice(roots.indexOf(first), 1);
-    const again = await mount(hon, { ...owned('IntradayOdd').extra(), panelId: 'flash-1' });
-    expect(unit(again)).toBe('股');
-    expect(qty(again).props.value).toBe(500);
-    // another panel id does not inherit it, and a different unit never carries it
-    const other = await mount(hon, { ...owned('IntradayOdd').extra(), panelId: 'flash-2' });
-    expect(qty(other).props.value).toBe(1);
-    await act(async () => again.unmount());
-    roots.splice(roots.indexOf(again), 1);
-    const round = await mount(hon, { ...owned('Common').extra(), panelId: 'flash-1' });
-    expect(qty(round).props.value).toBe(1);
-});
+

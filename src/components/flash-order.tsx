@@ -50,9 +50,6 @@ const EDGE = 2; // auto-recenter when last price gets this close to the edge
 
 const keyOf = (p: number) => p.toFixed(2);
 const FOLLOW_GLOBAL = '__follow__';
-// 面板 id → 最後的數量（含輸入時的類別＋單位）。鎖定代碼換到尚未載入的
-// 商品時面板會暫時卸載，重新掛載後同單位仍沿用數量；只在記憶體，不存檔
-const panelQtyMemory = new Map<string, { unit: string; qty: number }>();
 const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
 
 function accountChangedBeforeSend(error: unknown): boolean {
@@ -234,7 +231,6 @@ export function FlashOrder({
     reconcilePending = false,
     lot: savedLot,
     onLotChange,
-    panelId,
     qtyMemory: savedQtyMemory,
     onQtyMemoryChange,
 }: {
@@ -260,8 +256,6 @@ export function FlashOrder({
     // onLotChange. Undefined = never chosen → the 設為預設 unit.
     lot?: FlashLot;
     onLotChange?: (lot: FlashLot) => void;
-    // workspace block id: keeps the quantity across a remount (see panelQtyMemory)
-    panelId?: string;
     // 記住數量（預設開）：張／股／口各一個數量，由擁有者保存；false = 關閉。
     // 沒有 onQtyMemoryChange 時只在元件內
     qtyMemory?: FlashQtySetting;
@@ -315,46 +309,57 @@ export function FlashOrder({
     const qtyMemory: FlashQtySetting = onQtyMemoryChange ? sanitizeFlashQtySetting(savedQtyMemory) : localQtyMemory;
     const qtyMemoryRef = useRef(qtyMemory);
     qtyMemoryRef.current = qtyMemory;
+    const onQtyMemoryChangeRef = useRef(onQtyMemoryChange);
+    onQtyMemoryChangeRef.current = onQtyMemoryChange;
     const setQtyMemory = useCallback((next: FlashQtySetting) => {
         qtyMemoryRef.current = next;
         setLocalQtyMemory(next);
         onQtyMemoryChangeRef.current?.(next);
     }, []);
-    const onQtyMemoryChangeRef = useRef(onQtyMemoryChange);
-    onQtyMemoryChangeRef.current = onQtyMemoryChange;
     const qtySlot = flashQtySlot(market, lot);
-    const rememberedQty = qtyMemory === false ? undefined : rememberedFlashQty(qtyMemory, qtySlot).qty;
-    // user: the quantity was set by the user (input / ± / settings) → remembered;
-    // restored or reset quantities are not written back
-    const [qtyEntry, setQtyEntry] = useState<{ unit: string; qty: number; user?: boolean }>(() => {
+    const qtySlotRef = useRef(qtySlot);
+    qtySlotRef.current = qtySlot;
+    const remembered = qtyMemory === false ? { qty: undefined, invalid: false } : rememberedFlashQty(qtyMemory, qtySlot);
+    const rememberedQty = remembered.qty;
+    // 記住數量關閉或記住的數量不合法 → 1；開啟但這個單位還沒記住 → 設為預設
+    const [qtyEntry, setQtyEntry] = useState<{ unit: string; qty: number }>(() => {
+        if (qtyMemory === false || remembered.invalid) return { unit: unitKey, qty: 1 };
         if (rememberedQty !== undefined) return { unit: unitKey, qty: rememberedQty };
-        // 記住的數量不合法：一律 1（不改用預設或記憶體裡的數量）
-        if (qtyMemory !== false && rememberedFlashQty(qtyMemory, qtySlot).invalid) return { unit: unitKey, qty: 1 };
-        const kept = panelId ? panelQtyMemory.get(panelId) : undefined;
-        if (kept?.unit === unitKey) return { unit: kept.unit, qty: kept.qty };
         return { unit: unitKey, qty: lot === defaultFor(market).lot ? defaultFor(market).qty : 1 };
     });
-    useEffect(() => {
-        if (panelId) panelQtyMemory.set(panelId, { unit: qtyEntry.unit, qty: qtyEntry.qty });
-    }, [panelId, qtyEntry]);
-    // 單位一變，同一次 render 就換成新單位記住的數量（已檢查上限）或 1
-    const qty = qtyEntry.unit === unitKey ? qtyEntry.qty : (rememberedQty ?? 1);
-    const setQty = useCallback((v: number | ((prev: number) => number)) => setQtyEntry(prev => {
+    // 記住數量開啟且這個單位有合法紀錄時，紀錄就是數量：切換版面等外部還原、
+    // 換單位，都在同一次 render 生效；其他情況用輸入值（單位不同視為 1）
+    const qty = rememberedQty ?? (qtyEntry.unit === unitKey ? qtyEntry.qty : 1);
+    const qtyNowRef = useRef(qty);
+    qtyNowRef.current = qty;
+    // 點價下單啟用時這個單位記住的數量；之後由外部（切換版面）改掉就失效
+    const armedMemQty = useRef<number | undefined>(rememberedQty);
+    // 使用者改數量（輸入、±、設定）：同一個事件裡一起更新這個單位的記憶 —
+    // 合法就記下，不合法（例如清空、超過上限）就移除這個單位的紀錄
+    const setQty = useCallback((v: number | ((prev: number) => number)) => {
+        const next = typeof v === 'function' ? v(qtyNowRef.current) : v;
         const unit = unitKeyRef.current;
-        const base = prev.unit === unit ? prev.qty : 1;
-        return { unit, qty: typeof v === 'function' ? v(base) : v, user: true };
-    }), []);
-    // 使用者改的數量寫進這個單位的記憶（只寫通過單位上限的數量）
-    useEffect(() => {
+        const slot = qtySlotRef.current;
+        setQtyEntry({ unit, qty: next });
         const mem = qtyMemoryRef.current;
-        if (mem === false || !qtyEntry.user || qtyEntry.unit !== unitKeyRef.current) return;
-        const slot = flashQtySlot(market, lot);
-        if (!validFlashQty(slot, qtyEntry.qty) || mem[slot] === qtyEntry.qty) return;
-        setQtyMemory(withRememberedFlashQty(mem, slot, qtyEntry.qty));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [qtyEntry]);
+        if (mem === false) return;
+        if (validFlashQty(slot, next)) {
+            armedMemQty.current = next;
+            if (mem[slot] !== next) setQtyMemory(withRememberedFlashQty(mem, slot, next));
+        } else {
+            armedMemQty.current = undefined;
+            if (Object.prototype.hasOwnProperty.call(mem, slot)) {
+                const { [slot]: _dropped, ...rest } = mem;
+                setQtyMemory(rest);
+            }
+        }
+    }, [setQtyMemory]);
+    // 輸入值跟著記住的數量，關閉記住數量時數量不會跳回舊值
+    useEffect(() => {
+        if (rememberedQty !== undefined) setQtyEntry(prev => (prev.unit === unitKey && prev.qty === rememberedQty ? prev : { unit: unitKey, qty: rememberedQty }));
+    }, [rememberedQty, unitKey]);
     // 記住的數量不合法（超過單位上限、非整數等）：不帶出來，回到 1、提示並移除
-    const invalidRemembered = qtyMemory !== false && rememberedFlashQty(qtyMemory, qtySlot).invalid;
+    const invalidRemembered = remembered.invalid;
     useEffect(() => {
         if (!invalidRemembered) return;
         // 以最新的記憶再確認一次：已處理過（例如 StrictMode 重跑 effect）就不重複提示
@@ -426,7 +431,8 @@ export function FlashOrder({
     // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
     const armKey = `${contract.code}:${unitKey}`;
     const armedKey = useRef(armKey);
-    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey;
+    const armedQtyCurrent = armedMemQty.current === rememberedQty;
+    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const oddRef = useRef(odd);
@@ -452,6 +458,10 @@ export function FlashOrder({
     useEffect(() => {
         setArmed(false);
     }, [contract.code, accountKey, lot]);
+    // 記住的數量被外部改掉（例如切換版面）：點價下單解除
+    useEffect(() => {
+        if (armed && !armedQtyCurrent) setArmed(false);
+    }, [armed, armedQtyCurrent]);
 
     // 換商品時單位跟著面板走、不變；數量只在輸入時的單位有效：商品類別
     // （股票／期貨）或單位一變就歸 1，單位沒變就保留（零股 500 股換股票仍是
@@ -1013,7 +1023,12 @@ export function FlashOrder({
                             on: qtyMemory !== false,
                             text: qtyMemory === false ? '關閉：重新整理或換單位後數量回到 1' : `已記住：${flashQtyMemoryText(qtyMemory)}`,
                             note: '張、股、口各記一個數量，重新整理或重開後還原；關閉時清除',
-                            onToggle: on => setQtyMemory(on ? withRememberedFlashQty({}, qtySlot, qty) : false),
+                            onToggle: on => {
+                                // 關閉時數量停在目前顯示的值；開啟時從目前數量開始記
+                                setQtyEntry({ unit: unitKey, qty });
+                                armedMemQty.current = undefined;
+                                setQtyMemory(on ? withRememberedFlashQty({}, qtySlot, qty) : false);
+                            },
                         },
                     }}
                     contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
@@ -1026,7 +1041,7 @@ export function FlashOrder({
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
                     disabled={!live || !activeAccount}
-                    onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; setArmed((a) => !a); }}
+                    onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed((a) => !a); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'

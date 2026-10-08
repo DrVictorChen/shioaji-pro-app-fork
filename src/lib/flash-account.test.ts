@@ -202,11 +202,12 @@ describe('per-panel flash account (#139)', () => {
         expect(loadPopoutFlashQty(p.win)).toEqual({ Common: 3, IntradayOdd: 200 });
         savePopoutFlashQty(p.win, false);
         expect(loadPopoutFlashQty(p.win)).toBe(false);
-        // a recreated panel window takes the panel's setting — including "never saved" (default on)
-        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'Common', qty: { F: 2 } });
+        // reopening the same window keeps the popout's own setting (off stays off)
+        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'Common' });
+        expect(loadPopoutFlashQty(p.win)).toBe(false);
+        savePopoutFlashQty(p.win, { F: 2 });
+        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'IntradayOdd' });
         expect(loadPopoutFlashQty(p.win)).toEqual({ F: 2 });
-        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'Common', qty: undefined });
-        expect(loadPopoutFlashQty(p.win)).toBeUndefined();
         // a tile reopened without a panel keeps its own
         const tile = flashPopoutParams(undefined, main, 'tile:2330');
         expect(loadPopoutFlashQty(tile.win)).toBeUndefined();
