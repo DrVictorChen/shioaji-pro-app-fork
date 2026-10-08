@@ -39,6 +39,9 @@ import {
     showAllDrawings,
     toolDef,
     updateDrawing,
+    setDrawingsBehind,
+    canSendBehind,
+    isBehindCandles,
     useDrawings,
     useDrawingSettings,
     DRAWING_TOOL_DEFS,
@@ -54,7 +57,9 @@ import {
 import {
     dragPoints,
     formatSpan,
+    ANCHOR_SNAP_PX,
     magnetAnchor,
+    nearestDrawingAnchor,
     measureStats,
     pickDrawing,
     projectAnchors,
@@ -193,6 +198,10 @@ export interface ChartDrawingsApi {
     toggleHidden: () => void;
     setLocked: (id: string, v: boolean) => void;
     setHidden: (id: string, v: boolean) => void;
+    // 顯示在 K 棒前方／後方（文字註記不適用，一律前方）
+    setBehind: (id: string, v: boolean) => void;
+    // 選取中的物件：有任一個在前方就全部移到後方，否則全部移到前方
+    toggleBehind: () => void;
     rename: (id: string, name: string) => void;
     reorder: (id: string, toIndex: number) => void;
     duplicate: () => void;
@@ -257,6 +266,11 @@ const sameBox = (a: Box | null, b: Box | null) =>
         Math.round(a.top) === Math.round(b.top) &&
         Math.round(a.right) === Math.round(b.right) &&
         Math.round(a.bottom) === Math.round(b.bottom));
+
+// 與 DrawingLayer 的規則一致：單選且未鎖定畫控制點；多選一律畫淡色控制點
+function handlesVisible(selectedIds: readonly string[], d: Pick<Drawing, 'id' | 'locked'>): boolean {
+    return selectedIds.includes(d.id) && (selectedIds.length > 1 || !d.locked);
+}
 
 export function useChartDrawings(opts: {
     contract: ContractBase;
@@ -670,13 +684,30 @@ export function useChartDrawings(opts: {
             projector: Projector,
             pt: Point,
             t: DrawingToolId,
+            excludeDrawingId?: string,
         ): DrawingAnchor | null => {
             const anchor = unprojectPoint(projector, pt);
             if (!anchor) return null;
             const bars = getBarsRef.current?.();
-            if (stateRef.current.settings.magnet && bars?.length) {
-                // 磁吸：貼齊最近 K 棒的開高低收（本來就是合法價位）
-                return magnetAnchor(anchor, bars, (p) => projector.yOfPrice(p), pt.y);
+            if (stateRef.current.settings.magnet) {
+                // 既有端點優先，才能在相同位置精確接續另一條線。文字與量測
+                // 不吸到別的圖形端點（文字要放在游標處、量測照舊貼 K 棒）。
+                const existing =
+                    t === 'text' || t === 'measure'
+                        ? null
+                        : nearestDrawingAnchor(
+                              stateRef.current.drawings,
+                              projector,
+                              pt,
+                              ANCHOR_SNAP_PX,
+                              excludeDrawingId,
+                          );
+                // 水平線仍要落在合法跳動價位上
+                if (existing) return { time: existing.time, price: snapPrice(t, existing.price) };
+                if (bars?.length) {
+                    // 再貼齊最近 K 棒的開高低收（本來就是合法價位）。
+                    return magnetAnchor(anchor, bars, (p) => projector.yOfPrice(p), pt.y);
+                }
             }
             return { time: anchor.time, price: snapPrice(t, anchor.price) };
         };
@@ -684,7 +715,8 @@ export function useChartDrawings(opts: {
         const pick = (projector: Projector, pt: Point) => {
             const layer = layerOf();
             if (!layer) return null;
-            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice);
+            const sel = stateRef.current.selectedIds;
+            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => handlesVisible(sel, d));
         };
 
         const measureLabel = (a: DrawingAnchor, b: DrawingAnchor) => {
@@ -723,7 +755,10 @@ export function useChartDrawings(opts: {
 
         // startAnchors：按下當下的時間／價格 — 拖單一控制點時，其他點原樣保留
         type DragItem = { id: string; tool: DrawingTool; plan: DragPlan; startAnchors: DrawingAnchor[] };
-        let drag: { items: DragItem[]; before: Drawing[]; key: string; context: string } | null = null;
+        let drag: { items: DragItem[]; before: Drawing[]; key: string; context: string; startAt: Point; moved: boolean } | null = null;
+        // 按下後移動超過這個距離才算拖曳：單純點選控制點不能因為磁吸
+        // （端點吸附半徑比控制點命中半徑大）而改到座標、留下一步編輯。
+        const DRAG_START_PX = 3;
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
         // 拖曳中的 mousemove 合併到下一個 animation frame 才寫進 store —
@@ -760,6 +795,16 @@ export function useChartDrawings(opts: {
         const setChartInteractive = (on: boolean) =>
             chartRef.current?.applyOptions({ handleScroll: on, handleScale: on });
 
+        // 一旦超過門檻就鎖定為拖曳（之後拉回原點也算拖曳）。每個原始
+        // mousemove 都要先過這裡，不能只看 RAF 合併後的那一點。
+        const noteDragMove = (pt: Point): boolean => {
+            if (!drag) return false;
+            if (!drag.moved && Math.hypot(pt.x - drag.startAt.x, pt.y - drag.startAt.y) >= DRAG_START_PX) {
+                drag.moved = true;
+            }
+            return drag.moved;
+        };
+
         const commitDrag = (pt: Point) => {
             if (!drag) return;
             // 寫回前再核對物件商品與投影 context，攔下 context effect 前的遲到事件。
@@ -767,6 +812,7 @@ export function useChartDrawings(opts: {
                 cancelDragRef.current?.();
                 return;
             }
+            if (!noteDragMove(pt)) return;
             const layer = layerOf();
             const projector = layer?.projector();
             if (!projector) return;
@@ -786,7 +832,7 @@ export function useChartDrawings(opts: {
                     // 整體平移不磁吸（會把形狀扭掉）
                     const a =
                         hit.kind === 'anchor'
-                            ? anchorAt(projector, moved[i]!, item.tool)
+                            ? anchorAt(projector, moved[i]!, item.tool, item.id)
                             : unprojectPoint(projector, moved[i]!);
                     if (!a) return; // 投影不出來就整筆放棄，不寫半套座標
                     anchors.push(
@@ -959,13 +1005,14 @@ export function useChartDrawings(opts: {
             }
             const key = stateRef.current.symbolKey;
             historyRef.current.begin(key, getDrawingHistoryStart());
-            drag = { items, before: getDrawings(key), key, context: stateRef.current.contextKey };
+            drag = { items, before: getDrawings(key), key, context: stateRef.current.contextKey, startAt: pt, moved: false };
             dragIdsRef.current = items.map((item) => item.id);
 
             const move = (ev: MouseEvent) => {
                 if (!drag) return;
                 const p = layerOf()?.pointOf(ev);
                 if (!p) return;
+                if (!noteDragMove(p)) return;
                 pendingPt = p;
                 frame ??= raf(() => {
                     frame = null;
@@ -1349,6 +1396,19 @@ export function useChartDrawings(opts: {
         [patchOne],
     );
 
+    const setBehind = useCallback(
+        (id: string, v: boolean) => tx(() => setDrawingsBehind(stateRef.current.symbolKey, [id], v)),
+        [tx],
+    );
+
+    const toggleBehind = useCallback(() => {
+        const { selectedIds: ids, drawings: list, symbolKey: key } = stateRef.current;
+        const sel = list.filter((d) => ids.includes(d.id) && canSendBehind(d));
+        if (!sel.length) return;
+        const behind = sel.some((d) => !isBehindCandles(d));
+        tx(() => setDrawingsBehind(key, ids, behind));
+    }, [tx]);
+
     const toggleLock = useCallback(() => {
         const { selectedIds: ids, drawings: list, symbolKey: key } = stateRef.current;
         const sel = list.filter((d) => ids.includes(d.id));
@@ -1609,7 +1669,7 @@ export function useChartDrawings(opts: {
         if (!layer || !pt || !projector) return null;
         const { drawings: list, selectedIds: sel } = stateRef.current;
         if (!list.length) return null;
-        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice);
+        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => handlesVisible(sel, d));
         if (!picked) return null;
         return sel.includes(picked.drawing.id) ? 'selected' : 'other';
     }, []);
@@ -1656,6 +1716,8 @@ export function useChartDrawings(opts: {
         toggleHidden,
         setLocked,
         setHidden,
+        setBehind,
+        toggleBehind,
         rename,
         reorder,
         duplicate,

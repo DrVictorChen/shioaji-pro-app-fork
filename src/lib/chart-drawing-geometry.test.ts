@@ -8,6 +8,7 @@ import {
     formatSpan,
     magnetAnchor,
     measureStats,
+    nearestDrawingAnchor,
     nearestBarIndex,
     TEXT_FONT_PX,
     type Shape,
@@ -188,6 +189,43 @@ describe('投影', () => {
             ]),
         ).toBeNull();
     });
+
+    it('線段端點可磁吸到其他圖形的同一價位與時間', () => {
+        const drawings = [
+            {
+                id: 'line-a',
+                hidden: false,
+                anchors: [
+                    { time: 1000, price: 250 },
+                    { time: 2000, price: 260 },
+                ],
+            },
+            { id: 'hidden', hidden: true, anchors: [{ time: 1050, price: 250 }] },
+        ];
+
+        expect(nearestDrawingAnchor(drawings, projector, { x: 103, y: 151 })).toEqual({ time: 1000, price: 250 });
+        expect(nearestDrawingAnchor(drawings, projector, { x: 103, y: 151 }, 20, 'line-a')).toBeNull();
+        expect(nearestDrawingAnchor(drawings, projector, { x: 140, y: 151 })).toBeNull();
+    });
+
+    it('文字錨點與投影不完整（不在畫面上）的物件不當吸附目標', () => {
+        const drawings = [
+            { id: 'note', tool: 'text', hidden: false, anchors: [{ time: 1000, price: 250 }] },
+            {
+                id: 'offscreen',
+                tool: 'trend',
+                hidden: false,
+                anchors: [
+                    { time: 1000, price: 250 },
+                    { time: -1, price: 260 },
+                ],
+            },
+        ];
+        const partial: Projector = { ...projector, xOfTime: (t) => (t < 0 ? null : t / 10) };
+        expect(nearestDrawingAnchor(drawings, partial, { x: 100, y: 150 })).toBeNull();
+        // 同一條線完整投影得到時才吸附
+        expect(nearestDrawingAnchor(drawings, projector, { x: 101, y: 150 })).toEqual({ time: 1000, price: 250 });
+    });
 });
 
 describe('各工具的形狀', () => {
@@ -285,6 +323,12 @@ describe('命中判定', () => {
         expect(hitTest('trend', [a, b], SIZE, { x: 150, y: 100 })).toEqual({ kind: 'body' });
     });
 
+    it('相鄰控制點都在命中範圍內時取最近的', () => {
+        const near: Point = { x: 112, y: 100 };
+        expect(hitTest('trend', [a, near], SIZE, { x: 112, y: 100 })).toEqual({ kind: 'anchor', index: 1 });
+        expect(hitTest('trend', [a, near], SIZE, { x: 101, y: 100 })).toEqual({ kind: 'anchor', index: 0 });
+    });
+
     it('容差內算命中，容差外不算', () => {
         expect(hitTest('trend', [a, b], SIZE, { x: 150, y: 105 }, 6)).toEqual({ kind: 'body' });
         expect(hitTest('trend', [a, b], SIZE, { x: 150, y: 120 }, 6)).toBeNull();
@@ -329,7 +373,7 @@ describe('命中判定', () => {
 });
 
 describe('從一疊物件裡挑出點到的那個', () => {
-    const obj = (id: string, price: number, patch: Partial<{ hidden: boolean }> = {}) => ({
+    const obj = (id: string, price: number, patch: Partial<{ hidden: boolean; behind: boolean }> = {}) => ({
         id,
         tool: 'horizontal' as const,
         anchors: [{ time: 1000, price }],
@@ -352,6 +396,37 @@ describe('從一疊物件裡挑出點到的那個', () => {
     it('重疊時後畫的優先（畫在上面的先選到）', () => {
         const list = [obj('older', 250), obj('newer', 250)];
         expect(pickDrawing(list, projector, SIZE, at(150))?.drawing.id).toBe('newer');
+    });
+
+    it('K 棒前方的物件整層蓋在後方物件上，重疊時先選到前方的', () => {
+        const list = [obj('front', 250), obj('back', 250, { behind: true })];
+        expect(pickDrawing(list, projector, SIZE, at(150))?.drawing.id).toBe('front');
+        // 只有後方物件時照樣選得到
+        expect(pickDrawing([obj('back', 250, { behind: true })], projector, SIZE, at(150))?.drawing.id).toBe('back');
+    });
+
+    it('K 棒後方物件仍畫在上層的部分（斐波那契標籤、選取控制點）照清單順序先選到', () => {
+        const fib = { ...defaultFibOptions(), labelH: 'left' as const, labelV: 'middle' as const, showTrend: false };
+        const box = { id: 'box', tool: 'box' as const, hidden: false, anchors: [{ time: 1000, price: 350 }, { time: 3000, price: 250 }] };
+        const backFib = { id: 'fib', tool: 'fib' as const, hidden: false, behind: true, fib, anchors: [{ time: 2000, price: 100 }, { time: 5000, price: 300 }] };
+        const backLine = { id: 'line', tool: 'trend' as const, hidden: false, behind: true, anchors: [{ time: 2500, price: 280 }, { time: 7000, price: 280 }] };
+        const list = [box, backFib, backLine];
+        // 標籤（x≈160, y=100）畫在方框上面 → 選到斐波那契
+        expect(pickDrawing(list, projector, SIZE, { x: 160, y: 100 })?.drawing.id).toBe('fib');
+        // 後方線的端點（250,120）在方框內：沒選取時控制點沒畫，選到方框
+        expect(pickDrawing(list, projector, SIZE, { x: 250, y: 120 })?.drawing.id).toBe('box');
+        // 選取中控制點畫在上層 → 抓得到端點
+        const picked = pickDrawing(list, projector, SIZE, { x: 250, y: 120 }, undefined, undefined, (d) => d.id === 'line');
+        expect(picked?.drawing.id).toBe('line');
+        expect(picked?.hit).toEqual({ kind: 'anchor', index: 0 });
+        // 沒選取（控制點沒畫）時，蓋在端點上的標籤仍要選得到
+        const low = { id: 'low', tool: 'box' as const, hidden: false, anchors: [{ time: 1500, price: 150 }, { time: 2300, price: 50 }] };
+        expect(pickDrawing([low, backFib], projector, SIZE, { x: 190, y: 300 })?.drawing.id).toBe('fib');
+        // 單選且鎖定時控制點不畫 → 不攔截上層點選
+        const lockedLine = { ...backLine, locked: true };
+        expect(pickDrawing([box, lockedLine], projector, SIZE, { x: 250, y: 120 }, undefined, undefined, () => false)?.drawing.id).toBe('box');
+        // 方框外的後方線本體照樣選得到
+        expect(pickDrawing(list, projector, SIZE, { x: 500, y: 120 })?.drawing.id).toBe('line');
     });
 
     it('沒點到任何物件時回 null', () => {

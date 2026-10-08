@@ -1878,6 +1878,46 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect([25090, 25110, 25080, 25100]).toContain(d.anchors[1]!.price);
     });
 
+    it('磁吸開啟時拖曳端點會吸到另一條線的端點（優先於 K 棒開高低收）', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        addDrawing('TXF', 'trend', [{ time: 1180, price: 25084 }, { time: 1120, price: 24900 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => api().setMagnet(true));
+        await down(30, 100); // A 的第二點
+        await up(31, 112); // 靠近 B 的端點（x=30, y=116）
+        const d = api().drawings.find((x) => x.id === a.id)!;
+        expect(d.anchors[0]).toEqual({ time: 1000, price: 25000 });
+        expect(d.anchors[1]).toEqual({ time: 1180, price: 25084 });
+    });
+
+    it('只點選端點不移動：即使旁邊有可吸附的端點也不改座標、不留復原步驟', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        // B 的端點離 A 的第二點 16px：在吸附半徑內、控制點命中半徑外
+        addDrawing('TXF', 'trend', [{ time: 1180, price: 25084 }, { time: 1120, price: 24900 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => api().setMagnet(true));
+        await down(30, 100);
+        await up(31, 101); // 手抖 1px 也算點選
+        expect(api().selectedIds).toEqual([a.id]);
+        expect(api().drawings.find((x) => x.id === a.id)!.anchors).toEqual([
+            { time: 1000, price: 25000 },
+            { time: 1180, price: 25100 },
+        ]);
+        expect(api().canUndo).toBe(false);
+    });
+
+    it('拖曳門檻看原始 mousemove：超過 3px 後拉回原點放開仍算拖曳', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        addDrawing('TXF', 'trend', [{ time: 1180, price: 25084 }, { time: 1120, price: 24900 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => api().setMagnet(true));
+        await down(30, 100);
+        await act(async () => docL.get('mousemove')?.(ev(30, 106)));
+        await up(31, 101);
+        expect(api().drawings.find((x) => x.id === a.id)!.anchors[1]).toEqual({ time: 1180, price: 25084 });
+        expect(api().canUndo).toBe(true);
+    });
+
     it('拖曳期間其他 writer 新增物件，拖曳繼續並保留新增物件', async () => {
         const api = await setup();
         addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
@@ -2284,12 +2324,35 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         const api = await setup();
         await act(async () => api().setTool('horizontal'));
         await down(50, 150);
-        expect(api().selected!.style.opacity).toBe(0.85); // 深色主題預設略透明
-        for (const o of [0.7, 0.6, 0.5]) await act(async () => api().applyStyle({ opacity: o }));
-        expect(api().selected!.style.opacity).toBe(0.5);
-        expect(getDrawingSettings().lineOpacity).toBe(0.5);
+        expect(api().selected!.style.opacity).toBe(0.5); // 新物件在 K 棒前方，預設 50% 透明
+        expect(api().selected!.behind).toBeUndefined();
+        for (const o of [0.8, 0.7, 0.6]) await act(async () => api().applyStyle({ opacity: o }));
+        expect(api().selected!.style.opacity).toBe(0.6);
+        expect(getDrawingSettings().lineOpacity).toBe(0.6);
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
-        expect(api().drawings[0]!.style.opacity).toBe(0.85);
+        expect(api().drawings[0]!.style.opacity).toBe(0.5);
+    });
+
+    it('K 棒前方／後方：浮動工具列切換選取、物件列表切換單一物件，都可復原；文字註記不受影響', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 1 }, { time: 1060, price: 2 }], DEFAULT_DRAWING_STYLE)!;
+        const t = addDrawing('TXF', 'text', [{ time: 1000, price: 1 }], DEFAULT_DRAWING_STYLE, { text: '註記' })!;
+        await act(async () => {});
+        await down(700, 350); // 取得鍵盤（空白處）
+        await act(async () => { api().select(a.id); api().select(t.id, true); });
+        await act(async () => api().toggleBehind());
+        expect(api().drawings.find((d) => d.id === a.id)!.behind).toBe(true);
+        expect(api().drawings.find((d) => d.id === t.id)!.behind).toBeUndefined();
+        await act(async () => api().toggleBehind()); // 全部都在後方 → 移回前方
+        const back = api().drawings.find((d) => d.id === a.id)!;
+        expect('behind' in back).toBe(false); // 前方＝拿掉欄位，與舊資料同形
+        await act(async () => api().setBehind(a.id, true));
+        await act(async () => api().setBehind(t.id, true)); // 文字不接受
+        expect(api().drawings.find((d) => d.id === t.id)!.behind).toBeUndefined();
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings.find((d) => d.id === a.id)!.behind).toBeUndefined();
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings.find((d) => d.id === a.id)!.behind).toBe(true);
     });
 
     it('物件列表操作：改名、隱藏、鎖定、調整圖層都可復原', async () => {

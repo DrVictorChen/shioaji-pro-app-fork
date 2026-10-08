@@ -9,6 +9,7 @@
 // 互動邏輯全部在 hooks/use-chart-drawings.ts。圖示一律用 lucide。
 
 import {
+    BringToFront,
     ChartNoAxesGantt,
     Copy,
     Equal,
@@ -25,6 +26,7 @@ import {
     MoveUpRight,
     Redo2,
     Ruler,
+    SendToBack,
     SeparatorVertical,
     Settings2,
     Slash,
@@ -52,7 +54,10 @@ import {
     DRAWING_GROUPS,
     DRAWING_PALETTE,
     DRAWING_TOOL_DEFS,
+    canSendBehind,
     drawingLabel,
+    isBehindCandles,
+    LINE_WIDTHS,
     fibOptionsOf,
     MAX_DRAWINGS_PER_SYMBOL,
     MAX_TEXT_LENGTH,
@@ -76,7 +81,7 @@ import {
 } from '../lib/chart-drawing-fib';
 import * as styles from './chart-drawing-tools.css';
 
-const WIDTHS = [1, 2, 3, 4];
+const WIDTHS: readonly number[] = LINE_WIDTHS;
 
 export const TOOL_ICON: Record<DrawingToolId, ComponentType<{ size?: number }>> = {
     horizontal: Minus,
@@ -562,6 +567,9 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
     const anyUnlocked = sel.some((d) => !d.locked);
     const style = api.style;
     const full = api.drawings.length + sel.length > MAX_DRAWINGS_PER_SYMBOL;
+    // K 棒前方／後方：文字註記不適用；選取中只要有一個在前方，按鈕就是「移到後方」
+    const layerable = sel.filter(canSendBehind);
+    const allBehind = layerable.length > 0 && layerable.every(isBehindCandles);
 
     return (
         <>
@@ -615,6 +623,19 @@ export function ChartDrawingOverlays({ api }: { api: ChartDrawingsApi }) {
                             onClick={() => setSettingsOpen(true)}
                         >
                             <Settings2 size={13} />
+                        </button>
+                    )}
+                    {layerable.length > 0 && (
+                        <button
+                            className={styles.railBtn[allBehind ? 'on' : 'normal']}
+                            aria-pressed={allBehind}
+                            {...tipProps(
+                                allBehind ? '目前在 K 棒後方 — 點一下移到前方' : '目前在 K 棒前方 — 點一下移到後方',
+                                allBehind ? '移到 K 棒前方' : '移到 K 棒後方',
+                            )}
+                            onClick={api.toggleBehind}
+                        >
+                            {allBehind ? <SendToBack size={13} /> : <BringToFront size={13} />}
                         </button>
                     )}
                     <button
@@ -1343,6 +1364,22 @@ export function ChartObjectList({ api }: { api: ChartDrawingsApi }) {
                             >
                                 {d.hidden ? <EyeOff size={11} /> : <Eye size={11} />}
                             </button>
+                            {canSendBehind(d) && (
+                                <button
+                                    className={isBehindCandles(d) ? styles.iconBtnOn : styles.iconBtn}
+                                    aria-label={isBehindCandles(d) ? `${drawingLabel(d)} 移到 K 棒前方` : `${drawingLabel(d)} 移到 K 棒後方`}
+                                    title={isBehindCandles(d) ? 'K 棒後方（點一下移到前方）' : 'K 棒前方（點一下移到後方）'}
+                                    aria-pressed={isBehindCandles(d)}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        api.setBehind(d.id, !isBehindCandles(d));
+                                    }}
+                                >
+                                    {isBehindCandles(d) ? <SendToBack size={11} /> : <BringToFront size={11} />}
+                                </button>
+                            )}
+                            {/* 文字註記沒有前後可選：留同寬的空位，各列按鈕才對齊 */}
+                            {!canSendBehind(d) && <span className={styles.iconBtn} aria-hidden style={{ visibility: 'hidden' }} />}
                             <button
                                 className={styles.iconBtn}
                                 aria-label={d.locked ? `解鎖 ${drawingLabel(d)}` : `鎖定 ${drawingLabel(d)}`}
@@ -1371,7 +1408,7 @@ export function ChartObjectList({ api }: { api: ChartDrawingsApi }) {
                 })}
             </div>
             <div className={styles.listFooter}>
-                <span className={styles.hint}>拖曳調整圖層順序；雙擊改名；Shift 點選可多選。</span>
+                <span className={styles.hint}>拖曳調整圖層順序；前方／後方按鈕切換畫在 K 棒前或後；雙擊改名；Shift 點選可多選。</span>
                 <label className={styles.row} style={{ cursor: 'pointer' }}>
                     <input
                         type='checkbox'

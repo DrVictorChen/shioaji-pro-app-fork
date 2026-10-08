@@ -546,6 +546,9 @@ export const iconBtn = style({
     ':hover': { color: vars.color.foreground, background: vars.color.muted },
 });
 
+// 物件列表裡「K 棒後方」這種開啟中的狀態：用強調色，一眼看得出哪些在後方
+export const iconBtnOn = style([iconBtn, { color: vars.color.accent }]);
+
 export const listFooter = style({
     display: 'flex',
     flexDirection: 'column',
