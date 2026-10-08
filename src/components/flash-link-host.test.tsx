@@ -229,3 +229,24 @@ it('a month that is not listed yet can be looked up again', async () => {
     await show(r, stock('2317', '鴻海'), { kind: 'future', month: 'next' });
     expect(text(r.root)).toContain('ladder DHFK6');
 });
+
+it('a pending group lookup pauses the ladder under a new link key', async () => {
+    const r = await mount(tsmc, { kind: 'select' });
+    const before = seen.at(-1)!.linkKey;
+    const got: { paused?: string; linkKey: string }[] = [];
+    const render = (_c: ContractInfo, p: { linkKey: string; paused?: string }) => { got.push(p); return null; };
+    await show(r, tsmc, { kind: 'select' }, { render, pending: '2317' });
+    expect(got.at(-1)!.paused).toBe('載入商品…');
+    expect(got.at(-1)!.linkKey).not.toBe(before);
+});
+
+it('a failed stock lookup for 現股 offers retry and 改為照選取', async () => {
+    mocks.ensure.mockRejectedValueOnce(new Error('down'));
+    const onLinkChange = vi.fn();
+    const r = await mount(tsmcFut[0]!, { kind: 'stock' }, { onLinkChange });
+    expect(text(r.root)).toContain('找不到 2330');
+    const retry = r.root.findAllByType('button').find(b => text(b).includes('重試'))!;
+    await act(async () => { retry.props.onClick(); });
+    expect(text(r.root)).toContain('ladder 2330');
+    expect(r.root.findAllByType('button').length).toBe(0);
+});

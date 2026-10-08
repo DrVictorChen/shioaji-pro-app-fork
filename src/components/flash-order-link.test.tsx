@@ -27,7 +27,7 @@ vi.mock('../lib/utils/ticksize', () => ({ roundToTick: (_c: unknown, p: number) 
 import { FlashOrder } from './flash-order';
 
 const stk = { code: '2330', name: '台積電', security_type: 'STK', exchange: 'TSE', day_trade: 'Yes', reference: 1085, limit_up: 1190, limit_down: 980 } as unknown as ContractInfo;
-const cdf = { code: 'CDFJ6', name: '台積電期貨 202610', security_type: 'FUT', exchange: 'TAIFEX', delivery_month: '202610', underlying_code: '2330', underlying_kind: 'S', multiplier: 2000, reference: 1095, limit_up: 1200, limit_down: 990 } as unknown as ContractInfo;
+const cdf = { code: 'CDFJ6', name: '台積電期貨 202610', security_type: 'FUT', exchange: 'TAIFEX', delivery_month: '202610', last_trading_date: '2026-10-21', underlying_code: '2330', underlying_kind: 'S', multiplier: 2000, reference: 1095, limit_up: 1200, limit_down: 990 } as unknown as ContractInfo;
 const txf = { code: 'TXFJ6', name: '臺股期貨 202610', security_type: 'FUT', exchange: 'TAIFEX', delivery_month: '202610', underlying_code: 'IX0001', underlying_kind: 'I', multiplier: 200, reference: 100 } as unknown as ContractInfo;
 
 const text = (n: ReactTestInstance): string => n.children.map(c => (typeof c === 'string' ? c : text(c))).join('');
@@ -244,4 +244,19 @@ it('the settings dialog of a paused panel names no contract', async () => {
     const dlg = r.root.findAll(n => n.props.role === 'dialog')[0];
     expect(dlg && text(dlg)).not.toContain('CDFJ6');
     expect(text(r.root)).not.toContain('Σ買');
+});
+
+it('a real-month stock future without a last trading date (照選取 / popout) is paused and cannot send', async () => {
+    const r = await mount({ ...cdf, last_trading_date: undefined } as ContractInfo);
+    expect(text(r.root)).toContain('到期日無法確認');
+    await arm(r);
+    await act(async () => { buyCell(r)?.props.onClick(); });
+    expect(mocks.place).not.toHaveBeenCalled();
+});
+
+it('a paused panel shows no old-contract info: no order count, no credit banner', async () => {
+    const trade = { contract: { code: '2330' }, order: { id: 'o1', action: 'Buy', price: 1080, quantity: 3, order_lot: 'Common', account: accounts[0] }, status: { status: 'Submitted', order_quantity: 3, deal_quantity: 0, cancel_quantity: 0, modified_price: 0, deals: [] }, account: accounts[0] };
+    const r = await mount(stk, { trades: [trade], credit: { cond: 'MarginTrading', daytradeShort: false }, onCreditChange: () => undefined, paused: '載入商品…' });
+    expect(text(r.root)).not.toContain('全刪 3');
+    expect(byTestId(r, 'flash-credit-banner')).toBeUndefined();
 });

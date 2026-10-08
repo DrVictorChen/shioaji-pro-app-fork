@@ -262,7 +262,7 @@ export function FlashOrder({
     settingsRows,
     showRef = true,
     expiresAt = null,
-    paused,
+    paused: pausedProp,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -314,6 +314,8 @@ export function FlashOrder({
     paused?: string;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
+    // 真實月份個股期沒有最後交易日：無法判斷到期，跟查詢中一樣暫停（照選取、彈出視窗也一樣）
+    const paused = pausedProp ?? (isStockFuture(contract) && !contract.target_code && expiryTime(contract) === null ? '個股期到期日無法確認，暫停送單' : undefined);
     const live = useTradingLive();
     const accountState = useAccounts();
     const privacy = usePrivacyMode();
@@ -1432,7 +1434,7 @@ export function FlashOrder({
                     disabled={!!paused || (workingCount === 0 && otherLotOrders === 0)}
                     onClick={() => void cancelSymbol()}
                 >
-                    全刪{workingCount > 0 ? ` ${workingCount}` : ''}
+                    全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}
                 </button>
             </div>
             {pos && !paused && (
@@ -1456,14 +1458,14 @@ export function FlashOrder({
                     </span>
                 </div>
             )}
-            {odd && (
+            {odd && !paused && (
                 <div className={styles.oddBanner} title='盤中零股與整股分開撮合，成交價可能與整股五檔不同'>
                     盤中零股 · 以股計 · 只限價 ROD · 僅現股；五檔與成交為零股行情（股）
                     {(panelCredit.cond !== 'Cash' || panelCredit.daytradeShort) && ' · 面板的信用條件在切回整股時恢復'}
                     {oddMatchTime && <span className={styles.oddMatchTime} title='盤中零股約每 5 秒撮合一次；五檔與成交價在撮合時更新'> · 最近撮合 {oddMatchTime}</span>}
                 </div>
             )}
-            {creditTag && (
+            {creditTag && !paused && (
                 <div className={styles.creditBanner[creditBad ? 'bad' : 'ok']} data-testid='flash-credit-banner'>
                     {creditBad ? <Ban size={10} aria-hidden /> : credit.daytradeShort ? <Zap size={10} aria-hidden /> : null}
                     <span>

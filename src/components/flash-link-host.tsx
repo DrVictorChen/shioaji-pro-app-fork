@@ -71,7 +71,7 @@ export interface FlashLinkProps {
 
 const KIND_OPTIONS = [['select', '照選取'], ['stock', '現股'], ['future', '個股期']] as const;
 
-export function FlashLinkHost({ source, link, group, onLinkChange, render, targetRef }: {
+export function FlashLinkHost({ source, link, group, onLinkChange, render, targetRef, pending }: {
     source: ContractInfo;
     link: FlashLink;
     /** 連動方式（main／pin／A／B／C） */
@@ -80,6 +80,8 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     render: (contract: ContractInfo, props: FlashLinkProps) => ReactNode;
     /** 目前實際下單的合約代碼（彈出視窗用）；暫停時 null */
     targetRef?: MutableRefObject<string | null>;
+    /** 群組正在查新代碼：暫停（不能啟用、確認中的單作廢），查完一起換 */
+    pending?: string;
 }) {
     if (targetRef) targetRef.current = null;
     // 最後畫出的閃電：查詢中保留它（暫停、不顯示舊合約），數量等面板狀態不因查詢快慢而不同
@@ -97,6 +99,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     const stock = useContract(needStock);
     const [stockLoad, setStockLoad] = useState<{ code: string; ok: boolean } | null>(null);
     const stockFailed = stockLoad && !stockLoad.ok ? stockLoad.code : null;
+    const [stockRetry, setStockRetry] = useState(0);
     useEffect(() => {
         if (!needStock || stock) return;
         let active = true;
@@ -105,7 +108,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
             () => { if (active) setStockLoad({ code: needStock, ok: false }); },
         );
         return () => { active = false; };
-    }, [needStock, stock]);
+    }, [needStock, stock, stockRetry]);
     const fut = useStockFutures(link.kind === 'future' ? stockCode : null);
     const pick = link.kind === 'future' && fut?.status === 'ok' ? pickStockFuture(fut.rows, link, Date.now()) : null;
     useRerenderAt(pick?.status === 'ok' ? pick.expiresAt : null);
@@ -136,7 +139,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
                 options={[['on', '顯示'], ['off', '隱藏']]} onPick={v => set({ ref: v === 'on' })} />
         </>
     );
-    const linkKey = `${group}|${link.kind}|${link.spec}|${link.month}|${source.code}`;
+    const linkKey = `${group}|${link.kind}|${link.spec}|${link.month}|${source.code}${pending ? `|pending:${pending}` : ''}`;
     const name = `${source.code === source.name || !source.name ? source.code : source.security_type === 'STK' ? `${source.code} ${source.name}` : source.name}`;
 
     const loading = (text: string) => (lastShown.current
@@ -158,6 +161,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
         <button type='button' className={hostStyles.emptyBtn} onClick={onClick}>{label}</button>
     );
 
+    if (pending) return loading('載入商品…');
     if (link.kind === 'select') return show(source, { linkKey, settingsRows, showRef: link.ref });
     if (stockCode === null) {
         return empty(<CirclePause size={18} aria-hidden />, `${name} 不是個股`, '選一檔股票或個股期即恢復',
@@ -166,7 +170,13 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     if (link.kind === 'stock') {
         const target = needStock ? stock : source;
         if (target) return show(target, { linkKey, settingsRows, showRef: link.ref });
-        if (stockFailed === needStock) return empty(<Ban size={18} aria-hidden />, `找不到 ${needStock}`);
+        if (stockFailed === needStock) {
+            return empty(<Ban size={18} aria-hidden />, `找不到 ${needStock}`, undefined,
+                <span className={hostStyles.emptyActions}>
+                    {button(<><RotateCw size={11} aria-hidden /> 重試</>, () => { setStockLoad(null); setStockRetry(n => n + 1); })}
+                    {button('改為照選取', () => set({ kind: 'select' }))}
+                </span>);
+        }
         return loading('載入商品…');
     }
     if (!fut || fut.status === 'loading') return loading('載入個股期…');

@@ -221,6 +221,7 @@ function BlockBody({
     onFlashOrderChange,
     onFlashLinkChange,
     flashTargetRef,
+    groupPending,
     onSessionConfigChange,
     refreshTrading,
     workspaceGen,
@@ -230,6 +231,7 @@ function BlockBody({
     onFlashLinkChange: (id: string, link: FlashLink) => void;
     /** 閃電實際下單的合約（彈出視窗用）；暫停時為 null */
     flashTargetRef: React.MutableRefObject<string | null>;
+    groupPending?: string;
     missingContractPhase: AsyncPhase;
     snapshot?: import('./lib/types/market').Snapshot;
     watchlistProps: React.ComponentProps<typeof Watchlist>;
@@ -345,6 +347,7 @@ function BlockBody({
                     group={blockLinkMode(block)}
                     onLinkChange={(link) => onFlashLinkChange(block.id, link)}
                     targetRef={flashTargetRef}
+                    pending={groupPending}
                     render={(target, linkProps) => (
                 <LiveFlashOrder
                     // 套用版面（含同一個 block id）＝重新建立面板：數量依該版面
@@ -558,6 +561,8 @@ interface BlockViewProps {
     selected: ContractInfo | null;
     /** 鎖定或群組代碼；null = 跟自選 */
     sourceCode: string | null;
+    /** 群組正在查的新代碼 */
+    groupPending?: string;
     linkGroups: ReturnType<typeof linkGroupSummary>;
     onLinkMode: (id: string, mode: LinkMode, currentCode: string | null) => void;
     onGroupCode: (group: LinkGroupId, code: string) => void;
@@ -591,7 +596,7 @@ interface BlockViewProps {
 }
 
 function BlockView(props: BlockViewProps) {
-    const { block, selected, sourceCode, linkGroups, onLinkMode, onGroupCode, onPinChange, onRemove, ...bodyProps } = props;
+    const { block, selected, sourceCode, groupPending, linkGroups, onLinkMode, onGroupCode, onPinChange, onRemove, ...bodyProps } = props;
     const { contract, pinFailed } = useBlockContract(block, selected, sourceCode);
     const flashTargetRef = useRef<string | null>(null);
     // 每次 render 先清空；只有實際畫出閃電時才填入（來源載入中或暫停時彈出不帶舊合約）
@@ -658,7 +663,7 @@ function BlockView(props: BlockViewProps) {
                 }
             />
             <PanelErrorBoundary label={meta.label}>
-                <BlockBody {...bodyProps} block={block} contract={contract} missingContractPhase={missingContractPhase} flashTargetRef={flashTargetRef} />
+                <BlockBody {...bodyProps} block={block} contract={contract} missingContractPhase={missingContractPhase} flashTargetRef={flashTargetRef} groupPending={groupPending} />
             </PanelErrorBoundary>
         </section>
     );
@@ -1326,32 +1331,44 @@ function MainApp() {
     );
     // 同一群組連續輸入時只套用最後一次（較早的查詢晚回來不能蓋掉）
     const groupCodeSeq = useRef<Partial<Record<LinkGroupId, number>>>({});
+    // 群組正在查的新代碼：查詢期間全組閃電暫停（不能啟用、確認中的單作廢）
+    const [groupPending, setGroupPending] = useState<Partial<Record<LinkGroupId, { code: string; seq: number }>>>({});
+    const clearPending = useCallback((group: LinkGroupId, seq?: number) => setGroupPending((p) => {
+        if (!p[group] || (seq !== undefined && p[group]!.seq !== seq)) return p;
+        const { [group]: _gone, ...rest } = p;
+        return rest;
+    }), []);
     const setBlockLinkMode = useCallback(
         (id: string, mode: LinkMode, currentCode: string | null) => {
             const ws = workspaceRef.current;
             const prev = ws.blocks.find((b) => b.id === id);
             // 群組成員變動（離開、重新開始）時，該組還在查的代碼作廢，不能事後蓋掉
             for (const g of [prev ? blockLinkMode(prev) : null, mode]) {
-                if (isLinkGroup(g)) groupCodeSeq.current[g] = (groupCodeSeq.current[g] ?? 0) + 1;
+                if (isLinkGroup(g)) { groupCodeSeq.current[g] = (groupCodeSeq.current[g] ?? 0) + 1; clearPending(g); }
             }
             updateWorkspace(withLinkMode(ws, id, mode, currentCode));
         },
-        [updateWorkspace],
+        [updateWorkspace, clearPending],
     );
     // 群組換代碼：先確認代碼存在，再讓全組同一次一起換
     const setGroupCode = useCallback((group: LinkGroupId, code: string) => {
         const seq = (groupCodeSeq.current[group] ?? 0) + 1;
         groupCodeSeq.current[group] = seq;
         const gen = workspaceGenRef.current;
+        setGroupPending((p) => ({ ...p, [group]: { code, seq } }));
         ensureContract(code).then(
             (c) => {
+                clearPending(group, seq);
                 // 期間又輸入了新代碼或套用了別的版面：這次作廢
                 if (groupCodeSeq.current[group] !== seq || workspaceGenRef.current !== gen) return;
                 updateWorkspace(withGroupCode(workspaceRef.current, group, c.code));
             },
-            () => { if (groupCodeSeq.current[group] === seq) notify({ kind: 'err', title: '找不到商品', body: `代碼 ${code} 無法解析` }); },
+            () => {
+                clearPending(group, seq);
+                if (groupCodeSeq.current[group] === seq) notify({ kind: 'err', title: '找不到商品', body: `代碼 ${code} 無法解析` });
+            },
         );
-    }, [updateWorkspace]);
+    }, [updateWorkspace, clearPending]);
     const linkGroups = useMemo(() => linkGroupSummary(workspace), [workspace]);
     const setBlockSessionConfig = useCallback(
         (id: string, patch: SessionConfigPatch) => {
@@ -1610,6 +1627,7 @@ function MainApp() {
                                     block={block}
                                     selected={selected}
                                     sourceCode={blockSourceCode(block, workspace)}
+                                    groupPending={(() => { const m = blockLinkMode(block); return isLinkGroup(m) ? groupPending[m]?.code : undefined; })()}
                                     linkGroups={linkGroups}
                                     onLinkMode={setBlockLinkMode}
                                     onGroupCode={setGroupCode}
