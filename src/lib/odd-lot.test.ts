@@ -134,6 +134,19 @@ describe('placeStockOrder last check', () => {
     });
 });
 
+describe('placeFuturesOrder last check — order conditions', () => {
+    it('refuses an unknown 倉別／效期／價別 before anything is sent', async () => {
+        const { placeFuturesOrder } = await import('./shioaji');
+        const { ORDER_CONDITION_TEXT } = await import('./order-conditions');
+        const contract = { code: 'TXFR1', security_type: 'FUT', exchange: 'TAIFEX' } as never;
+        await expect(placeFuturesOrder(contract, { action: 'Buy', price: 100, quantity: 1, price_type: 'LMT', order_type: 'ROD', octype: 'Close' as never }))
+            .rejects.toMatchObject({ mutationNotStarted: true, message: ORDER_CONDITION_TEXT.octype });
+        await expect(placeFuturesOrder(contract, { action: 'Buy', price: 0, quantity: 1, price_type: 'MKP2' as never, order_type: 'IOC' }))
+            .rejects.toMatchObject({ mutationNotStarted: true, message: ORDER_CONDITION_TEXT.priceType });
+        expect(api.post).not.toHaveBeenCalled();
+    });
+});
+
 describe('odd-lot price updates and reference price (#204 follow-up)', () => {
     it('odd-lot orders cannot change price (Shioaji: IntradayOdd only reduces quantity); whole-lot limits can', () => {
         expect(odd.canUpdateOrderPrice({ order_lot: 'IntradayOdd', price_type: 'LMT' })).toBe(false);

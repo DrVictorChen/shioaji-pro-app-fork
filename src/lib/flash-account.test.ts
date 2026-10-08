@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashCredit, loadPopoutFlashLot, normalizeFlashCredit, savePopoutFlashCredit, savePopoutFlashLot, loadPopoutFlashQty, savePopoutFlashQty, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
+import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashCredit, loadPopoutFlashOrder, savePopoutFlashOrder, normalizeFlashOrderOpts, loadPopoutFlashLot, normalizeFlashCredit, savePopoutFlashCredit, savePopoutFlashLot, loadPopoutFlashQty, savePopoutFlashQty, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
 import type { Account } from './types/portfolio';
 const a: Account = { account_type: 'F', broker_id: 'B', account_id: 'A', signed: true, person_id: '', username: '' };
 const b = { ...a, account_id: 'B' };
@@ -249,5 +249,27 @@ describe('per-panel flash account (#139)', () => {
         expect(normalizeFlashCredit({ cond: 'Cash' })).toEqual({ cond: 'Cash', daytradeShort: false });
         expect(normalizeFlashCredit('MarginTrading')).toBeUndefined();
         expect(normalizeFlashCredit(undefined)).toBeUndefined();
+    });
+    it('a popout keeps its own order conditions (效期／倉別／範圍市價) by window id', () => withStorage(() => {
+        const opts = { orderType: 'IOC', octype: 'New', futuresPriceType: 'MKP' } as const;
+        const p = flashPopoutParams({}, main, 'panel:o:TXFR1', { lot: 'Common', order: opts });
+        expect(loadPopoutFlashOrder(p.win)).toEqual(opts);
+        savePopoutFlashLot(p.win, 'IntradayOdd');
+        savePopoutFlashAccounts(p.win, { F: flashAccountKey(b) });
+        expect(loadPopoutFlashOrder(p.win)).toEqual(opts);
+        savePopoutFlashOrder(p.win, { orderType: 'FOK', octype: 'Auto', futuresPriceType: 'MKT' });
+        expect(loadPopoutFlashOrder(p.win)).toEqual({ orderType: 'FOK', octype: 'Auto', futuresPriceType: 'MKT' });
+        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'Common', order: opts });
+        expect(loadPopoutFlashOrder(p.win)).toEqual(opts);
+        reseedPopoutFlashAccounts(p.win, {}, main);
+        expect(loadPopoutFlashOrder(p.win)).toEqual(opts);
+        expect(loadPopoutFlashOrder(null)).toBeUndefined();
+    }));
+    it('normalizes stored order conditions: unknown values fall back to the defaults', () => {
+        expect(normalizeFlashOrderOpts({ orderType: 'IOC', octype: 'DayTrade', futuresPriceType: 'MKP' })).toEqual({ orderType: 'IOC', octype: 'DayTrade', futuresPriceType: 'MKP' });
+        expect(normalizeFlashOrderOpts({ orderType: 'GTC', octype: 'Close', futuresPriceType: 'LMT' })).toEqual({ orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT' });
+        expect(normalizeFlashOrderOpts({ octype: 'New' })).toEqual({ orderType: 'ROD', octype: 'New', futuresPriceType: 'MKT' });
+        expect(normalizeFlashOrderOpts('IOC')).toBeUndefined();
+        expect(normalizeFlashOrderOpts(undefined)).toBeUndefined();
     });
 });

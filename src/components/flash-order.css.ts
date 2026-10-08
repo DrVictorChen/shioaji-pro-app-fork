@@ -726,3 +726,35 @@ export const creditBanner = styleVariants({
 export const blockedSide = style({
     opacity: 0.3,
 });
+
+// 快速下拉裡的分段列（效期／倉別／市價鈕）
+export const menuSegRow = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 3,
+    padding: '3px 6px',
+    flexWrap: 'wrap',
+});
+
+export const menuSegLabel = style({
+    fontSize: '0.6rem',
+    color: vars.color.mutedForeground,
+    minWidth: '2.6rem',
+});
+
+const menuSegBase = style({
+    fontFamily: vars.font.body,
+    fontSize: '0.64rem',
+    padding: '1px 6px',
+    borderRadius: vars.radius.sm,
+    border: `1px solid ${vars.color.border}`,
+    background: 'transparent',
+    color: vars.color.foreground,
+    cursor: 'pointer',
+    ':disabled': { opacity: 0.4, cursor: 'not-allowed' },
+});
+
+export const menuSegBtn = styleVariants({
+    off: [menuSegBase, { ':hover': { background: vars.color.muted } }],
+    on: [menuSegBase, { color: vars.color.amber, borderColor: vars.color.amber, background: 'rgba(224, 164, 60, 0.08)', fontWeight: 600 }],
+});

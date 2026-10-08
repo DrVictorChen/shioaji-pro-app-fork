@@ -35,7 +35,7 @@ const enquire = (code: string, patch: Record<string, number> = {}) => [{ stock_i
 const text = (n: ReactTestInstance): string => n.children.map(c => (typeof c === 'string' ? c : text(c))).join('');
 const roots: ReactTestRenderer[] = [];
 const button = (r: ReactTestRenderer, label: string) => r.root.findAllByType('button').find(b => text(b) === label);
-const creditBtn = (r: ReactTestRenderer) => r.root.findAll(n => n.type === 'button' && n.props['aria-label'] === '單位與信用條件')[0];
+const creditBtn = (r: ReactTestRenderer) => r.root.findAll(n => n.type === 'button' && n.props['aria-label'] === '單位與委託條件')[0];
 const menu = (r: ReactTestRenderer) => r.root.findAll(n => n.props.role === 'menu')[0];
 const item = (r: ReactTestRenderer, label: string) => menu(r)!.findAll(n => n.type === 'button' && String(n.props.role).startsWith('menuitem') && text(n).startsWith(label))[0]!;
 const tag = (r: ReactTestRenderer) => r.root.findAll(n => n.props['data-testid'] === 'flash-credit-tag')[0];
@@ -306,7 +306,11 @@ it('odd lots: credit options are disabled with an explanation; orders are cash; 
 
 it('futures panels show no credit control and never send one', async () => {
     const r = await mount(fut, owned({ cond: 'ShortSelling', daytradeShort: false }).extra());
-    expect(creditBtn(r)).toBeUndefined();
+    // the futures unit menu has no credit items
+    expect(text(creditBtn(r)!)).toBe('口');
+    await act(async () => { creditBtn(r)!.props.onClick(); });
+    expect(menu(r)!.findAll(n => n.type === 'button' && /^(現股|融資|融券|借券)/.test(text(n)))).toHaveLength(0);
+    await act(async () => { creditBtn(r)!.props.onClick(); });
     expect(tag(r)).toBeUndefined();
     expect(banner(r)).toBeUndefined();
     expect(button(r, '市價買')).toBeDefined();
@@ -317,7 +321,7 @@ it('futures panels show no credit control and never send one', async () => {
     expect(mocks.post).not.toHaveBeenCalled();
 });
 
-it('stock panels fold the settings gear into the unit menu (更多設定…); futures keep the gear', async () => {
+it('stock panels fold the settings gear into the unit menu (更多設定…)', async () => {
     const gear = (r: ReactTestRenderer) => r.root.findAll(n => n.type === 'button' && n.props['aria-label'] === '閃電下單設定')[0]!;
     const r = await mount(stk);
     expect(gear(r).props.hidden).toBe(true);
@@ -326,8 +330,9 @@ it('stock panels fold the settings gear into the unit menu (更多設定…); fu
     await act(async () => { item(r, '更多設定').props.onClick(); });
     expect(menu(r)).toBeUndefined();
     expect(r.root.findAll(n => n.props.role === 'dialog' && n.props['aria-label'] === '閃電下單設定')).toHaveLength(1);
+    // futures fold it into the 口 menu as well (flash-order-ordertype.test.tsx)
     const f = await mount(fut);
-    expect(gear(f).props.hidden).toBe(false);
+    expect(gear(f).props.hidden).toBe(true);
 });
 
 it('a server switch while the credit check is pending refuses the order (never sent to the new server)', async () => {

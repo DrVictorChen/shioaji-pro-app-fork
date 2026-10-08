@@ -39,6 +39,7 @@ import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT,
 import { currentProtectionEnv } from '../lib/protection-env';
 import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from '../lib/server-info-store';
 import { loadOrderLotPreference, saveOrderLotPreference, TICKET_LOTS } from '../lib/order-lot-preference';
+import { defaultOrderTypeFor, FUTURES_OCTYPES, futuresOrderProblem, ORDER_TYPES, orderTypeDisabledReason, priceTypeDisabledReason, priceTypesFor } from '../lib/order-conditions';
 import { fetchInfo, placeFuturesOrder, placeStockOrder } from '../lib/shioaji';
 import { notify } from '../lib/trade';
 import type { ContractInfo } from '../lib/types/contract';
@@ -268,6 +269,10 @@ export function OrderTicket({
         try {
             const blocked = checkOrderAllowed(qty, isFutures ? undefined : orderLot);
             if (blocked) throw new Error(blocked);
+            if (isFutures) {
+                const problem = futuresOrderProblem({ price_type: priceType, order_type: orderType, octype });
+                if (problem) throw new Error(problem);
+            }
             if (!isFutures) {
                 const problem = stockOrderProblem({ quantity: qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort, action, day_trade: contract.day_trade });
                 if (problem) throw new Error(problem);
@@ -528,6 +533,10 @@ export function OrderTicket({
         try {
             if (!splitValid || allocation.length === 0) {
                 throw new Error('分倉設定無效');
+            }
+            if (isFutures) {
+                const problem = futuresOrderProblem({ price_type: priceType, order_type: orderType, octype });
+                if (problem) throw new Error(problem);
             }
             if (!isFutures) {
                 for (const e of allocation) {
@@ -853,22 +862,18 @@ export function OrderTicket({
                 <div className={styles.fieldRow}>
                     <span className={styles.fieldLabel}>價別</span>
                     <div className={styles.segGroup}>
-                        {(isFutures
-                            ? ['LMT', 'MKT', 'MKP']
-                            : ['LMT', 'MKT']
-                        ).map((pt) => (
+                        {priceTypesFor(isFutures).map((pt) => (
                             <button
                                 key={pt}
                                 className={
                                     styles.seg[priceType === pt ? 'on' : 'off']
                                 }
-                                disabled={odd && pt !== 'LMT'}
-                                title={odd && pt !== 'LMT' ? ODD_LOT_TEXT.priceType : undefined}
+                                disabled={!!priceTypeDisabledReason(pt, odd)}
+                                title={priceTypeDisabledReason(pt, odd) ?? undefined}
                                 onClick={() => {
                                     setPriceType(pt);
                                     setArmed(false);
-                                    if (pt !== 'LMT') setOrderType('IOC');
-                                    else setOrderType('ROD');
+                                    setOrderType(defaultOrderTypeFor(pt));
                                 }}
                             >
                                 {pt}
@@ -880,14 +885,14 @@ export function OrderTicket({
                 <div className={styles.fieldRow}>
                     <span className={styles.fieldLabel}>效期</span>
                     <div className={styles.segGroup}>
-                        {(['ROD', 'IOC', 'FOK'] as OrderType[]).map((ot) => (
+                        {ORDER_TYPES.map((ot) => (
                             <button
                                 key={ot}
                                 className={
                                     styles.seg[orderType === ot ? 'on' : 'off']
                                 }
-                                disabled={odd && ot !== 'ROD'}
-                                title={odd && ot !== 'ROD' ? ODD_LOT_TEXT.orderType : undefined}
+                                disabled={!!orderTypeDisabledReason(ot, odd)}
+                                title={orderTypeDisabledReason(ot, odd) ?? undefined}
                                 onClick={() => {
                                     setOrderType(ot);
                                     setArmed(false);
@@ -903,14 +908,7 @@ export function OrderTicket({
                     <div className={styles.fieldRow}>
                         <span className={styles.fieldLabel}>倉別</span>
                         <div className={styles.segGroup}>
-                            {(
-                                [
-                                    ['Auto', '自動'],
-                                    ['New', '新倉'],
-                                    ['Cover', '平倉'],
-                                    ['DayTrade', '當沖'],
-                                ] as [FuturesOCType, string][]
-                            ).map(([oc, label]) => (
+                            {FUTURES_OCTYPES.map(({ value: oc, label }) => (
                                 <button
                                     key={oc}
                                     className={
