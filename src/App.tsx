@@ -120,9 +120,16 @@ import {
     reseedPopoutFlashAccounts,
     loadPopoutFlashAccounts,
     savePopoutFlashAccounts,
+    loadPopoutFlashLot,
+    savePopoutFlashLot,
+    loadPopoutFlashQty,
+    savePopoutFlashQty,
     touchPopoutFlashAccounts,
     type FlashAccountKeys,
+    type FlashLot,
 } from './lib/flash-account';
+import { loadFlashOrderDefault } from './lib/chart-order-settings';
+import type { FlashQtySetting } from './lib/flash-qty-memory';
 
 const POPOUT_TYPES: ReadonlySet<string> = new Set([
     'chart',
@@ -188,8 +195,11 @@ function BlockBody({
     onPulseConfigChange,
     onWallConfigChange,
     onFlashAccountsChange,
+    onFlashLotChange,
+    onFlashQtyChange,
     onSessionConfigChange,
     refreshTrading,
+    workspaceGen,
 }: {
     block: Block;
     contract: ContractInfo | null;
@@ -210,8 +220,12 @@ function BlockBody({
         rows: number,
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
+    onFlashLotChange: (id: string, lot: FlashLot) => void;
+    onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
+    /** bumps whenever a whole workspace is applied (layout / preset / reset / agent) */
+    workspaceGen: number;
 }) {
     if (contract?.security_type === 'IND' && indexBlockMessage(block.type)) {
         return <IndexBlockUnavailable type={block.type} />;
@@ -297,6 +311,9 @@ function BlockBody({
         case 'flash':
             return contract ? (
                 <LiveFlashOrder
+                    // 套用版面（含同一個 block id）＝重新建立面板：數量依該版面
+                    // 的記住數量還原（關閉則 1），點價下單一律解除
+                    key={workspaceGen}
                     snapshot={snapshot}
                     contract={contract}
                     trades={dockProps.trades}
@@ -304,6 +321,10 @@ function BlockBody({
                     onOrdersChanged={dockProps.onTradesChanged}
                     accountKeys={block.flashAccounts}
                     onAccountKeysChange={(keys) => onFlashAccountsChange(block.id, keys)}
+                    lot={block.flashLot}
+                    onLotChange={(flashLot) => onFlashLotChange(block.id, flashLot)}
+                    qtyMemory={block.flashQty}
+                    onQtyMemoryChange={(flashQty) => onFlashQtyChange(block.id, flashQty)}
                 />
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
@@ -510,8 +531,12 @@ interface BlockViewProps {
         rows: number,
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
+    onFlashLotChange: (id: string, lot: FlashLot) => void;
+    onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
+    /** bumps whenever a whole workspace is applied (layout / preset / reset / agent) */
+    workspaceGen: number;
 }
 
 function BlockView(props: BlockViewProps) {
@@ -549,8 +574,10 @@ function BlockView(props: BlockViewProps) {
                     POPOUT_TYPES.has(block.type)
                         ? () => {
                               const global = mainFlashSelection();
+                              // 彈出視窗沿用這個面板的單位（從沒選過＝設為預設的單位）
+                              const flashSeed = { lot: block.flashLot ?? loadFlashOrderDefault('S').lot, qty: block.flashQty };
                               const flashParams = block.type === 'flash'
-                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`)
+                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`, flashSeed)
                                   : undefined;
                               void openPopout(
                                   block.type,
@@ -561,7 +588,7 @@ function BlockView(props: BlockViewProps) {
                                       ...popoutSessionParam(block),
                                       ...flashParams,
                                   },
-                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global) : undefined,
+                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global, { lot: flashSeed.lot }) : undefined,
                               );
                           }
                         : undefined
@@ -603,6 +630,9 @@ function PopoutView({
     const popoutPositionsState = { data: trading.positions, refresh: tradingActionObserved };
     // popout 不在 workspace 裡 — 帳戶依視窗 id 存在本機（開啟時由開啟端固定並預先寫入）
     const [flashAccounts, setFlashAccounts] = useState(() => loadPopoutFlashAccounts(POPOUT_WINDOW_ID));
+    // 單位同樣依視窗 id 存（開啟端預先寫入面板的單位），重新整理後保留
+    const [flashLot, setFlashLot] = useState(() => loadPopoutFlashLot(POPOUT_WINDOW_ID));
+    const [flashQty, setFlashQty] = useState(() => loadPopoutFlashQty(POPOUT_WINDOW_ID));
     // heartbeat: a long-open popout must not be evicted as "stale"
     useEffect(() => {
         if (type !== 'flash' || !POPOUT_WINDOW_ID) return;
@@ -688,6 +718,16 @@ function PopoutView({
                         onAccountKeysChange={(keys) => {
                             setFlashAccounts(keys);
                             savePopoutFlashAccounts(POPOUT_WINDOW_ID, keys);
+                        }}
+                        lot={flashLot}
+                        onLotChange={(lot) => {
+                            setFlashLot(lot);
+                            savePopoutFlashLot(POPOUT_WINDOW_ID, lot);
+                        }}
+                        qtyMemory={flashQty}
+                        onQtyMemoryChange={(qty) => {
+                            setFlashQty(qty);
+                            savePopoutFlashQty(POPOUT_WINDOW_ID, qty);
                         }}
                     />
                 );
@@ -954,6 +994,14 @@ function MainApp() {
         setWorkspace(w);
         saveWorkspace(w);
     }, []);
+    // Applying a whole workspace (saved layout, preset, reset, agent command)
+    // rebuilds the flash panels even when block ids repeat, so their quantity
+    // and click-to-trade state come from the applied layout, never the old one.
+    const [workspaceGen, setWorkspaceGen] = useState(0);
+    const replaceWorkspace = useCallback((w: Workspace) => {
+        setWorkspaceGen((g) => g + 1);
+        updateWorkspace(w);
+    }, [updateWorkspace]);
 
     const indicatorService = useMemo(() => new IndicatorInstanceService({
         getWorkspace: () => workspaceRef.current,
@@ -993,7 +1041,10 @@ function MainApp() {
     const onLayoutChange = useCallback(
         (next: Layout) => {
             const fromRender = GRID_LEGACY_SCALE / density; // 12/k，整數
-            const prev = new Map(workspace.layout.map((l) => [l.i, l]));
+            // 讀最新版面：RGL 的 mount 回報可能與面板 mount 時的寫入（例如閃電
+            // 存初始單位）落在同一次 commit，用舊的 closure 會蓋掉那筆寫入
+            const current = workspaceRef.current;
+            const prev = new Map(current.layout.map((l) => [l.i, l]));
             // RGL 在 mount 時必發一次 onLayoutChange（含跨密度舍入後的
             // 座標）— 儲存值渲染後與回報一致的面板保留原值，精細版面
             // 不會只因「開了 app」就被粗化回存
@@ -1021,10 +1072,10 @@ function MainApp() {
                     h: l.h,
                 };
             });
-            if (!changed && stored.length === workspace.layout.length) return;
-            updateWorkspace({ ...workspace, layout: stored });
+            if (!changed && stored.length === current.layout.length) return;
+            updateWorkspace({ ...current, layout: stored });
         },
-        [workspace, updateWorkspace, density],
+        [updateWorkspace, density],
     );
 
     const addBlock = useCallback(
@@ -1161,13 +1212,23 @@ function MainApp() {
     // generic per-block field update (persisted with the workspace)
     const patchBlock = useCallback(
         (id: string, patch: Partial<Block>) => {
-            updateWorkspace(withBlockPatch(workspace, id, patch));
+            // read the latest workspace: several panels may patch in one commit
+            // (e.g. flash panels saving their initial unit on mount)
+            updateWorkspace(withBlockPatch(workspaceRef.current, id, patch));
         },
-        [workspace, updateWorkspace],
+        [updateWorkspace],
     );
     const setBlockFlashAccounts = useCallback(
         (id: string, flashAccounts: FlashAccountKeys) =>
             patchBlock(id, { flashAccounts }),
+        [patchBlock],
+    );
+    const setBlockFlashLot = useCallback(
+        (id: string, flashLot: FlashLot) => patchBlock(id, { flashLot }),
+        [patchBlock],
+    );
+    const setBlockFlashQty = useCallback(
+        (id: string, flashQty: FlashQtySetting) => patchBlock(id, { flashQty }),
         [patchBlock],
     );
     const setBlockSessionConfig = useCallback(
@@ -1196,14 +1257,14 @@ function MainApp() {
     );
 
     const resetWorkspace = useCallback(() => {
-        updateWorkspace(structuredClone(DEFAULT_WORKSPACE));
-    }, [updateWorkspace]);
+        replaceWorkspace(structuredClone(DEFAULT_WORKSPACE));
+    }, [replaceWorkspace]);
 
     const loadPreset = useCallback(
         (name: string) => {
             const preset = LAYOUT_PRESETS.find((p) => p.name === name);
             if (preset) {
-                updateWorkspace(structuredClone(preset.workspace));
+                replaceWorkspace(structuredClone(preset.workspace));
                 trackActivity('套版面', name);
                 notify({
                     kind: 'info',
@@ -1212,7 +1273,7 @@ function MainApp() {
                 });
             }
         },
-        [updateWorkspace],
+        [replaceWorkspace],
     );
 
     // ---- profiles ----
@@ -1243,7 +1304,7 @@ function MainApp() {
         (name: string) => {
             const p = profiles.find((x) => x.name === name);
             if (p) {
-                updateWorkspace(structuredClone(p.workspace));
+                replaceWorkspace(structuredClone(p.workspace));
                 trackActivity('套版面', name);
                 notify({
                     kind: 'info',
@@ -1252,7 +1313,7 @@ function MainApp() {
                 });
             }
         },
-        [profiles, updateWorkspace],
+        [profiles, replaceWorkspace],
     );
 
     // App-state reads remain available during setup with Harness disabled.
@@ -1281,10 +1342,10 @@ function MainApp() {
                     selectedRef.current = contract;
                     setSelected(contract);
                 },
-                updateWorkspace,
+                updateWorkspace: replaceWorkspace,
                 createPanelId: newBlockId,
         }, { readOnly: !agentHarnessEnabled });
-    }, [agentHarnessEnabled, updateWorkspace]);
+    }, [agentHarnessEnabled, replaceWorkspace]);
 
     const deleteProfile = useCallback(
         (name: string) => {
@@ -1439,8 +1500,11 @@ function MainApp() {
                                     onPulseConfigChange={setBlockPulseConfig}
                                     onWallConfigChange={setBlockWallConfig}
                                     onFlashAccountsChange={setBlockFlashAccounts}
+                                    onFlashLotChange={setBlockFlashLot}
+                                    onFlashQtyChange={setBlockFlashQty}
                                     onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
+                                    workspaceGen={workspaceGen}
                                 />
                             </div>
                         ))}

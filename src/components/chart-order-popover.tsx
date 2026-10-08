@@ -62,6 +62,8 @@ export interface OrderSettingsLayout {
     defaultNote: string;
     /** accessible name prefix of the quantity input */
     qtyLabel: string;
+    /** 記住數量 row (flash panels): on/off + what is remembered, with units */
+    rememberQty?: { on: boolean; text: string; note: string; onToggle: (on: boolean) => void };
 }
 
 export function OrderSettingsButton({
@@ -294,6 +296,21 @@ export function OrderSettingsPanel({
                     ))}
                 </div>
             </div>
+            {layout.rememberQty && (
+                <div className={styles.row}>
+                    <span className={styles.label}>記住數量</span>
+                    <div className={styles.seg} role='group' aria-label='記住數量' title={layout.rememberQty.note}>
+                        {([[true, '開'], [false, '關']] as const).map(([on, text]) => (
+                            <button key={text} type='button' className={styles.segBtn[layout.rememberQty!.on === on ? 'on' : 'off']}
+                                aria-pressed={layout.rememberQty!.on === on}
+                                onClick={() => { if (layout.rememberQty!.on !== on) layout.rememberQty!.onToggle(on); }}>
+                                {text}
+                            </button>
+                        ))}
+                    </div>
+                    <span className={styles.rowNote} data-testid='remember-qty-text'>{layout.rememberQty.text}</span>
+                </div>
+            )}
             {layout.orderType && (
                 <div className={styles.row}>
                     <span className={styles.label}>委託</span>

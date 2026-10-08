@@ -11,7 +11,7 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 
 import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { usePrivacyMode } from '../lib/privacy';
-import { accountMatches, flashAccountKey, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashMarket } from '../lib/flash-account';
+import { accountMatches, flashAccountKey, isFlashLot, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashLot, type FlashMarket } from '../lib/flash-account';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { ChevronDown, Zap } from 'lucide-react';
 import {
@@ -26,7 +26,6 @@ import {
 import { useQuote, useTradingLive } from '../hooks/use-stream';
 import { displayBook } from '../lib/display-book';
 import { flashOrderSummary, loadFlashOrderDefault, normalizeChartOrder, saveFlashOrderDefault } from '../lib/chart-order-settings';
-import { loadOrderLotPreference, saveOrderLotPreference, QUICK_ORDER_LOTS } from '../lib/order-lot-preference';
 import { OrderSettingsButton } from './chart-order-popover';
 import { useDisplayBook } from '../hooks/use-display-book';
 import type { Snapshot } from '../lib/types/market';
@@ -43,6 +42,7 @@ import { fmtClock, fmtCompactInt, fmtInt, fmtPrice, fmtSigned, fmtStockLots } fr
 import { clampLotQuantity, isOddLot, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT } from '../lib/odd-lot';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
+import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
 import * as styles from './flash-order.css';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
@@ -229,6 +229,10 @@ export function FlashOrder({
     onAccountKeysChange,
     followMain = true,
     reconcilePending = false,
+    lot: savedLot,
+    onLotChange,
+    qtyMemory: savedQtyMemory,
+    onQtyMemoryChange,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -247,6 +251,15 @@ export function FlashOrder({
     /** Orders or positions await reconciliation (missed or unapplied
      * reports): today's fills may be incomplete, so no FIFO cost. */
     reconcilePending?: boolean;
+    // this panel's own unit (整股／盤中零股): kept across symbol changes and
+    // persisted by the owner (workspace block / popout window) through
+    // onLotChange. Undefined = never chosen → the 設為預設 unit.
+    lot?: FlashLot;
+    onLotChange?: (lot: FlashLot) => void;
+    // 記住數量（預設開）：張／股／口各一個數量，由擁有者保存；false = 關閉。
+    // 沒有 onQtyMemoryChange 時只在元件內
+    qtyMemory?: FlashQtySetting;
+    onQtyMemoryChange?: (setting: FlashQtySetting) => void;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -278,11 +291,105 @@ export function FlashOrder({
     const defaultSnapshot = useRef<Record<FlashMarket, ReturnType<typeof loadFlashOrderDefault>> | null>(null);
     defaultSnapshot.current ??= { S: loadFlashOrderDefault('S'), F: loadFlashOrderDefault('F') };
     const defaultFor = (m: FlashMarket) => defaultSnapshot.current![m];
-    const initialLot = () => loadOrderLotPreference('flash', contract, QUICK_ORDER_LOTS, defaultFor(market).lot);
-    const [qty, setQty] = useState(() => initialLot() === defaultFor(market).lot ? defaultFor(market).qty : 1);
-    // 股票：整股（張）或盤中零股（股）（#204）— 每個面板自己的 state
-    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(initialLot);
-    const lotPreferences = useRef(new Map<string, 'Common' | 'IntradayOdd'>());
+    // 股票：整股（張）或盤中零股（股）（#204）是「這個面板」的設定，換股票不變；
+    // 有 onLotChange 時由擁有者（版面 block／彈出視窗）保存，否則只在元件內。
+    // 從沒選過（含升級前的面板）＝建立時的「設為預設」單位，不讀舊的依股票紀錄
+    const [localLot, setLocalLot] = useState<FlashLot | undefined>(isFlashLot(savedLot) ? savedLot : undefined);
+    const ownLot = onLotChange ? (isFlashLot(savedLot) ? savedLot : undefined) : localLot;
+    const panelLot: FlashLot = ownLot ?? defaultFor('S').lot;
+    // 期貨沒有零股：照常以「口」下單，面板單位不變，回到股票時恢復
+    const lot: FlashLot = market === 'F' ? 'Common' : panelLot;
+    // 數量只屬於輸入時的商品類別與單位：單位或類別一變（包含切換版面等外部
+    // 改變），同一次 render 就視為 1、點價下單也用 1，不等 effect（#204）
+    const unitKey = `${market}:${lot}`;
+    const unitKeyRef = useRef(unitKey);
+    unitKeyRef.current = unitKey;
+    // 記住數量：依單位（張／股／口）各記一個；還原前一律重新檢查單位上限
+    const [localQtyMemory, setLocalQtyMemory] = useState<FlashQtySetting>(() => sanitizeFlashQtySetting(savedQtyMemory));
+    const qtyMemory: FlashQtySetting = onQtyMemoryChange ? sanitizeFlashQtySetting(savedQtyMemory) : localQtyMemory;
+    const qtyMemoryRef = useRef(qtyMemory);
+    qtyMemoryRef.current = qtyMemory;
+    const onQtyMemoryChangeRef = useRef(onQtyMemoryChange);
+    onQtyMemoryChangeRef.current = onQtyMemoryChange;
+    const setQtyMemory = useCallback((next: FlashQtySetting) => {
+        qtyMemoryRef.current = next;
+        setLocalQtyMemory(next);
+        onQtyMemoryChangeRef.current?.(next);
+    }, []);
+    const qtySlot = flashQtySlot(market, lot);
+    const qtySlotRef = useRef(qtySlot);
+    qtySlotRef.current = qtySlot;
+    const remembered = qtyMemory === false ? { qty: undefined, invalid: false } : rememberedFlashQty(qtyMemory, qtySlot);
+    const rememberedQty = remembered.qty;
+    // 記住數量關閉或記住的數量不合法 → 1；開啟但這個單位還沒記住 → 設為預設
+    const [qtyEntry, setQtyEntry] = useState<{ unit: string; qty: number }>(() => {
+        if (qtyMemory === false || remembered.invalid) return { unit: unitKey, qty: 1 };
+        if (rememberedQty !== undefined) return { unit: unitKey, qty: rememberedQty };
+        return { unit: unitKey, qty: lot === defaultFor(market).lot ? defaultFor(market).qty : 1 };
+    });
+    // 記住數量開啟且這個單位有合法紀錄時，紀錄就是數量：切換版面等外部還原、
+    // 換單位，都在同一次 render 生效；其他情況用輸入值（單位不同視為 1）
+    const qty = remembered.invalid ? 1 : rememberedQty ?? (qtyEntry.unit === unitKey ? qtyEntry.qty : 1);
+    const qtyNowRef = useRef(qty);
+    qtyNowRef.current = qty;
+    // 點價下單啟用時這個單位記住的數量；之後由外部（切換版面）改掉就失效
+    const armedMemQty = useRef<number | undefined>(rememberedQty);
+    // 使用者改數量（輸入、±、設定）：同一個事件裡一起更新這個單位的記憶 —
+    // 合法就記下，不合法（例如清空、超過上限）就移除這個單位的紀錄
+    const setQty = useCallback((v: number | ((prev: number) => number)) => {
+        const next = typeof v === 'function' ? v(qtyNowRef.current) : v;
+        const unit = unitKeyRef.current;
+        const slot = qtySlotRef.current;
+        setQtyEntry({ unit, qty: next });
+        const mem = qtyMemoryRef.current;
+        if (mem === false) return;
+        if (validFlashQty(slot, next)) {
+            armedMemQty.current = next;
+            if (mem[slot] !== next) setQtyMemory(withRememberedFlashQty(mem, slot, next));
+        } else {
+            armedMemQty.current = undefined;
+            if (Object.prototype.hasOwnProperty.call(mem, slot)) {
+                const { [slot]: _dropped, ...rest } = mem;
+                setQtyMemory(rest);
+            }
+        }
+    }, [setQtyMemory]);
+    // 輸入值跟著記住的數量，關閉記住數量時數量不會跳回舊值
+    useEffect(() => {
+        if (rememberedQty !== undefined) setQtyEntry(prev => (prev.unit === unitKey && prev.qty === rememberedQty ? prev : { unit: unitKey, qty: rememberedQty }));
+    }, [rememberedQty, unitKey]);
+    // 記住的數量不合法（超過單位上限、非整數等）：不帶出來，回到 1、提示並移除
+    const invalidRemembered = remembered.invalid;
+    useEffect(() => {
+        if (!invalidRemembered) return;
+        // 以最新的記憶再確認一次：已處理過（例如 StrictMode 重跑 effect）就不重複提示
+        const mem = qtyMemoryRef.current;
+        if (mem === false || !rememberedFlashQty(mem, qtySlot).invalid) return;
+        const { [qtySlot]: bad, ...rest } = mem;
+        const unitName = qtySlot === 'F' ? '口' : qtySlot === 'IntradayOdd' ? '股' : '張';
+        notify({
+            kind: 'err',
+            title: '記住的數量已改為 1',
+            body: `這個閃電面板記住的數量（${String(bad)} ${unitName}）不符合單位限制${qtySlot === 'IntradayOdd' ? `（零股每筆 1～${ODD_LOT_MAX_SHARES} 股）` : ''}，已改為 1 ${unitName}，請確認數量後再下單。`,
+        });
+        // 先把數量定在 1，移除紀錄後也不會回到舊的輸入值
+        setQtyEntry({ unit: unitKeyRef.current, qty: 1 });
+        setQtyMemory(rest);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [invalidRemembered, qtySlot]);
+    const setPanelLot = (next: FlashLot) => {
+        setLocalLot(next);
+        onLotChange?.(next);
+    };
+    // 沒存過單位的面板（新開或升級前）把建立時的預設單位存一次，之後別的
+    // 面板改「設為預設」不會在重新整理、切換版面或彈出時改到這個面板
+    const onLotChangeRef = useRef(onLotChange);
+    onLotChangeRef.current = onLotChange;
+    const savedLotValid = isFlashLot(savedLot);
+    useEffect(() => {
+        if (!savedLotValid) onLotChangeRef.current?.(panelLot);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [savedLotValid]);
     const odd = market === 'S' && lot === 'IntradayOdd';
     // 盤中零股是另一個撮合市場：零股模式的五檔、成交價與單量一律取零股
     // 行情（intraday_odd，量以股計），只在這個面板處於零股時才訂閱；
@@ -322,7 +429,12 @@ export function FlashOrder({
     const captureContext = useOrderContext(contract, lot);
     const armedRef = useRef(armed);
     const armedAccountKey = useRef(accountKey);
-    armedRef.current = armed && armedAccountKey.current === accountKey;
+    // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
+    // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
+    const armKey = `${contract.code}:${unitKey}`;
+    const armedKey = useRef(armKey);
+    const armedQtyCurrent = armedMemQty.current === rememberedQty;
+    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const oddRef = useRef(odd);
@@ -344,30 +456,31 @@ export function FlashOrder({
         setFollow(true);
     }, [contract.code]);
 
-    // Account changes still disarm an active ladder.
+    // Account and unit changes still disarm an active ladder.
     useEffect(() => {
         setArmed(false);
-    }, [contract.code, accountKey]);
-
-    // 換商品優先恢復該代碼的單位，未選過則沿用面板預設。
-    // 數量只在輸入時的單位有效：商品類別（股票／期貨）或單位一變就歸 1 —
-    // 比對的是切換「之前」的類別與單位（render 後的 odd 已經是新商品的值），
-    // 500 股絕不會變成 500 口或 500 張（#204）
-    const lotRef = useRef(lot);
-    lotRef.current = lot;
-    const unitClassRef = useRef<FlashMarket>(market);
-    const symbolRef = useRef({ code: contract.code, market });
+    }, [contract.code, accountKey, lot]);
+    // 記住的數量被外部改掉（例如切換版面）：點價下單解除
     useEffect(() => {
-        if (symbolRef.current.code === contract.code && symbolRef.current.market === market) return;
-        symbolRef.current = { code: contract.code, market };
-        const prevClass = unitClassRef.current;
-        unitClassRef.current = market;
-        const d = defaultFor(market);
-        const nextLot = market === 'F' ? 'Common' : lotPreferences.current.get(contract.code) ?? loadOrderLotPreference('flash', contract, QUICK_ORDER_LOTS, d.lot);
-        if (prevClass !== market || lotRef.current !== nextLot || lotRef.current === 'IntradayOdd') setQty(1);
-        setLot(nextLot);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [contract.code, market]);
+        if (armed && !armedQtyCurrent) setArmed(false);
+    }, [armed, armedQtyCurrent]);
+
+    // 換商品時單位跟著面板走、不變；數量只在輸入時的單位有效：商品類別
+    // （股票／期貨）或單位一變就歸 1，單位沒變就保留（零股 500 股換股票仍是
+    // 500 股）。500 股絕不會變成 500 口或 500 張（#204）。單位由外部改變
+    // （例如切換版面）也一樣歸 1
+    const unitRef = useRef({ market, lot });
+    useEffect(() => {
+        const prev = unitRef.current;
+        unitRef.current = { market, lot };
+        // 換到新單位：帶出該單位記住的數量（已檢查上限），否則 1；
+        // 記住數量關閉時回到原單位也不讓舊數量復活
+        if (prev.market !== market || prev.lot !== lot) {
+            const mem = qtyMemoryRef.current;
+            const restored = mem === false ? undefined : rememberedFlashQty(mem, flashQtySlot(market, lot)).qty;
+            setQtyEntry({ unit: `${market}:${lot}`, qty: restored ?? 1 });
+        }
+    }, [market, lot]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
     // click can't fire into a dead connection (issue #2)
@@ -889,16 +1002,16 @@ export function FlashOrder({
                             // 換單位一律先上鎖，股數與張數不能互換
                             armedRef.current = false;
                             setArmed(false);
-                            lotPreferences.current.set(contract.code, next.lot);
-                            saveOrderLotPreference('flash', contract, next.lot);
-                            setLot(next.lot);
+                            setPanelLot(next.lot);
+                            // 數量由新單位決定（記住的數量或 1），不把舊單位的數量寫進去
+                            return;
                         }
                         setQty(next.qty);
                     }}
                     onSaveDefault={() => {
                         saveFlashOrderDefault(market, flashSettings);
                         defaultSnapshot.current![market] = flashSettings;
-                        notify({ kind: 'info', title: '已設為閃電下單預設', body: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量（這個面板換商品時也是）；其他現有面板維持原設定，帳號不變。` });
+                        notify({ kind: 'info', title: '已設為閃電下單預設', body: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量；其他現有面板維持原設定，帳號不變。` });
                     }}
                     layout={{
                         title: '閃電下單設定',
@@ -908,6 +1021,17 @@ export function FlashOrder({
                         octype: false,
                         defaultNote: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量（不含帳號）`,
                         qtyLabel: '閃電下單數量',
+                        rememberQty: {
+                            on: qtyMemory !== false,
+                            text: qtyMemory === false ? '關閉：重新整理或換單位後數量回到 1' : `已記住：${flashQtyMemoryText(qtyMemory)}`,
+                            note: '張、股、口各記一個數量，重新整理或重開後還原；關閉時清除',
+                            onToggle: on => {
+                                // 關閉時數量停在目前顯示的值；開啟時從目前數量開始記
+                                setQtyEntry({ unit: unitKey, qty });
+                                armedMemQty.current = undefined;
+                                setQtyMemory(on ? withRememberedFlashQty({}, qtySlot, qty) : false);
+                            },
+                        },
                     }}
                     contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
                     summary={flashOrderSummary(flashSettings, market, accountShort)}
@@ -919,7 +1043,7 @@ export function FlashOrder({
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
                     disabled={!live || !activeAccount}
-                    onClick={() => { armedAccountKey.current = accountKey; setArmed((a) => !a); }}
+                    onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed((a) => !a); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
