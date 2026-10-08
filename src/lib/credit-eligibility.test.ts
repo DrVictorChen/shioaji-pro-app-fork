@@ -68,3 +68,12 @@ it('an empty answer, or one for another stock only, resolves to undefined (unkno
     m.post.mockResolvedValue([row({ stock_id: '2317', short_unit: 0 })]);
     await expect(loadCreditEnquire({ ...stk, code: '2454' })).resolves.toBeUndefined();
 });
+
+it('a fresh load bypasses the cached answer and replaces it', async () => {
+    m.post.mockResolvedValue([row()]);
+    await loadCreditEnquire(stk);
+    m.post.mockResolvedValue([row({ margin_unit: 0 })]);
+    await expect(loadCreditEnquire(stk, { fresh: true })).resolves.toMatchObject({ margin_unit: 0 });
+    await expect(loadCreditEnquire(stk)).resolves.toMatchObject({ margin_unit: 0 });
+    expect(m.post).toHaveBeenCalledTimes(2);
+});

@@ -9,6 +9,7 @@
 
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
+import { getServerModeVersion, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
 import type { Action } from './types/order';
 import type { Account } from './types/portfolio';
 
@@ -37,7 +38,13 @@ export interface OrderConfirmRequest {
 interface PendingConfirm {
     request: OrderConfirmRequest;
     resolve: (approved: boolean) => void;
+    reject: (error: Error) => void;
+    // server mode generation when the dialog opened (server-info-store)
+    modeVersion: number;
 }
+
+/** 確認視窗開著時伺服器或模式變了（例如模擬 sidecar 重啟成正式）：舊的確認不算數 */
+export const ORDER_CONFIRM_SERVER_CHANGED = SERVER_MODE_CHANGED_MESSAGE;
 
 let pending: PendingConfirm | null = null;
 const listeners = new Set<() => void>();
@@ -60,6 +67,10 @@ export function resolveOrderConfirm(approved: boolean): void {
     const current = pending;
     pending = null;
     emit();
+    if (approved && getServerModeVersion() !== current.modeVersion) {
+        current.reject(Object.assign(new Error(ORDER_CONFIRM_SERVER_CHANGED), { mutationNotStarted: true as const }));
+        return;
+    }
     current.resolve(approved);
 }
 
@@ -105,7 +116,7 @@ export function requestOrderConfirm(
             new Error('已有待確認的委託 — 請先確認或取消上一筆'),
         );
     }
-    return new Promise<boolean>((resolve) => {
+    return new Promise<boolean>((resolve, reject) => {
         // Reserve synchronously before the first await. A cold simulation
         // cache may take hundreds of milliseconds; without this placeholder,
         // two same-tick orders can both pass the guard and one promise is
@@ -117,6 +128,8 @@ export function requestOrderConfirm(
         const current: PendingConfirm = {
             request: { ...withAccount, simulation: simulationCache },
             resolve,
+            reject,
+            modeVersion: getServerModeVersion(),
         };
         pending = current;
         const start = () => {

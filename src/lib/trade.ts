@@ -18,6 +18,7 @@ import {
 } from './shioaji';
 import { getStreamStatus } from './stream';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
+import { getServerModeVersion, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
@@ -184,9 +185,13 @@ export async function placeQuickOrder(
         orderCond?: StockOrderCond;
         // 現股當沖先賣：只在賣出時帶出；買進（回補）一律是現股買進
         daytradeShort?: boolean;
+        // 確認之後、送出之前的非同步最後檢查（例如重新查可否融資券）；丟出錯誤就不送
+        afterConfirm?: () => Promise<void>;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
+    // 伺服器模式代次：確認期間模擬重啟成正式（同一位址）也不送
+    const startedMode = getServerModeVersion();
     const capturedAccount = opts?.account ?? (isFuturesContract(contract) ? getAccountState().selectedFutures : getAccountState().selectedStock) ?? undefined;
     assertTradingLive();
     if (contract.security_type === 'IND') {
@@ -242,17 +247,29 @@ export async function placeQuickOrder(
     }
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
+    if (getServerModeVersion() !== startedMode) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+    if (opts?.afterConfirm) {
+        try {
+            await opts.afterConfirm();
+        } catch (e) {
+            throw mutationNotStartedError(e instanceof Error ? e.message : String(e));
+        }
+        assertTradingLive();
+        if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
+        if (getServerModeVersion() !== startedMode) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+    }
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     if (capturedAccount && !getAccountState().accounts.some(a => canTrade(a) && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined); if (blocked) throw mutationNotStartedError(blocked); }
-    const beforeDispatch = opts?.beforeSend ? () => {
+    const beforeDispatch = () => {
+        if (getServerModeVersion() !== startedMode) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
         try {
-            opts.beforeSend?.();
+            opts?.beforeSend?.();
         } catch (e) {
             // refused by the caller before sending: nothing was sent
             throw mutationNotStartedError(e instanceof Error ? e.message : String(e));
         }
-    } : undefined;
+    };
     trackActivity(
         '下單',
         `${contract.code} ${credit ?? ''}${action === 'Buy' ? '買' : '賣'} ${quantity}${odd ? '股（零股）' : ''} @${price ?? '市價'}`,

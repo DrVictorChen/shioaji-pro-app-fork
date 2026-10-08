@@ -37,7 +37,7 @@ export function creditStatus(row: CreditEnquire | undefined | null, cond: Credit
 }
 
 const TAIPEI_OFFSET_MS = 8 * 3600_000;
-const taipeiDay = (now = Date.now()) => new Date(now + TAIPEI_OFFSET_MS).toISOString().slice(0, 10);
+export const taipeiDay = (now = Date.now()) => new Date(now + TAIPEI_OFFSET_MS).toISOString().slice(0, 10);
 const msToTaipeiMidnight = (now = Date.now()) => 86_400_000 - ((now + TAIPEI_OFFSET_MS) % 86_400_000);
 
 type ContractKey = Pick<ContractBase, 'code' | 'security_type' | 'exchange'>;
@@ -49,9 +49,10 @@ export function creditEnquireKey(contract: ContractKey): string {
     return `${getApiBase()}|${contract.exchange}|${contract.code}|${taipeiDay()}`;
 }
 
-export function loadCreditEnquire(contract: ContractKey): Promise<CreditEnquire | undefined> {
+/** `fresh`：不用快取、重新查並取代快取（送出前的最後確認用） */
+export function loadCreditEnquire(contract: ContractKey, opts?: { fresh?: boolean }): Promise<CreditEnquire | undefined> {
     const key = creditEnquireKey(contract);
-    const hit = cache.get(key);
+    const hit = opts?.fresh ? undefined : cache.get(key);
     if (hit) return hit;
     const p = apiPost<CreditEnquire[]>('/api/v1/data/credit_enquire', {
         contracts: [{ security_type: contract.security_type, exchange: contract.exchange, code: contract.code }],

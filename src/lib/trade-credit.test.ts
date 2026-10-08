@@ -91,3 +91,23 @@ it('the confirmation names the credit condition in the action and the note', asy
     expect(m.confirm.mock.calls.at(-1)![0].credit).toBeUndefined();
     expect(m.confirm.mock.calls.at(-1)![0].note).toBeUndefined();
 });
+
+it('a server mode change during the confirmation refuses the order (same API address)', async () => {
+    const store = await import('./server-info-store');
+    store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+    m.confirm.mockImplementation(async () => {
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+        return true;
+    });
+    await expect(placeQuickOrder(stock, 'Buy', 100, 1, { account, orderCond: 'MarginTrading' })).rejects.toMatchObject({ mutationNotStarted: true });
+    expect(m.stock).not.toHaveBeenCalled();
+});
+
+it('runs afterConfirm after the confirmation and before dispatch; a throw refuses the order', async () => {
+    const order: string[] = [];
+    m.confirm.mockImplementation(async () => { order.push('confirm'); return true; });
+    const afterConfirm = vi.fn(async () => { order.push('after'); throw new Error('目前不能融資'); });
+    await expect(placeQuickOrder(stock, 'Buy', 100, 1, { account, orderCond: 'MarginTrading', afterConfirm })).rejects.toMatchObject({ mutationNotStarted: true, message: '目前不能融資' });
+    expect(order).toEqual(['confirm', 'after']);
+    expect(m.stock).not.toHaveBeenCalled();
+});

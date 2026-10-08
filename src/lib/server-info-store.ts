@@ -110,6 +110,9 @@ export const knownServerInfo = currentServerInfo;
 
 /** Changes of mode or server invalidate in-flight accounting responses,
  * including a switch away and back while a request is waiting. */
+/** 確認或送單期間伺服器或模式變了（例如模擬 sidecar 重啟成正式）的白話原因 */
+export const SERVER_MODE_CHANGED_MESSAGE = '確認期間伺服器或模式已變更，這筆沒有送出，請重新下單';
+
 export function getServerModeVersion() {
     syncBase();
     return modeVersion;

@@ -17,6 +17,7 @@ import {
     resetOrderConfirmForTest,
     resolveOrderConfirm,
     setSimulationCacheForTest,
+    ORDER_CONFIRM_SERVER_CHANGED,
 } from './order-confirm';
 import { fetchInfo } from './shioaji';
 
@@ -110,5 +111,23 @@ describe('requestOrderConfirm', () => {
         );
         resolveOrderConfirm(false);
         await promise;
+    });
+});
+
+describe('server mode changes while the confirmation is open', () => {
+    it('an approval after the server mode changed (e.g. simulation sidecar restarted as production) never counts', async () => {
+        const store = await import('./server-info-store');
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        const promise = requestOrderConfirm(req);
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+        resolveOrderConfirm(true);
+        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true, message: ORDER_CONFIRM_SERVER_CHANGED });
+    });
+    it('an approval under the same server mode still counts', async () => {
+        const store = await import('./server-info-store');
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        const promise = requestOrderConfirm(req);
+        resolveOrderConfirm(true);
+        await expect(promise).resolves.toBe(true);
     });
 });

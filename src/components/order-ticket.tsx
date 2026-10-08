@@ -37,6 +37,7 @@ import {
 import { checkOrderAllowed, getRiskSettings } from '../lib/risk';
 import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, ODD_LOT_WAITING, oddLotReferencePrice, orderQtyUnit, stockOrderProblem } from '../lib/odd-lot';
 import { currentProtectionEnv } from '../lib/protection-env';
+import { getServerModeVersion, SERVER_MODE_CHANGED_MESSAGE } from '../lib/server-info-store';
 import { loadOrderLotPreference, saveOrderLotPreference, TICKET_LOTS } from '../lib/order-lot-preference';
 import { fetchInfo, placeFuturesOrder, placeStockOrder } from '../lib/shioaji';
 import { notify } from '../lib/trade';
@@ -252,6 +253,8 @@ export function OrderTicket({
         setArmed(false);
         setBusy(true);
         const isContextCurrent = captureContext();
+        // 伺服器模式代次：確認期間模擬 sidecar 重啟成正式（同一位址）也不送
+        const startedMode = getServerModeVersion();
         try {
             const blocked = checkOrderAllowed(qty, isFutures ? undefined : orderLot);
             if (blocked) throw new Error(blocked);
@@ -333,6 +336,7 @@ export function OrderTicket({
             }
             const dispatch = { beforeDispatch: () => {
                 if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+                if (getServerModeVersion() !== startedMode) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
                 if (!isSelectedAccountUnchanged(orderAccount)) throw Object.assign(new Error(ACCOUNT_CHANGED_MESSAGE), { tradingGateRejected: true });
             } };
             dispatch.beforeDispatch();
@@ -503,8 +507,10 @@ export function OrderTicket({
         setSplitArmed(false);
         setSplitBusy(true);
         const isContextCurrent = captureContext();
+        const startedMode = getServerModeVersion();
         const beforeDispatch = () => {
             if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+            if (getServerModeVersion() !== startedMode) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
         };
         try {
             if (!splitValid || allocation.length === 0) {

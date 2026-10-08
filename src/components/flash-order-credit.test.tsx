@@ -457,3 +457,39 @@ it('a pending 現沖 sell is refused at dispatch if the stock stops being day-tr
     await show(r, { ...stk, day_trade: 'OnlyBuy' } as ContractInfo, owner.extra());
     expect(() => guard()).toThrow();
 });
+
+it('after the confirmation, a fresh credit check runs before dispatch; a new 0 blocks the order', async () => {
+    let captured!: { afterConfirm?: () => Promise<void> };
+    mocks.place.mockImplementation(async (_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { afterConfirm?: () => Promise<void> }) => {
+        captured = opts;
+        await opts.afterConfirm?.();
+        return { status: { status: 'PendingSubmit' } };
+    });
+    const r = await mount(stk, owned({ cond: 'MarginTrading', daytradeShort: false }).extra());
+    await arm(r);
+    // the cached (positive) answer lets the click through; the re-check after confirmation finds 0
+    mocks.post.mockImplementation(async () => enquire('2330', { margin_unit: 0 }));
+    await act(async () => { cell(r, 'buy').props.onClick(); });
+    await flush();
+    expect(captured.afterConfirm).toBeTypeOf('function');
+    expect(mocks.post).toHaveBeenCalledTimes(2);
+    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err' });
+    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('目前不能融資');
+});
+
+it('a 現沖 sell confirmation left open past Taipei midnight is refused at dispatch', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-08T23:59:00+08:00'));
+    let guard!: () => void;
+    mocks.place.mockImplementation((_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+        guard = opts.beforeSend;
+        return new Promise(() => undefined);
+    });
+    const r = await mount(stk, owned({ cond: 'Cash', daytradeShort: true }).extra());
+    await arm(r);
+    await act(async () => { cell(r, 'sell').props.onClick(); });
+    await flush();
+    expect(() => guard()).not.toThrow();
+    vi.setSystemTime(new Date('2026-10-09T00:00:30+08:00'));
+    expect(() => guard()).toThrow();
+});

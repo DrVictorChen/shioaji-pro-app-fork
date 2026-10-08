@@ -12,7 +12,7 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { usePrivacyMode } from '../lib/privacy';
 import { accountMatches, CASH_CREDIT, flashAccountKey, isFlashLot, normalizeFlashCredit, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashCond, type FlashCredit, type FlashLot, type FlashMarket } from '../lib/flash-account';
-import { creditEnquireKey, creditStatus, loadCreditEnquire, useCreditEnquire, type CreditCond } from '../lib/credit-eligibility';
+import { creditEnquireKey, creditStatus, loadCreditEnquire, taipeiDay, useCreditEnquire, type CreditCond } from '../lib/credit-eligibility';
 import { getApiBase } from '../lib/runtime';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { Ban, Check, ChevronDown, Settings2, Zap } from 'lucide-react';
@@ -863,6 +863,9 @@ export function FlashOrder({
             // 融資／融券：這次查詢的鍵（伺服器＋股票＋台北日期）；確認視窗開著
             // 跨過午夜或換伺服器，送出時就不算數，要重新查、重新確認
             let enquiryKey: string | null = null;
+            // 現沖賣：可否當沖是當天的資格，確認視窗跨過午夜就不送
+            const clickDay = taipeiDay();
+            const dayBound = creditOn && action === 'Sell' && clickCredit.cond === 'Cash' && clickCredit.daytradeShort;
             if (creditOn && (clickCredit.cond === 'MarginTrading' || clickCredit.cond === 'ShortSelling')) {
                 enquiryKey = creditEnquireKey(capturedContract);
                 const clickBase = getApiBase();
@@ -883,9 +886,19 @@ export function FlashOrder({
                 {
                     account: capturedAccount,
                     isAccountCurrent: stillPanelAccount(capturedAccount),
+                    // 確認之後重新查可否融資券（不用快取）：確認期間變成 0 就不送；
+                    // 查詢失敗照樣不擋（由券商端決定）
+                    ...(enquiryKey !== null ? {
+                        afterConfirm: async () => {
+                            const cond = clickCredit.cond as CreditCond;
+                            const fresh = await loadCreditEnquire(capturedContract, { fresh: true }).catch(() => undefined);
+                            if (creditStatus(fresh, cond) === 'blocked') throw new Error(`${capturedContract.code} 目前不能${cond === 'MarginTrading' ? '融資' : '融券'}，已停止送單`);
+                        },
+                    } : {}),
                     beforeSend: () => {
                         if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                         if (enquiryKey !== null && creditEnquireKey(capturedContract) !== enquiryKey) throw new Error('確認期間已跨日或伺服器已切換，可否融資券需重新確認，這筆沒有送出');
+                        if (dayBound && taipeiDay() !== clickDay) throw new Error('確認期間已跨日，可否當沖需重新確認，這筆沒有送出');
                         // 確認期間合約更新（例如變成不可當沖）：照目前的規則再看一次
                         const nowBlocked = creditOn ? ruleBlockRef.current[action] : null;
                         if (nowBlocked) throw new Error(nowBlocked);
