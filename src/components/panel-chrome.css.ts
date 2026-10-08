@@ -239,8 +239,8 @@ export const closeBtn = style({
 const GROUP_COLORS = { A: '#8b5cf6', B: '#ec4899', C: '#06b6d4' } as const;
 const dim = (c: string) => `color-mix(in srgb, ${c} 16%, transparent)`;
 
+// 選單以整個面板定位（panel 是 position: relative），窄面板也不被裁切
 export const linkAnchor = style({
-    position: 'relative',
     display: 'inline-flex',
     alignItems: 'center',
     gap: vars.space.sm,
@@ -283,10 +283,10 @@ export const menuBackdrop = style({ position: 'fixed', inset: 0, zIndex: 40 });
 
 export const linkMenu = style({
     position: 'absolute',
-    top: 'calc(100% + 4px)',
-    right: 0,
+    top: 30,
+    right: 4,
     zIndex: 41,
-    width: 200,
+    width: 'min(200px, calc(100% - 8px))',
     padding: 4,
     display: 'flex',
     flexDirection: 'column',
