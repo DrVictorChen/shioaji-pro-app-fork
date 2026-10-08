@@ -79,9 +79,22 @@ it('summarises confirmed, sent-but-unconfirmed, not-sent and unknown cancellatio
     const mixed = summary([{ status: 'fulfilled', value: trade('Cancelled') }, { status: 'rejected', reason: unconfirmed },
         { status: 'rejected', reason: notSent }, { status: 'rejected', reason: new Error('timeout') }]);
     expect(mixed.kind).toBe('err');
-    expect(mixed.body).toBe('已確認取消 1 筆；已送出未確認 1 筆；未送出 1 筆；失敗或結果未知 1 筆。未確認項目請手動更新委託核對，勿自動重送。');
+    expect(mixed.body).toBe('已確認取消 1 筆；已送出未確認 1 筆；未送出 1 筆（委託或帳戶歸屬不明）；失敗或結果未知 1 筆（timeout）。未確認項目請手動更新委託核對，勿自動重送。');
     expect(summary([{ status: 'rejected', reason: notSent }]).kind).toBe('err');
     expect(summary([{ status: 'fulfilled', value: trade('Filled') }])).toEqual({ kind: 'info', body: '已確認取消 0 筆；已全部成交、無可取消 1 筆。' });
+});
+it('masks identity numbers in failure reasons and marks mixed reasons as an example (#244)', async () => {
+    const { cancellationSummary: summary, maskIdentifiers } = await import('./trade-mutations');
+    expect(maskIdentifiers('400 CA not activated for: A123456789')).toBe('400 CA not activated for: ***');
+    expect(maskIdentifiers('帳號 9A95-1234567 拒絕')).toBe('帳號 9A95-*** 拒絕');
+    expect(maskIdentifiers('委託 38tQF4 序號 018838')).toBe('委託 38tQF4 序號 018838');
+    const rejected = (reason: unknown): PromiseSettledResult<Trade> => ({ status: 'rejected', reason });
+    expect(summary([rejected(new Error('400 CA not activated for: A123456789')), rejected('400 CA not activated for: B223456789')]).body)
+        .toContain('失敗或結果未知 2 筆（400 CA not activated for: ***）');
+    expect(summary([rejected(new Error('400 CA not activated for: A123456789')), rejected(new Error('timeout'))]).body)
+        .toContain('失敗或結果未知 2 筆（其中一筆：400 CA not activated for: ***）');
+    expect(summary([rejected(new Error('timeout')), { status: 'fulfilled', value: trade('Failed') }]).body)
+        .toContain('失敗或結果未知 2 筆（其中一筆：timeout）');
 });
 it('flags only read-back confirmed results as confirmed', async () => {
     vi.resetModules();

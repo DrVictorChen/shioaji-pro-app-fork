@@ -59,3 +59,26 @@ it('real FlashOrder switches ownership, cancels only selected trades, and captur
         expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '⚡ 平倉未完整確認', body: expect.stringContaining('可能已有部分委託送出或結果未知') });
     } finally { await act(async () => view?.unmount()); vi.unstubAllGlobals(); }
 });
+it('flash 全刪 shows why a cancel failed (#244)', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
+    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    mocks.selected = 'A';
+    accounts.forEach(account => { account.account_type = 'F'; });
+    const contract = { code: 'TMF', security_type: 'FUT', reference: 100 } as ContractInfo;
+    const trades = [{ account: accounts[0], contract, order: { id: 'ext-1', seqno: '38tQF4', account: accounts[0], price: 100, action: 'Buy', quantity: 1 }, status: { status: 'Submitted', order_quantity: 1, deal_quantity: 0, cancel_quantity: 0, deals: [] } }] as unknown as Trade[];
+    let view!: ReactTestRenderer;
+    const button = (text: string) => view.root.findAllByType('button').find(b => b.children.filter(c => typeof c === 'string').join('').includes(text))!;
+    try {
+        await act(async () => { view = create(createElement(FlashOrder, { contract, trades, positions: [] })); });
+        // Native / HTTP rejections carry no outcome flag; a string reason is what Tauri invoke rejects with.
+        mocks.cancel.mockRejectedValueOnce('400 CA not activated for: A123456789');
+        await act(async () => { await button('全刪').props.onClick(); });
+        expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({
+            kind: 'err', title: '⚡ 全刪', body: expect.stringContaining('失敗或結果未知 1 筆（400 CA not activated for: ***）'),
+        });
+        mocks.cancel.mockRejectedValueOnce(Object.assign(new Error('此視窗無法送出交易指令'), { mutationNotStarted: true }));
+        await act(async () => { await button('全刪').props.onClick(); });
+        expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ body: expect.stringContaining('未送出 1 筆（此視窗無法送出交易指令）') });
+    } finally { await act(async () => view?.unmount()); vi.unstubAllGlobals(); }
+});

@@ -23,6 +23,10 @@ const AGENT_HARNESS_MUTATIONS = new Set([
     '/api/v1/order/reserve_earmarking',
 ]);
 
+// shioaji-pro-desktop ensure_agent_command_window: agent_harness_post is
+// main-window only and returns this exact text before sending anything.
+const NATIVE_MAIN_WINDOW_ONLY = '此視窗無權呼叫 Agent 原生命令';
+
 export function shouldProxyAgentHarnessMutation(
     desktop: boolean,
     enabled: boolean,
@@ -271,6 +275,15 @@ export async function apiPost<T>(
             if (message.startsWith(marker)) {
                 throw Object.assign(
                     new Error(message.slice(marker.length).trim()),
+                    { mutationNotStarted: true },
+                );
+            }
+            // The native proxy only serves the main window and refuses any
+            // other window first, before any HTTP (#244: a popout flash
+            // panel's cancel showed only "失敗或結果未知").
+            if (message === NATIVE_MAIN_WINDOW_ONLY) {
+                throw Object.assign(
+                    new Error(`此視窗不能送出交易指令（${message}），未送出；請改在主視窗操作`),
                     { mutationNotStarted: true },
                 );
             }
