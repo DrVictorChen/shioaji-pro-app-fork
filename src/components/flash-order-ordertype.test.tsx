@@ -243,3 +243,22 @@ it('futures panels fold the gear into the 口 menu too (更多設定…)', async
     await act(async () => { item(r, '更多設定').props.onClick(); });
     expect(r.root.findAll(n => n.props.role === 'dialog' && n.props['aria-label'] === '閃電下單設定')).toHaveLength(1);
 });
+
+it('the settings summary describes what clicks really send (效期／倉別／範圍市價)', async () => {
+    const summary = (x: ReactTestRenderer) => text(x.root.findAll(n => n.props['data-testid'] === 'order-settings-summary')[0]!);
+    const openMore = async (x: ReactTestRenderer) => {
+        await act(async () => { unitBtn(x)!.props.onClick(); });
+        await act(async () => { item(x, '更多設定').props.onClick(); });
+    };
+    const r = await mount(fut, owned({ orderType: 'FOK', octype: 'New', futuresPriceType: 'MKP' }).extra());
+    await openMore(r);
+    expect(summary(r)).toContain('FOK 限價');
+    expect(summary(r)).toContain('新倉');
+    expect(summary(r)).toContain('範圍市價 IOC');
+    const s = await mount(stk, owned({ orderType: 'FOK', octype: 'New', futuresPriceType: 'MKP' }, 'IntradayOdd').extra());
+    await openMore(s);
+    // odd lots: ROD only, no 倉別／範圍市價 on stocks
+    expect(summary(s)).toContain('ROD 限價');
+    expect(summary(s)).not.toContain('新倉');
+    expect(summary(s)).not.toContain('範圍市價');
+});

@@ -13,12 +13,12 @@ import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { usePrivacyMode } from '../lib/privacy';
 import { FlashQuickMenu } from './flash-quick-menu';
 import { octypeLabel, quickOrderNote } from '../lib/order-conditions';
-import { accountMatches, CASH_CREDIT, DEFAULT_ORDER_OPTS, normalizeFlashOrderOpts, type FlashOrderOpts, flashAccountKey, isFlashLot, normalizeFlashCredit, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashCond, type FlashCredit, type FlashLot, type FlashMarket } from '../lib/flash-account';
+import { accountMatches, CASH_CREDIT, DEFAULT_ORDER_OPTS, normalizeFlashOrderOpts, type FlashOrderOpts, flashAccountKey, isFlashLot, normalizeFlashCredit, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashCredit, type FlashLot, type FlashMarket } from '../lib/flash-account';
 import { creditEnquireKey, creditStatus, loadCreditEnquire, taipeiDay, useCreditEnquire, type CreditCond } from '../lib/credit-eligibility';
 import { getApiBase } from '../lib/runtime';
 import { captureServerMode } from '../lib/server-info-store';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
-import { Ban, Check, ChevronDown, Settings2, Zap } from 'lucide-react';
+import { Ban, ChevronDown, Zap } from 'lucide-react';
 import {
     memo,
     useCallback,
@@ -1283,7 +1283,7 @@ export function FlashOrder({
                         },
                     }}
                     contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
-                    summary={flashOrderSummary(flashSettings, market, accountShort)}
+                    summary={flashOrderSummary(flashSettings, market, accountShort, { orderType: clickOrderType, octype: clickOctype, futuresPriceType: mktPriceType })}
                     ariaLabel='閃電下單設定'
                     onOpenChange={open => { settingsOpenRef.current = open; }}
                     align='panel'

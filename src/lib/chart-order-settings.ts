@@ -10,7 +10,7 @@
 // 刻意不放（不做沒有作用的控制項）。
 
 import { ODD_LOT_MAX_SHARES } from './odd-lot';
-import { FUTURES_OCTYPES, ORDER_TYPES } from './order-conditions';
+import { FUTURES_OCTYPES, octypeLabel, ORDER_TYPES } from './order-conditions';
 import type { FuturesOCType, OrderType } from './types/order';
 
 export type ChartOrderMarket = 'S' | 'F';
@@ -125,10 +125,19 @@ export function chartTriggerFields(s: ChartOrderSettings, market: ChartOrderMark
 // 市價鈕固定市價 IOC、期貨固定自動開平倉，沒有其他可選的送單參數 ----
 
 /** 閃電下單面板底部一句話：點下去實際會送什麼。 */
-export function flashOrderSummary(s: ChartOrderSettings, market: ChartOrderMarket, accountLabel: string): string {
+export function flashOrderSummary(
+    s: ChartOrderSettings,
+    market: ChartOrderMarket,
+    accountLabel: string,
+    /** 閃電面板實際會送的委託條件（不適用的已排除） */
+    cond?: { orderType?: OrderType; octype?: FuturesOCType; futuresPriceType?: 'MKT' | 'MKP' },
+): string {
     const odd = market === 'S' && s.lot === 'IntradayOdd';
-    return `點買量／賣量以 ROD 限價送出 ${lotText(s, market)}，帳號 ${accountLabel}；`
-        + (odd ? '零股沒有市價單，市價買／賣停用。' : '市價買／賣以市價 IOC 送出。');
+    const ot = odd ? 'ROD' : (cond?.orderType ?? 'ROD');
+    const oc = market === 'F' && cond?.octype && cond.octype !== 'Auto' ? `（${octypeLabel(cond.octype)}）` : '';
+    const mkt = market === 'F' && cond?.futuresPriceType === 'MKP' ? '範圍市價' : '市價';
+    return `點買量／賣量以 ${ot} 限價送出 ${lotText(s, market)}${oc}，帳號 ${accountLabel}；`
+        + (odd ? '零股沒有市價單，市價買／賣停用。' : `${mkt}買／賣以${mkt} IOC 送出${oc}。`);
 }
 
 // ---- 設為預設：依商品類別（股票／期貨）存新面板的預設 ----
