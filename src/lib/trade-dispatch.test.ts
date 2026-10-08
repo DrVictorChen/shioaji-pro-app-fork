@@ -65,7 +65,8 @@ it.each([false, true].flatMap(harness => ['Common', 'IntradayOdd', 'Futures'].fl
     });
     const rejected = expect(pending).rejects.toMatchObject({
         mutationNotStarted: true,
-        message: expect.stringContaining(change === 'mode' ? '環境已切換' : change === 'instance' ? '伺服器身分已變更' : '帳戶不可交易'),
+        // a mode change is now refused by placeQuickOrder's own mode-version gate, before the caller's guard
+        message: expect.stringContaining(change === 'mode' ? '伺服器或模式已變更' : change === 'instance' ? '伺服器身分已變更' : '帳戶不可交易'),
     });
     await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
     expect(beforeSend).not.toHaveBeenCalled();
@@ -74,7 +75,7 @@ it.each([false, true].flatMap(harness => ['Common', 'IntradayOdd', 'Futures'].fl
     else m.accounts = [];
     release();
     await rejected;
-    expect(beforeSend).toHaveBeenCalledTimes(change === 'account' ? 0 : 1);
+    expect(beforeSend).toHaveBeenCalledTimes(change === 'instance' ? 1 : 0);
     expect(m.nativeFetch).not.toHaveBeenCalled();
     expect(m.invoke).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
