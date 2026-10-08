@@ -113,6 +113,27 @@ export const knownServerInfo = currentServerInfo;
 /** 確認或送單期間伺服器或模式變了（例如模擬 sidecar 重啟成正式）的白話原因 */
 export const SERVER_MODE_CHANGED_MESSAGE = '確認期間伺服器或模式已變更，這筆沒有送出，請重新下單';
 
+/**
+ * 送單閘門：記下開始時的伺服器與模式，回傳「是否仍是同一個」的檢查。
+ * - 換了 API 位址 → 不同。
+ * - 開始時已知模式（模擬／正式）→ 目前已知的模式必須相同；資訊被清掉
+ *   （例如 sidecar 重啟中）也算不同。
+ * - 開始時模式未知 → 代次沒變才算相同；代次變了只在現在確定是模擬時放行
+ *   （確認視窗自己第一次取得 /info 不會誤擋模擬單；變成正式一律不送）。
+ */
+export function captureServerMode(): () => boolean {
+    const base = syncBase();
+    const simulation = infos.get(base)?.simulation;
+    const version = modeVersion;
+    return () => {
+        const now = syncBase();
+        if (now !== base) return false;
+        const current = infos.get(now)?.simulation;
+        if (typeof simulation === 'boolean') return current === simulation;
+        return modeVersion === version || current === true;
+    };
+}
+
 export function getServerModeVersion() {
     syncBase();
     return modeVersion;

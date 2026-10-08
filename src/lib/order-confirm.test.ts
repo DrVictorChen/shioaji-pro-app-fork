@@ -131,3 +131,30 @@ describe('server mode changes while the confirmation is open', () => {
         await expect(promise).resolves.toBe(true);
     });
 });
+
+describe('server mode unknown when the confirmation opens', () => {
+    it('the dialog learning the mode (simulation) for the first time does not refuse the approval', async () => {
+        const store = await import('./server-info-store');
+        store.forgetServerInfo('');
+        const promise = requestOrderConfirm(req);
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        resolveOrderConfirm(true);
+        await expect(promise).resolves.toBe(true);
+    });
+    it('but learning it is production after a change refuses', async () => {
+        const store = await import('./server-info-store');
+        store.forgetServerInfo('');
+        const promise = requestOrderConfirm(req);
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+        resolveOrderConfirm(true);
+        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+    });
+    it('an approval while the server info was cleared (restart in progress) refuses', async () => {
+        const store = await import('./server-info-store');
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        const promise = requestOrderConfirm(req);
+        store.observeServerInfo(store.beginServerInfoRequest(), undefined);
+        resolveOrderConfirm(true);
+        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+    });
+});

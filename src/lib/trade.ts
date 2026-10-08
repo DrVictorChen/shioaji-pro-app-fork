@@ -18,7 +18,7 @@ import {
 } from './shioaji';
 import { getStreamStatus } from './stream';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
-import { getServerModeVersion, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
+import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
@@ -191,7 +191,7 @@ export async function placeQuickOrder(
 ): Promise<Trade> {
     const startedBase = getApiBase();
     // 伺服器模式代次：確認期間模擬重啟成正式（同一位址）也不送
-    const startedMode = getServerModeVersion();
+    const sameServerMode = captureServerMode();
     const capturedAccount = opts?.account ?? (isFuturesContract(contract) ? getAccountState().selectedFutures : getAccountState().selectedStock) ?? undefined;
     assertTradingLive();
     if (contract.security_type === 'IND') {
@@ -247,7 +247,7 @@ export async function placeQuickOrder(
     }
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
-    if (getServerModeVersion() !== startedMode) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+    if (!sameServerMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
     if (opts?.afterConfirm) {
         try {
             await opts.afterConfirm();
@@ -256,13 +256,13 @@ export async function placeQuickOrder(
         }
         assertTradingLive();
         if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
-        if (getServerModeVersion() !== startedMode) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+        if (!sameServerMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
     }
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     if (capturedAccount && !getAccountState().accounts.some(a => canTrade(a) && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined); if (blocked) throw mutationNotStartedError(blocked); }
     const beforeDispatch = () => {
-        if (getServerModeVersion() !== startedMode) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+        if (!sameServerMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
         try {
             opts?.beforeSend?.();
         } catch (e) {

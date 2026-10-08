@@ -9,7 +9,7 @@
 
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
-import { getServerModeVersion, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
+import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
 import type { Action } from './types/order';
 import type { Account } from './types/portfolio';
 
@@ -39,8 +39,8 @@ interface PendingConfirm {
     request: OrderConfirmRequest;
     resolve: (approved: boolean) => void;
     reject: (error: Error) => void;
-    // server mode generation when the dialog opened (server-info-store)
-    modeVersion: number;
+    // the server and mode when the dialog opened (server-info-store)
+    sameServer: () => boolean;
 }
 
 /** 確認視窗開著時伺服器或模式變了（例如模擬 sidecar 重啟成正式）：舊的確認不算數 */
@@ -67,7 +67,7 @@ export function resolveOrderConfirm(approved: boolean): void {
     const current = pending;
     pending = null;
     emit();
-    if (approved && getServerModeVersion() !== current.modeVersion) {
+    if (approved && !current.sameServer()) {
         current.reject(Object.assign(new Error(ORDER_CONFIRM_SERVER_CHANGED), { mutationNotStarted: true as const }));
         return;
     }
@@ -129,7 +129,7 @@ export function requestOrderConfirm(
             request: { ...withAccount, simulation: simulationCache },
             resolve,
             reject,
-            modeVersion: getServerModeVersion(),
+            sameServer: captureServerMode(),
         };
         pending = current;
         const start = () => {
