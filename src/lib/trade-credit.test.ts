@@ -56,6 +56,7 @@ it('sends 現股當沖先賣 only on the sell side of a day-trade stock', async 
 
 it.each([
     ['融券買進', stock, 'Buy', { orderCond: 'ShortSelling' }, CREDIT_TEXT.shortBuy],
+    ['借券買進', stock, 'Buy', { orderCond: 'SBLShort' }, CREDIT_TEXT.shortBuy],
     ['不可當沖的當沖先賣', onlyBuy, 'Sell', { daytradeShort: true }, CREDIT_TEXT.daytradeStock],
     ['融資＋當沖先賣', stock, 'Sell', { orderCond: 'MarginTrading', daytradeShort: true }, CREDIT_TEXT.daytradeCond],
     ['零股融資', stock, 'Buy', { orderCond: 'MarginTrading', orderLot: 'IntradayOdd' }, ODD_LOT_TEXT.cond],
@@ -80,8 +81,13 @@ it('the confirmation names the credit condition in the action and the note', asy
     expect(m.confirm.mock.calls[1]![0]).toMatchObject({ credit: '融資', note: '市價 IOC・融資' });
     await placeQuickOrder(stock, 'Sell', 1090, 1, { account, daytradeShort: true });
     expect(m.confirm.mock.calls[2]![0]).toMatchObject({ credit: '現沖', note: '限價 ROD・現股當沖' });
+    await placeQuickOrder(stock, 'Sell', 1090, 1, { account, orderCond: 'SBLShort' });
+    expect(m.confirm.mock.calls.at(-1)![0]).toMatchObject({ credit: '借券', note: '限價 ROD・借券' });
+    await placeQuickOrder(stock, 'Sell', 1090, 1, { account, orderCond: 'SBLShortPriceExempt' });
+    expect(m.confirm.mock.calls.at(-1)![0]).toMatchObject({ credit: '借券豁免', note: '限價 ROD・借券豁免' });
+    expect(m.stock.mock.calls.at(-1)![1]).toMatchObject({ order_cond: 'SBLShortPriceExempt' });
     // cash keeps today's note
     await placeQuickOrder(stock, 'Buy', 1090, 1, { account });
-    expect(m.confirm.mock.calls[3]![0].credit).toBeUndefined();
-    expect(m.confirm.mock.calls[3]![0].note).toBeUndefined();
+    expect(m.confirm.mock.calls.at(-1)![0].credit).toBeUndefined();
+    expect(m.confirm.mock.calls.at(-1)![0].note).toBeUndefined();
 });

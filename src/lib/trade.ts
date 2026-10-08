@@ -151,7 +151,7 @@ async function confirmManualOrder(
     if (!approved) throw new OrderConfirmCancelled();
 }
 
-const CREDIT_NOTE: Record<CreditLabel, string> = { 融資: '融資', 融券: '融券', 現沖: '現股當沖' };
+const CREDIT_NOTE: Record<CreditLabel, string> = { 融資: '融資', 融券: '融券', 借券: '借券', 借券豁免: '借券豁免', 現沖: '現股當沖' };
 
 export async function placeQuickOrder(
     contract: ContractBase,

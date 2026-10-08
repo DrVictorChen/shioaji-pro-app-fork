@@ -243,7 +243,9 @@ describe('per-panel flash account (#139)', () => {
     it('normalizes a stored credit condition: unknown conditions are dropped, 當沖 only with 現股', () => {
         expect(normalizeFlashCredit({ cond: 'MarginTrading', daytradeShort: false })).toEqual({ cond: 'MarginTrading', daytradeShort: false });
         expect(normalizeFlashCredit({ cond: 'ShortSelling', daytradeShort: true })).toEqual({ cond: 'ShortSelling', daytradeShort: false });
-        expect(normalizeFlashCredit({ cond: 'SBLShort', daytradeShort: false })).toBeUndefined();
+        expect(normalizeFlashCredit({ cond: 'SBLShort', daytradeShort: true })).toEqual({ cond: 'SBLShort', daytradeShort: false });
+        expect(normalizeFlashCredit({ cond: 'SBLShortPriceExempt', daytradeShort: false })).toEqual({ cond: 'SBLShortPriceExempt', daytradeShort: false });
+        expect(normalizeFlashCredit({ cond: 'Bogus', daytradeShort: false })).toBeUndefined();
         expect(normalizeFlashCredit({ cond: 'Cash' })).toEqual({ cond: 'Cash', daytradeShort: false });
         expect(normalizeFlashCredit('MarginTrading')).toBeUndefined();
         expect(normalizeFlashCredit(undefined)).toBeUndefined();

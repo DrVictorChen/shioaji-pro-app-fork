@@ -44,6 +44,14 @@ const cell = (r: ReactTestRenderer, side: 'buy' | 'sell') => r.root.findAll(n =>
 const arm = async (r: ReactTestRenderer) => { await act(async () => { button(r, '啟用閃電下單')!.props.onClick(); }); };
 const flush = async () => { await act(async () => { await Promise.resolve(); }); };
 
+const keyListeners = new Set<(e: unknown) => void>();
+const pressEscape = async () => {
+    await act(async () => {
+        const e = { key: 'Escape', defaultPrevented: false, stopped: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+        // capture listeners (the menu's) run first, like the browser
+        for (const fn of [...keyListeners]) { if (e.stopped) break; fn(e); }
+    });
+};
 const owned = (credit?: FlashCredit, lot?: 'Common' | 'IntradayOdd') => {
     const state = { credit, lot, changes: [] as FlashCredit[] };
     const extra = () => ({
@@ -79,7 +87,11 @@ beforeEach(() => {
     resetCreditEnquireCache();
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.stubGlobal('localStorage', { getItem: (k: string) => mocks.store.get(k) ?? null, setItem: (k: string, v: string) => { mocks.store.set(k, v); } });
-    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    keyListeners.clear();
+    vi.stubGlobal('window', {
+        addEventListener: (t: string, fn: (e: unknown) => void) => { if (t === 'keydown') keyListeners.add(fn); },
+        removeEventListener: (t: string, fn: (e: unknown) => void) => { if (t === 'keydown') keyListeners.delete(fn); },
+    });
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     mocks.place.mockResolvedValue({ status: { status: 'PendingSubmit' } });
     mocks.post.mockImplementation(async (_p: string, body: { contracts: { code: string }[] }) => enquire(body.contracts[0]!.code));
@@ -370,4 +382,59 @@ it('a server switch re-checks eligibility instead of keeping the old server answ
     await show(r, stk, owner.extra());
     expect(mocks.post).toHaveBeenCalledTimes(2);
     expect(text(banner(r)!)).not.toContain('目前不能融券');
+});
+
+it('借券／借券豁免 can only sell: buy faded, sell sends the SBL condition, no credit enquiry', async () => {
+    for (const [label, cond, tagText] of [['借券', 'SBLShort', '借券'], ['借券豁免', 'SBLShortPriceExempt', '借券豁免']] as const) {
+        vi.clearAllMocks();
+        mocks.place.mockResolvedValue({ status: { status: 'PendingSubmit' } });
+        const owner = owned();
+        const r = await mount(stk, owner.extra());
+        await pick(r, label, () => show(r, stk, owner.extra()));
+        expect(owner.state.credit).toEqual({ cond, daytradeShort: false });
+        expect(text(tag(r)!)).toBe(tagText);
+        expect(button(r, '市價買')!.props.disabled).toBe(true);
+        expect(button(r, `市價${tagText}賣`)).toBeDefined();
+        await arm(r);
+        await act(async () => { cell(r, 'buy').props.onClick(); });
+        await flush();
+        expect(mocks.place).not.toHaveBeenCalled();
+        await act(async () => { cell(r, 'sell').props.onClick(); });
+        await flush();
+        expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderCond: cond });
+        expect(mocks.notify.mock.calls.at(-1)![0].title).toBe(`⚡ ${tagText}賣出已送出`);
+        expect(mocks.post).not.toHaveBeenCalled();
+    }
+});
+
+it('a confirmation left open past Taipei midnight is refused at dispatch (the new day must be re-checked)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-08T23:59:00+08:00'));
+    let guard!: () => void;
+    mocks.place.mockImplementation((_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+        guard = opts.beforeSend;
+        return new Promise(() => undefined);
+    });
+    const r = await mount(stk, owned({ cond: 'ShortSelling', daytradeShort: false }).extra());
+    await arm(r);
+    await act(async () => { cell(r, 'sell').props.onClick(); });
+    await flush();
+    expect(() => guard()).not.toThrow();
+    vi.setSystemTime(new Date('2026-10-09T00:00:30+08:00'));
+    expect(() => guard()).toThrow();
+});
+
+it('a stock menu left open when the panel switches to futures does not swallow Esc (Esc still disarms)', async () => {
+    const r = await mount(stk);
+    await act(async () => { creditBtn(r)!.props.onClick(); });
+    expect(menu(r)).toBeDefined();
+    await show(r, fut);
+    expect(menu(r)).toBeUndefined();
+    await arm(r);
+    expect(text(r.root)).toContain('點價即下單');
+    await pressEscape();
+    expect(text(r.root)).toContain('啟用閃電下單');
+    // back on a stock the menu is closed
+    await show(r, stk);
+    expect(menu(r)).toBeUndefined();
 });

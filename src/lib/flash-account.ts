@@ -64,10 +64,11 @@ export function isFlashLot(v: unknown): v is FlashLot {
     return v === 'Common' || v === 'IntradayOdd';
 }
 
-// 閃電下單面板自己的信用條件（整股）：現股／融資／融券＋現股當沖先賣。
-// 換股票不變；零股與期貨時不適用（面板設定保留，回到整股股票時恢復）。
-// 借券／借券豁免不放進閃電（留在下單面板）。
-export type FlashCond = 'Cash' | 'MarginTrading' | 'ShortSelling';
+// 閃電下單面板自己的信用條件（整股）：與下單面板相同的 現股／融資／融券／
+// 借券／借券豁免＋現股當沖先賣。換股票不變；零股與期貨時不適用（面板設定
+// 保留，回到整股股票時恢復）。
+export type FlashCond = 'Cash' | 'MarginTrading' | 'ShortSelling' | 'SBLShort' | 'SBLShortPriceExempt';
+const FLASH_CONDS: ReadonlySet<string> = new Set(['Cash', 'MarginTrading', 'ShortSelling', 'SBLShort', 'SBLShortPriceExempt']);
 export interface FlashCredit { cond: FlashCond; daytradeShort: boolean }
 export const CASH_CREDIT: FlashCredit = { cond: 'Cash', daytradeShort: false };
 
@@ -75,8 +76,8 @@ export const CASH_CREDIT: FlashCredit = { cond: 'Cash', daytradeShort: false };
 export function normalizeFlashCredit(v: unknown): FlashCredit | undefined {
     if (!v || typeof v !== 'object') return undefined;
     const { cond, daytradeShort } = v as { cond?: unknown; daytradeShort?: unknown };
-    if (cond !== 'Cash' && cond !== 'MarginTrading' && cond !== 'ShortSelling') return undefined;
-    return { cond, daytradeShort: cond === 'Cash' && daytradeShort === true };
+    if (typeof cond !== 'string' || !FLASH_CONDS.has(cond)) return undefined;
+    return { cond: cond as FlashCond, daytradeShort: cond === 'Cash' && daytradeShort === true };
 }
 
 // qty: 記住數量（false = 使用者關閉；沒有這個欄位 = 預設開啟、尚未記住）

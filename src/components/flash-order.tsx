@@ -12,7 +12,7 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { usePrivacyMode } from '../lib/privacy';
 import { accountMatches, CASH_CREDIT, flashAccountKey, isFlashLot, normalizeFlashCredit, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashCond, type FlashCredit, type FlashLot, type FlashMarket } from '../lib/flash-account';
-import { creditStatus, loadCreditEnquire, useCreditEnquire } from '../lib/credit-eligibility';
+import { creditEnquireKey, creditStatus, loadCreditEnquire, useCreditEnquire, type CreditCond } from '../lib/credit-eligibility';
 import { getApiBase } from '../lib/runtime';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { Ban, Check, ChevronDown, Settings2, Zap } from 'lucide-react';
@@ -276,7 +276,7 @@ export function FlashOrder({
     // 沒有 onQtyMemoryChange 時只在元件內
     qtyMemory?: FlashQtySetting;
     onQtyMemoryChange?: (setting: FlashQtySetting) => void;
-    // this panel's own credit condition (整股：現股／融資／融券＋現股當沖先賣):
+    // this panel's own credit condition (整股：同下單面板的信用條件＋現股當沖先賣):
     // kept across symbol changes, persisted by the owner like the unit.
     // Undefined = never chosen → 現股.
     credit?: FlashCredit;
@@ -426,20 +426,22 @@ export function FlashOrder({
     };
     // 可否融資／融券：只在面板是融資或融券時查（當日快取）；成數或單位確定
     // 是 0 才擋，查詢失敗只提示（由券商端決定）。絕不自動改成現股送出
-    const creditCond = credit.cond === 'Cash' ? null : credit.cond;
+    // 只有融資／融券要查 credit_enquire；借券類由券源決定，不查
+    const creditCond: CreditCond | null = credit.cond === 'MarginTrading' || credit.cond === 'ShortSelling' ? credit.cond : null;
     const enquiry = useCreditEnquire(contract, creditCond !== null);
     const creditCheck: 'ok' | 'blocked' | 'unknown' | 'loading' = creditCond === null
         ? 'ok'
         : enquiry.loading ? 'loading' : enquiry.failed ? 'unknown' : creditStatus(enquiry.row, creditCond);
-    const creditName = credit.cond === 'MarginTrading' ? '融資' : credit.cond === 'ShortSelling' ? '融券' : '';
+    const creditName = creditLabel('Sell', credit.cond) ?? '';
+    const sellOnly = credit.cond === 'ShortSelling' || credit.cond === 'SBLShort' || credit.cond === 'SBLShortPriceExempt';
     const creditBlocked = creditCheck === 'blocked' ? `${contract.code} 目前不能${creditName}，已停止送單；改回現股或換股票` : null;
     const dayTradeBlocked = credit.daytradeShort && contract.day_trade !== 'Yes'
         ? (contract.day_trade === 'OnlyBuy' ? '此股票只能先買後賣，不能現沖先賣；點賣已停用' : '此股票不可當沖，不能現沖先賣；點賣已停用')
         : null;
-    const buyBlock = creditBlocked ?? (credit.cond === 'ShortSelling' ? CREDIT_TEXT.shortBuy : null);
+    const buyBlock = creditBlocked ?? (sellOnly ? CREDIT_TEXT.shortBuy : null);
     const sellBlock = creditBlocked ?? dayTradeBlocked;
     // 融券面板的買邊停用，市價鈕仍寫「市價買」（不會出現「融券買」）
-    const buyCredit = credit.cond === 'ShortSelling' ? '' : creditLabel('Buy', credit.cond, credit.daytradeShort) ?? '';
+    const buyCredit = sellOnly ? '' : creditLabel('Buy', credit.cond, credit.daytradeShort) ?? '';
     const sellCredit = creditLabel('Sell', credit.cond, credit.daytradeShort) ?? '';
     const creditTag = creditApplies ? (credit.cond !== 'Cash' ? creditName : credit.daytradeShort ? '現沖' : '') : '';
     const creditBad = !!creditBlocked || !!dayTradeBlocked;
@@ -447,7 +449,7 @@ export function FlashOrder({
     // 不沿用畫面上可能過時的結果
     const ruleBlockRef = useRef<Record<Action, string | null>>({ Buy: null, Sell: null });
     ruleBlockRef.current = {
-        Buy: credit.cond === 'ShortSelling' ? CREDIT_TEXT.shortBuy : null,
+        Buy: sellOnly ? CREDIT_TEXT.shortBuy : null,
         Sell: dayTradeBlocked,
     };
     const creditRef = useRef({ applies: creditApplies, credit });
@@ -558,17 +560,24 @@ export function FlashOrder({
     // Esc disarms anywhere — except while the settings popover is open:
     // there Esc only closes the popover
     const settingsOpenRef = useRef(false);
+    // the quick menu exists only on stock panels: switching to futures closes it
+    // (and its Esc listener) in the same render, and it stays closed on return
+    const menuShown = menuOpen && market === 'S';
     const menuOpenRef = useRef(false);
+    menuOpenRef.current = menuShown;
     const setMenuOpen = (open: boolean) => { menuOpenRef.current = open; setMenuOpenState(open); };
+    useEffect(() => {
+        if (market !== 'S') setMenuOpenState(false);
+    }, [market]);
     // Esc closes the quick menu and nothing else (no disarm)
     useEffect(() => {
-        if (!menuOpen) return;
+        if (!menuShown) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); menuOpenRef.current = false; setMenuOpenState(false); }
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-    }, [menuOpen]);
+    }, [menuShown]);
     useEffect(() => {
         if (!armed) return;
         const onKey = (e: KeyboardEvent) => {
@@ -850,7 +859,11 @@ export function FlashOrder({
         try {
             // 融資／融券：送出前再看一次 credit_enquire（當日快取）；確定不可就擋，
             // 查詢失敗不擋（由券商端決定）
-            if (creditOn && clickCredit.cond !== 'Cash') {
+            // 融資／融券：這次查詢的鍵（伺服器＋股票＋台北日期）；確認視窗開著
+            // 跨過午夜或換伺服器，送出時就不算數，要重新查、重新確認
+            let enquiryKey: string | null = null;
+            if (creditOn && (clickCredit.cond === 'MarginTrading' || clickCredit.cond === 'ShortSelling')) {
+                enquiryKey = creditEnquireKey(capturedContract);
                 const clickBase = getApiBase();
                 const row = await loadCreditEnquire(capturedContract).catch(() => undefined);
                 // 查詢期間換了伺服器：不送（placeQuickOrder 之後才固定伺服器）
@@ -871,6 +884,7 @@ export function FlashOrder({
                     isAccountCurrent: stillPanelAccount(capturedAccount),
                     beforeSend: () => {
                         if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                        if (enquiryKey !== null && creditEnquireKey(capturedContract) !== enquiryKey) throw new Error('確認期間已跨日或伺服器已切換，可否融資券需重新確認，這筆沒有送出');
                         if (!accountMatches(accountRef.current, capturedAccount)) throw new Error('帳戶已變更，已停止後續下單');
                     },
                     ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
@@ -1134,6 +1148,8 @@ export function FlashOrder({
                                         ['Cash', '現股', '預設'],
                                         ['MarginTrading', '融資', '買／賣'],
                                         ['ShortSelling', '融券', '只能賣'],
+                                        ['SBLShort', '借券', '只能賣'],
+                                        ['SBLShortPriceExempt', '借券豁免', '只能賣'],
                                     ] as [FlashCond, string, string][]).map(([cond, name, desc]) => {
                                         const on = !odd && panelCredit.cond === cond && !(cond === 'Cash' && panelCredit.daytradeShort);
                                         return (
@@ -1143,6 +1159,7 @@ export function FlashOrder({
                                                 role='menuitemradio'
                                                 aria-checked={on}
                                                 disabled={odd}
+                                                title={cond === 'SBLShort' ? '一般借券賣出（委託類別5）' : cond === 'SBLShortPriceExempt' ? '價格豁免借券賣出（委託類別6，特殊金融商品適用）' : undefined}
                                                 className={styles.menuItem[on ? 'on' : 'off']}
                                                 onClick={() => {
                                                     if (odd) return;
@@ -1374,8 +1391,8 @@ export function FlashOrder({
                     <span>
                         {creditBlocked ?? dayTradeBlocked ?? (credit.cond === 'MarginTrading'
                             ? '融資：點買＝融資買進，點賣＝融資賣出'
-                            : credit.cond === 'ShortSelling'
-                              ? '融券：只能點賣（融券賣出）；買進請改現股或融資'
+                            : sellOnly
+                              ? `${creditName}：只能點賣（${creditName}賣出）；買進請改現股或融資`
                               : '現股當沖先賣：點賣為現沖賣出，當日需回補')}
                         {creditCheck === 'unknown' && ' · 無法確認可否融資券（不擋單，由券商端決定）'}
                         {creditCheck === 'loading' && ' · 確認可否融資券中…'}

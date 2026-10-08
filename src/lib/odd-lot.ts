@@ -83,10 +83,12 @@ export const CREDIT_TEXT = {
 } as const;
 
 /** 信用條件寫進動作名稱（融資買進／融券賣出／現沖賣出）；現股回 undefined */
-export type CreditLabel = '融資' | '融券' | '現沖';
+export type CreditLabel = '融資' | '融券' | '借券' | '借券豁免' | '現沖';
 export function creditLabel(action: 'Buy' | 'Sell', orderCond?: StockOrderCond | string, daytradeShort?: boolean): CreditLabel | undefined {
     if (orderCond === 'MarginTrading') return '融資';
     if (orderCond === 'ShortSelling') return '融券';
+    if (orderCond === 'SBLShort') return '借券';
+    if (orderCond === 'SBLShortPriceExempt') return '借券豁免';
     if ((!orderCond || orderCond === 'Cash') && daytradeShort && action === 'Sell') return '現沖';
     return undefined;
 }
