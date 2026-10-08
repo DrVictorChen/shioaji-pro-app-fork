@@ -160,7 +160,8 @@ it('futures show 口 without changing the panel unit; back on a stock the panel 
     await act(async () => { btnIn(pop(r)!, '完成').props.onClick(); });
     await show(r, hon, owner.extra());
     expect(unit(r)).toBe('股');
-    expect(qty(r).props.value).toBe(1); // class changed → 1, never 500 張
+    // 記住數量 is on by default: back on 股 the remembered 500 股 returns (never 500 張)
+    expect(qty(r).props.value).toBe(500);
     expect(owner.state.changes).toEqual([]);
     expect(owner.state.lot).toBe('IntradayOdd');
 });

@@ -122,11 +122,14 @@ import {
     savePopoutFlashAccounts,
     loadPopoutFlashLot,
     savePopoutFlashLot,
+    loadPopoutFlashQty,
+    savePopoutFlashQty,
     touchPopoutFlashAccounts,
     type FlashAccountKeys,
     type FlashLot,
 } from './lib/flash-account';
 import { loadFlashOrderDefault } from './lib/chart-order-settings';
+import type { FlashQtySetting } from './lib/flash-qty-memory';
 
 const POPOUT_TYPES: ReadonlySet<string> = new Set([
     'chart',
@@ -193,6 +196,7 @@ function BlockBody({
     onWallConfigChange,
     onFlashAccountsChange,
     onFlashLotChange,
+    onFlashQtyChange,
     onSessionConfigChange,
     refreshTrading,
 }: {
@@ -216,6 +220,7 @@ function BlockBody({
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
     onFlashLotChange: (id: string, lot: FlashLot) => void;
+    onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }) {
@@ -313,6 +318,8 @@ function BlockBody({
                     lot={block.flashLot}
                     onLotChange={(flashLot) => onFlashLotChange(block.id, flashLot)}
                     panelId={block.id}
+                    qtyMemory={block.flashQty}
+                    onQtyMemoryChange={(flashQty) => onFlashQtyChange(block.id, flashQty)}
                 />
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
@@ -520,6 +527,7 @@ interface BlockViewProps {
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
     onFlashLotChange: (id: string, lot: FlashLot) => void;
+    onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }
@@ -560,9 +568,9 @@ function BlockView(props: BlockViewProps) {
                         ? () => {
                               const global = mainFlashSelection();
                               // 彈出視窗沿用這個面板的單位（從沒選過＝設為預設的單位）
-                              const flashLot = block.flashLot ?? loadFlashOrderDefault('S').lot;
+                              const flashSeed = { lot: block.flashLot ?? loadFlashOrderDefault('S').lot, qty: block.flashQty };
                               const flashParams = block.type === 'flash'
-                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`, flashLot)
+                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`, flashSeed)
                                   : undefined;
                               void openPopout(
                                   block.type,
@@ -573,7 +581,7 @@ function BlockView(props: BlockViewProps) {
                                       ...popoutSessionParam(block),
                                       ...flashParams,
                                   },
-                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global, flashLot) : undefined,
+                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global, flashSeed) : undefined,
                               );
                           }
                         : undefined
@@ -617,6 +625,7 @@ function PopoutView({
     const [flashAccounts, setFlashAccounts] = useState(() => loadPopoutFlashAccounts(POPOUT_WINDOW_ID));
     // 單位同樣依視窗 id 存（開啟端預先寫入面板的單位），重新整理後保留
     const [flashLot, setFlashLot] = useState(() => loadPopoutFlashLot(POPOUT_WINDOW_ID));
+    const [flashQty, setFlashQty] = useState(() => loadPopoutFlashQty(POPOUT_WINDOW_ID));
     // heartbeat: a long-open popout must not be evicted as "stale"
     useEffect(() => {
         if (type !== 'flash' || !POPOUT_WINDOW_ID) return;
@@ -707,6 +716,11 @@ function PopoutView({
                         onLotChange={(lot) => {
                             setFlashLot(lot);
                             savePopoutFlashLot(POPOUT_WINDOW_ID, lot);
+                        }}
+                        qtyMemory={flashQty}
+                        onQtyMemoryChange={(qty) => {
+                            setFlashQty(qty);
+                            savePopoutFlashQty(POPOUT_WINDOW_ID, qty);
                         }}
                     />
                 );
@@ -1198,6 +1212,10 @@ function MainApp() {
         (id: string, flashLot: FlashLot) => patchBlock(id, { flashLot }),
         [patchBlock],
     );
+    const setBlockFlashQty = useCallback(
+        (id: string, flashQty: FlashQtySetting) => patchBlock(id, { flashQty }),
+        [patchBlock],
+    );
     const setBlockSessionConfig = useCallback(
         (id: string, patch: SessionConfigPatch) => {
             updateWorkspace(withBlockSessionConfig(workspace, id, patch));
@@ -1468,6 +1486,7 @@ function MainApp() {
                                     onWallConfigChange={setBlockWallConfig}
                                     onFlashAccountsChange={setBlockFlashAccounts}
                                     onFlashLotChange={setBlockFlashLot}
+                                    onFlashQtyChange={setBlockFlashQty}
                                     onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
                                 />

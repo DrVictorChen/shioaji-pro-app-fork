@@ -127,7 +127,7 @@ it('odd 500 股 → futures → stock: the quantity never crosses units or instr
     expect(qty().props.value).toBe(1); // 1 口, never 500 口
     expect(text(view.root)).toContain('口');
     await act(async () => { view.update(createElement(FlashOrder, { contract: stk, trades: [], positions: [] })); });
-    expect(qty().props.value).toBe(1); // remembered 1 股, never 500 張
+    expect(qty().props.value).toBe(500); // 記住數量 (default on): back to 500 股, never 500 張
     expect(qty().props['aria-label']).toBe('數量（股）');
     // whole lots do not carry into futures either
     await act(async () => { qty().props.onChange({ target: { value: '5' } }); });

@@ -42,6 +42,7 @@ import { fmtClock, fmtCompactInt, fmtInt, fmtPrice, fmtSigned, fmtStockLots } fr
 import { clampLotQuantity, isOddLot, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT } from '../lib/odd-lot';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
+import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
 import * as styles from './flash-order.css';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
@@ -234,6 +235,8 @@ export function FlashOrder({
     lot: savedLot,
     onLotChange,
     panelId,
+    qtyMemory: savedQtyMemory,
+    onQtyMemoryChange,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -259,6 +262,10 @@ export function FlashOrder({
     onLotChange?: (lot: FlashLot) => void;
     // workspace block id: keeps the quantity across a remount (see panelQtyMemory)
     panelId?: string;
+    // 記住數量（預設開）：張／股／口各一個數量，由擁有者保存；false = 關閉。
+    // 沒有 onQtyMemoryChange 時只在元件內
+    qtyMemory?: FlashQtySetting;
+    onQtyMemoryChange?: (setting: FlashQtySetting) => void;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -303,20 +310,65 @@ export function FlashOrder({
     const unitKey = `${market}:${lot}`;
     const unitKeyRef = useRef(unitKey);
     unitKeyRef.current = unitKey;
-    const [qtyEntry, setQtyEntry] = useState(() => {
+    // 記住數量：依單位（張／股／口）各記一個；還原前一律重新檢查單位上限
+    const [localQtyMemory, setLocalQtyMemory] = useState<FlashQtySetting>(() => sanitizeFlashQtySetting(savedQtyMemory));
+    const qtyMemory: FlashQtySetting = onQtyMemoryChange ? sanitizeFlashQtySetting(savedQtyMemory) : localQtyMemory;
+    const qtyMemoryRef = useRef(qtyMemory);
+    qtyMemoryRef.current = qtyMemory;
+    const setQtyMemory = useCallback((next: FlashQtySetting) => {
+        qtyMemoryRef.current = next;
+        setLocalQtyMemory(next);
+        onQtyMemoryChangeRef.current?.(next);
+    }, []);
+    const onQtyMemoryChangeRef = useRef(onQtyMemoryChange);
+    onQtyMemoryChangeRef.current = onQtyMemoryChange;
+    const qtySlot = flashQtySlot(market, lot);
+    const rememberedQty = qtyMemory === false ? undefined : rememberedFlashQty(qtyMemory, qtySlot).qty;
+    // user: the quantity was set by the user (input / ± / settings) → remembered;
+    // restored or reset quantities are not written back
+    const [qtyEntry, setQtyEntry] = useState<{ unit: string; qty: number; user?: boolean }>(() => {
+        if (rememberedQty !== undefined) return { unit: unitKey, qty: rememberedQty };
+        // 記住的數量不合法：一律 1（不改用預設或記憶體裡的數量）
+        if (qtyMemory !== false && rememberedFlashQty(qtyMemory, qtySlot).invalid) return { unit: unitKey, qty: 1 };
         const kept = panelId ? panelQtyMemory.get(panelId) : undefined;
-        if (kept?.unit === unitKey) return kept;
+        if (kept?.unit === unitKey) return { unit: kept.unit, qty: kept.qty };
         return { unit: unitKey, qty: lot === defaultFor(market).lot ? defaultFor(market).qty : 1 };
     });
     useEffect(() => {
-        if (panelId) panelQtyMemory.set(panelId, qtyEntry);
+        if (panelId) panelQtyMemory.set(panelId, { unit: qtyEntry.unit, qty: qtyEntry.qty });
     }, [panelId, qtyEntry]);
-    const qty = qtyEntry.unit === unitKey ? qtyEntry.qty : 1;
+    // 單位一變，同一次 render 就換成新單位記住的數量（已檢查上限）或 1
+    const qty = qtyEntry.unit === unitKey ? qtyEntry.qty : (rememberedQty ?? 1);
     const setQty = useCallback((v: number | ((prev: number) => number)) => setQtyEntry(prev => {
         const unit = unitKeyRef.current;
         const base = prev.unit === unit ? prev.qty : 1;
-        return { unit, qty: typeof v === 'function' ? v(base) : v };
+        return { unit, qty: typeof v === 'function' ? v(base) : v, user: true };
     }), []);
+    // 使用者改的數量寫進這個單位的記憶（只寫通過單位上限的數量）
+    useEffect(() => {
+        const mem = qtyMemoryRef.current;
+        if (mem === false || !qtyEntry.user || qtyEntry.unit !== unitKeyRef.current) return;
+        const slot = flashQtySlot(market, lot);
+        if (!validFlashQty(slot, qtyEntry.qty) || mem[slot] === qtyEntry.qty) return;
+        setQtyMemory(withRememberedFlashQty(mem, slot, qtyEntry.qty));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [qtyEntry]);
+    // 記住的數量不合法（超過單位上限、非整數等）：不帶出來，回到 1、提示並移除
+    const invalidRemembered = qtyMemory !== false && rememberedFlashQty(qtyMemory, qtySlot).invalid;
+    useEffect(() => {
+        if (!invalidRemembered) return;
+        const mem = qtyMemoryRef.current;
+        if (mem === false) return;
+        const { [qtySlot]: bad, ...rest } = mem;
+        const unitName = qtySlot === 'F' ? '口' : qtySlot === 'IntradayOdd' ? '股' : '張';
+        notify({
+            kind: 'err',
+            title: '記住的數量已改為 1',
+            body: `這個閃電面板記住的數量（${String(bad)} ${unitName}）不符合單位限制${qtySlot === 'IntradayOdd' ? `（零股每筆 1～${ODD_LOT_MAX_SHARES} 股）` : ''}，已改為 1 ${unitName}，請確認數量後再下單。`,
+        });
+        setQtyMemory(rest);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [invalidRemembered, qtySlot]);
     const setPanelLot = (next: FlashLot) => {
         setLocalLot(next);
         onLotChange?.(next);
@@ -408,8 +460,13 @@ export function FlashOrder({
     useEffect(() => {
         const prev = unitRef.current;
         unitRef.current = { market, lot };
-        // 回到原單位時不讓舊數量復活
-        if (prev.market !== market || prev.lot !== lot) setQtyEntry({ unit: `${market}:${lot}`, qty: 1 });
+        // 換到新單位：帶出該單位記住的數量（已檢查上限），否則 1；
+        // 記住數量關閉時回到原單位也不讓舊數量復活
+        if (prev.market !== market || prev.lot !== lot) {
+            const mem = qtyMemoryRef.current;
+            const restored = mem === false ? undefined : rememberedFlashQty(mem, flashQtySlot(market, lot)).qty;
+            setQtyEntry({ unit: `${market}:${lot}`, qty: restored ?? 1 });
+        }
     }, [market, lot]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
@@ -933,6 +990,8 @@ export function FlashOrder({
                             armedRef.current = false;
                             setArmed(false);
                             setPanelLot(next.lot);
+                            // 數量由新單位決定（記住的數量或 1），不把舊單位的數量寫進去
+                            return;
                         }
                         setQty(next.qty);
                     }}
@@ -949,6 +1008,12 @@ export function FlashOrder({
                         octype: false,
                         defaultNote: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量（不含帳號）`,
                         qtyLabel: '閃電下單數量',
+                        rememberQty: {
+                            on: qtyMemory !== false,
+                            text: qtyMemory === false ? '關閉：重新整理或換單位後數量回到 1' : `已記住：${flashQtyMemoryText(qtyMemory)}`,
+                            note: '張、股、口各記一個數量，重新整理或重開後還原；關閉時清除',
+                            onToggle: on => setQtyMemory(on ? withRememberedFlashQty({}, qtySlot, qty) : false),
+                        },
                     }}
                     contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
                     summary={flashOrderSummary(flashSettings, market, accountShort)}

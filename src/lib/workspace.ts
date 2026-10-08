@@ -90,6 +90,8 @@ export interface Block {
     flashAccounts?: import('./flash-account').FlashAccountKeys;
     // 閃電下單面板自己的單位（整股／盤中零股），換股票不變；缺省 = 設為預設的單位
     flashLot?: import('./flash-account').FlashLot;
+    // 閃電下單「記住數量」：張／股／口各一個數量；false = 使用者關閉，缺省 = 預設開啟
+    flashQty?: import('./flash-qty-memory').FlashQtySetting;
     // Market-pulse presets can open multiple panels on distinct views.
     pulseVisualization?: 'distribution' | 'flow';
     pulseSections?: PulseSection[];

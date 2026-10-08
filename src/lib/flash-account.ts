@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { sanitizeFlashQtySetting, type FlashQtySetting } from './flash-qty-memory';
 import type { Account } from './types/portfolio';
 
 type AccountIdentity = Pick<Account, 'account_type' | 'broker_id' | 'account_id'>;
@@ -63,7 +64,11 @@ export function isFlashLot(v: unknown): v is FlashLot {
     return v === 'Common' || v === 'IntradayOdd';
 }
 
-interface PopoutEntry { keys: FlashAccountKeys; at: number; source?: string; lot?: FlashLot }
+// qty: 記住數量（false = 使用者關閉；沒有這個欄位 = 預設開啟、尚未記住）
+interface PopoutEntry { keys: FlashAccountKeys; at: number; source?: string; lot?: FlashLot; qty?: FlashQtySetting }
+
+/** The opening panel's own settings handed to its popout. */
+export interface FlashPanelSeed { lot?: FlashLot; qty?: FlashQtySetting }
 
 function isKeys(v: unknown): v is FlashAccountKeys {
     return !!v && typeof v === 'object' && Object.entries(v).every(([k, s]) => (k === 'S' || k === 'F') && typeof s === 'string');
@@ -81,6 +86,7 @@ function readPopoutEntries(): Record<string, PopoutEntry> {
                 at: Number(entry.at) || 0,
                 ...(typeof entry.source === 'string' ? { source: entry.source } : {}),
                 ...(isFlashLot(entry.lot) ? { lot: entry.lot } : {}),
+                ...(entry.qty !== undefined ? { qty: sanitizeFlashQtySetting(entry.qty) } : {}),
             };
         }
         return out;
@@ -93,10 +99,18 @@ function readPopoutEntries(): Record<string, PopoutEntry> {
 // (never from a cached copy) and change only this window's entry. Another
 // window's entry can only be lost if both writes land in the same instant —
 // localStorage has no transactions, and each write is synchronous.
-function writePopoutEntry(id: string, keys: FlashAccountKeys, source?: string, lot?: FlashLot): void {
+// panel: only the fields present are changed; a present `qty: undefined`
+// removes the entry's quantities (back to the default)
+function writePopoutEntry(id: string, keys: FlashAccountKeys, source?: string, panel?: FlashPanelSeed): void {
     try {
         const all = readPopoutEntries();
-        all[id] = { ...all[id], ...(source ? { source } : {}), ...(lot ? { lot } : {}), keys, at: Date.now() };
+        const next: PopoutEntry = { ...all[id], ...(source ? { source } : {}), keys, at: Date.now() };
+        if (panel?.lot) next.lot = panel.lot;
+        if (panel && 'qty' in panel) {
+            if (panel.qty === undefined) delete next.qty;
+            else next.qty = panel.qty;
+        }
+        all[id] = next;
         const kept = Object.entries(all).sort((a, b) => b[1].at - a[1].at).slice(0, POPOUT_MAX_ENTRIES);
         localStorage.setItem(POPOUT_STORAGE_KEY, JSON.stringify(Object.fromEntries(kept)));
     } catch { /* best effort */ }
@@ -109,8 +123,8 @@ export function newPopoutWindowId(): string {
 }
 
 /** Opener side: hand the pinned accounts (and the panel's unit) to a new popout. */
-export function seedPopoutFlashAccounts(windowId: string, keys: FlashAccountKeys, lot?: FlashLot): void {
-    writePopoutEntry(windowId, { ...keys }, undefined, lot);
+export function seedPopoutFlashAccounts(windowId: string, keys: FlashAccountKeys, panel?: FlashPanelSeed): void {
+    writePopoutEntry(windowId, { ...keys }, undefined, panel);
 }
 
 /**
@@ -144,7 +158,17 @@ export function loadPopoutFlashLot(windowId: string | null): FlashLot | undefine
 
 export function savePopoutFlashLot(windowId: string | null, lot: FlashLot): void {
     if (!windowId) return;
-    writePopoutEntry(windowId, readPopoutEntries()[windowId]?.keys ?? {}, undefined, lot);
+    writePopoutEntry(windowId, readPopoutEntries()[windowId]?.keys ?? {}, undefined, { lot });
+}
+
+/** The popout's 記住數量 setting; undefined = never saved (default on, nothing remembered). */
+export function loadPopoutFlashQty(windowId: string | null): FlashQtySetting | undefined {
+    return windowId ? readPopoutEntries()[windowId]?.qty : undefined;
+}
+
+export function savePopoutFlashQty(windowId: string | null, qty: FlashQtySetting): void {
+    if (!windowId) return;
+    writePopoutEntry(windowId, readPopoutEntries()[windowId]?.keys ?? {}, undefined, { qty });
 }
 
 export interface GlobalFlashSelection {
@@ -175,7 +199,7 @@ export function pinnedFlashAccounts(panelKeys: FlashAccountKeys | undefined, glo
  * Different panels of the same product remain independent. Only the opaque
  * window id goes into the URL.
  */
-export function flashPopoutParams(panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, source?: string, lot?: FlashLot): { win: string } {
+export function flashPopoutParams(panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, source?: string, panel?: FlashPanelSeed): { win: string } {
     if (source) {
         const old = Object.entries(readPopoutEntries()).find(([, entry]) => entry.source === source);
         if (old) {
@@ -183,15 +207,15 @@ export function flashPopoutParams(panelKeys: FlashAccountKeys | undefined, globa
         }
     }
     const win = newPopoutWindowId();
-    writePopoutEntry(win, pinnedFlashAccounts(panelKeys, global), source, lot);
+    writePopoutEntry(win, pinnedFlashAccounts(panelKeys, global), source, panel);
     return { win };
 }
 
 /**
  * Called only when the opener has confirmed that it created a window. A panel
- * passes its unit so the popout opens on it; a tile (no panel) passes none
- * and keeps the unit its window last used.
+ * passes its unit and 記住數量 setting so the popout opens on them; a tile (no
+ * panel) passes none and keeps what its window last used.
  */
-export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, lot?: FlashLot): void {
-    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global), lot);
+export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, panel?: FlashPanelSeed): void {
+    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global), panel);
 }

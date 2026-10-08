@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashLot, savePopoutFlashLot, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
+import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashLot, savePopoutFlashLot, loadPopoutFlashQty, savePopoutFlashQty, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
 import type { Account } from './types/portfolio';
 const a: Account = { account_type: 'F', broker_id: 'B', account_id: 'A', signed: true, person_id: '', username: '' };
 const b = { ...a, account_id: 'B' };
@@ -161,8 +161,8 @@ describe('per-panel flash account (#139)', () => {
     }));
 
     it('a popout keeps its own unit by window id: seeded from the opening panel, kept on reload and account changes', () => withStorage(() => {
-        const odd = flashPopoutParams({}, main, 'panel:odd:2330', 'IntradayOdd');
-        const round = flashPopoutParams({}, main, 'panel:round:2330', 'Common');
+        const odd = flashPopoutParams({}, main, 'panel:odd:2330', { lot: 'IntradayOdd' });
+        const round = flashPopoutParams({}, main, 'panel:round:2330', { lot: 'Common' });
         expect(loadPopoutFlashLot(odd.win)).toBe('IntradayOdd');
         expect(loadPopoutFlashLot(round.win)).toBe('Common');
         // the popout's own change and later account changes never lose it
@@ -172,9 +172,9 @@ describe('per-panel flash account (#139)', () => {
         expect(loadPopoutFlashAccounts(round.win)).toEqual({ F: flashAccountKey(b) });
         expect(loadPopoutFlashLot(round.win)).toBe('IntradayOdd');
         // merely focusing an open window keeps its unit; a recreated window takes the panel's
-        expect(flashPopoutParams({}, main, 'panel:odd:2330', 'Common').win).toBe(odd.win);
+        expect(flashPopoutParams({}, main, 'panel:odd:2330', { lot: 'Common' }).win).toBe(odd.win);
         expect(loadPopoutFlashLot(odd.win)).toBe('IntradayOdd');
-        reseedPopoutFlashAccounts(odd.win, {}, main, 'Common');
+        reseedPopoutFlashAccounts(odd.win, {}, main, { lot: 'Common' });
         expect(loadPopoutFlashLot(odd.win)).toBe('Common');
         // a tile reopened without a panel unit keeps the tile's own unit
         const tile = flashPopoutParams(undefined, main, 'tile:2330');
@@ -192,5 +192,34 @@ describe('per-panel flash account (#139)', () => {
         savePopoutFlashLot('fresh', 'IntradayOdd');
         expect(loadPopoutFlashLot('fresh')).toBe('IntradayOdd');
         expect(loadPopoutFlashAccounts('fresh')).toEqual({});
+    }));
+    it('a popout keeps its remembered quantities by window id; off is kept as off, tiles keep their own', () => withStorage(() => {
+        const p = flashPopoutParams({}, main, 'panel:q:2330', { lot: 'IntradayOdd', qty: { Common: 3, IntradayOdd: 500 } });
+        expect(loadPopoutFlashQty(p.win)).toEqual({ Common: 3, IntradayOdd: 500 });
+        savePopoutFlashQty(p.win, { Common: 3, IntradayOdd: 200 });
+        savePopoutFlashAccounts(p.win, { F: flashAccountKey(b) });
+        savePopoutFlashLot(p.win, 'Common');
+        expect(loadPopoutFlashQty(p.win)).toEqual({ Common: 3, IntradayOdd: 200 });
+        savePopoutFlashQty(p.win, false);
+        expect(loadPopoutFlashQty(p.win)).toBe(false);
+        // a recreated panel window takes the panel's setting — including "never saved" (default on)
+        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'Common', qty: { F: 2 } });
+        expect(loadPopoutFlashQty(p.win)).toEqual({ F: 2 });
+        reseedPopoutFlashAccounts(p.win, {}, main, { lot: 'Common', qty: undefined });
+        expect(loadPopoutFlashQty(p.win)).toBeUndefined();
+        // a tile reopened without a panel keeps its own
+        const tile = flashPopoutParams(undefined, main, 'tile:2330');
+        expect(loadPopoutFlashQty(tile.win)).toBeUndefined();
+        savePopoutFlashQty(tile.win, { Common: 5 });
+        reseedPopoutFlashAccounts(tile.win, undefined, main);
+        expect(loadPopoutFlashQty(tile.win)).toEqual({ Common: 5 });
+        expect(loadPopoutFlashQty(null)).toBeUndefined();
+        savePopoutFlashQty(null, { Common: 1 });
+    }));
+    it('reads a malformed popout quantity setting as default (on)', () => withStorage(store => {
+        store.set('sj-pro-flash-popout-windows', JSON.stringify({ w: { keys: {}, at: 1, qty: 'bad' }, v: { keys: {}, at: 1, qty: { IntradayOdd: 5000, X: 1 } } }));
+        expect(loadPopoutFlashQty('w')).toEqual({});
+        // raw values are kept; the panel re-checks limits on restore
+        expect(loadPopoutFlashQty('v')).toEqual({ IntradayOdd: 5000 });
     }));
 });
