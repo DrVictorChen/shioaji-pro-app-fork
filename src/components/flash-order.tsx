@@ -1137,7 +1137,7 @@ export function FlashOrder({
                                 setMenuOpen(!menuOpen);
                             }}
                         >
-                            {odd ? '股' : '張'}{creditTag && <>·<b className={styles.unitCredit}>{creditTag}</b></>}
+                            {odd ? '股' : '張'}{creditTag && <>·<b className={styles.unitCredit}>{creditTag === '借券豁免' ? '借豁' : creditTag}</b></>}
                             <ChevronDown size={9} aria-hidden />
                         </button>
                         {menuOpen && (

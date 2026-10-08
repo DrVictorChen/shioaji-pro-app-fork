@@ -393,6 +393,8 @@ it('借券／借券豁免 can only sell: buy faded, sell sends the SBL condition
         await pick(r, label, () => show(r, stk, owner.extra()));
         expect(owner.state.credit).toEqual({ cond, daytradeShort: false });
         expect(text(tag(r)!)).toBe(tagText);
+        // the unit button stays short on narrow panels
+        expect(text(creditBtn(r)!)).toBe(cond === 'SBLShort' ? '張·借券' : '張·借豁');
         expect(button(r, '市價買')!.props.disabled).toBe(true);
         expect(button(r, `市價${tagText}賣`)).toBeDefined();
         await arm(r);
