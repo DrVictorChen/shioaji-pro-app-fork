@@ -234,3 +234,100 @@ export const closeBtn = style({
         background: vars.color.muted,
     },
 });
+
+// ---- 連動群組（A 紫／B 粉／C 青）----
+const GROUP_COLORS = { A: '#8b5cf6', B: '#ec4899', C: '#06b6d4' } as const;
+const dim = (c: string) => `color-mix(in srgb, ${c} 16%, transparent)`;
+
+export const linkAnchor = style({
+    position: 'relative',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: vars.space.sm,
+    flexShrink: 0,
+});
+
+// 面板頂端 2px 色條（panel 是 position: relative）
+export const groupBar = styleVariants(GROUP_COLORS, (c) => ({
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    background: c,
+    pointerEvents: 'none',
+}));
+
+export const groupBtn = styleVariants(GROUP_COLORS, (c) => [
+    pinBase,
+    { color: c, borderColor: 'transparent', background: dim(c), ':hover': { borderColor: c } },
+]);
+
+export const groupInput = styleVariants(GROUP_COLORS, (c) => [
+    pinInput,
+    { color: c, selectors: { '&:focus': { borderColor: c } } },
+]);
+
+export const groupDot = style({
+    display: 'inline-block',
+    width: 7,
+    height: 7,
+    borderRadius: '50%',
+    marginRight: 3,
+    verticalAlign: '0',
+    background: vars.color.accent,
+    flexShrink: 0,
+});
+
+export const menuBackdrop = style({ position: 'fixed', inset: 0, zIndex: 40 });
+
+export const linkMenu = style({
+    position: 'absolute',
+    top: 'calc(100% + 4px)',
+    right: 0,
+    zIndex: 41,
+    width: 200,
+    padding: 4,
+    display: 'flex',
+    flexDirection: 'column',
+    background: vars.color.panelRaised,
+    border: `1px solid ${vars.color.borderBright}`,
+    borderRadius: vars.radius.md,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+    textTransform: 'none',
+    letterSpacing: 0,
+});
+
+export const linkItem = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '5px 8px',
+    fontFamily: vars.font.body,
+    fontSize: '0.7rem',
+    fontWeight: 500,
+    color: vars.color.foreground,
+    background: 'transparent',
+    border: 'none',
+    borderRadius: vars.radius.sm,
+    cursor: 'pointer',
+    textAlign: 'left',
+    ':hover': { background: vars.color.muted },
+});
+
+export const linkNote = style({
+    marginLeft: 'auto',
+    fontFamily: vars.font.mono,
+    fontSize: '0.62rem',
+    color: vars.color.mutedForeground,
+});
+
+export const linkHint = style({
+    padding: '5px 8px 3px',
+    marginTop: 3,
+    borderTop: `1px solid ${vars.color.border}`,
+    fontFamily: vars.font.body,
+    fontSize: '0.6rem',
+    lineHeight: 1.45,
+    color: vars.color.mutedForeground,
+});

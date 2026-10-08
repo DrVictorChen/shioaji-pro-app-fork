@@ -113,7 +113,16 @@ import {
     type PulseSectionWeights,
     type Workspace,
     withBlockPatch,
+    blockLinkMode,
+    blockSourceCode,
+    linkGroupSummary,
+    withGroupCode,
+    withLinkMode,
+    type LinkMode,
 } from './lib/workspace';
+import { normalizeFlashLink, type FlashLink, type LinkGroupId } from './lib/flash-link';
+import { FlashLinkHost } from './components/flash-link-host';
+import { SettingsInfoRow } from './components/chart-order-popover';
 import { mainFlashSelection } from './lib/order-account';
 import {
     flashPopoutParams,
@@ -164,31 +173,34 @@ const popoutChartSession = popoutSession.chartSession;
 const popoutIntradaySession = popoutSession.intradaySession;
 
 // resolves a block's contract: pinned code (contract cache) or global selection
+// sourceCode: the pinned code or the link group's code (null = follow selection)
 function useBlockContract(
     block: Block,
     selected: ContractInfo | null,
+    sourceCode: string | null,
 ): { contract: ContractInfo | null; pinFailed: boolean } {
-    const pinned = useContract(block.pin);
+    const pinned = useContract(sourceCode);
     const [failedPin, setFailedPin] = useState<string | null>(null);
     useEffect(() => {
-        if (block.pin && !pinned) {
+        if (sourceCode && !pinned) {
             let active = true;
             setFailedPin(null);
-            ensureContract(block.pin).catch(() => {
+            ensureContract(sourceCode).catch(() => {
                 if (!active) return;
-                setFailedPin(block.pin);
-                notify({
+                setFailedPin(sourceCode);
+                // 群組代碼在套用前已確認過；只有鎖定代碼在這裡提示
+                if (block.pin) notify({
                     kind: 'err',
                     title: '找不到商品',
-                    body: `代碼 ${block.pin} 無法解析`,
+                    body: `代碼 ${sourceCode} 無法解析`,
                 });
             });
             return () => { active = false; };
         }
-    }, [block.pin, pinned]);
+    }, [sourceCode, pinned, block.pin]);
     return {
-        contract: block.pin ? (pinned ?? null) : selected,
-        pinFailed: !!block.pin && !pinned && failedPin === block.pin,
+        contract: sourceCode ? (pinned ?? null) : blockLinkMode(block) === 'main' ? selected : null,
+        pinFailed: !!sourceCode && !pinned && failedPin === sourceCode,
     };
 }
 
@@ -207,12 +219,17 @@ function BlockBody({
     onFlashQtyChange,
     onFlashCreditChange,
     onFlashOrderChange,
+    onFlashLinkChange,
+    flashTargetRef,
     onSessionConfigChange,
     refreshTrading,
     workspaceGen,
 }: {
     block: Block;
     contract: ContractInfo | null;
+    onFlashLinkChange: (id: string, link: FlashLink) => void;
+    /** 閃電實際下單的合約（彈出視窗用）；暫停時為 null */
+    flashTargetRef: React.MutableRefObject<string | null>;
     missingContractPhase: AsyncPhase;
     snapshot?: import('./lib/types/market').Snapshot;
     watchlistProps: React.ComponentProps<typeof Watchlist>;
@@ -322,12 +339,20 @@ function BlockBody({
             );
         case 'flash':
             return contract ? (
+                <FlashLinkHost
+                    source={contract}
+                    link={normalizeFlashLink(block.flashLink)}
+                    group={blockLinkMode(block)}
+                    onLinkChange={(link) => onFlashLinkChange(block.id, link)}
+                    targetRef={flashTargetRef}
+                    render={(target, linkProps) => (
                 <LiveFlashOrder
                     // 套用版面（含同一個 block id）＝重新建立面板：數量依該版面
                     // 的記住數量還原（關閉則 1），點價下單一律解除
                     key={workspaceGen}
                     snapshot={snapshot}
-                    contract={contract}
+                    contract={target}
+                    {...linkProps}
                     trades={dockProps.trades}
                     positions={dockProps.positions}
                     onOrdersChanged={dockProps.onTradesChanged}
@@ -341,6 +366,8 @@ function BlockBody({
                     onCreditChange={(flashCredit) => onFlashCreditChange(block.id, flashCredit)}
                     orderOpts={block.flashOrder}
                     onOrderOptsChange={(flashOrder) => onFlashOrderChange(block.id, flashOrder)}
+                />
+                    )}
                 />
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
@@ -529,6 +556,11 @@ function comboBlockMessage(type: BlockType): string | null {
 interface BlockViewProps {
     block: Block;
     selected: ContractInfo | null;
+    /** 鎖定或群組代碼；null = 跟自選 */
+    sourceCode: string | null;
+    linkGroups: ReturnType<typeof linkGroupSummary>;
+    onLinkMode: (id: string, mode: LinkMode, currentCode: string | null) => void;
+    onGroupCode: (group: LinkGroupId, code: string) => void;
     onPinChange: (id: string, pin: string | null) => void;
     onRemove: (id: string) => void;
     snapshot?: import('./lib/types/market').Snapshot;
@@ -551,6 +583,7 @@ interface BlockViewProps {
     onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onFlashCreditChange: (id: string, credit: FlashCredit) => void;
     onFlashOrderChange: (id: string, order: FlashOrderOpts) => void;
+    onFlashLinkChange: (id: string, link: FlashLink) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
     /** bumps whenever a whole workspace is applied (layout / preset / reset / agent) */
@@ -558,9 +591,11 @@ interface BlockViewProps {
 }
 
 function BlockView(props: BlockViewProps) {
-    const { block, selected, onPinChange, onRemove, ...bodyProps } = props;
-    const { contract, pinFailed } = useBlockContract(block, selected);
-    const missingContractPhase: AsyncPhase = block.pin
+    const { block, selected, sourceCode, linkGroups, onLinkMode, onGroupCode, onPinChange, onRemove, ...bodyProps } = props;
+    const { contract, pinFailed } = useBlockContract(block, selected, sourceCode);
+    const flashTargetRef = useRef<string | null>(null);
+    const linkMode = blockLinkMode(block);
+    const missingContractPhase: AsyncPhase = sourceCode
         ? pinFailed ? 'error' : 'loading'
         : bodyProps.watchlistProps.loading && bodyProps.watchlistProps.items.length === 0
             ? 'loading' : 'idle';
@@ -582,6 +617,12 @@ function BlockView(props: BlockViewProps) {
                 pin={block.pin}
                 currentCode={selected?.code ?? null}
                 onPinChange={(pin) => onPinChange(block.id, pin)}
+                link={{
+                    mode: linkMode,
+                    groups: linkGroups,
+                    onMode: (mode) => onLinkMode(block.id, mode, contract?.code ?? selected?.code ?? null),
+                    onGroupCode,
+                }}
                 onRemove={() => {
                     // 整零價差執行在主視窗服務背景追蹤，關閉面板不會中斷；仍先提醒
                     if (block.type === 'oddspread' && hasLiveSpreadExecution()
@@ -599,7 +640,8 @@ function BlockView(props: BlockViewProps) {
                                   : undefined;
                               void openPopout(
                                   block.type,
-                                  contract?.code ?? null,
+                                  // 閃電：彈出實際下單的合約（對應商品之後），固定不跟群組
+                                  block.type === 'flash' ? flashTargetRef.current : contract?.code ?? null,
                                   // popout 開啟時固定帳戶：面板自己的選擇，跟隨主畫面的市場
                                   // 則取此刻主畫面的選擇（popout 不會即時跟隨）
                                   {
@@ -613,7 +655,7 @@ function BlockView(props: BlockViewProps) {
                 }
             />
             <PanelErrorBoundary label={meta.label}>
-                <BlockBody {...bodyProps} block={block} contract={contract} missingContractPhase={missingContractPhase} />
+                <BlockBody {...bodyProps} block={block} contract={contract} missingContractPhase={missingContractPhase} flashTargetRef={flashTargetRef} />
             </PanelErrorBoundary>
         </section>
     );
@@ -760,6 +802,7 @@ function PopoutView({
                             setFlashOrder(order);
                             savePopoutFlashOrder(POPOUT_WINDOW_ID, order);
                         }}
+                        settingsRows={<SettingsInfoRow label='連動' text='彈出視窗固定此商品，不支援群組' />}
                     />
                 );
                 break;
@@ -1270,6 +1313,23 @@ function MainApp() {
         (id: string, flashOrder: FlashOrderOpts) => patchBlock(id, { flashOrder }),
         [patchBlock],
     );
+    const setBlockFlashLink = useCallback(
+        (id: string, flashLink: FlashLink) => patchBlock(id, { flashLink }),
+        [patchBlock],
+    );
+    const setBlockLinkMode = useCallback(
+        (id: string, mode: LinkMode, currentCode: string | null) =>
+            updateWorkspace(withLinkMode(workspaceRef.current, id, mode, currentCode)),
+        [updateWorkspace],
+    );
+    // 群組換代碼：先確認代碼存在，再讓全組同一次一起換
+    const setGroupCode = useCallback((group: LinkGroupId, code: string) => {
+        ensureContract(code).then(
+            (c) => updateWorkspace(withGroupCode(workspaceRef.current, group, c.code)),
+            () => notify({ kind: 'err', title: '找不到商品', body: `代碼 ${code} 無法解析` }),
+        );
+    }, [updateWorkspace]);
+    const linkGroups = useMemo(() => linkGroupSummary(workspace), [workspace]);
     const setBlockSessionConfig = useCallback(
         (id: string, patch: SessionConfigPatch) => {
             updateWorkspace(withBlockSessionConfig(workspace, id, patch));
@@ -1526,10 +1586,14 @@ function MainApp() {
                                 <BlockView
                                     block={block}
                                     selected={selected}
+                                    sourceCode={blockSourceCode(block, workspace)}
+                                    linkGroups={linkGroups}
+                                    onLinkMode={setBlockLinkMode}
+                                    onGroupCode={setGroupCode}
                                     onPinChange={setBlockPin}
                                     onRemove={removeBlock}
                                     snapshot={
-                                        block.pin
+                                        blockLinkMode(block) !== 'main'
                                             ? undefined
                                             : selectedSnapshot
                                     }
@@ -1543,6 +1607,7 @@ function MainApp() {
                                     onFlashQtyChange={setBlockFlashQty}
                                     onFlashCreditChange={setBlockFlashCredit}
                                     onFlashOrderChange={setBlockFlashOrder}
+                                    onFlashLinkChange={setBlockFlashLink}
                                     onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
                                     workspaceGen={workspaceGen}

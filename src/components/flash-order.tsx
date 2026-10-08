@@ -20,6 +20,7 @@ import { captureServerMode } from '../lib/server-info-store';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { Ban, ChevronDown, Zap } from 'lucide-react';
 import {
+    type ReactNode,
     memo,
     useCallback,
     useEffect,
@@ -48,6 +49,7 @@ import { clampLotQuantity, CREDIT_TEXT, creditLabel, isOddLot, ODD_LOT_MAX_SHARE
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
+import { isStockFuture, lotsPerContract, spreadOf } from '../lib/flash-link';
 import * as styles from './flash-order.css';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
@@ -254,6 +256,10 @@ export function FlashOrder({
     onCreditChange,
     orderOpts: savedOrder,
     onOrderOptsChange,
+    linkKey = '',
+    symbolExtra,
+    settingsRows,
+    showRef = true,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -290,6 +296,15 @@ export function FlashOrder({
     // symbol changes and persisted by the owner. Undefined = defaults.
     orderOpts?: FlashOrderOpts;
     onOrderOptsChange?: (order: FlashOrderOpts) => void;
+    /** 連動狀態（群組、對應商品、來源代碼）：一變就同一次 render 解除點價下單，
+     * 確認中的那筆也不送 — 即使換完的合約跟原本相同 */
+    linkKey?: string;
+    /** 商品列右側（個股期月份） */
+    symbolExtra?: ReactNode;
+    /** 設定面板最上面的列（對應商品／規格／月份／價差對照） */
+    settingsRows?: ReactNode;
+    /** 價差對照列（零股：整零差；個股期：期現差） */
+    showRef?: boolean;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -537,12 +552,12 @@ export function FlashOrder({
     const contractRef = useRef(contract);
     contractRef.current = contract;
     // 確認期間換信用條件也一樣中止（不會用舊條件送出）
-    const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}`);
+    const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}:${linkKey}`);
     const armedRef = useRef(armed);
     const armedAccountKey = useRef(accountKey);
     // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
     // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
-    const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}`;
+    const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}:${linkKey}`;
     const armedKey = useRef(armKey);
     const armedQtyCurrent = armedMemQty.current === rememberedQty;
     armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent;
@@ -570,7 +585,7 @@ export function FlashOrder({
     // Account and unit changes still disarm an active ladder.
     useEffect(() => {
         setArmed(false);
-    }, [contract.code, accountKey, lot, creditKey, orderKey]);
+    }, [contract.code, accountKey, lot, creditKey, orderKey, linkKey]);
     // 記住的數量被外部改掉（例如切換版面）：點價下單解除
     useEffect(() => {
         if (armed && !armedQtyCurrent) setArmed(false);
@@ -1122,6 +1137,10 @@ export function FlashOrder({
     return (
         <div className={styles.wrap}>
             <div className={styles.symbolRow} title={symbolLabel.title}>
+                <span className={styles.kindTag} data-testid='flash-kind'>
+                    <b>{market === 'S' ? (odd ? '零股' : '整股') : isStockFuture(contract) ? '股期' : contract.security_type === 'OPT' ? '選擇權' : '期貨'}</b>
+                    <i>{market === 'F' ? '口' : odd ? '股' : '張'}</i>
+                </span>
                 <span className={styles.symbolName}>{symbolLabel.name}</span>
                 {creditTag && (
                     <span
@@ -1136,8 +1155,12 @@ export function FlashOrder({
                 {orderTags.map(t => (
                     <span key={t} className={styles.creditTag.ok} data-testid='flash-order-tag' title={`這個面板的委託條件：${t}`}>{t}</span>
                 ))}
+                {symbolExtra}
                 <span className={styles.symbolMeta}>{symbolLabel.meta}</span>
             </div>
+            {showRef && (odd || isStockFuture(contract)) && (
+                <FlashRefRow contract={contract} odd={odd} own={odd ? last : lotLast} roundLot={lotLast} />
+            )}
             <div className={styles.controls}>
                 {/* 收合時只顯示精簡帳號（#176）；透明的原生 select 疊在上面，
                     展開的選單才列出帳號＋戶名 */}
@@ -1265,6 +1288,7 @@ export function FlashOrder({
                     layout={{
                         title: '閃電下單設定',
                         scope: '只影響這個面板',
+                        extraRows: settingsRows,
                         unit: market === 'S',
                         orderType: false,
                         octype: false,
@@ -1499,6 +1523,26 @@ export function FlashOrder({
                         : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買${orderSuffix}`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣${orderSuffix}`} · 點單量=刪單 · Esc 鎖定`
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
             </div>
+        </div>
+    );
+}
+
+// 價差對照列：零股面板＝零股成交價 − 整股成交價；個股期面板＝期貨 − 現股，
+// 並提示 1 口對應幾張。用最近成交價，任一方沒有成交就顯示 —
+function FlashRefRow({ contract, odd, own, roundLot }: { contract: ContractInfo; odd: boolean; own: number | null; roundLot: number | null }) {
+    const stockQuote = useQuote(odd ? null : contract.underlying_code ?? null);
+    const base = odd ? roundLot : stockQuote?.tick ? Number(stockQuote.tick.close) : null;
+    const s = spreadOf(own, base);
+    const digits = base !== null && Math.abs(base) >= 500 ? 0 : undefined;
+    const sign = (n: number) => (n > 0 ? '+' : n < 0 ? '−' : '');
+    return (
+        <div className={styles.refRow} data-testid='flash-ref'>
+            <span className={styles.refKey}>{odd ? '整股' : '現股'} <b>{base ? fmtPrice(base) : '—'}</b></span>
+            <span className={styles.refKey}>
+                {odd ? '整零差' : '期現差'}{' '}
+                {s ? <b className={s.diff > 0 ? styles.refUp : s.diff < 0 ? styles.refDown : undefined}>{sign(s.diff)}{fmtPrice(Math.abs(s.diff), digits)} ({sign(s.pct)}{Math.abs(s.pct).toFixed(2)}%)</b> : <b>—</b>}
+            </span>
+            {!odd && <span className={styles.refKey}>{lotsPerContract(contract.multiplier)}</span>}
         </div>
     );
 }

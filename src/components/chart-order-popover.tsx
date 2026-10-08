@@ -62,6 +62,8 @@ export interface OrderSettingsLayout {
     defaultNote: string;
     /** accessible name prefix of the quantity input */
     qtyLabel: string;
+    /** rows shown first (閃電：對應商品／規格／月份／價差對照) */
+    extraRows?: ReactNode;
     /** 記住數量 row (flash panels): on/off + what is remembered, with units */
     rememberQty?: { on: boolean; text: string; note: string; onToggle: (on: boolean) => void };
 }
@@ -246,6 +248,7 @@ export function OrderSettingsPanel({
                 <span className={styles.headTitle}>{layout.title}</span>
                 <span className={styles.headNote} title={contractLabel}>{contractLabel} · {layout.scope}</span>
             </div>
+            {layout.extraRows}
             {account && (
                 <div className={styles.row}>
                     <span className={styles.label}>帳號</span>
@@ -361,6 +364,39 @@ export function OrderSettingsPanel({
                 </button>
                 <button type='button' className={styles.footBtn.primary} onClick={onClose}>完成</button>
             </div>
+        </div>
+    );
+}
+
+/** 設定面板的一列分段按鈕（閃電的對應商品、規格、月份、價差對照） */
+export function SettingsSegRow<T extends string>({ label, value, options, onPick, note }: {
+    label: string;
+    value: T;
+    options: readonly (readonly [T, string, string?])[];
+    onPick: (v: T) => void;
+    note?: string;
+}) {
+    return (
+        <div className={styles.row}>
+            <span className={styles.label}>{label}</span>
+            <div className={styles.seg} role='group' aria-label={label}>
+                {options.map(([v, text, sub]) => (
+                    <button key={v} type='button' className={styles.segBtn[value === v ? 'on' : 'off']} aria-pressed={value === v}
+                        title={sub} onClick={() => { if (value !== v) onPick(v); }}>
+                        {text}{sub && <small> {sub}</small>}
+                    </button>
+                ))}
+            </div>
+            {note && <span className={styles.rowNote}>{note}</span>}
+        </div>
+    );
+}
+
+export function SettingsInfoRow({ label, text }: { label: string; text: string }) {
+    return (
+        <div className={styles.row}>
+            <span className={styles.label}>{label}</span>
+            <span className={styles.info}>{text}</span>
         </div>
     );
 }
