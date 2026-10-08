@@ -247,3 +247,33 @@ it('a known mode lost to a failed /info is broadcast too, so a popout cannot kee
         vi.unstubAllGlobals();
     }
 });
+
+it('captureServerMode: any mode change in between invalidates for good, even if the mode comes back', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-round-trip';
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    const guard = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(false);
+    // a restart (info lost) that comes back with the same mode
+    const g2 = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), undefined);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(g2()).toBe(false);
+    // repeated same-mode responses keep it valid
+    const g3 = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(g3()).toBe(true);
+});
+
+it('captureServerMode: unknown at capture allows only the first discovery as simulation', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-unknown-rt';
+    const guard = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(true);
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(false);
+});

@@ -20,6 +20,7 @@ const applied = new Map<string, number>();
 const listeners = new Set<() => void>();
 let sequence = 0;
 let modeVersion = 0;
+let observations = 0;
 let activeBase: string | undefined;
 let channel: BroadcastChannel | null = null;
 
@@ -74,6 +75,7 @@ export function observeServerInfo(request: ServerInfoRequest, info: ServerInfo |
         channel?.postMessage({ kind: 'server-info-invalidated', base });
     }
     applied.set(base, request.sequence);
+    if (info) observations += 1;
     if (info) infos.set(base, info);
     else infos.delete(base);
     for (const listener of listeners) listener();
@@ -121,11 +123,11 @@ export const knownServerInfo = currentServerInfo;
 export const SERVER_MODE_CHANGED_MESSAGE = '確認期間伺服器或模式已變更，這筆沒有送出，請重新下單';
 
 /**
- * 送單閘門：記下開始時的伺服器與模式，回傳「是否仍是同一個」的檢查。
+ * 送單閘門：記下開始時的伺服器與模式代次，回傳「是否仍是同一個」的檢查。
  * - 換了 API 位址 → 不同。
- * - 開始時已知模式（模擬／正式）→ 目前已知的模式必須相同；資訊被清掉
- *   （例如 sidecar 重啟中）也算不同。
- * - 開始時模式未知 → 代次沒變才算相同；代次變了只在現在確定是模擬時放行
+ * - 開始時已知模式 → 代次必須沒變（中間任何模式變化或資訊被清掉，例如
+ *   模擬→正式→模擬、同位址重啟後恢復同一模式，都永久失效）。
+ * - 開始時模式未知 → 代次沒變，或只多了一次「第一次得知是模擬」才算相同
  *   （確認視窗自己第一次取得 /info 不會誤擋模擬單；變成正式一律不送）。
  */
 export interface ServerModeGuard {
@@ -144,8 +146,8 @@ export function captureServerMode(): ServerModeGuard {
         const now = syncBase();
         if (now !== base) return false;
         const current = infos.get(now)?.simulation;
-        if (typeof simulation === 'boolean') return current === simulation;
-        return modeVersion === version || current === true;
+        if (typeof simulation === 'boolean') return modeVersion === version && current === simulation;
+        return modeVersion === version || (modeVersion === version + 1 && current === true);
     }) as ServerModeGuard;
     same.rebaseIfUnknown = () => {
         // 只在同一個位址上改以目前的模式為準；換了位址永遠不算同一個
@@ -154,6 +156,12 @@ export function captureServerMode(): ServerModeGuard {
         version = modeVersion;
     };
     return same;
+}
+
+/** 成功取得 /info 的次數（同一模式也會增加）：確認視窗用來判斷「有新的回應」 */
+export function getServerInfoObservations() {
+    syncBase();
+    return observations;
 }
 
 export function getServerModeVersion() {

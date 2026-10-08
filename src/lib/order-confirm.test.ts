@@ -254,3 +254,23 @@ describe('the opening /info refresh has not settled', () => {
         }
     });
 });
+
+describe('a stalled opening refresh', () => {
+    it('a newer successful /info with the same mode unblocks the dialog', async () => {
+        vi.useFakeTimers();
+        try {
+            const store = await import('./server-info-store');
+            store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+            vi.mocked(fetchInfo).mockImplementationOnce(() => new Promise(() => undefined));
+            const promise = requestOrderConfirm(req);
+            await vi.advanceTimersByTimeAsync(900);
+            expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: true });
+            store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+            expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: false, simulation: true });
+            resolveOrderConfirm(true);
+            await expect(promise).resolves.toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});

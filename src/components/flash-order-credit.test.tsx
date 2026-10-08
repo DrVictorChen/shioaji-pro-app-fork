@@ -201,16 +201,24 @@ it('a stock that definitely cannot 融券 (unit 0) stops both sides and says why
     expect(mocks.place).not.toHaveBeenCalled();
 });
 
-it('融資 on a stock whose margin ratio is 0 stops both sides', async () => {
+it('融資 on a stock whose margin ratio is 0 stops only 融資買進; 融資賣出 (repaying) still goes out', async () => {
     mocks.post.mockImplementation(async () => enquire('2330', { margin_loan_ratio: 0 }));
     const r = await mount(stk, owned({ cond: 'MarginTrading', daytradeShort: false }).extra());
-    expect(text(banner(r)!)).toContain('目前不能融資');
+    expect(text(banner(r)!)).toContain('目前不能融資買進');
+    expect(text(banner(r)!)).toContain('融資賣出');
+    expect(button(r, '市價融資買')!.props.disabled).toBe(true);
+    expect(button(r, '市價融資賣')!.props.disabled).toBe(false);
     await arm(r);
-    for (const side of ['buy', 'sell'] as const) {
-        await act(async () => { cell(r, side).props.onClick(); });
-        await flush();
-    }
+    expect(cell(r, 'buy').props['data-blocked']).toBe(true);
+    expect(cell(r, 'sell').props['data-blocked']).toBeUndefined();
+    await act(async () => { cell(r, 'buy').props.onClick(); });
+    await flush();
     expect(mocks.place).not.toHaveBeenCalled();
+    await act(async () => { cell(r, 'sell').props.onClick(); });
+    await flush();
+    expect(mocks.place).toHaveBeenCalledOnce();
+    expect(mocks.place.mock.calls[0]![1]).toBe('Sell');
+    expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderCond: 'MarginTrading' });
 });
 
 it('a failed credit enquiry only warns — the order still goes out as 融資 (the broker decides)', async () => {
@@ -502,4 +510,40 @@ it('a flatten refused before anything went out says 未送出, not "maybe partly
     await act(async () => { button(r, '平倉')!.props.onClick(); });
     await flush();
     expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', title: '⚡ 平倉未送出' });
+});
+
+it('the post-confirmation re-check never blocks a 融資賣出 (repayment)', async () => {
+    mocks.place.mockImplementation(async (_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { afterConfirm?: () => Promise<void> }) => {
+        await opts.afterConfirm?.();
+        return { status: { status: 'PendingSubmit' } };
+    });
+    const r = await mount(stk, owned({ cond: 'MarginTrading', daytradeShort: false }).extra());
+    await arm(r);
+    mocks.post.mockImplementation(async () => enquire('2330', { margin_unit: 0 }));
+    await act(async () => { cell(r, 'sell').props.onClick(); });
+    await flush();
+    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'ok', title: '⚡ 融資賣出已送出' });
+});
+
+it('the server mode is captured at the click, before the credit check: a mode change meanwhile refuses', async () => {
+    const store = await import('../lib/server-info-store');
+    store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+    const r = await mount(stk, owned({ cond: 'MarginTrading', daytradeShort: false }).extra());
+    await arm(r);
+    resetCreditEnquireCache();
+    let release!: (v: unknown) => void;
+    mocks.post.mockImplementationOnce(() => new Promise(res => { release = res; }));
+    let guardSeen: (() => boolean) | undefined;
+    mocks.place.mockImplementation(async (_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { serverMode?: () => boolean }) => {
+        guardSeen = opts.serverMode;
+        return { status: { status: 'PendingSubmit' } };
+    });
+    await act(async () => { cell(r, 'buy').props.onClick(); });
+    store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+    await act(async () => { release(enquire('2330')); });
+    await flush();
+    // either refused before placeQuickOrder, or placeQuickOrder gets the click-time guard (now false)
+    if (mocks.place.mock.calls.length) expect(guardSeen?.()).toBe(false);
+    else expect(mocks.notify.mock.calls.at(-1)![0].kind).toBe('err');
+    expect(mocks.place).not.toHaveBeenCalled();
 });

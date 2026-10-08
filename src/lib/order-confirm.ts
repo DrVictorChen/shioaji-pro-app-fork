@@ -9,7 +9,7 @@
 
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
-import { captureServerMode, getServerModeVersion, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, subscribeServerInfo, type ServerModeGuard } from './server-info-store';
+import { captureServerMode, getServerInfoObservations, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, subscribeServerInfo, type ServerModeGuard } from './server-info-store';
 import { getApiBase } from './runtime';
 import type { Action } from './types/order';
 import type { Account } from './types/portfolio';
@@ -48,7 +48,7 @@ interface PendingConfirm {
     started: boolean;
     // API base when the dialog was shown; the mode is only ever adopted on it
     base: string;
-    // server mode version when it started waiting for the refresh
+    // successful /info count when it started waiting for the refresh
     awaitVersion?: number;
 }
 
@@ -137,7 +137,7 @@ subscribeServerInfo(() => {
     const s = currentSimulation();
     if (s === null) return;
     // 只在模式真的有新的觀察時採用（仍在等待時，舊的快取值不算）
-    if (current.request.awaitingMode && getServerModeVersion() === current.awaitVersion) return;
+    if (current.request.awaitingMode && getServerInfoObservations() === current.awaitVersion) return;
     current.sameServer = captureServerMode();
     current.request = { ...current.request, simulation: s, awaitingMode: false };
     emit();
@@ -183,7 +183,7 @@ export function requestOrderConfirm(
             current.request = settled
                 ? { ...withAccount, simulation: currentSimulation() }
                 : { ...withAccount, simulation: null, awaitingMode: true };
-            current.awaitVersion = getServerModeVersion();
+            current.awaitVersion = getServerInfoObservations();
             current.started = true;
             emit();
         };

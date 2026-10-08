@@ -14,6 +14,7 @@ import { usePrivacyMode } from '../lib/privacy';
 import { accountMatches, CASH_CREDIT, flashAccountKey, isFlashLot, normalizeFlashCredit, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashCond, type FlashCredit, type FlashLot, type FlashMarket } from '../lib/flash-account';
 import { creditEnquireKey, creditStatus, loadCreditEnquire, taipeiDay, useCreditEnquire, type CreditCond } from '../lib/credit-eligibility';
 import { getApiBase } from '../lib/runtime';
+import { captureServerMode } from '../lib/server-info-store';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { Ban, Check, ChevronDown, Settings2, Zap } from 'lucide-react';
 import {
@@ -434,12 +435,18 @@ export function FlashOrder({
         : enquiry.loading ? 'loading' : enquiry.failed ? 'unknown' : creditStatus(enquiry.row, creditCond);
     const creditName = creditLabel('Sell', credit.cond) ?? '';
     const sellOnly = credit.cond === 'ShortSelling' || credit.cond === 'SBLShort' || credit.cond === 'SBLShortPriceExempt';
-    const creditBlocked = creditCheck === 'blocked' ? `${contract.code} 目前不能${creditName}，已停止送單；改回現股或換股票` : null;
+    // 信用了結不受暫停限制（證交所）：可否融資只擋「融資買進」，可否融券只擋
+    // 「融券賣出」（融券的買邊本來就停用）；融資賣出償還照常
+    const creditBlocked = creditCheck === 'blocked'
+        ? (credit.cond === 'MarginTrading'
+            ? `${contract.code} 目前不能融資買進，已停止融資買進；融資賣出（償還）照常`
+            : `${contract.code} 目前不能融券賣出，已停止送單；改回現股或換股票`)
+        : null;
     const dayTradeBlocked = credit.daytradeShort && contract.day_trade !== 'Yes'
         ? (contract.day_trade === 'OnlyBuy' ? '此股票只能先買後賣，不能現沖先賣；點賣已停用' : '此股票不可當沖，不能現沖先賣；點賣已停用')
         : null;
-    const buyBlock = creditBlocked ?? (sellOnly ? CREDIT_TEXT.shortBuy : null);
-    const sellBlock = creditBlocked ?? dayTradeBlocked;
+    const buyBlock = (credit.cond === 'MarginTrading' ? creditBlocked : null) ?? (sellOnly ? CREDIT_TEXT.shortBuy : null);
+    const sellBlock = (credit.cond === 'ShortSelling' ? creditBlocked : null) ?? dayTradeBlocked;
     // 融券面板的買邊停用，市價鈕仍寫「市價買」（不會出現「融券買」）
     const buyCredit = sellOnly ? '' : creditLabel('Buy', credit.cond, credit.daytradeShort) ?? '';
     const sellCredit = creditLabel('Sell', credit.cond, credit.daytradeShort) ?? '';
@@ -863,17 +870,21 @@ export function FlashOrder({
             // 融資／融券：這次查詢的鍵（伺服器＋股票＋台北日期）；確認視窗開著
             // 跨過午夜或換伺服器，送出時就不算數，要重新查、重新確認
             let enquiryKey: string | null = null;
+            // 伺服器模式在點下去的當下（任何等待之前）就固定，送出前比對
+            const serverMode = captureServerMode();
             // 現沖賣：可否當沖是當天的資格，確認視窗跨過午夜就不送
             const clickDay = taipeiDay();
             const dayBound = creditOn && action === 'Sell' && clickCredit.cond === 'Cash' && clickCredit.daytradeShort;
-            if (creditOn && (clickCredit.cond === 'MarginTrading' || clickCredit.cond === 'ShortSelling')) {
+            // 只有會「新增」信用部位的那一邊要看可否融資券：融資買進、融券賣出
+            const opensCredit = creditOn && ((clickCredit.cond === 'MarginTrading' && action === 'Buy') || (clickCredit.cond === 'ShortSelling' && action === 'Sell'));
+            if (opensCredit) {
                 enquiryKey = creditEnquireKey(capturedContract);
                 const clickBase = getApiBase();
                 const row = await loadCreditEnquire(capturedContract).catch(() => undefined);
                 // 查詢期間換了伺服器：不送（placeQuickOrder 之後才固定伺服器）
-                if (getApiBase() !== clickBase) throw new Error('確認可否融資券期間伺服器已切換，這筆沒有送出');
-                if (creditStatus(row, clickCredit.cond) === 'blocked') {
-                    throw new Error(`${capturedContract.code} 目前不能${clickCredit.cond === 'MarginTrading' ? '融資' : '融券'}，已停止送單`);
+                if (getApiBase() !== clickBase || !serverMode()) throw new Error('確認可否融資券期間伺服器或模式已切換，這筆沒有送出');
+                if (creditStatus(row, clickCredit.cond as CreditCond) === 'blocked') {
+                    throw new Error(`${capturedContract.code} 目前不能${clickCredit.cond === 'MarginTrading' ? '融資買進' : '融券賣出'}，已停止送單`);
                 }
                 if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                 if (!armedRef.current) throw new Error('閃電下單已鎖定，這筆沒有送出');
@@ -886,13 +897,14 @@ export function FlashOrder({
                 {
                     account: capturedAccount,
                     isAccountCurrent: stillPanelAccount(capturedAccount),
+                    serverMode,
                     // 確認之後重新查可否融資券（不用快取）：確認期間變成 0 就不送；
                     // 查詢失敗照樣不擋（由券商端決定）
                     ...(enquiryKey !== null ? {
                         afterConfirm: async () => {
                             const cond = clickCredit.cond as CreditCond;
                             const fresh = await loadCreditEnquire(capturedContract, { fresh: true }).catch(() => undefined);
-                            if (creditStatus(fresh, cond) === 'blocked') throw new Error(`${capturedContract.code} 目前不能${cond === 'MarginTrading' ? '融資' : '融券'}，已停止送單`);
+                            if (creditStatus(fresh, cond) === 'blocked') throw new Error(`${capturedContract.code} 目前不能${cond === 'MarginTrading' ? '融資買進' : '融券賣出'}，已停止送單`);
                         },
                     } : {}),
                     beforeSend: () => {
