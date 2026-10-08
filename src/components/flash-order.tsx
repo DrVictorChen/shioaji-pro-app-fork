@@ -11,9 +11,11 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 
 import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { usePrivacyMode } from '../lib/privacy';
-import { accountMatches, flashAccountKey, isFlashLot, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashLot, type FlashMarket } from '../lib/flash-account';
+import { accountMatches, CASH_CREDIT, flashAccountKey, isFlashLot, normalizeFlashCredit, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashCond, type FlashCredit, type FlashLot, type FlashMarket } from '../lib/flash-account';
+import { creditStatus, loadCreditEnquire, useCreditEnquire } from '../lib/credit-eligibility';
+import { getApiBase } from '../lib/runtime';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
-import { ChevronDown, Zap } from 'lucide-react';
+import { Ban, Check, ChevronDown, Settings2, Zap } from 'lucide-react';
 import {
     memo,
     useCallback,
@@ -39,7 +41,7 @@ import type { ContractInfo } from '../lib/types/contract';
 import { ACTIVE_ORDER_STATUSES, type Action, type Trade } from '../lib/types/order';
 import type { Account, AccountedPosition } from '../lib/types/portfolio';
 import { fmtClock, fmtCompactInt, fmtInt, fmtPrice, fmtSigned, fmtStockLots } from '../lib/utils/format';
-import { clampLotQuantity, isOddLot, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT } from '../lib/odd-lot';
+import { clampLotQuantity, CREDIT_TEXT, creditLabel, isOddLot, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT } from '../lib/odd-lot';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
@@ -96,6 +98,11 @@ interface RowProps {
     avgMark: boolean;
     band: 'up' | 'down' | null;
     armed: boolean;
+    /** a side this panel's credit condition cannot send (reason), else null */
+    buyBlock: string | null;
+    sellBlock: string | null;
+    /** 信用條件寫進格子提示（融資限價買 …） */
+    credit: { buy: string; sell: string };
     /** odd-lot book: volumes in shares, shown compactly (exact in tooltip) */
     compact: boolean;
     onCell: (action: Action, price: number) => void;
@@ -118,6 +125,9 @@ const FlashRow = memo(function FlashRow({
     avgMark,
     band,
     armed,
+    buyBlock,
+    sellBlock,
+    credit,
     compact,
     onCell,
     onCancelAt,
@@ -146,8 +156,10 @@ const FlashRow = memo(function FlashRow({
                 )}
             </div>
             <div
-                className={`${styles.buyCell} ${armed ? '' : styles.disabledCell}`}
-                title={armed ? `限價買 ${text}` : '先啟用閃電下單'}
+                className={`${styles.buyCell} ${armed && !buyBlock ? '' : styles.disabledCell} ${buyBlock ? styles.blockedSide : ''}`}
+                title={buyBlock ?? (armed ? `${credit.buy}限價買 ${text}` : '先啟用閃電下單')}
+                data-side='buy'
+                data-blocked={buyBlock ? true : undefined}
                 onClick={() => onCell('Buy', price)}
             >
                 {bid !== undefined && (
@@ -182,8 +194,10 @@ const FlashRow = memo(function FlashRow({
                 )}
             </div>
             <div
-                className={`${styles.sellCell} ${armed ? '' : styles.disabledCell}`}
-                title={armed ? `限價賣 ${text}` : '先啟用閃電下單'}
+                className={`${styles.sellCell} ${armed && !sellBlock ? '' : styles.disabledCell} ${sellBlock ? styles.blockedSide : ''}`}
+                title={sellBlock ?? (armed ? `${credit.sell}限價賣 ${text}` : '先啟用閃電下單')}
+                data-side='sell'
+                data-blocked={sellBlock ? true : undefined}
                 onClick={() => onCell('Sell', price)}
             >
                 {ask !== undefined && (
@@ -233,6 +247,8 @@ export function FlashOrder({
     onLotChange,
     qtyMemory: savedQtyMemory,
     onQtyMemoryChange,
+    credit: savedCredit,
+    onCreditChange,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -260,6 +276,11 @@ export function FlashOrder({
     // 沒有 onQtyMemoryChange 時只在元件內
     qtyMemory?: FlashQtySetting;
     onQtyMemoryChange?: (setting: FlashQtySetting) => void;
+    // this panel's own credit condition (整股：現股／融資／融券＋現股當沖先賣):
+    // kept across symbol changes, persisted by the owner like the unit.
+    // Undefined = never chosen → 現股.
+    credit?: FlashCredit;
+    onCreditChange?: (credit: FlashCredit) => void;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -391,6 +412,51 @@ export function FlashOrder({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [savedLotValid]);
     const odd = market === 'S' && lot === 'IntradayOdd';
+    // 信用條件是面板的設定（跟單位一樣），換股票保留。只在整股股票適用：
+    // 零股時暫時當作現股（選項停用、設定不覆寫，切回整股恢復），期貨不顯示
+    const [localCredit, setLocalCredit] = useState<FlashCredit | undefined>(() => normalizeFlashCredit(savedCredit));
+    const ownCredit = onCreditChange ? normalizeFlashCredit(savedCredit) : localCredit;
+    const panelCredit: FlashCredit = ownCredit ?? CASH_CREDIT;
+    const creditApplies = market === 'S' && lot === 'Common';
+    const credit: FlashCredit = creditApplies ? panelCredit : CASH_CREDIT;
+    const creditKey = `${credit.cond}:${credit.daytradeShort ? 'dt' : ''}`;
+    const setPanelCredit = (next: FlashCredit) => {
+        setLocalCredit(next);
+        onCreditChange?.(next);
+    };
+    // 可否融資／融券：只在面板是融資或融券時查（當日快取）；成數或單位確定
+    // 是 0 才擋，查詢失敗只提示（由券商端決定）。絕不自動改成現股送出
+    const creditCond = credit.cond === 'Cash' ? null : credit.cond;
+    const enquiry = useCreditEnquire(contract, creditCond !== null);
+    const creditCheck: 'ok' | 'blocked' | 'unknown' | 'loading' = creditCond === null
+        ? 'ok'
+        : enquiry.loading ? 'loading' : enquiry.failed ? 'unknown' : creditStatus(enquiry.row, creditCond);
+    const creditName = credit.cond === 'MarginTrading' ? '融資' : credit.cond === 'ShortSelling' ? '融券' : '';
+    const creditBlocked = creditCheck === 'blocked' ? `${contract.code} 目前不能${creditName}，已停止送單；改回現股或換股票` : null;
+    const dayTradeBlocked = credit.daytradeShort && contract.day_trade !== 'Yes'
+        ? (contract.day_trade === 'OnlyBuy' ? '此股票只能先買後賣，不能現沖先賣；點賣已停用' : '此股票不可當沖，不能現沖先賣；點賣已停用')
+        : null;
+    const buyBlock = creditBlocked ?? (credit.cond === 'ShortSelling' ? CREDIT_TEXT.shortBuy : null);
+    const sellBlock = creditBlocked ?? dayTradeBlocked;
+    // 融券面板的買邊停用，市價鈕仍寫「市價買」（不會出現「融券買」）
+    const buyCredit = credit.cond === 'ShortSelling' ? '' : creditLabel('Buy', credit.cond, credit.daytradeShort) ?? '';
+    const sellCredit = creditLabel('Sell', credit.cond, credit.daytradeShort) ?? '';
+    const creditTag = creditApplies ? (credit.cond !== 'Cash' ? creditName : credit.daytradeShort ? '現沖' : '') : '';
+    const creditBad = !!creditBlocked || !!dayTradeBlocked;
+    // 送單時的固定規則（融券不能買、不可當沖）；可否融資券在送出前重新查詢，
+    // 不沿用畫面上可能過時的結果
+    const ruleBlockRef = useRef<Record<Action, string | null>>({ Buy: null, Sell: null });
+    ruleBlockRef.current = {
+        Buy: credit.cond === 'ShortSelling' ? CREDIT_TEXT.shortBuy : null,
+        Sell: dayTradeBlocked,
+    };
+    const creditRef = useRef({ applies: creditApplies, credit });
+    creditRef.current = { applies: creditApplies, credit };
+    const [menuOpen, setMenuOpenState] = useState(false);
+    // the quick menu spans the controls row (narrow panels clip anything hanging off the button)
+    const [menuTop, setMenuTop] = useState<number | undefined>(undefined);
+    const unitBtnRef = useRef<HTMLButtonElement>(null);
+    const openSettingsRef = useRef<((top?: number) => void) | null>(null);
     // 盤中零股是另一個撮合市場：零股模式的五檔、成交價與單量一律取零股
     // 行情（intraday_odd，量以股計），只在這個面板處於零股時才訂閱；
     // 單位是面板自己的 state，同一檔的整股面板不受影響（#204）
@@ -426,12 +492,13 @@ export function FlashOrder({
     // refs so hot-path callbacks stay referentially stable (rows are memo'd)
     const contractRef = useRef(contract);
     contractRef.current = contract;
-    const captureContext = useOrderContext(contract, lot);
+    // 確認期間換信用條件也一樣中止（不會用舊條件送出）
+    const captureContext = useOrderContext(contract, `${lot}:${creditKey}`);
     const armedRef = useRef(armed);
     const armedAccountKey = useRef(accountKey);
     // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
     // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
-    const armKey = `${contract.code}:${unitKey}`;
+    const armKey = `${contract.code}:${unitKey}:${creditKey}`;
     const armedKey = useRef(armKey);
     const armedQtyCurrent = armedMemQty.current === rememberedQty;
     armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent;
@@ -459,7 +526,7 @@ export function FlashOrder({
     // Account and unit changes still disarm an active ladder.
     useEffect(() => {
         setArmed(false);
-    }, [contract.code, accountKey, lot]);
+    }, [contract.code, accountKey, lot, creditKey]);
     // 記住的數量被外部改掉（例如切換版面）：點價下單解除
     useEffect(() => {
         if (armed && !armedQtyCurrent) setArmed(false);
@@ -491,10 +558,21 @@ export function FlashOrder({
     // Esc disarms anywhere — except while the settings popover is open:
     // there Esc only closes the popover
     const settingsOpenRef = useRef(false);
+    const menuOpenRef = useRef(false);
+    const setMenuOpen = (open: boolean) => { menuOpenRef.current = open; setMenuOpenState(open); };
+    // Esc closes the quick menu and nothing else (no disarm)
+    useEffect(() => {
+        if (!menuOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); menuOpenRef.current = false; setMenuOpenState(false); }
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [menuOpen]);
     useEffect(() => {
         if (!armed) return;
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape' && !settingsOpenRef.current && !e.defaultPrevented) setArmed(false);
+            if (e.key === 'Escape' && !settingsOpenRef.current && !menuOpenRef.current && !e.defaultPrevented) setArmed(false);
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
@@ -757,11 +835,32 @@ export function FlashOrder({
             notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: ODD_LOT_TEXT.priceType });
             return;
         }
+        // 信用條件：點下去當下的面板條件；不能用的一邊不送（不會改成現股）
+        const { applies: creditOn, credit: clickCredit } = creditRef.current;
+        const blocked = ruleBlockRef.current[action];
+        if (blocked) {
+            notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: blocked });
+            return;
+        }
+        const label = creditOn ? creditLabel(action, clickCredit.cond, clickCredit.daytradeShort) : undefined;
         const key = `${oddLot ? 'odd:' : ''}${action}:${price === null ? 'MKT' : keyOf(price)}`;
         if (inflightRef.current.has(key)) return; // double-click guard
         inflightRef.current.add(key);
         force();
         try {
+            // 融資／融券：送出前再看一次 credit_enquire（當日快取）；確定不可就擋，
+            // 查詢失敗不擋（由券商端決定）
+            if (creditOn && clickCredit.cond !== 'Cash') {
+                const clickBase = getApiBase();
+                const row = await loadCreditEnquire(capturedContract).catch(() => undefined);
+                // 查詢期間換了伺服器：不送（placeQuickOrder 之後才固定伺服器）
+                if (getApiBase() !== clickBase) throw new Error('確認可否融資券期間伺服器已切換，這筆沒有送出');
+                if (creditStatus(row, clickCredit.cond) === 'blocked') {
+                    throw new Error(`${capturedContract.code} 目前不能${clickCredit.cond === 'MarginTrading' ? '融資' : '融券'}，已停止送單`);
+                }
+                if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                if (!armedRef.current) throw new Error('閃電下單已鎖定，這筆沒有送出');
+            }
             const trade = await placeQuickOrder(
                 capturedContract,
                 action,
@@ -775,11 +874,12 @@ export function FlashOrder({
                         if (!accountMatches(accountRef.current, capturedAccount)) throw new Error('帳戶已變更，已停止後續下單');
                     },
                     ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
+                    ...(creditOn ? { orderCond: clickCredit.cond, daytradeShort: clickCredit.daytradeShort } : {}),
                 },
             );
             notify({
                 kind: 'ok',
-                title: `⚡ ${oddLot ? '零股' : ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
+                title: `⚡ ${oddLot ? '零股' : ''}${label ?? ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
                 body: `${capturedContract.code} ${q}${oddLot ? ' 股' : ''} @ ${
                     price === null ? '市價' : fmtPrice(price)
                 } (${trade.status.status})`,
@@ -910,6 +1010,8 @@ export function FlashOrder({
     }, [myOrders, trades, contract.code, lotShown]);
 
     const symbolLabel = flashSymbolLabel(contract);
+    // rows are memo'd: keep the credit labels referentially stable
+    const rowCredit = useMemo(() => ({ buy: buyCredit, sell: sellCredit }), [buyCredit, sellCredit]);
     const flashSettings = normalizeChartOrder({ qty, lot }, market);
     const accountLabels = flashAccountLabels(eligible, privacy);
     const accountShort = resolved.following
@@ -924,6 +1026,16 @@ export function FlashOrder({
         <div className={styles.wrap}>
             <div className={styles.symbolRow} title={symbolLabel.title}>
                 <span className={styles.symbolName}>{symbolLabel.name}</span>
+                {creditTag && (
+                    <span
+                        className={styles.creditTag[creditBad ? 'bad' : 'ok']}
+                        data-testid='flash-credit-tag'
+                        data-bad={creditBad ? true : undefined}
+                        title={creditBlocked ?? dayTradeBlocked ?? `這個面板的信用條件：${creditTag}`}
+                    >
+                        {creditTag}
+                    </span>
+                )}
                 <span className={styles.symbolMeta}>{symbolLabel.meta}</span>
             </div>
             <div className={styles.controls}>
@@ -993,7 +1105,119 @@ export function FlashOrder({
                 >
                     ＋
                 </button>
-                <span className={styles.qtyUnit}>{market === 'F' ? '口' : odd ? '股' : '張'}</span>
+                {market === 'F' ? (
+                    <span className={styles.qtyUnit}>口</span>
+                ) : (
+                    <span className={styles.unitAnchor}>
+                        <button
+                            type='button'
+                            className={styles.unitBtn[menuOpen ? 'open' : 'closed']}
+                            aria-label='單位與信用條件'
+                            aria-haspopup='menu'
+                            aria-expanded={menuOpen}
+                            title={`單位：${odd ? '盤中零股（股）' : '整股（張）'}${creditApplies ? `\n信用：${creditTag || '現股'}` : '\n零股只能現股'}`}
+                            ref={unitBtnRef}
+                            onClick={() => {
+                                const b = unitBtnRef.current;
+                                if (b && Number.isFinite(b.offsetTop)) setMenuTop(b.offsetTop + b.offsetHeight + 4);
+                                setMenuOpen(!menuOpen);
+                            }}
+                        >
+                            {odd ? '股' : '張'}{creditTag && <>·<b className={styles.unitCredit}>{creditTag}</b></>}
+                            <ChevronDown size={9} aria-hidden />
+                        </button>
+                        {menuOpen && (
+                            <>
+                                <div className={styles.menuBackdrop} onClick={() => setMenuOpen(false)} />
+                                <div className={styles.unitMenu} role='menu' aria-label='單位與信用條件' style={menuTop !== undefined ? { top: menuTop } : undefined}>
+                                    {([
+                                        ['Cash', '現股', '預設'],
+                                        ['MarginTrading', '融資', '買／賣'],
+                                        ['ShortSelling', '融券', '只能賣'],
+                                    ] as [FlashCond, string, string][]).map(([cond, name, desc]) => {
+                                        const on = !odd && panelCredit.cond === cond && !(cond === 'Cash' && panelCredit.daytradeShort);
+                                        return (
+                                            <button
+                                                key={cond}
+                                                type='button'
+                                                role='menuitemradio'
+                                                aria-checked={on}
+                                                disabled={odd}
+                                                className={styles.menuItem[on ? 'on' : 'off']}
+                                                onClick={() => {
+                                                    if (odd) return;
+                                                    armedRef.current = false;
+                                                    setArmed(false);
+                                                    setPanelCredit({ cond, daytradeShort: false });
+                                                    setMenuOpen(false);
+                                                }}
+                                            >
+                                                {name}<span className={styles.menuDesc}>{desc}</span>
+                                                {on && <Check size={11} aria-hidden />}
+                                            </button>
+                                        );
+                                    })}
+                                    <div className={styles.menuSep} />
+                                    <button
+                                        type='button'
+                                        role='menuitemcheckbox'
+                                        aria-checked={!odd && panelCredit.daytradeShort}
+                                        disabled={odd}
+                                        className={styles.menuItem[!odd && panelCredit.daytradeShort ? 'on' : 'off']}
+                                        title={contract.day_trade === 'Yes' ? '現股當沖先賣：點賣為現沖賣出，當日需回補' : '此股票目前不可現沖先賣；設定保留，換到可當沖的股票時生效'}
+                                        onClick={() => {
+                                            if (odd) return;
+                                            armedRef.current = false;
+                                            setArmed(false);
+                                            // 只限現股：勾選時信用條件一起改回現股
+                                            setPanelCredit({ cond: 'Cash', daytradeShort: !panelCredit.daytradeShort });
+                                            setMenuOpen(false);
+                                        }}
+                                    >
+                                        現股當沖先賣<span className={styles.menuDesc}>只限現股</span>
+                                        {!odd && panelCredit.daytradeShort && <Check size={11} aria-hidden />}
+                                    </button>
+                                    {odd && <div className={styles.menuNote}>零股只能以現股買賣，不能融資、融券或當沖；切回整股時恢復這個面板的信用設定。</div>}
+                                    <div className={styles.menuSep} />
+                                    {([['Common', '張（整股）'], ['IntradayOdd', '股（盤中零股）']] as [FlashLot, string][]).map(([l, name]) => (
+                                        <button
+                                            key={l}
+                                            type='button'
+                                            role='menuitemradio'
+                                            aria-checked={lot === l}
+                                            className={styles.menuItem[lot === l ? 'on' : 'off']}
+                                            onClick={() => {
+                                                if (l !== lot) {
+                                                    // 換單位一律先上鎖，股數與張數不能互換
+                                                    armedRef.current = false;
+                                                    setArmed(false);
+                                                    setPanelLot(l);
+                                                }
+                                                setMenuOpen(false);
+                                            }}
+                                        >
+                                            {name}
+                                            {lot === l && <Check size={11} aria-hidden />}
+                                        </button>
+                                    ))}
+                                    <div className={styles.menuSep} />
+                                    <button
+                                        type='button'
+                                        role='menuitem'
+                                        className={styles.menuItem.off}
+                                        onClick={() => {
+                                            setMenuOpen(false);
+                                            openSettingsRef.current?.(menuTop);
+                                        }}
+                                    >
+                                        <Settings2 size={11} aria-hidden />更多設定…
+                                    </button>
+                                    <div className={styles.menuNote}>切換後自動解除「點價即下單」。</div>
+                                </div>
+                            </>
+                        )}
+                    </span>
+                )}
                 <OrderSettingsButton
                     market={market}
                     settings={flashSettings}
@@ -1038,6 +1262,9 @@ export function FlashOrder({
                     ariaLabel='閃電下單設定'
                     onOpenChange={open => { settingsOpenRef.current = open; }}
                     align='panel'
+                    // 股票面板的齒輪併進「張·融資」按鈕（更多設定…），窄面板不多佔一顆按鈕
+                    hideTrigger={market === 'S'}
+                    openRef={openSettingsRef}
                 />
                 <span className={styles.rowBreak} aria-hidden />
                 <button
@@ -1076,20 +1303,20 @@ export function FlashOrder({
             </div>
             <div className={styles.actionBar}>
                 <button
-                    className={`${styles.mktBtn.buy} ${armed && !odd ? '' : styles.disabledCell}`}
-                    disabled={odd}
-                    title={odd ? ODD_LOT_TEXT.priceType : undefined}
+                    className={`${styles.mktBtn.buy} ${armed && !odd && !buyBlock ? '' : styles.disabledCell}`}
+                    disabled={odd || !!buyBlock}
+                    title={odd ? ODD_LOT_TEXT.priceType : buyBlock ?? undefined}
                     onClick={() => void send('Buy', null)}
                 >
-                    市價買
+                    市價{buyCredit}買
                 </button>
                 <button
-                    className={`${styles.mktBtn.sell} ${armed && !odd ? '' : styles.disabledCell}`}
-                    disabled={odd}
-                    title={odd ? ODD_LOT_TEXT.priceType : undefined}
+                    className={`${styles.mktBtn.sell} ${armed && !odd && !sellBlock ? '' : styles.disabledCell}`}
+                    disabled={odd || !!sellBlock}
+                    title={odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined}
                     onClick={() => void send('Sell', null)}
                 >
-                    市價賣
+                    市價{sellCredit}賣
                 </button>
                 {pos && (
                     <button
@@ -1137,7 +1364,22 @@ export function FlashOrder({
             {odd && (
                 <div className={styles.oddBanner} title='盤中零股與整股分開撮合，成交價可能與整股五檔不同'>
                     盤中零股 · 以股計 · 只限價 ROD · 僅現股；五檔與成交為零股行情（股）
+                    {(panelCredit.cond !== 'Cash' || panelCredit.daytradeShort) && ' · 面板的信用條件在切回整股時恢復'}
                     {oddMatchTime && <span className={styles.oddMatchTime} title='盤中零股約每 5 秒撮合一次；五檔與成交價在撮合時更新'> · 最近撮合 {oddMatchTime}</span>}
+                </div>
+            )}
+            {creditTag && (
+                <div className={styles.creditBanner[creditBad ? 'bad' : 'ok']} data-testid='flash-credit-banner'>
+                    {creditBad ? <Ban size={10} aria-hidden /> : credit.daytradeShort ? <Zap size={10} aria-hidden /> : null}
+                    <span>
+                        {creditBlocked ?? dayTradeBlocked ?? (credit.cond === 'MarginTrading'
+                            ? '融資：點買＝融資買進，點賣＝融資賣出'
+                            : credit.cond === 'ShortSelling'
+                              ? '融券：只能點賣（融券賣出）；買進請改現股或融資'
+                              : '現股當沖先賣：點賣為現沖賣出，當日需回補')}
+                        {creditCheck === 'unknown' && ' · 無法確認可否融資券（不擋單，由券商端決定）'}
+                        {creditCheck === 'loading' && ' · 確認可否融資券中…'}
+                    </span>
                 </div>
             )}
             <div className={styles.headRow}>
@@ -1191,6 +1433,9 @@ export function FlashOrder({
                                       : null
                             }
                             armed={armed}
+                            buyBlock={buyBlock}
+                            sellBlock={sellBlock}
+                            credit={rowCredit}
                             compact={odd}
                             onCell={onCell}
                             onCancelAt={onCancelAt}
@@ -1223,7 +1468,7 @@ export function FlashOrder({
                 {armed
                     ? odd
                         ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · 點單量=刪單 · Esc 鎖定`
-                        : '點買量=限價買 · 點賣量=限價賣 · 點單量=刪單 · Esc 鎖定'
+                        : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣`} · 點單量=刪單 · Esc 鎖定`
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
             </div>
         </div>

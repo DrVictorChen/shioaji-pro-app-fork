@@ -23,6 +23,8 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
     const pendingPrices = usePendingPrices();
     const livePrice = request.livePriceCode ? pendingPrices[request.livePriceCode] : undefined;
     const dir = request.action === 'Buy' ? ('up' as const) : ('down' as const);
+    // 信用條件寫進動作：融資買進／融券賣出／現沖賣出，不會看起來像現股
+    const actionText = `${request.credit ?? ''}${request.action === 'Buy' ? '買進' : '賣出'}`;
     return createPortal(
         <div
             className={styles.overlay}
@@ -52,7 +54,7 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                 </div>
                 <div className={styles.body}>
                     <div className={styles.actionLine[dir]}>
-                        {request.action === 'Buy' ? '買進' : '賣出'}
+                        {actionText}
                         <span className={styles.contractName}>
                             {request.name || request.code}
                         </span>
@@ -106,7 +108,7 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                         disabled={!!request.livePriceCode && livePrice === undefined}
                         onClick={() => resolveOrderConfirm(true)}
                     >
-                        確認{request.action === 'Buy' ? '買進' : '賣出'}
+                        確認{actionText}
                     </button>
                 </div>
             </div>

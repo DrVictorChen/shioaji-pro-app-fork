@@ -6,20 +6,12 @@ import { useCallback } from 'react';
 import { useQuery } from '../hooks/use-query';
 import { apiGet, apiPost } from '../lib/api';
 import type { ContractInfo } from '../lib/types/contract';
+import type { CreditEnquire } from '../lib/credit-eligibility';
 import { fmtInt } from '../lib/utils/format';
 import * as dock from './bottom-dock.css';
 import * as panel from './panel.css';
 import { AsyncStatus } from './async-status';
 
-interface CreditEnquire {
-    stock_id: string;
-    system: string;
-    update_time: string;
-    margin_unit: number;
-    short_unit: number;
-    margin_loan_ratio: number;
-    short_margin_ratio: number;
-}
 
 interface ShortSource {
     code: string;

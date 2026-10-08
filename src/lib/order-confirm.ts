@@ -28,6 +28,8 @@ export interface OrderConfirmRequest {
     accountLabel?: string;
     // 額外說明（盤中零股、平倉等）
     note?: string;
+    // 股票信用條件（融資／融券／現沖）：寫進動作名稱（融券賣出、確認融券賣出）
+    credit?: string;
     // true=模擬、false=正式、null=未知（server 未回應）
     simulation: boolean | null;
 }

@@ -256,7 +256,7 @@ export function OrderTicket({
             const blocked = checkOrderAllowed(qty, isFutures ? undefined : orderLot);
             if (blocked) throw new Error(blocked);
             if (!isFutures) {
-                const problem = stockOrderProblem({ quantity: qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort });
+                const problem = stockOrderProblem({ quantity: qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort, action, day_trade: contract.day_trade });
                 if (problem) throw new Error(problem);
             }
             const p = priceType === 'LMT' ? Number(price) : 0;
@@ -512,7 +512,7 @@ export function OrderTicket({
             }
             if (!isFutures) {
                 for (const e of allocation) {
-                    const problem = stockOrderProblem({ quantity: e.qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort });
+                    const problem = stockOrderProblem({ quantity: e.qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort, action, day_trade: contract.day_trade });
                     if (problem) throw new Error(problem);
                 }
             }

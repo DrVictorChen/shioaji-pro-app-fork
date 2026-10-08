@@ -5,7 +5,7 @@
 // 「500 股」＝盤中零股、「1 張」＝整股、「2 口」＝期貨）。
 
 import { Settings2 } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import {
     chartOrderChipLabel,
     chartOrderRows,
@@ -79,6 +79,8 @@ export function OrderSettingsButton({
     className,
     onOpenChange,
     align = 'start',
+    hideTrigger = false,
+    openRef,
 }: {
     market: ChartOrderMarket;
     settings: ChartOrderSettings;
@@ -96,6 +98,11 @@ export function OrderSettingsButton({
     /** 'panel': span the host row (its nearest positioned ancestor) — for
      * narrow panels where a button-anchored popover would be clipped */
     align?: 'start' | 'panel';
+    /** the host opens the popover from its own control (閃電整股面板：單位
+     *按鈕的「更多設定…」) — the gear button is kept but not shown */
+    hideTrigger?: boolean;
+    /** receives a function that opens the popover (optionally at `top`) */
+    openRef?: MutableRefObject<((top?: number) => void) | null>;
 }) {
     const [open, setOpenState] = useState(false);
     const buttonRef = useRef<HTMLButtonElement>(null);
@@ -105,6 +112,7 @@ export function OrderSettingsButton({
         if (value !== prev) onOpenChange?.(value);
         return value;
     });
+    if (openRef) openRef.current = (top) => { if (top !== undefined) setPanelTop(top); setOpen(true); };
     // Esc closes the popover and nothing else (a panel's own Esc hotkey must
     // not also fire); nothing is listened to while closed
     useEffect(() => {
@@ -125,6 +133,9 @@ export function OrderSettingsButton({
                 aria-label={ariaLabel}
                 aria-haspopup='dialog'
                 aria-expanded={open}
+                hidden={hideTrigger}
+                // the chip class sets display, which would override [hidden]
+                style={hideTrigger ? { display: 'none' } : undefined}
                 onClick={() => {
                     const b = buttonRef.current;
                     if (align === 'panel' && b && Number.isFinite(b.offsetTop)) setPanelTop(b.offsetTop + b.offsetHeight + 4);

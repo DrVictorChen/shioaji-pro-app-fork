@@ -8,7 +8,7 @@ import { cancellationSummary } from './trade-mutations';
 import { getAccountState } from './account-store';
 import { trackActivity } from './activity';
 import { accountConfirmLabel, requestOrderConfirm } from './order-confirm';
-import { isOddLot, lotLabel, ODD_LOT_TEXT, orderQtyUnit } from './odd-lot';
+import { creditLabel, isOddLot, lotLabel, ODD_LOT_TEXT, orderQtyUnit, stockOrderProblem, type CreditLabel } from './odd-lot';
 import { checkOrderAllowed, getRiskSettings } from './risk';
 import {
     cancelOrders,
@@ -22,6 +22,7 @@ import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
     type Action,
+    type StockOrderCond,
     type StockOrderLot,
     type FuturesOCType,
     type OrderType,
@@ -131,6 +132,7 @@ async function confirmManualOrder(
     note?: string,
     account?: Account,
     livePriceCode?: string,
+    credit?: string,
 ): Promise<void> {
     if (!getRiskSettings().confirmManualOrders) return;
     const approved = await requestOrderConfirm({
@@ -144,9 +146,12 @@ async function confirmManualOrder(
         accountLabel: account ? accountConfirmLabel(account) : undefined,
         note,
         livePriceCode,
+        ...(credit ? { credit } : {}),
     });
     if (!approved) throw new OrderConfirmCancelled();
 }
+
+const CREDIT_NOTE: Record<CreditLabel, string> = { 融資: '融資', 融券: '融券', 現沖: '現股當沖' };
 
 export async function placeQuickOrder(
     contract: ContractBase,
@@ -175,6 +180,10 @@ export async function placeQuickOrder(
         customField?: string;
         // 讀下單回應的標頭（X-Shioaji-Instance，SDK 1.7.8+）
         onResponse?: (res: Response) => void;
+        // 股票信用條件（閃電下單，整股）：缺省／Cash＝現股
+        orderCond?: StockOrderCond;
+        // 現股當沖先賣：只在賣出時帶出；買進（回補）一律是現股買進
+        daytradeShort?: boolean;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
@@ -192,6 +201,26 @@ export async function placeQuickOrder(
     const odd = !isFuturesContract(contract) && isOddLot(opts?.orderLot);
     // 零股沒有市價單（#204）；需要立即成交的呼叫端自行帶漲跌停限價
     if (odd && price === null) throw mutationNotStartedError(ODD_LOT_TEXT.priceType);
+    // 信用條件（閃電，整股）：照下單面板現行規則在確認前就檢查，送單時
+    // placeStockOrder 會再檢查一次 — 任何路徑都不會把不支援的組合送出
+    const orderCond = opts?.orderCond && opts.orderCond !== 'Cash' ? opts.orderCond : undefined;
+    const daytradeShort = opts?.daytradeShort === true && action === 'Sell';
+    if (isFuturesContract(contract)) {
+        if (orderCond || opts?.daytradeShort) throw mutationNotStartedError('信用條件（融資、融券、當沖先賣）只適用股票');
+    } else if (orderCond || daytradeShort) {
+        const problem = stockOrderProblem({
+            quantity,
+            price_type: price === null ? 'MKT' : 'LMT',
+            order_type: price === null ? 'IOC' : (opts?.orderType ?? 'ROD'),
+            order_lot: opts?.orderLot ?? 'Common',
+            order_cond: orderCond,
+            daytrade_short: daytradeShort,
+            action,
+            day_trade: (contract as Partial<ContractInfo>).day_trade,
+        });
+        if (problem) throw mutationNotStartedError(problem);
+    }
+    const credit = isFuturesContract(contract) ? undefined : creditLabel(action, orderCond, daytradeShort);
     if (!opts?.bypassRisk) {
         const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined);
         if (blocked) throw mutationNotStartedError(blocked);
@@ -204,9 +233,11 @@ export async function placeQuickOrder(
             quantity,
             opts?.orderLot,
             odd ? `${lotLabel(opts?.orderLot)}・限價 ROD`
+                : credit ? `${price === null ? '市價 IOC' : `限價 ${opts?.orderType ?? 'ROD'}`}・${CREDIT_NOTE[credit]}`
                 : price !== null && opts?.orderType && opts.orderType !== 'ROD' ? `限價 ${opts.orderType}` : undefined,
             capturedAccount,
             opts?.confirmLivePriceCode,
+            credit,
         );
     }
     assertTradingLive();
@@ -224,7 +255,7 @@ export async function placeQuickOrder(
     } : undefined;
     trackActivity(
         '下單',
-        `${contract.code} ${action === 'Buy' ? '買' : '賣'} ${quantity}${odd ? '股（零股）' : ''} @${price ?? '市價'}`,
+        `${contract.code} ${credit ?? ''}${action === 'Buy' ? '買' : '賣'} ${quantity}${odd ? '股（零股）' : ''} @${price ?? '市價'}`,
     );
     const market = price === null;
     return sendOrder(
@@ -244,6 +275,7 @@ export async function placeQuickOrder(
         opts?.customField,
         opts?.onResponse,
         beforeDispatch,
+        { orderCond, daytradeShort },
     );
 }
 
@@ -262,6 +294,7 @@ async function sendOrder(
     customField?: string,
     onResponse?: (res: Response) => void,
     beforeDispatch?: () => void,
+    credit?: { orderCond?: StockOrderCond; daytradeShort?: boolean },
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -282,6 +315,8 @@ async function sendOrder(
               price_type: market ? 'MKT' : 'LMT',
               order_type: market ? 'IOC' : orderType,
               order_lot: orderLot ?? 'Common',
+              ...(credit?.orderCond ? { order_cond: credit.orderCond } : {}),
+              ...(credit?.daytradeShort ? { daytrade_short: true } : {}),
               ...(customField ? { custom_field: customField } : {}),
           }, account, { agentInitiated, ...agentContext, ...(onResponse ? { onResponse } : {}), ...(beforeDispatch ? { beforeDispatch } : {}) });
     return trade;

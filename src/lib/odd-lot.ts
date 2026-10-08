@@ -57,6 +57,10 @@ export interface StockOrderShape {
     order_lot?: StockOrderLot | string;
     order_cond?: StockOrderCond | string;
     daytrade_short?: boolean;
+    /** 委託方向（信用規則：融券／借券只能賣、當沖先賣只能賣） */
+    action?: 'Buy' | 'Sell' | string;
+    /** 合約的可當沖別（contract.day_trade）；當沖先賣只限 'Yes' */
+    day_trade?: string;
 }
 
 export const ODD_LOT_TEXT = {
@@ -67,9 +71,42 @@ export const ODD_LOT_TEXT = {
     quantity: `零股數量須為 1～${ODD_LOT_MAX_SHARES} 股；1,000 股以上請改用整股（張）`,
 } as const;
 
-/** 零股不支援的條件組合 → 白話原因；支援（或非零股）回 null。 */
+// 整股信用規則（照下單面板現行規則，閃電下單共用）：
+// - 買進只能現股或融資；融券、借券、借券豁免只在賣出。
+// - 現股當沖先賣只限「賣出＋整股＋現股＋contract.day_trade === 'Yes'」。
+export const CREDIT_TEXT = {
+    shortBuy: '融券、借券只能賣出；買進請改用現股或融資',
+    daytradeSide: '現股當沖先賣只能用在賣出',
+    daytradeCond: '現股當沖先賣只限現股；請把信用條件改回現股，或取消當沖',
+    daytradeStock: '此股票不能現股當沖先賣（只能先買後賣或不可當沖）；請取消當沖',
+    daytradeLot: '現股當沖先賣只限整股；請改用整股，或取消當沖',
+} as const;
+
+/** 信用條件寫進動作名稱（融資買進／融券賣出／現沖賣出）；現股回 undefined */
+export type CreditLabel = '融資' | '融券' | '現沖';
+export function creditLabel(action: 'Buy' | 'Sell', orderCond?: StockOrderCond | string, daytradeShort?: boolean): CreditLabel | undefined {
+    if (orderCond === 'MarginTrading') return '融資';
+    if (orderCond === 'ShortSelling') return '融券';
+    if ((!orderCond || orderCond === 'Cash') && daytradeShort && action === 'Sell') return '現沖';
+    return undefined;
+}
+
+const SELL_ONLY_CONDS: ReadonlySet<string> = new Set(['ShortSelling', 'SBLShort', 'SBLShortPriceExempt']);
+
+function creditProblem(o: StockOrderShape): string | null {
+    if (o.action === 'Buy' && o.order_cond && SELL_ONLY_CONDS.has(o.order_cond)) return CREDIT_TEXT.shortBuy;
+    if (o.daytrade_short) {
+        if (o.action !== undefined && o.action !== 'Sell') return CREDIT_TEXT.daytradeSide;
+        if (o.order_lot !== undefined && o.order_lot !== 'Common') return CREDIT_TEXT.daytradeLot;
+        if (o.order_cond && o.order_cond !== 'Cash') return CREDIT_TEXT.daytradeCond;
+        if (o.day_trade !== 'Yes') return CREDIT_TEXT.daytradeStock;
+    }
+    return null;
+}
+
+/** 不支援的條件組合（零股規則＋整股信用規則）→ 白話原因；支援回 null。 */
 export function stockOrderProblem(o: StockOrderShape): string | null {
-    if (!isOddLot(o.order_lot)) return null;
+    if (!isOddLot(o.order_lot)) return creditProblem(o);
     if (o.order_cond && o.order_cond !== 'Cash') return ODD_LOT_TEXT.cond;
     if (o.daytrade_short) return ODD_LOT_TEXT.daytrade;
     if (o.price_type !== undefined && o.price_type !== 'LMT') return ODD_LOT_TEXT.priceType;

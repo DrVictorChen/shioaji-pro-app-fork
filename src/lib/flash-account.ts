@@ -64,11 +64,26 @@ export function isFlashLot(v: unknown): v is FlashLot {
     return v === 'Common' || v === 'IntradayOdd';
 }
 
+// 閃電下單面板自己的信用條件（整股）：現股／融資／融券＋現股當沖先賣。
+// 換股票不變；零股與期貨時不適用（面板設定保留，回到整股股票時恢復）。
+// 借券／借券豁免不放進閃電（留在下單面板）。
+export type FlashCond = 'Cash' | 'MarginTrading' | 'ShortSelling';
+export interface FlashCredit { cond: FlashCond; daytradeShort: boolean }
+export const CASH_CREDIT: FlashCredit = { cond: 'Cash', daytradeShort: false };
+
+/** 讀存檔的信用條件：未知條件丟掉；當沖先賣只限現股 */
+export function normalizeFlashCredit(v: unknown): FlashCredit | undefined {
+    if (!v || typeof v !== 'object') return undefined;
+    const { cond, daytradeShort } = v as { cond?: unknown; daytradeShort?: unknown };
+    if (cond !== 'Cash' && cond !== 'MarginTrading' && cond !== 'ShortSelling') return undefined;
+    return { cond, daytradeShort: cond === 'Cash' && daytradeShort === true };
+}
+
 // qty: 記住數量（false = 使用者關閉；沒有這個欄位 = 預設開啟、尚未記住）
-interface PopoutEntry { keys: FlashAccountKeys; at: number; source?: string; lot?: FlashLot; qty?: FlashQtySetting }
+interface PopoutEntry { keys: FlashAccountKeys; at: number; source?: string; lot?: FlashLot; qty?: FlashQtySetting; credit?: FlashCredit }
 
 /** The opening panel's own settings handed to its popout. */
-export interface FlashPanelSeed { lot?: FlashLot; qty?: FlashQtySetting }
+export interface FlashPanelSeed { lot?: FlashLot; qty?: FlashQtySetting; credit?: FlashCredit }
 
 function isKeys(v: unknown): v is FlashAccountKeys {
     return !!v && typeof v === 'object' && Object.entries(v).every(([k, s]) => (k === 'S' || k === 'F') && typeof s === 'string');
@@ -87,6 +102,7 @@ function readPopoutEntries(): Record<string, PopoutEntry> {
                 ...(typeof entry.source === 'string' ? { source: entry.source } : {}),
                 ...(isFlashLot(entry.lot) ? { lot: entry.lot } : {}),
                 ...(entry.qty !== undefined ? { qty: sanitizeFlashQtySetting(entry.qty) } : {}),
+                ...(normalizeFlashCredit(entry.credit) ? { credit: normalizeFlashCredit(entry.credit) } : {}),
             };
         }
         return out;
@@ -106,6 +122,7 @@ function writePopoutEntry(id: string, keys: FlashAccountKeys, source?: string, p
         const all = readPopoutEntries();
         const next: PopoutEntry = { ...all[id], ...(source ? { source } : {}), keys, at: Date.now() };
         if (panel?.lot) next.lot = panel.lot;
+        if (panel?.credit) next.credit = { ...panel.credit };
         if (panel && 'qty' in panel) {
             if (panel.qty === undefined) delete next.qty;
             else next.qty = panel.qty;
@@ -171,6 +188,16 @@ export function savePopoutFlashQty(windowId: string | null, qty: FlashQtySetting
     writePopoutEntry(windowId, readPopoutEntries()[windowId]?.keys ?? {}, undefined, { qty });
 }
 
+/** The popout's own credit condition; undefined = never chosen (現股). */
+export function loadPopoutFlashCredit(windowId: string | null): FlashCredit | undefined {
+    return windowId ? readPopoutEntries()[windowId]?.credit : undefined;
+}
+
+export function savePopoutFlashCredit(windowId: string | null, credit: FlashCredit): void {
+    if (!windowId) return;
+    writePopoutEntry(windowId, readPopoutEntries()[windowId]?.keys ?? {}, undefined, { credit });
+}
+
 export interface GlobalFlashSelection {
     S?: Account | null;
     F?: Account | null;
@@ -217,6 +244,6 @@ export function flashPopoutParams(panelKeys: FlashAccountKeys | undefined, globa
  * keeps the unit its window last used. The popout's 記住數量 setting is its own:
  * only a brand-new window id is seeded with the panel's (flashPopoutParams).
  */
-export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, panel?: Pick<FlashPanelSeed, 'lot'>): void {
-    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global), panel?.lot ? { lot: panel.lot } : undefined);
+export function reseedPopoutFlashAccounts(windowId: string, panelKeys: FlashAccountKeys | undefined, global: GlobalFlashSelection, panel?: Pick<FlashPanelSeed, 'lot' | 'credit'>): void {
+    seedPopoutFlashAccounts(windowId, pinnedFlashAccounts(panelKeys, global), panel?.lot || panel?.credit ? { ...(panel.lot ? { lot: panel.lot } : {}), ...(panel.credit ? { credit: panel.credit } : {}) } : undefined);
 }
