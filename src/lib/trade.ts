@@ -18,7 +18,7 @@ import {
 } from './shioaji';
 import { getStreamStatus } from './stream';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
-import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
+import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from './server-info-store';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
@@ -181,6 +181,8 @@ export async function placeQuickOrder(
         customField?: string;
         // 讀下單回應的標頭（X-Shioaji-Instance，SDK 1.7.8+）
         onResponse?: (res: Response) => void;
+        // 整批共用的伺服器模式閘門（外層一次確認、內層多筆送出）
+        serverMode?: ServerModeGuard;
         // 股票信用條件（閃電下單，整股）：缺省／Cash＝現股
         orderCond?: StockOrderCond;
         // 現股當沖先賣：只在賣出時帶出；買進（回補）一律是現股買進
@@ -191,7 +193,7 @@ export async function placeQuickOrder(
 ): Promise<Trade> {
     const startedBase = getApiBase();
     // 伺服器模式代次：確認期間模擬重啟成正式（同一位址）也不送
-    const sameServerMode = captureServerMode();
+    const sameServerMode = opts?.serverMode ?? captureServerMode();
     const capturedAccount = opts?.account ?? (isFuturesContract(contract) ? getAccountState().selectedFutures : getAccountState().selectedStock) ?? undefined;
     assertTradingLive();
     if (contract.security_type === 'IND') {
@@ -244,6 +246,8 @@ export async function placeQuickOrder(
             opts?.confirmLivePriceCode,
             credit,
         );
+        // 確認視窗守到按下確認；開始時模式未知（冷啟動）就以確認後的模式為準
+        sameServerMode.rebaseIfUnknown();
     }
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
@@ -352,6 +356,8 @@ export async function placeStockExitByShares(
 ): Promise<Trade[]> {
     const capturedAccount = account ?? getAccountState().selectedStock ?? undefined;
     const base = getApiBase();
+    // 一次確認、兩腳送出：整批用同一個伺服器模式閘門，任一腳之前變了就不送
+    const serverMode = captureServerMode();
     assertTradingLive();
     if (!capturedAccount || capturedAccount.account_type !== 'S') throw mutationNotStartedError('缺少股票平倉帳戶');
     if (contract.security_type !== 'STK') throw mutationNotStartedError('股票股數平倉僅支援股票');
@@ -373,8 +379,10 @@ export async function placeStockExitByShares(
             : undefined,
         capturedAccount,
     );
+    serverMode.rebaseIfUnknown();
     assertTradingLive();
     if (getApiBase() !== base) throw mutationNotStartedError('確認期間伺服器已切換');
+    if (!serverMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     const out: Trade[] = [];
     if (lots > 0) {
@@ -384,23 +392,32 @@ export async function placeStockExitByShares(
                 account: capturedAccount,
                 isAccountCurrent: opts?.isAccountCurrent,
                 beforeSend: opts?.beforeSend,
+                serverMode,
             }),
         );
     }
     if (odd > 0) {
         if (getApiBase() !== base) throw new Error('伺服器已切換；先前分單可能已送出，剩餘分單未送出');
+        if (out.length > 0 && !serverMode()) throw new Error(`${SERVER_MODE_CHANGED_MESSAGE}；整張分單已送出，零股分單未送出`);
         if (!limitPrice) {
             throw new Error('零股需要漲跌停價作為限價，無法取得');
         }
-        out.push(
-            await placeQuickOrder(contract, action, limitPrice, odd, {
-                orderLot: 'IntradayOdd',
-                source: 'auto',
-                account: capturedAccount,
-                isAccountCurrent: opts?.isAccountCurrent,
-                beforeSend: opts?.beforeSend,
-            }),
-        );
+        try {
+            out.push(
+                await placeQuickOrder(contract, action, limitPrice, odd, {
+                    orderLot: 'IntradayOdd',
+                    source: 'auto',
+                    account: capturedAccount,
+                    isAccountCurrent: opts?.isAccountCurrent,
+                    beforeSend: opts?.beforeSend,
+                    serverMode,
+                }),
+            );
+        } catch (e) {
+            // 整張那一腳已送出：這筆不能報成「沒有送出」
+            if (out.length > 0) throw new Error(`整張分單已送出，零股分單未送出：${e instanceof Error ? e.message : String(e)}`);
+            throw e;
+        }
     }
     return out;
 }

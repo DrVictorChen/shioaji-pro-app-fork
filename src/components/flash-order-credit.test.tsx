@@ -7,7 +7,7 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'rea
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
 import type { ContractInfo } from '../lib/types/contract';
-const mocks = vi.hoisted(() => ({ place: vi.fn(), notify: vi.fn(), post: vi.fn(), base: 'fixture', store: new Map<string, string>() }));
+const mocks = vi.hoisted(() => ({ place: vi.fn(), exit: vi.fn(), notify: vi.fn(), post: vi.fn(), base: 'fixture', store: new Map<string, string>() }));
 const accounts: Account[] = [
     { account_type: 'S', broker_id: 'BR', account_id: 'A1234', signed: true, person_id: '', username: '' },
     { account_type: 'F', broker_id: 'BR', account_id: 'F5678', signed: true, person_id: '', username: '' },
@@ -16,7 +16,7 @@ vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAcc
 vi.mock('../hooks/use-stream', () => ({ useQuote: () => undefined, useTradingLive: () => true }));
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: { tick: { close: '100', volume: 1 } }, snapshot: { close: 100 }, book: undefined }) }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: vi.fn(), cancelOrders: vi.fn() }));
-vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place, placeStockExitByShares: vi.fn() }));
+vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place, placeStockExitByShares: mocks.exit }));
 vi.mock('../lib/stream', () => ({ getAliasFor: () => undefined }));
 vi.mock('../lib/tick-bands', () => ({ useTickBandsVersion: () => 0 }));
 vi.mock('../lib/api', () => ({ apiPost: mocks.post }));
@@ -492,4 +492,14 @@ it('a 現沖 sell confirmation left open past Taipei midnight is refused at disp
     expect(() => guard()).not.toThrow();
     vi.setSystemTime(new Date('2026-10-09T00:00:30+08:00'));
     expect(() => guard()).toThrow();
+});
+
+it('a flatten refused before anything went out says 未送出, not "maybe partly sent"', async () => {
+    const position = { code: '2330', direction: 'Buy', quantity: 2000, price: 100, pnl: 0, last_price: 100, cond: 'Cash', account: accounts[0] };
+    mocks.exit.mockRejectedValue(Object.assign(new Error('確認期間伺服器或模式已變更，這筆沒有送出，請重新下單'), { mutationNotStarted: true }));
+    const r = await mount(stk, { positions: [position] });
+    await arm(r);
+    await act(async () => { button(r, '平倉')!.props.onClick(); });
+    await flush();
+    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', title: '⚡ 平倉未送出' });
 });

@@ -68,11 +68,15 @@ it.each(['context', 'account'])('rechecks %s before the odd remainder of a stock
         current = false; // the first leg's response arrives after the panel changed
         return {};
     });
-    await expect(placeStockExitByShares(contract, 'Sell', 1500, account, {
+    const err = await placeStockExitByShares(contract, 'Sell', 1500, account, {
         isAccountCurrent: () => change !== 'account' || current,
         beforeSend: () => { if (change === 'context' && !current) throw new Error('商品已變更'); },
-    })).rejects.toMatchObject({ mutationNotStarted: true });
+    }).then(() => null, e => e);
     expect(dispatched).toHaveBeenCalledOnce();
+    // the whole-lot leg went out, so the refusal of the odd leg is never reported as "nothing sent"
+    expect(err).toBeInstanceOf(Error);
+    expect((err as { mutationNotStarted?: boolean }).mutationNotStarted).toBeUndefined();
+    expect(String(err.message)).toContain('整張分單已送出，零股分單未送出');
 });
 it('passes explicit Cover and retains Auto default', async () => {
     const future = {...contract,security_type:'FUT',exchange:'TAIFEX'} as ContractBase;
@@ -170,4 +174,14 @@ it('sends the chosen order type on limit orders, keeps ROD by default and IOC fo
     m.selected = {...account, account_type:'F'}; m.accounts=[m.selected];
     await placeQuickOrder(future,'Sell',100,1,{orderType:'IOC',ocType:'New'});
     expect(m.future.mock.calls[0]![1]).toMatchObject({order_type:'IOC',price_type:'LMT',octype:'New'});
+});
+it('a split exit approved once stops before the odd-lot leg if the server mode changes after the whole-lot leg', async () => {
+    setSimulation(true);
+    m.stock.mockImplementationOnce(async () => { setSimulation(false); return {}; });
+    const err = await placeStockExitByShares(contract, 'Sell', 1500, account).catch(e => e);
+    expect(m.stock).toHaveBeenCalledOnce();
+    expect(err).toBeInstanceOf(Error);
+    // the first leg went out: never reported as "not sent"
+    expect((err as { mutationNotStarted?: boolean }).mutationNotStarted).toBeUndefined();
+    expect(String(err.message)).toContain('零股分單未送出');
 });

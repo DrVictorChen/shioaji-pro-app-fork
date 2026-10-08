@@ -129,3 +129,18 @@ it('shows the pinned follow account, masked in privacy mode', async () => {
     await act(async () => { setPrivacyMode(false); btn('動態跟隨中').props.onClick(); });
     expect(shown()).toBeUndefined();
 });
+
+it('stops the batch (signed account) when the server mode changes between grid orders', async () => {
+    observeServerInfo(beginServerInfoRequest(), { simulation: true } as import('../lib/shioaji').ServerInfo);
+    let sent = 0;
+    m.future.mockImplementation(async (_c: unknown, _o: unknown, _a: unknown, opts?: { beforeDispatch?: () => void }) => {
+        opts?.beforeDispatch?.();
+        sent += 1;
+        if (sent === 1) observeServerInfo(beginServerInfoRequest(), { simulation: false } as import('../lib/shioaji').ServerInfo);
+        return {};
+    });
+    await render();
+    await act(async () => { await btn('鋪 ').props.onClick(); });
+    expect(sent).toBe(1);
+    expect(m.notify.mock.calls.some(c => c[0].kind === 'err' && c[0].body.includes('伺服器或模式'))).toBe(true);
+});

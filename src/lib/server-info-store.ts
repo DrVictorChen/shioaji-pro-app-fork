@@ -121,17 +121,32 @@ export const SERVER_MODE_CHANGED_MESSAGE = '確認期間伺服器或模式已變
  * - 開始時模式未知 → 代次沒變才算相同；代次變了只在現在確定是模擬時放行
  *   （確認視窗自己第一次取得 /info 不會誤擋模擬單；變成正式一律不送）。
  */
-export function captureServerMode(): () => boolean {
-    const base = syncBase();
-    const simulation = infos.get(base)?.simulation;
-    const version = modeVersion;
-    return () => {
+export interface ServerModeGuard {
+    (): boolean;
+    /** 開始時模式未知、已經過使用者確認（確認視窗自己會守到按下確認）：
+     * 改以目前的伺服器與模式為準，之後再變就不送。避免冷啟動第一筆正式單
+     * 因確認視窗第一次取得模式而被誤擋。 */
+    rebaseIfUnknown(): void;
+}
+
+export function captureServerMode(): ServerModeGuard {
+    let base = syncBase();
+    let simulation = infos.get(base)?.simulation;
+    let version = modeVersion;
+    const same = (() => {
         const now = syncBase();
         if (now !== base) return false;
         const current = infos.get(now)?.simulation;
         if (typeof simulation === 'boolean') return current === simulation;
         return modeVersion === version || current === true;
+    }) as ServerModeGuard;
+    same.rebaseIfUnknown = () => {
+        if (typeof simulation === 'boolean') return;
+        base = syncBase();
+        simulation = infos.get(base)?.simulation;
+        version = modeVersion;
     };
+    return same;
 }
 
 export function getServerModeVersion() {

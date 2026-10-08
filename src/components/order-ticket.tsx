@@ -326,7 +326,9 @@ export function OrderTicket({
                     accountLabel: accountConfirmLabel(orderAccount),
                 });
                 if (!approved) throw new Error('已取消下單');
+                sameServerMode.rebaseIfUnknown();
             }
+            if (!sameServerMode()) throw new Error(SERVER_MODE_CHANGED_MESSAGE);
             // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
             if (orderLotRef.current !== orderLot) {
                 throw new Error(UNIT_CHANGED_MESSAGE);
@@ -541,7 +543,9 @@ export function OrderTicket({
                         .join('、')}`,
                 });
                 if (!approved) throw new Error('已取消下單');
+                sameServerMode.rebaseIfUnknown();
             }
+            if (!sameServerMode()) throw new Error(SERVER_MODE_CHANGED_MESSAGE);
             // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
             if (orderLotRef.current !== orderLot) {
                 throw new Error(UNIT_CHANGED_MESSAGE);

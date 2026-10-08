@@ -2,12 +2,14 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// like the real fetchInfo, a response updates the server-info store
 vi.mock('./shioaji', () => ({
-    fetchInfo: vi.fn(() =>
-        Promise.resolve({ simulation: true }) as Promise<{
-            simulation: boolean;
-        }>,
-    ),
+    fetchInfo: vi.fn(async () => {
+        const store = await import('./server-info-store');
+        const info = { simulation: true };
+        store.observeServerInfo(store.beginServerInfoRequest(), info as never);
+        return info;
+    }),
 }));
 
 import {
@@ -40,7 +42,8 @@ describe('requestOrderConfirm', () => {
         await primeOrderConfirmSimulation();
         const promise = requestOrderConfirm(req);
         expect(getPendingOrderConfirm()?.simulation).toBe(true);
-        expect(fetchInfo).toHaveBeenCalledTimes(1);
+        // the dialog also refreshes /info when it opens (the badge must not be stale)
+        expect(fetchInfo).toHaveBeenCalled();
         resolveOrderConfirm(false);
         await promise;
     });
@@ -156,5 +159,21 @@ describe('server mode unknown when the confirmation opens', () => {
         store.observeServerInfo(store.beginServerInfoRequest(), undefined);
         resolveOrderConfirm(true);
         await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+    });
+});
+
+describe('the dialog badge and the gate read the same current mode', () => {
+    it('a new dialog after simulation → production shows 正式 (not a stale cached 模擬) and approving it sends', async () => {
+        const store = await import('./server-info-store');
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        const first = requestOrderConfirm(req);
+        expect(getPendingOrderConfirm()?.simulation).toBe(true);
+        resolveOrderConfirm(false);
+        await first;
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+        const second = requestOrderConfirm(req);
+        expect(getPendingOrderConfirm()?.simulation).toBe(false);
+        resolveOrderConfirm(true);
+        await expect(second).resolves.toBe(true);
     });
 });

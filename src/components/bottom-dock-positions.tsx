@@ -226,10 +226,12 @@ export function PositionsPane({
             });
             onChanged();
         } catch (e) {
+            // 確定一筆都沒送出（mutationNotStarted）就照實說未送出
+            const notSent = (e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted === true;
             notify({
                 kind: 'err',
-                title: mode2 === 'close' ? '平倉未完整確認' : '反手未完整確認',
-                body: `可能已有部分委託送出或結果未知，請手動核對，勿直接重送。${e instanceof Error ? e.message : String(e)}`,
+                title: mode2 === 'close' ? (notSent ? '平倉未送出' : '平倉未完整確認') : (notSent ? '反手未送出' : '反手未完整確認'),
+                body: notSent ? (e instanceof Error ? e.message : String(e)) : `可能已有部分委託送出或結果未知，請手動核對，勿直接重送。${e instanceof Error ? e.message : String(e)}`,
             });
         } finally {
             setBusyCode(null);

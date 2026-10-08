@@ -9,7 +9,7 @@
 
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
-import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from './server-info-store';
+import { captureServerMode, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from './server-info-store';
 import type { Action } from './types/order';
 import type { Account } from './types/portfolio';
 
@@ -40,7 +40,7 @@ interface PendingConfirm {
     resolve: (approved: boolean) => void;
     reject: (error: Error) => void;
     // the server and mode when the dialog opened (server-info-store)
-    sameServer: () => boolean;
+    sameServer: ServerModeGuard;
 }
 
 /** 確認視窗開著時伺服器或模式變了（例如模擬 sidecar 重啟成正式）：舊的確認不算數 */
@@ -74,9 +74,15 @@ export function resolveOrderConfirm(approved: boolean): void {
     current.resolve(approved);
 }
 
-// 環境 badge 用 — lazy 快取一次，local server 毫秒級回應
-let simulationCache: boolean | null = null;
+// 環境 badge：一律取伺服器資訊 store 目前的模式（與送單閘門同一份），
+// 不另外長期快取 — sidecar 在同一位址由模擬重啟成正式時不會顯示舊的「模擬」
+let simulationOverride: boolean | null | undefined;
 let simulationInflight: Promise<void> | null = null;
+function currentSimulation(): boolean | null {
+    if (simulationOverride !== undefined) return simulationOverride;
+    const s = knownServerInfo()?.simulation;
+    return typeof s === 'boolean' ? s : null;
+}
 
 // 確認視窗一律遮罩帳號（只露末四碼），不受隱私模式開關影響
 export function accountConfirmLabel(account: Pick<Account, 'broker_id' | 'account_id'>): string {
@@ -91,12 +97,10 @@ function selectedAccountLabel(unit: string): string | undefined {
     return account ? accountConfirmLabel(account) : undefined;
 }
 
+/** 重新取得 /info（更新 store）；確認視窗開啟時一律取一次最新的模式 */
 export function primeOrderConfirmSimulation(): Promise<void> {
-    if (simulationCache !== null) return Promise.resolve();
     simulationInflight ??= fetchInfo()
-        .then((info) => {
-            simulationCache = info.simulation;
-        })
+        .then(() => undefined)
         .catch(() => {
             // 未知就未知 — 不阻塞下單確認
         })
@@ -126,7 +130,7 @@ export function requestOrderConfirm(
             accountLabel: request.accountLabel ?? selectedAccountLabel(request.unit),
         };
         const current: PendingConfirm = {
-            request: { ...withAccount, simulation: simulationCache },
+            request: { ...withAccount, simulation: currentSimulation() },
             resolve,
             reject,
             sameServer: captureServerMode(),
@@ -134,7 +138,9 @@ export function requestOrderConfirm(
         pending = current;
         const start = () => {
             if (pending !== current) return;
-            current.request = { ...withAccount, simulation: simulationCache };
+            // 視窗顯示的模式與送單閘門取自同一個時間點（取得最新 /info 之後）
+            current.sameServer = captureServerMode();
+            current.request = { ...withAccount, simulation: currentSimulation() };
             emit();
         };
         // 環境資訊最多等 800ms — 拿不到就以未知呈現
@@ -152,11 +158,11 @@ export function resetOrderConfirmForTest() {
         pending = null;
         current.resolve(false);
     }
-    simulationCache = null;
+    simulationOverride = undefined;
     simulationInflight = null;
     emit();
 }
 
 export function setSimulationCacheForTest(value: boolean | null) {
-    simulationCache = value;
+    simulationOverride = value;
 }
