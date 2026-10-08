@@ -6,7 +6,7 @@
 
 import { CirclePause, ArrowLeftRight, Ban, ChevronDown, RotateCw } from 'lucide-react';
 import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from 'react';
-import { ensureContract, getCachedContract, primeContract, useContract } from '../lib/contracts-cache';
+import { ensureContract, primeContract, useContract } from '../lib/contracts-cache';
 import { expiryTime, linkedStockCode, monthLabel, pickStockFuture, type FlashLink } from '../lib/flash-link';
 import { fetchFutures } from '../lib/shioaji';
 import type { ContractInfo } from '../lib/types/contract';
@@ -24,7 +24,8 @@ function loadStockFutures(code: string) {
     futures.set(code, { status: 'loading' });
     emit();
     fetchFutures({ underlyingCode: code }).then(rows => {
-        for (const row of rows) if (!getCachedContract(row.code)) primeContract(row);
+        // 以這次取得的資料為準（更新快取裡可能過時的同代碼合約）
+        for (const row of rows) primeContract(row);
         futures.set(code, { status: 'ok', rows, at: Date.now() });
     }, () => futures.set(code, { status: 'error' })).finally(emit);
 }

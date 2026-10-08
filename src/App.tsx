@@ -120,7 +120,7 @@ import {
     withLinkMode,
     type LinkMode,
 } from './lib/workspace';
-import { isLinkGroup, normalizeFlashLink, type FlashLink, type LinkGroupId } from './lib/flash-link';
+import { isLinkGroup, LINK_GROUPS, normalizeFlashLink, type FlashLink, type LinkGroupId } from './lib/flash-link';
 import { FlashLinkHost } from './components/flash-link-host';
 import { SettingsInfoRow } from './components/chart-order-popover';
 import { mainFlashSelection } from './lib/order-account';
@@ -1332,7 +1332,13 @@ function MainApp() {
     // 同一群組連續輸入時只套用最後一次（較早的查詢晚回來不能蓋掉）
     const groupCodeSeq = useRef<Partial<Record<LinkGroupId, number>>>({});
     // 群組正在查的新代碼：查詢期間全組閃電暫停（不能啟用、確認中的單作廢）
-    const [groupPending, setGroupPending] = useState<Partial<Record<LinkGroupId, { code: string; seq: number }>>>({});
+    // （記錄所屬版面 generation：套用別的版面後，舊查詢不會暫停新版面）
+    const [groupPending, setGroupPending] = useState<Partial<Record<LinkGroupId, { code: string; seq: number; gen: number }>>>({});
+    useEffect(() => {
+        // 套用新版面：舊版面的群組查詢全部作廢
+        for (const g of LINK_GROUPS) groupCodeSeq.current[g] = (groupCodeSeq.current[g] ?? 0) + 1;
+        setGroupPending({});
+    }, [workspaceGen]);
     const clearPending = useCallback((group: LinkGroupId, seq?: number) => setGroupPending((p) => {
         if (!p[group] || (seq !== undefined && p[group]!.seq !== seq)) return p;
         const { [group]: _gone, ...rest } = p;
@@ -1355,7 +1361,7 @@ function MainApp() {
         const seq = (groupCodeSeq.current[group] ?? 0) + 1;
         groupCodeSeq.current[group] = seq;
         const gen = workspaceGenRef.current;
-        setGroupPending((p) => ({ ...p, [group]: { code, seq } }));
+        setGroupPending((p) => ({ ...p, [group]: { code, seq, gen } }));
         ensureContract(code).then(
             (c) => {
                 clearPending(group, seq);
@@ -1627,7 +1633,7 @@ function MainApp() {
                                     block={block}
                                     selected={selected}
                                     sourceCode={blockSourceCode(block, workspace)}
-                                    groupPending={(() => { const m = blockLinkMode(block); return isLinkGroup(m) ? groupPending[m]?.code : undefined; })()}
+                                    groupPending={(() => { const m = blockLinkMode(block); const p = isLinkGroup(m) ? groupPending[m] : undefined; return p && p.gen === workspaceGen ? p.code : undefined; })()}
                                     linkGroups={linkGroups}
                                     onLinkMode={setBlockLinkMode}
                                     onGroupCode={setGroupCode}

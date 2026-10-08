@@ -250,3 +250,10 @@ it('a failed stock lookup for 現股 offers retry and 改為照選取', async ()
     expect(text(r.root)).toContain('ladder 2330');
     expect(r.root.findAllByType('button').length).toBe(0);
 });
+
+it('freshly fetched futures replace stale cached copies of the same contract', async () => {
+    mocks.cache.set('CDFJ6', { ...tsmcFut[0]!, multiplier: 100, last_trading_date: undefined });
+    let got: ContractInfo | undefined;
+    await mount(tsmc, { kind: 'future' }, { render: (c: ContractInfo) => { got = c; return null; } });
+    expect(got).toMatchObject({ code: 'CDFJ6', multiplier: 2000, last_trading_date: '2026-10-20' });
+});
