@@ -594,6 +594,8 @@ function BlockView(props: BlockViewProps) {
     const { block, selected, sourceCode, linkGroups, onLinkMode, onGroupCode, onPinChange, onRemove, ...bodyProps } = props;
     const { contract, pinFailed } = useBlockContract(block, selected, sourceCode);
     const flashTargetRef = useRef<string | null>(null);
+    // 每次 render 先清空；只有實際畫出閃電時才填入（來源載入中或暫停時彈出不帶舊合約）
+    flashTargetRef.current = null;
     const linkMode = blockLinkMode(block);
     const missingContractPhase: AsyncPhase = sourceCode
         ? pinFailed ? 'error' : 'loading'
@@ -1072,6 +1074,8 @@ function MainApp() {
     // rebuilds the flash panels even when block ids repeat, so their quantity
     // and click-to-trade state come from the applied layout, never the old one.
     const [workspaceGen, setWorkspaceGen] = useState(0);
+    const workspaceGenRef = useRef(workspaceGen);
+    workspaceGenRef.current = workspaceGen;
     const replaceWorkspace = useCallback((w: Workspace) => {
         setWorkspaceGen((g) => g + 1);
         updateWorkspace(w);
@@ -1174,6 +1178,7 @@ function MainApp() {
                 minH: meta.defaultSize.minH,
             };
             updateWorkspace({
+                ...workspace,
                 blocks: [...workspace.blocks, { id, type, pin: null }],
                 layout: [...workspace.layout, item],
             });
@@ -1250,6 +1255,7 @@ function MainApp() {
             const gone = workspace.blocks.find((b) => b.id === id);
             if (gone) trackActivity('關面板', gone.type);
             updateWorkspace({
+                ...workspace,
                 blocks: workspace.blocks.filter((b) => b.id !== id),
                 layout: workspace.layout.filter((l) => l.i !== id),
             });
@@ -1323,10 +1329,19 @@ function MainApp() {
         [updateWorkspace],
     );
     // 群組換代碼：先確認代碼存在，再讓全組同一次一起換
+    // 同一群組連續輸入時只套用最後一次（較早的查詢晚回來不能蓋掉）
+    const groupCodeSeq = useRef<Partial<Record<LinkGroupId, number>>>({});
     const setGroupCode = useCallback((group: LinkGroupId, code: string) => {
+        const seq = (groupCodeSeq.current[group] ?? 0) + 1;
+        groupCodeSeq.current[group] = seq;
+        const gen = workspaceGenRef.current;
         ensureContract(code).then(
-            (c) => updateWorkspace(withGroupCode(workspaceRef.current, group, c.code)),
-            () => notify({ kind: 'err', title: '找不到商品', body: `代碼 ${code} 無法解析` }),
+            (c) => {
+                // 期間又輸入了新代碼或套用了別的版面：這次作廢
+                if (groupCodeSeq.current[group] !== seq || workspaceGenRef.current !== gen) return;
+                updateWorkspace(withGroupCode(workspaceRef.current, group, c.code));
+            },
+            () => { if (groupCodeSeq.current[group] === seq) notify({ kind: 'err', title: '找不到商品', body: `代碼 ${code} 無法解析` }); },
         );
     }, [updateWorkspace]);
     const linkGroups = useMemo(() => linkGroupSummary(workspace), [workspace]);

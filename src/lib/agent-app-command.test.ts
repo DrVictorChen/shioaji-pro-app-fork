@@ -250,6 +250,15 @@ describe('semantic workspace commands', () => {
         ).rejects.toMatchObject({ code: 'not_found' });
     });
 
+    it('adding or removing a panel keeps the link groups\' codes', async () => {
+        const { context, workspace } = fixture();
+        context.updateWorkspace({ ...workspace(), linkGroups: { A: '2330' } });
+        await executeAgentAppCommand({ name: 'add_panel', args: { type: 'depth' } }, context);
+        expect(workspace().linkGroups).toEqual({ A: '2330' });
+        await executeAgentAppCommand({ name: 'remove_panel', args: { id: 'depth-1' } }, context);
+        expect(workspace().linkGroups).toEqual({ A: '2330' });
+    });
+
     it('adds supported panels and makes singleton addition idempotent', async () => {
         const { context, workspace } = fixture();
         await expect(

@@ -45,21 +45,23 @@ export function linkedStockCode(c: ContractInfo): string | null {
     return isStockFuture(c) ? c.underlying_code! : null;
 }
 
-// 最後交易日 13:30（台北）收盤後視為已到期
-const CLOSE_MINUTES = 13 * 60 + 30;
-function taipei(now: number): { day: string; minutes: number } {
-    const t = new Date(now + 8 * 3600_000);
-    return { day: t.toISOString().slice(0, 10), minutes: t.getUTCHours() * 60 + t.getUTCMinutes() };
+function taipei(now: number): { day: string } {
+    return { day: new Date(now + 8 * 3600_000).toISOString().slice(0, 10) };
+}
+/** 最後交易日 13:30（台北）收盤的時刻；之後視為已到期。沒有日期 → null */
+export function expiryTime(c: Pick<ContractInfo, 'last_trading_date' | 'delivery_date'>): number | null {
+    const ltd = c.last_trading_date ?? c.delivery_date;
+    if (!ltd || !/^\d{4}-\d{2}-\d{2}$/.test(ltd)) return null;
+    return Date.parse(`${ltd}T13:30:00+08:00`);
 }
 function expired(c: ContractInfo, now: number): boolean {
-    const ltd = c.last_trading_date ?? c.delivery_date;
-    if (!ltd) return false;
-    const { day, minutes } = taipei(now);
-    return day > ltd || (day === ltd && minutes >= CLOSE_MINUTES);
+    const t = expiryTime(c);
+    return t !== null && now >= t;
 }
 
 export type StockFuturePick =
-    | { status: 'ok'; contract: ContractInfo; hasMini: boolean; expiresToday: boolean; months: string[] }
+    | { status: 'ok'; contract: ContractInfo; hasMini: boolean; expiresToday: boolean; expiresAt: number | null; months: string[] }
+    | { status: 'unlisted'; month: string }
     | { status: 'none' }
     | { status: 'noMini' }
     | { status: 'expired'; month: string };
@@ -67,7 +69,9 @@ export type StockFuturePick =
 /** 依面板的規格與月份，從某檔股票的個股期合約中選出要下單的真實月份合約 */
 export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spec' | 'month'>, now = Date.now()): StockFuturePick {
     // 近月／次月別名（…R1／…R2）不用：下單一律用真實月份
-    const real = rows.filter(r => r.security_type === 'FUT' && !r.target_code && /^\d{6}$/.test(r.delivery_month ?? ''));
+    // ETF 期貨不是個股期（spec_kind 缺省時不排除）
+    const real = rows.filter(r => r.security_type === 'FUT' && !r.target_code && /^\d{6}$/.test(r.delivery_month ?? '')
+        && (r.spec_kind === undefined || r.spec_kind === 'stock_fut'));
     if (real.length === 0) return { status: 'none' };
     const mult = new Map<string, number>();
     for (const r of real) mult.set(r.root ?? '', Math.max(mult.get(r.root ?? '') ?? 0, r.multiplier ?? 0));
@@ -78,9 +82,15 @@ export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spe
     const series = real.filter(r => (r.root ?? '') === root).sort((a, b) => a.delivery_month!.localeCompare(b.delivery_month!));
     const live = series.filter(r => !expired(r, now));
     const contract = link.month === 'near' ? live[0] : link.month === 'next' ? live[1] : live.find(r => r.delivery_month === link.month);
-    if (!contract) return link.month === 'near' || link.month === 'next' ? { status: 'none' } : { status: 'expired', month: link.month };
+    if (!contract) {
+        if (link.month === 'near' || link.month === 'next') return { status: 'none' };
+        const listed = series.some(r => r.delivery_month === link.month);
+        return listed || link.month < taipei(now).day.replace('-', '').slice(0, 6)
+            ? { status: 'expired', month: link.month }
+            : { status: 'unlisted', month: link.month };
+    }
     const ltd = contract.last_trading_date ?? contract.delivery_date;
-    return { status: 'ok', contract, hasMini, expiresToday: !!ltd && ltd === taipei(now).day, months: live.map(r => r.delivery_month!) };
+    return { status: 'ok', contract, hasMini, expiresToday: !!ltd && ltd === taipei(now).day, expiresAt: expiryTime(contract), months: live.map(r => r.delivery_month!) };
 }
 
 /** 價差：a − b 與相對 b 的百分比；任一方沒有價格 → null */

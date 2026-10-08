@@ -9,6 +9,7 @@ import {
     pickStockFuture,
     spreadOf,
     lotsPerContract,
+    expiryTime,
 } from './flash-link';
 
 const fut = (code: string, root: string, month: string, ltd: string, multiplier: number, target: string | null = null) => ({
@@ -77,6 +78,23 @@ describe('pickStockFuture', () => {
     it('lists the live months of the chosen spec for the picker', () => {
         const r = pickStockFuture(rows, link(), now);
         expect(r.status === 'ok' && r.months).toEqual(['202610', '202611', '202612']);
+    });
+});
+
+describe('stock futures only', () => {
+    it('ETF futures are not stock futures: an ETF has no 個股期', () => {
+        const etf = [{ ...fut('NYFJ6', 'NYF', '202610', '2026-10-21', 10000), spec_kind: 'etf_fut', underlying_code: '0050' } as ContractInfo];
+        expect(pickStockFuture(etf, link(), now)).toEqual({ status: 'none' });
+    });
+    it('a chosen month that is simply not listed is not called expired', () => {
+        expect(pickStockFuture(rows, link({ month: '202704' }), now)).toEqual({ status: 'unlisted', month: '202704' });
+    });
+    it('expiry instant is 13:30 Taipei on the last trading day', () => {
+        expect(expiryTime(rows[2]!)).toBe(Date.UTC(2026, 9, 21, 5, 30));
+    });
+    it('the picked contract carries its expiry instant', () => {
+        const r = pickStockFuture(rows, link(), now);
+        expect(r.status === 'ok' && r.expiresAt).toBe(Date.UTC(2026, 9, 21, 5, 30));
     });
 });
 

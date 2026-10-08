@@ -1,6 +1,6 @@
 // 閃電連動：換標的、換對應商品、換群組（linkKey 變了）同一次 render 解除點價
 // 下單，確認視窗開著時的那筆不送；商品列的種類標籤；價差對照列。
-import { createElement } from 'react';
+import { createElement, useLayoutEffect } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
@@ -16,7 +16,8 @@ vi.mock('../hooks/use-stream', () => ({
     useQuote: (code: string | null, o?: { oddLot?: boolean }) => (o?.oddLot ? { tick: { close: '1080', volume: 1 } } : code === '2330' ? { tick: { close: '1085', volume: 1 } } : undefined),
 }));
 vi.mock('../hooks/use-display-book', () => ({
-    useDisplayBook: (code: string) => ({ quote: { tick: { close: code === 'CDFJ6' ? '1095' : '1085', volume: 1 } }, snapshot: undefined, book: undefined }),
+    useDisplayBook: (code: string) => (code === 'CDFK6' ? { quote: undefined, snapshot: undefined, book: undefined }
+        : { quote: { tick: { close: code === 'CDFJ6' ? '1095' : '1085', volume: 1 } }, snapshot: undefined, book: undefined }),
 }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: vi.fn(), cancelOrders: vi.fn() }));
 vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place, placeStockExitByShares: vi.fn() }));
@@ -112,4 +113,44 @@ it('odd-lot panel shows the odd/round-lot spread; stock-future panel the basis a
     // hidden in settings
     const hidden = await mount(cdf, { showRef: false });
     expect(byTestId(hidden, 'flash-ref')).toBeUndefined();
+});
+
+it('the basis uses traded prices only — a future with no trade shows —, not its reference price', async () => {
+    const r = await mount({ ...cdf, code: 'CDFK6', reference: 1100 } as ContractInfo);
+    expect(text(byTestId(r, 'flash-ref')!)).toBe('現股 1,085期現差 —1口=2張');
+});
+
+it('a mapped future that has reached its expiry is not sent, also when the confirmation is still open', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-21T13:29:00+08:00'));
+    let guard!: () => void;
+    mocks.place.mockImplementation((_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+        guard = opts.beforeSend;
+        return new Promise(() => undefined);
+    });
+    const expiresAt = Date.parse('2026-10-21T13:30:00+08:00');
+    const r = await mount(cdf, { expiresAt });
+    await arm(r);
+    await act(async () => { buyCell(r).props.onClick(); });
+    expect(mocks.place).toHaveBeenCalledOnce();
+    vi.setSystemTime(new Date('2026-10-21T13:30:05+08:00'));
+    expect(() => guard()).toThrow(/到期/);
+    // a click after the expiry instant is refused before anything is sent
+    await act(async () => { buyCell(r).props.onClick(); });
+    expect(mocks.place).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+});
+
+it('the ladder already shows locked in the commit where the link key changes (before effects)', async () => {
+    let r!: ReactTestRenderer;
+    const seen: boolean[] = [];
+    const Wrapped = ({ linkKey, look }: { linkKey: string; look: boolean }) => {
+        useLayoutEffect(() => { if (look) seen.push(text(r.root).includes('點價即下單')); }, [look]);
+        return createElement(FlashOrder, props(stk, { linkKey }));
+    };
+    await act(async () => { r = create(createElement(Wrapped, { linkKey: 'A|future|2330', look: false })); });
+    roots.push(r);
+    await arm(r);
+    await act(async () => { r.update(createElement(Wrapped, { linkKey: 'A|future|2317', look: true })); });
+    expect(seen).toEqual([false]);
 });

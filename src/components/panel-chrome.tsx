@@ -58,7 +58,7 @@ export function PanelChrome({
     // 鎖定輸入框正在輸入新代碼時，舊名稱會誤導 — 未按 Enter 套用前先隱藏
     const editingPin =
         pinned && editCode.trim().toUpperCase() !== (pin ?? '').toUpperCase();
-    const showCode = !!symbolCode && !pinned;
+    const showCode = !!symbolCode && !pinned && !(link && link.mode !== 'main');
     const showName = !!symbolCode && !!symbolName && !editingPin;
     // 面板名稱只在旁邊還有代碼或名稱時才可於極窄時隱藏
     const hasSymbol = showCode || showName;

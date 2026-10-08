@@ -283,6 +283,7 @@ export async function executeAgentAppCommand<K extends AgentAppCommandName>(
                 pin: null,
             };
             context.updateWorkspace({
+                ...workspace,
                 blocks: [...workspace.blocks, block],
                 layout: [
                     ...workspace.layout,
@@ -316,6 +317,7 @@ export async function executeAgentAppCommand<K extends AgentAppCommandName>(
                 );
             }
             context.updateWorkspace({
+                ...workspace,
                 blocks: workspace.blocks.filter((block) => block.id !== id),
                 layout: workspace.layout.filter((item) => item.i !== id),
             });

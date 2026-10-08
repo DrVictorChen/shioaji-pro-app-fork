@@ -44,15 +44,14 @@ function useStockFutures(code: string | null): FuturesEntry | undefined {
     return entry;
 }
 
-// 近月到期換月：每分鐘重新判斷
-function useMinute(on: boolean): number {
-    const [now, setNow] = useState(() => Date.now());
+// 近月到期換月：每次 render 都用當下時間判斷，並在到期那一刻重新 render
+function useRerenderAt(at: number | null) {
+    const [, bump] = useState(0);
     useEffect(() => {
-        if (!on) return;
-        const t = setInterval(() => setNow(Date.now()), 60_000);
-        return () => clearInterval(t);
-    }, [on]);
-    return on ? now : 0;
+        if (at === null) return;
+        const t = setTimeout(() => bump(n => n + 1), Math.max(0, at - Date.now()) + 50);
+        return () => clearTimeout(t);
+    }, [at]);
 }
 
 export interface FlashLinkProps {
@@ -60,6 +59,7 @@ export interface FlashLinkProps {
     symbolExtra?: ReactNode;
     settingsRows: ReactNode;
     showRef: boolean;
+    expiresAt?: number | null;
 }
 
 const KIND_OPTIONS = [['select', '照選取'], ['stock', '現股'], ['future', '個股期']] as const;
@@ -95,8 +95,8 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
         return () => { active = false; };
     }, [needStock, stock]);
     const fut = useStockFutures(link.kind === 'future' ? stockCode : null);
-    const now = useMinute(link.kind === 'future');
-    const pick = link.kind === 'future' && fut?.status === 'ok' ? pickStockFuture(fut.rows, link, now || Date.now()) : null;
+    const pick = link.kind === 'future' && fut?.status === 'ok' ? pickStockFuture(fut.rows, link, Date.now()) : null;
+    useRerenderAt(pick?.status === 'ok' ? pick.expiresAt : null);
     const picked = useContract(pick?.status === 'ok' ? pick.contract.code : null) ?? (pick?.status === 'ok' ? pick.contract : undefined);
 
     const set = (patch: Partial<FlashLink>) => onLinkChange({ ...link, ...patch });
@@ -161,6 +161,10 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
         return empty(<Ban size={18} aria-hidden />, `${monthLabel(pick.month)} 合約已到期`, undefined,
             button('改為近月', () => set({ month: 'near' })));
     }
+    if (pick?.status === 'unlisted') {
+        return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有 ${monthLabel(pick.month)} 合約`, undefined,
+            button('改為近月', () => set({ month: 'near' })));
+    }
     if (pick?.status !== 'ok' || !picked) return <div className={styles.waiting}>載入個股期…</div>;
     const monthText = link.month === 'near' ? '近月' : link.month === 'next' ? '次月' : monthLabel(link.month);
     const symbolExtra = (
@@ -177,5 +181,5 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
             {pick.expiresToday && <span className={styles.expiryTag}>今日到期</span>}
         </>
     );
-    return show(picked, { linkKey, symbolExtra, settingsRows, showRef: link.ref });
+    return show(picked, { linkKey, symbolExtra, settingsRows, showRef: link.ref, expiresAt: pick.expiresAt });
 }

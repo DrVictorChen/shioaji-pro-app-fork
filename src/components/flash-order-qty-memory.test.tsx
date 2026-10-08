@@ -198,7 +198,7 @@ it('a unit change that brings a remembered quantity is still disarmed, even befo
     const Wrapped = ({ lot, click }: { lot: Lot; click: boolean }) => {
         useLayoutEffect(() => {
             if (!click) return;
-            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+            r.root.findAll(n => n.type === 'div' && n.props['data-side'] === 'buy')[0]!.props.onClick();
         }, [click]);
         return createElement(FlashOrder, props(stk, { lot, onLotChange: () => undefined, qtyMemory: mem, onQtyMemoryChange: () => undefined }));
     };
@@ -237,7 +237,7 @@ it('a layout switch that brings another remembered quantity for the same unit sh
     const Wrapped = ({ mem, click }: { mem: Setting; click: boolean }) => {
         useLayoutEffect(() => {
             if (!click) return;
-            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+            r.root.findAll(n => n.type === 'div' && n.props['data-side'] === 'buy')[0]!.props.onClick();
         }, [click]);
         return createElement(FlashOrder, props(stk, { lot: 'Common', onLotChange: () => undefined, qtyMemory: mem, onQtyMemoryChange: () => undefined }));
     };
@@ -287,7 +287,7 @@ it('an invalid quantity restored into a mounted panel (same unit) is 1 at once a
     const Wrapped = ({ mem, click }: { mem: Setting; click: boolean }) => {
         useLayoutEffect(() => {
             if (!click) return;
-            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+            r.root.findAll(n => n.type === 'div' && n.props['data-side'] === 'buy')[0]!.props.onClick();
         }, [click]);
         return createElement(FlashOrder, props(stk, { lot: 'Common', onLotChange: () => undefined, qtyMemory: mem, onQtyMemoryChange: () => undefined }));
     };

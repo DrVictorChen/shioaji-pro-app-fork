@@ -142,3 +142,22 @@ it('a failed futures lookup says so and can retry', async () => {
     await act(async () => { retry.props.onClick(); });
     expect(text(r.root)).toContain('ladder CDFJ6');
 });
+
+it('reports the traded contract for a popout, and nothing while paused', async () => {
+    const targetRef = { current: 'stale' as string | null };
+    const r = await mount(tsmc, { kind: 'future' }, { targetRef });
+    expect(targetRef.current).toBe('CDFJ6');
+    await show(r, txf, { kind: 'future' }, { targetRef });
+    expect(targetRef.current).toBeNull();
+});
+
+it('a chosen month that is not listed says so (not 已到期)', async () => {
+    const r = await mount(tsmc, { kind: 'future', month: '202704' });
+    expect(text(r.root)).toContain('沒有 2027/4 合約');
+});
+
+it('passes the picked contract\'s expiry instant to the ladder', async () => {
+    let expiresAt: unknown;
+    await mount(tsmc, { kind: 'future' }, { render: (_c: ContractInfo, p: { expiresAt?: number }) => { expiresAt = p.expiresAt; return null; } });
+    expect(expiresAt).toBe(Date.parse('2026-10-20T13:30:00+08:00'));
+});
