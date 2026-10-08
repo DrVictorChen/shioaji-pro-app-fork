@@ -21,6 +21,8 @@ const listeners = new Set<() => void>();
 let sequence = 0;
 let modeVersion = 0;
 let observations = 0;
+// base → request sequence of the latest successful /info applied there
+const freshest = new Map<string, number>();
 let activeBase: string | undefined;
 let channel: BroadcastChannel | null = null;
 
@@ -75,7 +77,8 @@ export function observeServerInfo(request: ServerInfoRequest, info: ServerInfo |
         channel?.postMessage({ kind: 'server-info-invalidated', base });
     }
     applied.set(base, request.sequence);
-    if (info) observations += 1;
+    if (info) { observations += 1; freshest.set(base, request.sequence); }
+    else freshest.delete(base);
     if (info) infos.set(base, info);
     else infos.delete(base);
     for (const listener of listeners) listener();
@@ -156,6 +159,18 @@ export function captureServerMode(): ServerModeGuard {
         version = modeVersion;
     };
     return same;
+}
+
+/** 目前的請求序號：之後才開始的 /info 請求序號都比它大 */
+export function currentServerInfoSequence() {
+    syncBase();
+    return sequence;
+}
+
+/** 目前位址的模式是否來自 `afterSequence` 之後才開始的 /info 請求（舊請求的回應不算） */
+export function serverInfoFreshSince(afterSequence: number): boolean {
+    const base = syncBase();
+    return (freshest.get(base) ?? -1) > afterSequence && typeof infos.get(base)?.simulation === 'boolean';
 }
 
 /** 成功取得 /info 的次數（同一模式也會增加）：確認視窗用來判斷「有新的回應」 */

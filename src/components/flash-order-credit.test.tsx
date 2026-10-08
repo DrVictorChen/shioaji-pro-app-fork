@@ -542,8 +542,20 @@ it('the server mode is captured at the click, before the credit check: a mode ch
     store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
     await act(async () => { release(enquire('2330')); });
     await flush();
-    // either refused before placeQuickOrder, or placeQuickOrder gets the click-time guard (now false)
-    if (mocks.place.mock.calls.length) expect(guardSeen?.()).toBe(false);
-    else expect(mocks.notify.mock.calls.at(-1)![0].kind).toBe('err');
-    expect(mocks.place).not.toHaveBeenCalled();
+    // the click-time guard goes to placeQuickOrder (which checks it after the confirmation): it is now invalid
+    expect(mocks.place).toHaveBeenCalledOnce();
+    expect(guardSeen?.()).toBe(false);
+});
+
+it('a cached 0 does not block all day: the click re-queries a blocked answer and goes out if it recovered', async () => {
+    mocks.post.mockImplementation(async () => enquire('2330', { margin_unit: 0 }));
+    const r = await mount(stk, owned({ cond: 'MarginTrading', daytradeShort: false }).extra());
+    expect(text(banner(r)!)).toContain('目前不能融資買進');
+    mocks.post.mockImplementation(async () => enquire('2330'));
+    await arm(r);
+    await act(async () => { button(r, '市價融資買')!.props.onClick?.(); });
+    await act(async () => { cell(r, 'buy').props.onClick(); });
+    await flush();
+    expect(mocks.place).toHaveBeenCalled();
+    expect(mocks.place.mock.calls.at(-1)![4]).toMatchObject({ orderCond: 'MarginTrading' });
 });

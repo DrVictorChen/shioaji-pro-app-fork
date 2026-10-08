@@ -182,8 +182,12 @@ describe('server mode unknown when the confirmation opens', () => {
         const promise = requestOrderConfirm(req);
         await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         store.observeServerInfo(store.beginServerInfoRequest(), undefined);
+        // the mode is unknown again: the dialog goes back to waiting and ignores approval
+        expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: true, simulation: null });
         resolveOrderConfirm(true);
-        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+        expect(getPendingOrderConfirm()).not.toBeNull();
+        resolveOrderConfirm(false);
+        await expect(promise).resolves.toBe(false);
     });
 });
 
@@ -248,7 +252,9 @@ describe('the opening /info refresh has not settled', () => {
             release();
             await vi.advanceTimersByTimeAsync(0);
             resolveOrderConfirm(true);
-            await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+            expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: true });
+            resolveOrderConfirm(false);
+            await expect(promise).resolves.toBe(false);
         } finally {
             vi.useRealTimers();
         }
@@ -269,6 +275,43 @@ describe('a stalled opening refresh', () => {
             expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: false, simulation: true });
             resolveOrderConfirm(true);
             await expect(promise).resolves.toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
+describe('the dialog only accepts a mode learned after it opened', () => {
+    it('a failed opening /info keeps approval disabled (unknown mode is never approvable)', async () => {
+        const store = await import('./server-info-store');
+        store.forgetServerInfo('');
+        vi.mocked(fetchInfo).mockImplementationOnce(async () => {
+            store.observeServerInfo(store.beginServerInfoRequest(), undefined);
+            throw new Error('down');
+        });
+        const promise = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
+        expect(getPendingOrderConfirm()).toMatchObject({ simulation: null, awaitingMode: true, modeUnavailable: true });
+        resolveOrderConfirm(true);
+        expect(getPendingOrderConfirm()).not.toBeNull();
+        resolveOrderConfirm(false);
+        await expect(promise).resolves.toBe(false);
+    });
+    it('a response to a request started before the dialog opened does not count', async () => {
+        vi.useFakeTimers();
+        try {
+            const store = await import('./server-info-store');
+            store.forgetServerInfo('');
+            const early = store.beginServerInfoRequest(); // e.g. a background refresh already in flight
+            vi.mocked(fetchInfo).mockImplementationOnce(() => new Promise(() => undefined));
+            const promise = requestOrderConfirm(req);
+            await vi.advanceTimersByTimeAsync(900);
+            store.observeServerInfo(early, { simulation: true } as never);
+            expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: true, simulation: null });
+            resolveOrderConfirm(true);
+            expect(getPendingOrderConfirm()).not.toBeNull();
+            resolveOrderConfirm(false);
+            await promise;
         } finally {
             vi.useRealTimers();
         }

@@ -164,3 +164,25 @@ it('a unit change while the confirm dialog is open sends nothing', async () => {
     expect(m.stock).not.toHaveBeenCalled();
     expect(text(view.root)).toContain('單位已變更');
 });
+
+it('a 現沖 sell confirmation does not send if the same stock stops being day-tradable meanwhile', async () => {
+    await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    await act(async () => { btn('賣出 Sell').props.onClick(); });
+    await act(async () => { btn('現股當沖先賣').props.onClick(); });
+    let approve!: (v: boolean) => void;
+    m.confirm.mockImplementation(() => new Promise<boolean>(res => { approve = res; }));
+    let sent = 0;
+    m.stock.mockImplementation(async (_c: unknown, _o: unknown, _a: unknown, opts?: { beforeDispatch?: () => void }) => {
+        opts?.beforeDispatch?.();
+        sent += 1;
+        return { status: { status: 'Submitted' }, order: { id: 'o1', seqno: '1' } };
+    });
+    await act(async () => { await exec().props.onClick(); }); // arm
+    let pending!: Promise<void>;
+    await act(async () => { pending = exec().props.onClick(); });
+    // the same stock's contract refreshes while the dialog is open
+    await act(async () => { view.update(createElement(OrderTicket, { contract: { ...contract, day_trade: 'OnlyBuy' }, onPlaced: vi.fn() })); });
+    await act(async () => { approve(true); await pending; });
+    expect(m.confirm).toHaveBeenCalledOnce();
+    expect(sent).toBe(0);
+});

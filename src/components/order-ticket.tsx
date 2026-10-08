@@ -35,7 +35,7 @@ import {
     isSelectedAccountUnchanged,
 } from '../lib/order-account';
 import { checkOrderAllowed, getRiskSettings } from '../lib/risk';
-import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, ODD_LOT_WAITING, oddLotReferencePrice, orderQtyUnit, stockOrderProblem } from '../lib/odd-lot';
+import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, ODD_LOT_WAITING, oddLotReferencePrice, orderQtyUnit, stockOrderProblem, CREDIT_TEXT } from '../lib/odd-lot';
 import { currentProtectionEnv } from '../lib/protection-env';
 import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from '../lib/server-info-store';
 import { loadOrderLotPreference, saveOrderLotPreference, TICKET_LOTS } from '../lib/order-lot-preference';
@@ -244,6 +244,15 @@ export function OrderTicket({
         }
     }, [picked]);
 
+    // 確認期間同一檔合約更新成不可當沖：現沖賣就不送（照最新合約再檢查）
+    const latestContractRef = useRef(contract);
+    latestContractRef.current = contract;
+    const assertDayTradeStillAllowed = () => {
+        if (!isFutures && action === 'Sell' && daytradeShort && orderCond === 'Cash' && latestContractRef.current.day_trade !== 'Yes') {
+            throw Object.assign(new Error(CREDIT_TEXT.daytradeStock), { tradingGateRejected: true });
+        }
+    };
+
     const execute = async () => {
         if (!armed) {
             setArmed(true);
@@ -339,6 +348,7 @@ export function OrderTicket({
             const dispatch = { beforeDispatch: () => {
                 if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
                 if (!sameServerMode()) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
+                assertDayTradeStillAllowed();
                 if (!isSelectedAccountUnchanged(orderAccount)) throw Object.assign(new Error(ACCOUNT_CHANGED_MESSAGE), { tradingGateRejected: true });
             } };
             dispatch.beforeDispatch();
@@ -513,6 +523,7 @@ export function OrderTicket({
         const beforeDispatch = () => {
             if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
             if (!sameServerMode()) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
+            assertDayTradeStillAllowed();
         };
         try {
             if (!splitValid || allocation.length === 0) {

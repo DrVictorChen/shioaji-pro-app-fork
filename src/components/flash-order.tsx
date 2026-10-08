@@ -880,9 +880,14 @@ export function FlashOrder({
             if (opensCredit) {
                 enquiryKey = creditEnquireKey(capturedContract);
                 const clickBase = getApiBase();
-                const row = await loadCreditEnquire(capturedContract).catch(() => undefined);
-                // 查詢期間換了伺服器：不送（placeQuickOrder 之後才固定伺服器）
-                if (getApiBase() !== clickBase || !serverMode()) throw new Error('確認可否融資券期間伺服器或模式已切換，這筆沒有送出');
+                let row = await loadCreditEnquire(capturedContract).catch(() => undefined);
+                // 快取裡是 0：重新查一次（額度可能已恢復），不讓一次的 0 擋一整天
+                if (creditStatus(row, clickCredit.cond as CreditCond) === 'blocked') {
+                    row = await loadCreditEnquire(capturedContract, { fresh: true }).catch(() => undefined);
+                }
+                // 查詢期間換了位址：不送。模式的比對交給 placeQuickOrder（點擊當下固定的
+                // 閘門，在確認之後檢查），冷啟動第一次得知正式時使用者仍會先看到確認視窗
+                if (getApiBase() !== clickBase) throw new Error('確認可否融資券期間伺服器已切換，這筆沒有送出');
                 if (creditStatus(row, clickCredit.cond as CreditCond) === 'blocked') {
                     throw new Error(`${capturedContract.code} 目前不能${clickCredit.cond === 'MarginTrading' ? '融資買進' : '融券賣出'}，已停止送單`);
                 }
