@@ -4,6 +4,7 @@ import { getApiBase } from './runtime';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { noteMutationIntent } from './mutation-intent';
 import { isOddLot, ODD_LOT_NO_PRICE_UPDATE, stockOrderProblem } from './odd-lot';
+import { futuresOrderProblem } from './order-conditions';
 import { markConfirmedCancellation, observeTradeMutation } from './trade-mutations';
 import { createCancelBatch, readMark, sharedAuthoritativeTrades, verifyCancellation, type CancelBatchMember } from './cancel-verification';
 import { observeMarketSnapshots } from './market-snapshot-store';
@@ -835,6 +836,9 @@ export function placeFuturesOrder(
     account?: Account,
     opts?: { agentInitiated?: boolean; agentCallId?: string; agentAuto?: boolean; beforeDispatch?: () => void },
 ) {
+    // 倉別／效期／價別不在下單面板提供的範圍就不送（與下單面板、閃電同一套規則）
+    const problem = futuresOrderProblem(order);
+    if (problem) return Promise.reject(Object.assign(new Error(problem), { mutationNotStarted: true as const }));
     const selected = account ?? accountFor('F');
     return sendOrderMutation<Trade>('/api/v1/order/place_order', {
         contract: orderableKey(contract),

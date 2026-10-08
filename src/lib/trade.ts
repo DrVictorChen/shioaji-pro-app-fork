@@ -9,6 +9,7 @@ import { getAccountState } from './account-store';
 import { trackActivity } from './activity';
 import { accountConfirmLabel, requestOrderConfirm } from './order-confirm';
 import { creditLabel, isOddLot, lotLabel, ODD_LOT_TEXT, orderQtyUnit, stockOrderProblem, type CreditLabel } from './odd-lot';
+import { futuresOrderProblem, quickOrderNote } from './order-conditions';
 import { checkOrderAllowed, getRiskSettings } from './risk';
 import {
     cancelOrders,
@@ -193,6 +194,8 @@ export async function placeQuickOrder(
         daytradeShort?: boolean;
         // 確認之後、送出之前的非同步最後檢查（例如重新查可否融資券）；丟出錯誤就不送
         afterConfirm?: () => Promise<void>;
+        // 期貨市價單的價別：市價（缺省）或範圍市價 MKP；一律 IOC
+        futuresPriceType?: 'MKT' | 'MKP';
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
@@ -216,9 +219,18 @@ export async function placeQuickOrder(
     // placeStockOrder 會再檢查一次 — 任何路徑都不會把不支援的組合送出
     const orderCond = opts?.orderCond && opts.orderCond !== 'Cash' ? opts.orderCond : undefined;
     const daytradeShort = opts?.daytradeShort === true && action === 'Sell';
+    // 委託條件（效期、價別、期貨倉別）同樣在確認前用下單面板的同一套規則檢查
+    const futuresPriceType = price === null && opts?.futuresPriceType === 'MKP' ? 'MKP' : 'MKT';
     if (isFuturesContract(contract)) {
         if (orderCond || opts?.daytradeShort) throw mutationNotStartedError('信用條件（融資、融券、當沖先賣）只適用股票');
-    } else if (orderCond || daytradeShort) {
+        const problem = futuresOrderProblem({
+            price_type: price === null ? futuresPriceType : 'LMT',
+            order_type: price === null ? 'IOC' : (opts?.orderType ?? 'ROD'),
+            octype: opts?.ocType ?? 'Auto',
+        });
+        if (problem) throw mutationNotStartedError(problem);
+    } else {
+        if (opts?.futuresPriceType === 'MKP') throw mutationNotStartedError('範圍市價（MKP）只適用期貨');
         const problem = stockOrderProblem({
             quantity,
             price_type: price === null ? 'MKT' : 'LMT',
@@ -243,9 +255,15 @@ export async function placeQuickOrder(
             price,
             quantity,
             opts?.orderLot,
-            odd ? `${lotLabel(opts?.orderLot)}・限價 ROD`
-                : credit ? `${price === null ? '市價 IOC' : `限價 ${opts?.orderType ?? 'ROD'}`}・${CREDIT_NOTE[credit]}`
-                : price !== null && opts?.orderType && opts.orderType !== 'ROD' ? `限價 ${opts.orderType}` : undefined,
+            quickOrderNote({
+                market: price === null,
+                futures: isFuturesContract(contract),
+                priceType: futuresPriceType,
+                orderType: opts?.orderType,
+                octype: opts?.ocType,
+                credit: credit ? CREDIT_NOTE[credit] : undefined,
+                oddLotLabel: odd ? lotLabel(opts?.orderLot) : undefined,
+            }),
             capturedAccount,
             opts?.confirmLivePriceCode,
             credit,
@@ -300,7 +318,7 @@ export async function placeQuickOrder(
         opts?.customField,
         opts?.onResponse,
         beforeDispatch,
-        { orderCond, daytradeShort },
+        { orderCond, daytradeShort, futuresPriceType },
     );
 }
 
@@ -319,7 +337,7 @@ async function sendOrder(
     customField?: string,
     onResponse?: (res: Response) => void,
     beforeDispatch?: () => void,
-    credit?: { orderCond?: StockOrderCond; daytradeShort?: boolean },
+    credit?: { orderCond?: StockOrderCond; daytradeShort?: boolean; futuresPriceType?: 'MKT' | 'MKP' },
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -329,7 +347,7 @@ async function sendOrder(
               action,
               price: price ?? 0,
               quantity,
-              price_type: market ? 'MKT' : 'LMT',
+              price_type: market ? (credit?.futuresPriceType ?? 'MKT') : 'LMT',
               order_type: market ? 'IOC' : orderType,
               octype: ocType,
           }, account, { agentInitiated, ...agentContext, ...(beforeDispatch ? { beforeDispatch } : {}) })

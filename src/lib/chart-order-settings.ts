@@ -10,6 +10,7 @@
 // 刻意不放（不做沒有作用的控制項）。
 
 import { ODD_LOT_MAX_SHARES } from './odd-lot';
+import { FUTURES_OCTYPES, ORDER_TYPES } from './order-conditions';
 import type { FuturesOCType, OrderType } from './types/order';
 
 export type ChartOrderMarket = 'S' | 'F';
@@ -28,12 +29,9 @@ export interface ChartOrderSettings {
     accountKey?: string;
 }
 
-export const ORDER_TYPES: readonly OrderType[] = ['ROD', 'IOC', 'FOK'];
-export const OCTYPES: readonly { value: FuturesOCType; label: string }[] = [
-    { value: 'Auto', label: '自動' },
-    { value: 'New', label: '新倉' },
-    { value: 'Cover', label: '平倉' },
-];
+// 清單與下單面板共用（order-conditions）；圖表的停損停利不提供當沖倉別
+export { ORDER_TYPES };
+export const OCTYPES: readonly { value: FuturesOCType; label: string }[] = FUTURES_OCTYPES.filter(o => o.value !== 'DayTrade');
 export const QTY_PRESETS: Record<'張' | '股' | '口', readonly number[]> = {
     張: [1, 2, 5, 10],
     股: [100, 500, 999],
