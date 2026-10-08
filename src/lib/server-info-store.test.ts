@@ -187,3 +187,118 @@ it('keeps ordering per base and ignores late responses after a server switch', a
         expect(probe.seen.info).toBeUndefined();
     } finally { await probe.unmount(); }
 });
+
+it('captureServerMode: a guard captured with an unknown mode never rebases across API bases', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-a';
+    const guard = info.captureServerMode();
+    runtime.base = 'guard-b';
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    guard.rebaseIfUnknown();
+    expect(guard()).toBe(false);
+});
+
+it('captureServerMode: unknown at capture → rebased to the mode known after approval on the same base', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-c';
+    const guard = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    expect(guard()).toBe(false);
+    guard.rebaseIfUnknown();
+    expect(guard()).toBe(true);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(false);
+});
+
+it('a mode change observed here is broadcast so other windows (popouts) invalidate their copy', async () => {
+    const info = await import('./server-info-store');
+    const posted: unknown[] = [];
+    const Orig = globalThis.BroadcastChannel;
+    class Fake { constructor(public name: string) {} postMessage(m: unknown) { posted.push(m); } addEventListener() {} close() {} }
+    vi.stubGlobal('BroadcastChannel', Fake);
+    vi.stubGlobal('window', globalThis.window ?? {});
+    try {
+        runtime.base = 'broadcast-a';
+        info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+        posted.length = 0;
+        info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+        expect(posted).toEqual([]);
+        info.observeServerInfo(info.beginServerInfoRequest(), production);
+        expect(posted).toContainEqual({ kind: 'server-info-invalidated', base: 'broadcast-a' });
+    } finally {
+        vi.unstubAllGlobals();
+        if (Orig) globalThis.BroadcastChannel = Orig;
+    }
+});
+
+it('a known mode lost to a failed /info is broadcast too, so a popout cannot keep a stale 模擬 guard', async () => {
+    const info = await import('./server-info-store');
+    const posted: unknown[] = [];
+    class Fake { constructor(public name: string) {} postMessage(m: unknown) { posted.push(m); } addEventListener() {} close() {} }
+    vi.stubGlobal('BroadcastChannel', Fake);
+    vi.stubGlobal('window', globalThis.window ?? {});
+    try {
+        runtime.base = 'broadcast-b';
+        info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+        posted.length = 0;
+        info.observeServerInfo(info.beginServerInfoRequest(), undefined);
+        expect(posted).toContainEqual({ kind: 'server-info-invalidated', base: 'broadcast-b' });
+    } finally {
+        vi.unstubAllGlobals();
+    }
+});
+
+it('captureServerMode: any mode change in between invalidates for good, even if the mode comes back', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-round-trip';
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    const guard = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(false);
+    // a restart (info lost) that comes back with the same mode
+    const g2 = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), undefined);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(g2()).toBe(false);
+    // repeated same-mode responses keep it valid
+    const g3 = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(g3()).toBe(true);
+});
+
+it('captureServerMode: unknown at capture allows only the first discovery as simulation', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-unknown-rt';
+    const guard = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(true);
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(false);
+});
+
+it('the first discovery of a mode is announced; a peer with a different known mode invalidates, the same mode does not', async () => {
+    const info = await import('./server-info-store');
+    const posted: unknown[] = [];
+    const handlers: ((e: { data: unknown }) => void)[] = [];
+    class Fake { constructor(public name: string) {} postMessage(m: unknown) { posted.push(m); } addEventListener(_t: string, h: (e: { data: unknown }) => void) { handlers.push(h); } close() {} }
+    vi.stubGlobal('BroadcastChannel', Fake);
+    vi.stubGlobal('window', globalThis.window ?? {});
+    try {
+        runtime.base = 'announce-a';
+        info.forgetServerInfo('announce-a');
+        posted.length = 0;
+        info.observeServerInfo(info.beginServerInfoRequest(), production);
+        expect(posted).toContainEqual({ kind: 'server-mode-observed', base: 'announce-a', simulation: false });
+        // this window knows production; a peer announcing production changes nothing
+        const g = info.captureServerMode();
+        handlers.at(-1)!({ data: { kind: 'server-mode-observed', base: 'announce-a', simulation: false } });
+        expect(g()).toBe(true);
+        // a peer announcing simulation means our copy is stale
+        handlers.at(-1)!({ data: { kind: 'server-mode-observed', base: 'announce-a', simulation: true } });
+        expect(g()).toBe(false);
+    } finally {
+        vi.unstubAllGlobals();
+    }
+});

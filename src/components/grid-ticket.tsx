@@ -4,6 +4,7 @@
 // moves so the ladder keeps its distance. Grid orders are tagged with
 // custom_field so only our own orders are touched.
 
+import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from '../lib/server-info-store';
 import { canTrade } from '../lib/account-tradable';
 
 import { RefreshCw, Zap } from 'lucide-react';
@@ -266,8 +267,11 @@ export function GridTicket({
     const layGrid = async () => {
         if (!armed || busy || last === null) return;
         const isContextCurrent = captureContext();
-        const batch = { qtyPer, odd, side, contract, beforeDispatch: () => {
+        // 整批一次確認：每一筆送出前都比對確認時的伺服器與模式，變了就停止後續
+        const serverMode = captureServerMode();
+        const batch = { qtyPer, odd, side, contract, serverMode, beforeDispatch: () => {
             if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+            if (!serverMode()) throw Object.assign(new Error(`${SERVER_MODE_CHANGED_MESSAGE}；已停止後續鋪單`), { tradingGateRejected: true });
         } };
         const blocked = checkOrderAllowed(batch.qtyPer * levels, batch.odd ? 'IntradayOdd' : undefined);
         if (blocked) {
@@ -295,7 +299,7 @@ export function GridTicket({
     const sendBatch = async (
         prices: number[],
         gridAccount: Account,
-        batch: { qtyPer: number; odd: boolean; side: Action; contract: ContractInfo; beforeDispatch: () => void },
+        batch: { qtyPer: number; odd: boolean; side: Action; contract: ContractInfo; serverMode?: ServerModeGuard; beforeDispatch: () => void },
     ) => {
         const { qtyPer, odd, side } = batch;
         // 手動鋪單整批確認一次（動態跟隨的補單不屬手動，不再問）
@@ -313,7 +317,11 @@ export function GridTicket({
                 unit,
                 note: `網格鋪單 ${prices.length} 檔 × ${qtyPer}${odd ? ' 股・盤中零股限價 ROD' : ''}`,
                 accountLabel: accountConfirmLabel(gridAccount),
-            }).catch(() => false);
+            }, batch.serverMode ? { serverMode: batch.serverMode } : undefined).catch((e: unknown) => {
+                // 確認期間伺服器模式變更等：照實說未送出（不是取消）
+                if ((e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '鋪單未送出', body: e instanceof Error ? e.message : String(e) });
+                return false;
+            });
             if (!approved) return;
         }
         if (!isSelectedAccountUnchanged(gridAccount)) {

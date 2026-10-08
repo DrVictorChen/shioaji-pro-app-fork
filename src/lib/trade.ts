@@ -8,7 +8,7 @@ import { cancellationSummary } from './trade-mutations';
 import { getAccountState } from './account-store';
 import { trackActivity } from './activity';
 import { accountConfirmLabel, requestOrderConfirm } from './order-confirm';
-import { isOddLot, lotLabel, ODD_LOT_TEXT, orderQtyUnit } from './odd-lot';
+import { creditLabel, isOddLot, lotLabel, ODD_LOT_TEXT, orderQtyUnit, stockOrderProblem, type CreditLabel } from './odd-lot';
 import { checkOrderAllowed, getRiskSettings } from './risk';
 import {
     cancelOrders,
@@ -18,10 +18,12 @@ import {
 } from './shioaji';
 import { getStreamStatus } from './stream';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
+import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from './server-info-store';
 import type { ContractBase, ContractInfo } from './types/contract';
 import type { Account } from './types/portfolio';
 import {
     type Action,
+    type StockOrderCond,
     type StockOrderLot,
     type FuturesOCType,
     type OrderType,
@@ -109,6 +111,8 @@ export function assertTradingLive() {
 
 // 手動下單確認被取消 — 呼叫端的錯誤通知會顯示這個訊息
 export class OrderConfirmCancelled extends Error {
+    // 取消確認＝確定沒有送出
+    readonly mutationNotStarted = true as const;
     constructor() {
         super('已取消下單');
         this.name = 'OrderConfirmCancelled';
@@ -131,8 +135,10 @@ async function confirmManualOrder(
     note?: string,
     account?: Account,
     livePriceCode?: string,
-): Promise<void> {
-    if (!getRiskSettings().confirmManualOrders) return;
+    credit?: string,
+    serverMode?: ServerModeGuard,
+): Promise<boolean> {
+    if (!getRiskSettings().confirmManualOrders) return false;
     const approved = await requestOrderConfirm({
         code: contract.code,
         name: (contract as Partial<ContractInfo>).name,
@@ -144,9 +150,13 @@ async function confirmManualOrder(
         accountLabel: account ? accountConfirmLabel(account) : undefined,
         note,
         livePriceCode,
-    });
+        ...(credit ? { credit } : {}),
+    }, serverMode ? { serverMode } : undefined);
     if (!approved) throw new OrderConfirmCancelled();
+    return true;
 }
+
+const CREDIT_NOTE: Record<CreditLabel, string> = { 融資: '融資', 融券: '融券', 借券: '借券', 借券豁免: '借券豁免', 現沖: '現股當沖' };
 
 export async function placeQuickOrder(
     contract: ContractBase,
@@ -175,9 +185,19 @@ export async function placeQuickOrder(
         customField?: string;
         // 讀下單回應的標頭（X-Shioaji-Instance，SDK 1.7.8+）
         onResponse?: (res: Response) => void;
+        // 整批共用的伺服器模式閘門（外層一次確認、內層多筆送出）
+        serverMode?: ServerModeGuard;
+        // 股票信用條件（閃電下單，整股）：缺省／Cash＝現股
+        orderCond?: StockOrderCond;
+        // 現股當沖先賣：只在賣出時帶出；買進（回補）一律是現股買進
+        daytradeShort?: boolean;
+        // 確認之後、送出之前的非同步最後檢查（例如重新查可否融資券）；丟出錯誤就不送
+        afterConfirm?: () => Promise<void>;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
+    // 伺服器模式代次：確認期間模擬重啟成正式（同一位址）也不送
+    const sameServerMode = opts?.serverMode ?? captureServerMode();
     const capturedAccount = opts?.account ?? (isFuturesContract(contract) ? getAccountState().selectedFutures : getAccountState().selectedStock) ?? undefined;
     assertTradingLive();
     if (contract.security_type === 'IND') {
@@ -192,6 +212,26 @@ export async function placeQuickOrder(
     const odd = !isFuturesContract(contract) && isOddLot(opts?.orderLot);
     // 零股沒有市價單（#204）；需要立即成交的呼叫端自行帶漲跌停限價
     if (odd && price === null) throw mutationNotStartedError(ODD_LOT_TEXT.priceType);
+    // 信用條件（閃電，整股）：照下單面板現行規則在確認前就檢查，送單時
+    // placeStockOrder 會再檢查一次 — 任何路徑都不會把不支援的組合送出
+    const orderCond = opts?.orderCond && opts.orderCond !== 'Cash' ? opts.orderCond : undefined;
+    const daytradeShort = opts?.daytradeShort === true && action === 'Sell';
+    if (isFuturesContract(contract)) {
+        if (orderCond || opts?.daytradeShort) throw mutationNotStartedError('信用條件（融資、融券、當沖先賣）只適用股票');
+    } else if (orderCond || daytradeShort) {
+        const problem = stockOrderProblem({
+            quantity,
+            price_type: price === null ? 'MKT' : 'LMT',
+            order_type: price === null ? 'IOC' : (opts?.orderType ?? 'ROD'),
+            order_lot: opts?.orderLot ?? 'Common',
+            order_cond: orderCond,
+            daytrade_short: daytradeShort,
+            action,
+            day_trade: (contract as Partial<ContractInfo>).day_trade,
+        });
+        if (problem) throw mutationNotStartedError(problem);
+    }
+    const credit = isFuturesContract(contract) ? undefined : creditLabel(action, orderCond, daytradeShort);
     if (!opts?.bypassRisk) {
         const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined);
         if (blocked) throw mutationNotStartedError(blocked);
@@ -204,27 +244,43 @@ export async function placeQuickOrder(
             quantity,
             opts?.orderLot,
             odd ? `${lotLabel(opts?.orderLot)}・限價 ROD`
+                : credit ? `${price === null ? '市價 IOC' : `限價 ${opts?.orderType ?? 'ROD'}`}・${CREDIT_NOTE[credit]}`
                 : price !== null && opts?.orderType && opts.orderType !== 'ROD' ? `限價 ${opts.orderType}` : undefined,
             capturedAccount,
             opts?.confirmLivePriceCode,
+            credit,
+            // 開始時模式未知（冷啟動）：在按下確認的當下，以確認視窗顯示的模式為準
+            sameServerMode,
         );
     }
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
+    if (!sameServerMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+    if (opts?.afterConfirm) {
+        try {
+            await opts.afterConfirm();
+        } catch (e) {
+            throw mutationNotStartedError(e instanceof Error ? e.message : String(e));
+        }
+        assertTradingLive();
+        if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
+        if (!sameServerMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
+    }
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     if (capturedAccount && !getAccountState().accounts.some(a => canTrade(a) && a.account_type === capturedAccount.account_type && a.broker_id === capturedAccount.broker_id && a.account_id === capturedAccount.account_id)) throw mutationNotStartedError('帳戶已不可用，請重新確認');
     if (!opts?.bypassRisk) { const blocked = checkOrderAllowed(quantity, odd ? opts?.orderLot : undefined); if (blocked) throw mutationNotStartedError(blocked); }
-    const beforeDispatch = opts?.beforeSend ? () => {
+    const beforeDispatch = () => {
+        if (!sameServerMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
         try {
-            opts.beforeSend?.();
+            opts?.beforeSend?.();
         } catch (e) {
             // refused by the caller before sending: nothing was sent
             throw mutationNotStartedError(e instanceof Error ? e.message : String(e));
         }
-    } : undefined;
+    };
     trackActivity(
         '下單',
-        `${contract.code} ${action === 'Buy' ? '買' : '賣'} ${quantity}${odd ? '股（零股）' : ''} @${price ?? '市價'}`,
+        `${contract.code} ${credit ?? ''}${action === 'Buy' ? '買' : '賣'} ${quantity}${odd ? '股（零股）' : ''} @${price ?? '市價'}`,
     );
     const market = price === null;
     return sendOrder(
@@ -244,6 +300,7 @@ export async function placeQuickOrder(
         opts?.customField,
         opts?.onResponse,
         beforeDispatch,
+        { orderCond, daytradeShort },
     );
 }
 
@@ -262,6 +319,7 @@ async function sendOrder(
     customField?: string,
     onResponse?: (res: Response) => void,
     beforeDispatch?: () => void,
+    credit?: { orderCond?: StockOrderCond; daytradeShort?: boolean },
 ): Promise<Trade> {
     if (contract.security_type === 'IND') {
         throw new Error('指數商品僅提供行情，不可下單');
@@ -282,6 +340,8 @@ async function sendOrder(
               price_type: market ? 'MKT' : 'LMT',
               order_type: market ? 'IOC' : orderType,
               order_lot: orderLot ?? 'Common',
+              ...(credit?.orderCond ? { order_cond: credit.orderCond } : {}),
+              ...(credit?.daytradeShort ? { daytrade_short: true } : {}),
               ...(customField ? { custom_field: customField } : {}),
           }, account, { agentInitiated, ...agentContext, ...(onResponse ? { onResponse } : {}), ...(beforeDispatch ? { beforeDispatch } : {}) });
     return trade;
@@ -300,6 +360,8 @@ export async function placeStockExitByShares(
 ): Promise<Trade[]> {
     const capturedAccount = account ?? getAccountState().selectedStock ?? undefined;
     const base = getApiBase();
+    // 一次確認、兩腳送出：整批用同一個伺服器模式閘門，任一腳之前變了就不送
+    const serverMode = captureServerMode();
     assertTradingLive();
     if (!capturedAccount || capturedAccount.account_type !== 'S') throw mutationNotStartedError('缺少股票平倉帳戶');
     if (contract.security_type !== 'STK') throw mutationNotStartedError('股票股數平倉僅支援股票');
@@ -320,9 +382,13 @@ export async function placeStockExitByShares(
             ? `拆為 ${lots} 張市價＋${odd} 股盤中零股限價`
             : undefined,
         capturedAccount,
+        undefined,
+        undefined,
+        serverMode,
     );
     assertTradingLive();
     if (getApiBase() !== base) throw mutationNotStartedError('確認期間伺服器已切換');
+    if (!serverMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
     if (opts?.isAccountCurrent && !opts.isAccountCurrent()) throw mutationNotStartedError('確認期間帳戶已變更，請重新確認');
     const out: Trade[] = [];
     if (lots > 0) {
@@ -332,23 +398,42 @@ export async function placeStockExitByShares(
                 account: capturedAccount,
                 isAccountCurrent: opts?.isAccountCurrent,
                 beforeSend: opts?.beforeSend,
+                serverMode,
             }),
         );
     }
     if (odd > 0) {
-        if (getApiBase() !== base) throw new Error('伺服器已切換；先前分單可能已送出，剩餘分單未送出');
+        if (getApiBase() !== base) {
+            if (out.length === 0) throw mutationNotStartedError('伺服器已切換，尚未送出任何分單');
+            throw new Error('伺服器已切換；整張分單已送出，零股分單未送出');
+        }
+        if (out.length > 0 && !serverMode()) throw new Error('確認後伺服器或模式已變更：整張分單已送出，零股分單未送出，請核對委託');
         if (!limitPrice) {
             throw new Error('零股需要漲跌停價作為限價，無法取得');
         }
-        out.push(
-            await placeQuickOrder(contract, action, limitPrice, odd, {
-                orderLot: 'IntradayOdd',
-                source: 'auto',
-                account: capturedAccount,
-                isAccountCurrent: opts?.isAccountCurrent,
-                beforeSend: opts?.beforeSend,
-            }),
-        );
+        try {
+            out.push(
+                await placeQuickOrder(contract, action, limitPrice, odd, {
+                    orderLot: 'IntradayOdd',
+                    source: 'auto',
+                    account: capturedAccount,
+                    isAccountCurrent: opts?.isAccountCurrent,
+                    beforeSend: opts?.beforeSend,
+                    serverMode,
+                }),
+            );
+        } catch (e) {
+            // 整張那一腳已送出：這筆不能報成「沒有送出」
+            if (out.length > 0) {
+                const msg = e instanceof Error ? e.message : String(e);
+                // 只有確定沒送出（mutationNotStarted）才說未送出；否則結果未知
+                throw new Error((e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted
+                    // mutationNotStarted 也包含券商立即回 Failed（已送達但未成立）
+                    ? `整張分單已送出，零股分單未成立（未送出或被券商拒絕）：${msg}`
+                    : `整張分單已送出，零股分單結果未知，請核對委託，勿直接重送：${msg}`);
+            }
+            throw e;
+        }
     }
     return out;
 }

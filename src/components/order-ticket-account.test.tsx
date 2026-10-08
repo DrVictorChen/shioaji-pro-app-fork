@@ -152,3 +152,14 @@ it.each(['confirmation', 'first order', 'dispatch', 'unmount', 'switch back'])(
         expect(dispatched).toHaveBeenCalledTimes(phase === 'confirmation' || phase === 'dispatch' ? 0 : 1);
     },
 );
+
+it('does not send when the server mode changes while the confirmation is open (sim sidecar restarted as production)', async () => {
+    observeServerInfo(beginServerInfoRequest(), { simulation: true } as never);
+    m.confirm.mockImplementation(async () => {
+        observeServerInfo(beginServerInfoRequest(), { simulation: false } as never);
+        return true;
+    });
+    await armAndSend();
+    expect(m.future).not.toHaveBeenCalled();
+    expect(feedback()).toContain('伺服器');
+});

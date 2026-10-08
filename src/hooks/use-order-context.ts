@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useRef } from 'react';
 import type { ContractBase } from '../lib/types/contract';
 
-export const ORDER_CONTEXT_CHANGED_MESSAGE = '商品或交易單位已變更，已停止後續下單';
+export const ORDER_CONTEXT_CHANGED_MESSAGE = '商品、交易單位或信用條件已變更，已停止後續下單';
 
 /** Capture a sending cycle. Switching away and back must not revive it;
  * layout cleanup also invalidates pending confirmations on unmount. */

@@ -23,6 +23,8 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
     const pendingPrices = usePendingPrices();
     const livePrice = request.livePriceCode ? pendingPrices[request.livePriceCode] : undefined;
     const dir = request.action === 'Buy' ? ('up' as const) : ('down' as const);
+    // 信用條件寫進動作：融資買進／融券賣出／現沖賣出，不會看起來像現股
+    const actionText = `${request.credit ?? ''}${request.action === 'Buy' ? '買進' : '賣出'}`;
     return createPortal(
         <div
             className={styles.overlay}
@@ -49,10 +51,12 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                             {request.simulation ? '模擬環境' : '正式環境'}
                         </span>
                     )}
+                    {request.serverChanged && <span className={styles.note}>伺服器或模式已變更，這筆不會送出，請取消後重新下單</span>}
+                    {request.awaitingMode && <span className={styles.note}>{request.modeUnavailable ? '無法確認伺服器模式（模擬／正式），請取消後重試' : '確認伺服器模式中…'}</span>}
                 </div>
                 <div className={styles.body}>
                     <div className={styles.actionLine[dir]}>
-                        {request.action === 'Buy' ? '買進' : '賣出'}
+                        {actionText}
                         <span className={styles.contractName}>
                             {request.name || request.code}
                         </span>
@@ -103,10 +107,11 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                     </button>
                     <button
                         className={styles.confirmBtn[dir]}
-                        disabled={!!request.livePriceCode && livePrice === undefined}
+                        disabled={(!!request.livePriceCode && livePrice === undefined) || !!request.awaitingMode || request.simulation === null || !!request.serverChanged}
+                        title={request.awaitingMode ? '正在確認伺服器模式（模擬／正式），請稍候' : undefined}
                         onClick={() => resolveOrderConfirm(true)}
                     >
-                        確認{request.action === 'Buy' ? '買進' : '賣出'}
+                        確認{actionText}
                     </button>
                 </div>
             </div>

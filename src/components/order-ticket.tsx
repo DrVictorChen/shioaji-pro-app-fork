@@ -35,8 +35,9 @@ import {
     isSelectedAccountUnchanged,
 } from '../lib/order-account';
 import { checkOrderAllowed, getRiskSettings } from '../lib/risk';
-import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, ODD_LOT_WAITING, oddLotReferencePrice, orderQtyUnit, stockOrderProblem } from '../lib/odd-lot';
+import { clampLotQuantity, isOddLot, lotLabel, ODD_LOT_MAX_SHARES, ODD_LOT_TEXT, ODD_LOT_WAITING, oddLotReferencePrice, orderQtyUnit, stockOrderProblem, CREDIT_TEXT } from '../lib/odd-lot';
 import { currentProtectionEnv } from '../lib/protection-env';
+import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE } from '../lib/server-info-store';
 import { loadOrderLotPreference, saveOrderLotPreference, TICKET_LOTS } from '../lib/order-lot-preference';
 import { fetchInfo, placeFuturesOrder, placeStockOrder } from '../lib/shioaji';
 import { notify } from '../lib/trade';
@@ -107,7 +108,8 @@ export function OrderTicket({
     const priceTouched = useRef(false);
     const orderLotRef = useRef(orderLot);
     orderLotRef.current = orderLot;
-    const captureContext = useOrderContext(contract, orderLot);
+    // 確認期間換買賣方向或信用條件（例如快捷鍵）也算換了，舊確認不送
+    const captureContext = useOrderContext(contract, `${orderLot}:${action}:${orderCond}:${daytradeShort}`);
 
     // ---- multi-account: chip + split-order (分倉) state ----
     const [acctMenuOpen, setAcctMenuOpen] = useState(false);
@@ -243,6 +245,15 @@ export function OrderTicket({
         }
     }, [picked]);
 
+    // 確認期間同一檔合約更新成不可當沖：現沖賣就不送（照最新合約再檢查）
+    const latestContractRef = useRef(contract);
+    latestContractRef.current = contract;
+    const assertDayTradeStillAllowed = () => {
+        if (!isFutures && action === 'Sell' && daytradeShort && orderCond === 'Cash' && latestContractRef.current.day_trade !== 'Yes') {
+            throw Object.assign(new Error(CREDIT_TEXT.daytradeStock), { tradingGateRejected: true });
+        }
+    };
+
     const execute = async () => {
         if (!armed) {
             setArmed(true);
@@ -252,11 +263,13 @@ export function OrderTicket({
         setArmed(false);
         setBusy(true);
         const isContextCurrent = captureContext();
+        // 伺服器模式代次：確認期間模擬 sidecar 重啟成正式（同一位址）也不送
+        const sameServerMode = captureServerMode();
         try {
             const blocked = checkOrderAllowed(qty, isFutures ? undefined : orderLot);
             if (blocked) throw new Error(blocked);
             if (!isFutures) {
-                const problem = stockOrderProblem({ quantity: qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort });
+                const problem = stockOrderProblem({ quantity: qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort, action, day_trade: contract.day_trade });
                 if (problem) throw new Error(problem);
             }
             const p = priceType === 'LMT' ? Number(price) : 0;
@@ -321,9 +334,10 @@ export function OrderTicket({
                             : ''
                     }${!isFutures && daytradeShort && action === 'Sell' ? '・現股當沖' : ''}`,
                     accountLabel: accountConfirmLabel(orderAccount),
-                });
+                }, { serverMode: sameServerMode });
                 if (!approved) throw new Error('已取消下單');
             }
+            if (!sameServerMode()) throw new Error(SERVER_MODE_CHANGED_MESSAGE);
             // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
             if (orderLotRef.current !== orderLot) {
                 throw new Error(UNIT_CHANGED_MESSAGE);
@@ -333,6 +347,8 @@ export function OrderTicket({
             }
             const dispatch = { beforeDispatch: () => {
                 if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+                if (!sameServerMode()) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
+                assertDayTradeStillAllowed();
                 if (!isSelectedAccountUnchanged(orderAccount)) throw Object.assign(new Error(ACCOUNT_CHANGED_MESSAGE), { tradingGateRejected: true });
             } };
             dispatch.beforeDispatch();
@@ -503,8 +519,11 @@ export function OrderTicket({
         setSplitArmed(false);
         setSplitBusy(true);
         const isContextCurrent = captureContext();
+        const sameServerMode = captureServerMode();
         const beforeDispatch = () => {
             if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
+            if (!sameServerMode()) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
+            assertDayTradeStillAllowed();
         };
         try {
             if (!splitValid || allocation.length === 0) {
@@ -512,7 +531,7 @@ export function OrderTicket({
             }
             if (!isFutures) {
                 for (const e of allocation) {
-                    const problem = stockOrderProblem({ quantity: e.qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort });
+                    const problem = stockOrderProblem({ quantity: e.qty, price_type: priceType, order_type: orderType, order_lot: orderLot, order_cond: orderCond, daytrade_short: action === 'Sell' && daytradeShort, action, day_trade: contract.day_trade });
                     if (problem) throw new Error(problem);
                 }
             }
@@ -533,9 +552,10 @@ export function OrderTicket({
                     accountLabel: `分倉 ${allocation.length} 戶：${allocation
                         .map((e) => `${accountConfirmLabel(e.account)}×${e.qty}`)
                         .join('、')}`,
-                });
+                }, { serverMode: sameServerMode });
                 if (!approved) throw new Error('已取消下單');
             }
+            if (!sameServerMode()) throw new Error(SERVER_MODE_CHANGED_MESSAGE);
             // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
             if (orderLotRef.current !== orderLot) {
                 throw new Error(UNIT_CHANGED_MESSAGE);
@@ -1029,7 +1049,8 @@ export function OrderTicket({
                     action === 'Sell' &&
                     orderLot === 'Common' &&
                     orderCond === 'Cash' &&
-                    contract.day_trade === 'Yes' && (
+                    // 已勾選但此股票已不可當沖時仍顯示，讓使用者能取消（送單會被擋下）
+                    (contract.day_trade === 'Yes' || daytradeShort) && (
                         <div className={styles.fieldRow}>
                             <span className={styles.fieldLabel}>沖賣</span>
                             <div className={styles.segGroup}>
@@ -1037,7 +1058,7 @@ export function OrderTicket({
                                     className={
                                         styles.seg[daytradeShort ? 'on' : 'off']
                                     }
-                                    title='現股當沖先賣（無券先賣，當日需回補）'
+                                    title={contract.day_trade === 'Yes' ? '現股當沖先賣（無券先賣，當日需回補）' : '此股票目前不可現股當沖先賣，請取消'}
                                     onClick={() => {
                                         setDaytradeShort((v) => !v);
                                         setArmed(false);

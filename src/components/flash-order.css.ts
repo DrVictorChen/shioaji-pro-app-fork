@@ -581,3 +581,148 @@ export const hint = style({
     flexShrink: 0,
     textAlign: 'center',
 });
+
+// ---- 信用條件（整股：現股／融資／融券＋現股當沖先賣）----
+
+const amberDim = 'rgba(224, 164, 60, 0.08)';
+
+// 數量旁的「張·融資」按鈕：單位＋信用條件的快速下拉
+// static: the menu is placed against the controls row (position: relative),
+// so it never hangs off a narrow panel
+export const unitAnchor = style({
+    position: 'static',
+    display: 'inline-flex',
+});
+
+const unitBtnBase = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 2,
+    fontFamily: vars.font.body,
+    fontSize: '0.64rem',
+    color: vars.color.mutedForeground,
+    background: 'transparent',
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    padding: '1px 4px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    ':hover': { color: vars.color.foreground },
+});
+
+export const unitBtn = styleVariants({
+    closed: [unitBtnBase],
+    open: [unitBtnBase, { color: vars.color.foreground, borderColor: vars.color.accent }],
+});
+
+export const unitCredit = style({
+    color: vars.color.amber,
+    fontWeight: 700,
+});
+
+export const menuBackdrop = style({
+    position: 'fixed',
+    inset: 0,
+    zIndex: 40,
+});
+
+export const unitMenu = style({
+    position: 'absolute',
+    top: 'calc(100% + 4px)',
+    right: '6px',
+    zIndex: 41,
+    width: '11.5rem',
+    maxWidth: 'calc(100% - 12px)',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '4px',
+    fontFamily: vars.font.body,
+    fontSize: '0.68rem',
+    color: vars.color.foreground,
+    background: vars.color.panelRaised,
+    border: `1px solid ${vars.color.borderBright}`,
+    borderRadius: vars.radius.md,
+    boxShadow: '0 12px 30px rgba(0, 0, 0, 0.35)',
+});
+
+const menuItemBase = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    width: '100%',
+    padding: '4px 6px',
+    fontFamily: vars.font.body,
+    fontSize: '0.68rem',
+    textAlign: 'left',
+    color: vars.color.foreground,
+    background: 'transparent',
+    border: 'none',
+    borderRadius: vars.radius.sm,
+    cursor: 'pointer',
+    ':hover': { background: vars.color.muted },
+    ':disabled': { opacity: 0.45, cursor: 'not-allowed', background: 'transparent' },
+});
+
+export const menuItem = styleVariants({
+    off: [menuItemBase],
+    on: [menuItemBase, { color: vars.color.amber, fontWeight: 600 }],
+});
+
+export const menuDesc = style({
+    marginLeft: 'auto',
+    fontSize: '0.6rem',
+    color: vars.color.mutedForeground,
+    fontWeight: 400,
+});
+
+export const menuSep = style({
+    height: 1,
+    margin: '3px 2px',
+    background: vars.color.border,
+});
+
+export const menuNote = style({
+    padding: '3px 6px',
+    fontSize: '0.6rem',
+    lineHeight: 1.35,
+    color: vars.color.mutedForeground,
+});
+
+// 商品列的琥珀色小標籤（現股不顯示）；不能用時變紅並劃掉
+const creditTagBase = style({
+    fontFamily: vars.font.body,
+    fontSize: '0.6rem',
+    fontWeight: 700,
+    padding: '0 5px',
+    borderRadius: 3,
+    border: '1px solid',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+});
+
+export const creditTag = styleVariants({
+    ok: [creditTagBase, { color: vars.color.amber, borderColor: vars.color.amber, background: amberDim }],
+    bad: [creditTagBase, { color: vars.color.danger, borderColor: vars.color.danger, textDecoration: 'line-through' }],
+});
+
+const creditBannerBase = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    padding: `2px ${vars.space.sm}`,
+    fontFamily: vars.font.body,
+    fontSize: '0.62rem',
+    lineHeight: 1.35,
+    borderBottom: `1px solid ${vars.color.border}`,
+    flexShrink: 0,
+});
+
+export const creditBanner = styleVariants({
+    ok: [creditBannerBase, { color: vars.color.amber, background: amberDim }],
+    bad: [creditBannerBase, { color: vars.color.danger, background: 'rgba(239, 68, 68, 0.08)' }],
+});
+
+// 這個信用條件不能送的那一邊：整欄變淡
+export const blockedSide = style({
+    opacity: 0.3,
+});

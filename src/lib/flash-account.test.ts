@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashLot, savePopoutFlashLot, loadPopoutFlashQty, savePopoutFlashQty, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
+import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashCredit, loadPopoutFlashLot, normalizeFlashCredit, savePopoutFlashCredit, savePopoutFlashLot, loadPopoutFlashQty, savePopoutFlashQty, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
 import type { Account } from './types/portfolio';
 const a: Account = { account_type: 'F', broker_id: 'B', account_id: 'A', signed: true, person_id: '', username: '' };
 const b = { ...a, account_id: 'B' };
@@ -223,4 +223,31 @@ describe('per-panel flash account (#139)', () => {
         // raw values are kept; the panel re-checks limits on restore
         expect(loadPopoutFlashQty('v')).toEqual({ IntradayOdd: 5000 });
     }));
+    it('a popout keeps its own credit condition by window id, like its unit', () => withStorage(() => {
+        const margin = flashPopoutParams({}, main, 'panel:m:2330', { lot: 'Common', credit: { cond: 'MarginTrading', daytradeShort: false } });
+        expect(loadPopoutFlashCredit(margin.win)).toEqual({ cond: 'MarginTrading', daytradeShort: false });
+        // later unit and account changes keep it; the popout's own change replaces it
+        savePopoutFlashLot(margin.win, 'IntradayOdd');
+        savePopoutFlashAccounts(margin.win, { S: 'S:B:S1' });
+        expect(loadPopoutFlashCredit(margin.win)).toEqual({ cond: 'MarginTrading', daytradeShort: false });
+        savePopoutFlashCredit(margin.win, { cond: 'Cash', daytradeShort: true });
+        expect(loadPopoutFlashCredit(margin.win)).toEqual({ cond: 'Cash', daytradeShort: true });
+        expect(loadPopoutFlashLot(margin.win)).toBe('IntradayOdd');
+        // a recreated window takes the panel's; a tile without one keeps its own
+        reseedPopoutFlashAccounts(margin.win, {}, main, { lot: 'Common', credit: { cond: 'ShortSelling', daytradeShort: false } });
+        expect(loadPopoutFlashCredit(margin.win)).toEqual({ cond: 'ShortSelling', daytradeShort: false });
+        reseedPopoutFlashAccounts(margin.win, {}, main);
+        expect(loadPopoutFlashCredit(margin.win)).toEqual({ cond: 'ShortSelling', daytradeShort: false });
+        expect(loadPopoutFlashCredit(null)).toBeUndefined();
+    }));
+    it('normalizes a stored credit condition: unknown conditions are dropped, 當沖 only with 現股', () => {
+        expect(normalizeFlashCredit({ cond: 'MarginTrading', daytradeShort: false })).toEqual({ cond: 'MarginTrading', daytradeShort: false });
+        expect(normalizeFlashCredit({ cond: 'ShortSelling', daytradeShort: true })).toEqual({ cond: 'ShortSelling', daytradeShort: false });
+        expect(normalizeFlashCredit({ cond: 'SBLShort', daytradeShort: true })).toEqual({ cond: 'SBLShort', daytradeShort: false });
+        expect(normalizeFlashCredit({ cond: 'SBLShortPriceExempt', daytradeShort: false })).toEqual({ cond: 'SBLShortPriceExempt', daytradeShort: false });
+        expect(normalizeFlashCredit({ cond: 'Bogus', daytradeShort: false })).toBeUndefined();
+        expect(normalizeFlashCredit({ cond: 'Cash' })).toEqual({ cond: 'Cash', daytradeShort: false });
+        expect(normalizeFlashCredit('MarginTrading')).toBeUndefined();
+        expect(normalizeFlashCredit(undefined)).toBeUndefined();
+    });
 });
