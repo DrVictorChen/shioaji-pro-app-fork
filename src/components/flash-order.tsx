@@ -20,6 +20,7 @@ import { captureServerMode } from '../lib/server-info-store';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { Ban, ChevronDown, Zap } from 'lucide-react';
 import {
+    type ReactNode,
     memo,
     useCallback,
     useEffect,
@@ -48,6 +49,7 @@ import { clampLotQuantity, CREDIT_TEXT, creditLabel, isOddLot, ODD_LOT_MAX_SHARE
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
+import { expiryTime, isStockFuture, lotsPerContract, spreadOf } from '../lib/flash-link';
 import * as styles from './flash-order.css';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
@@ -56,6 +58,7 @@ const EDGE = 2; // auto-recenter when last price gets this close to the edge
 const keyOf = (p: number) => p.toFixed(2);
 const FOLLOW_GLOBAL = '__follow__';
 const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
+const CONTRACT_EXPIRED = '合約已到期，這筆沒有送出';
 
 function accountChangedBeforeSend(error: unknown): boolean {
     return error instanceof Error && error.message === ACCOUNT_CHANGED_DURING_CONFIRMATION;
@@ -254,6 +257,12 @@ export function FlashOrder({
     onCreditChange,
     orderOpts: savedOrder,
     onOrderOptsChange,
+    linkKey = '',
+    symbolExtra,
+    settingsRows,
+    showRef = true,
+    expiresAt = null,
+    paused: pausedProp,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -290,8 +299,23 @@ export function FlashOrder({
     // symbol changes and persisted by the owner. Undefined = defaults.
     orderOpts?: FlashOrderOpts;
     onOrderOptsChange?: (order: FlashOrderOpts) => void;
+    /** 連動狀態（群組、對應商品、來源代碼）：一變就同一次 render 解除點價下單，
+     * 確認中的那筆也不送 — 即使換完的合約跟原本相同 */
+    linkKey?: string;
+    /** 商品列右側（個股期月份） */
+    symbolExtra?: ReactNode;
+    /** 設定面板最上面的列（對應商品／規格／月份／價差對照） */
+    settingsRows?: ReactNode;
+    /** 價差對照列（零股：整零差；個股期：期現差） */
+    showRef?: boolean;
+    /** 對應的個股期到期時刻（最後交易日收盤）；之後點下去或確認中的都不送 */
+    expiresAt?: number | null;
+    /** 對應商品查詢中：面板保留（數量等狀態不重設），但不顯示舊合約、不能啟用或送出 */
+    paused?: string;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
+    // 真實月份個股期沒有最後交易日：無法判斷到期，跟查詢中一樣暫停（照選取、彈出視窗也一樣）
+    const paused = pausedProp ?? (isStockFuture(contract) && !contract.target_code && expiryTime(contract) === null ? '個股期到期日無法確認，暫停送單' : undefined);
     const live = useTradingLive();
     const accountState = useAccounts();
     const privacy = usePrivacyMode();
@@ -525,6 +549,8 @@ export function FlashOrder({
     const last = odd
         ? (oddQuote?.tick ? Number(oddQuote.tick.close) : null)
         : lotLast;
+    // 價差對照只用成交價（即時或快照），不拿參考價充數
+    const tradedLast = quote?.tick ? Number(quote.tick.close) : initialSnapshot?.close || null;
     const lastVol = odd
         ? (oddQuote?.tick?.volume ?? 0)
         : quote?.tick ? quote.tick.volume : 0;
@@ -537,15 +563,22 @@ export function FlashOrder({
     const contractRef = useRef(contract);
     contractRef.current = contract;
     // 確認期間換信用條件也一樣中止（不會用舊條件送出）
-    const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}`);
+    // 暫停（對應商品查詢中）也算換了狀態：確認中的單作廢，之後恢復也不會復活
+    const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}:${linkKey}:${paused ? 'paused' : ''}`);
     const armedRef = useRef(armed);
+    // 真實月份個股期（不是近月別名）在最後交易日收盤後一律不送 — 彈出視窗、照選取也一樣；其他期貨不由這裡判斷
+    const pausedRef = useRef(paused);
+    pausedRef.current = paused;
+    const expiresRef = useRef(expiresAt);
+    expiresRef.current = expiresAt ?? (isStockFuture(contract) && !contract.target_code ? expiryTime(contract) : null);
+    const expiredNow = () => expiresRef.current !== null && expiresRef.current !== undefined && Date.now() >= expiresRef.current;
     const armedAccountKey = useRef(accountKey);
     // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
     // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
-    const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}`;
+    const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}:${linkKey}:${paused ? 'paused' : ''}`;
     const armedKey = useRef(armKey);
     const armedQtyCurrent = armedMemQty.current === rememberedQty;
-    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent;
+    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent && !paused;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const oddRef = useRef(odd);
@@ -570,7 +603,7 @@ export function FlashOrder({
     // Account and unit changes still disarm an active ladder.
     useEffect(() => {
         setArmed(false);
-    }, [contract.code, accountKey, lot, creditKey, orderKey]);
+    }, [contract.code, accountKey, lot, creditKey, orderKey, linkKey, paused]);
     // 記住的數量被外部改掉（例如切換版面）：點價下單解除
     useEffect(() => {
         if (armed && !armedQtyCurrent) setArmed(false);
@@ -883,6 +916,11 @@ export function FlashOrder({
         const capturedContract = contractRef.current;
         const isContextCurrent = captureContext();
         const q = Math.max(1, qtyRef.current);
+        if (expiredNow()) {
+            notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: CONTRACT_EXPIRED });
+            return;
+        }
+        if (pausedRef.current) return;
         if (oddLot && price === null) {
             notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: ODD_LOT_TEXT.priceType });
             return;
@@ -951,6 +989,8 @@ export function FlashOrder({
                     } : {}),
                     beforeSend: () => {
                         if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                        if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
+                        if (pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                         if (enquiryKey !== null && creditEnquireKey(capturedContract) !== enquiryKey) throw new Error('確認期間已跨日或伺服器已切換，可否融資券需重新確認，這筆沒有送出');
                         if (dayBound && taipeiDay() !== clickDay) throw new Error('確認期間已跨日，可否當沖需重新確認，這筆沒有送出');
                         // 確認期間合約更新（例如變成不可當沖）：照目前的規則再看一次
@@ -994,9 +1034,15 @@ export function FlashOrder({
         [send],
     );
 
+    // 刪單送出前再確認：期間面板暫停或連動、商品變了就不送（不撤到上一檔的委託）
+    const cancelGuard = useCallback(() => {
+        const isContextCurrent = captureContext();
+        return () => { if (!isContextCurrent() || pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE); };
+    }, [captureContext]);
+
     const cancelAt = useCallback(async (action: Action, price: number) => {
         const capturedAccount = accountRef.current;
-        if (!capturedAccount) return;
+        if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
@@ -1012,7 +1058,7 @@ export function FlashOrder({
                     keyOf(price),
         );
         if (targets.length === 0) return;
-        const results = await cancelOrders(targets.map((t) => t.order.id));
+        const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -1020,7 +1066,7 @@ export function FlashOrder({
             body: `${code} @ ${fmtPrice(price)}：${summary.body}`,
         });
         onOrdersChangedRef.current?.();
-    }, []);
+    }, [cancelGuard]);
 
     const onCancelAt = useCallback(
         (action: Action, price: number) => void cancelAt(action, price),
@@ -1029,7 +1075,7 @@ export function FlashOrder({
 
     const cancelSymbol = useCallback(async () => {
         const capturedAccount = accountRef.current;
-        if (!capturedAccount) return;
+        if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
@@ -1042,7 +1088,7 @@ export function FlashOrder({
             notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
-        const results = await cancelOrders(targets.map((t) => t.order.id));
+        const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -1050,7 +1096,7 @@ export function FlashOrder({
             body: `${code}：${summary.body}`,
         });
         onOrdersChangedRef.current?.();
-    }, []);
+    }, [cancelGuard]);
 
     const flatten = useCallback(async () => {
         const account = accountRef.current;
@@ -1060,8 +1106,15 @@ export function FlashOrder({
         inflightRef.current.add(key);
         const contract = contractRef.current;
         const isContextCurrent = captureContext();
+        if (expiredNow() || pausedRef.current) {
+            inflightRef.current.delete(key);
+            notify({ kind: 'err', title: '⚡ 平倉未送出', body: CONTRACT_EXPIRED });
+            return;
+        }
         const beforeSend = () => {
             if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+            if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
+            if (pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
             if (!accountMatches(accountRef.current, account)) throw new Error('帳戶已變更，已停止後續下單');
         };
         const action = pos.net > 0 ? 'Sell' : 'Buy';
@@ -1082,6 +1135,9 @@ export function FlashOrder({
     }, [pos, stillPanelAccount, captureContext]);
 
     // ---- render ----
+
+    // 畫面也用同一次 render 算出的啟用狀態：換商品／單位／連動的那一刻就顯示鎖定
+    const armedView = armedRef.current;
 
     const lastKey = last !== null ? keyOf(roundToTick(contract, last)) : '';
     const lastIdx =
@@ -1121,7 +1177,14 @@ export function FlashOrder({
 
     return (
         <div className={styles.wrap}>
+            {paused ? (
+                <div className={styles.symbolRow}><span className={styles.symbolName}>{paused}</span></div>
+            ) : (
             <div className={styles.symbolRow} title={symbolLabel.title}>
+                <span className={styles.kindTag} data-testid='flash-kind'>
+                    <b>{market === 'S' ? (odd ? '零股' : '整股') : isStockFuture(contract) ? '股期' : contract.security_type === 'OPT' ? '選擇權' : '期貨'}</b>
+                    <i>{market === 'F' ? '口' : odd ? '股' : '張'}</i>
+                </span>
                 <span className={styles.symbolName}>{symbolLabel.name}</span>
                 {creditTag && (
                     <span
@@ -1136,8 +1199,13 @@ export function FlashOrder({
                 {orderTags.map(t => (
                     <span key={t} className={styles.creditTag.ok} data-testid='flash-order-tag' title={`這個面板的委託條件：${t}`}>{t}</span>
                 ))}
+                {symbolExtra}
                 <span className={styles.symbolMeta}>{symbolLabel.meta}</span>
             </div>
+            )}
+            {!paused && showRef && (odd || isStockFuture(contract)) && (
+                <FlashRefRow contract={contract} odd={odd} own={odd ? last : tradedLast} roundLot={tradedLast} />
+            )}
             <div className={styles.controls}>
                 {/* 收合時只顯示精簡帳號（#176）；透明的原生 select 疊在上面，
                     展開的選單才列出帳號＋戶名 */}
@@ -1265,6 +1333,7 @@ export function FlashOrder({
                     layout={{
                         title: '閃電下單設定',
                         scope: '只影響這個面板',
+                        extraRows: settingsRows,
                         unit: market === 'S',
                         orderType: false,
                         octype: false,
@@ -1282,7 +1351,7 @@ export function FlashOrder({
                             },
                         },
                     }}
-                    contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
+                    contractLabel={paused ?? (symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`)}
                     summary={flashOrderSummary(flashSettings, market, accountShort, { orderType: clickOrderType, octype: clickOctype, futuresPriceType: mktPriceType })}
                     ariaLabel='閃電下單設定'
                     onOpenChange={open => { settingsOpenRef.current = open; }}
@@ -1293,13 +1362,13 @@ export function FlashOrder({
                 />
                 <span className={styles.rowBreak} aria-hidden />
                 <button
-                    className={styles.armBtn[armed ? 'on' : 'off']}
-                    disabled={!live || !activeAccount}
-                    onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed((a) => !a); }}
+                    className={styles.armBtn[armedView ? 'on' : 'off']}
+                    disabled={!live || !activeAccount || !!paused}
+                    onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed(!armedView); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
-                    ) : armed ? (
+                    ) : armedView ? (
                         <>
                             <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
                             點價即下單
@@ -1328,7 +1397,7 @@ export function FlashOrder({
             </div>
             <div className={styles.actionBar}>
                 <button
-                    className={`${styles.mktBtn.buy} ${armed && !odd && !buyBlock ? '' : styles.disabledCell}`}
+                    className={`${styles.mktBtn.buy} ${armedView && !odd && !buyBlock ? '' : styles.disabledCell}`}
                     // 可否融資券的 0 只讓按鈕變淡、仍可點（點下去會重新查）；固定規則才停用
                     disabled={odd || !!ruleBlockRef.current.Buy}
                     data-blocked={buyBlock ? true : undefined}
@@ -1338,7 +1407,7 @@ export function FlashOrder({
                     {mktLabel}{buyCredit}買
                 </button>
                 <button
-                    className={`${styles.mktBtn.sell} ${armed && !odd && !sellBlock ? '' : styles.disabledCell}`}
+                    className={`${styles.mktBtn.sell} ${armedView && !odd && !sellBlock ? '' : styles.disabledCell}`}
                     disabled={odd || !!ruleBlockRef.current.Sell}
                     data-blocked={sellBlock ? true : undefined}
                     title={odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined}
@@ -1346,15 +1415,15 @@ export function FlashOrder({
                 >
                     {mktLabel}{sellCredit}賣
                 </button>
-                {pos && (
+                {pos && !paused && (
                     <button
-                        className={`${styles.flatBtn} ${armed ? '' : styles.disabledCell}`}
+                        className={`${styles.flatBtn} ${armedView ? '' : styles.disabledCell}`}
                         title={pos.safeExit
                             ? market === 'S'
                                 ? `平倉 ${maskMoney(fmtStockLots(Math.abs(pos.net)), privMoney)}（整張市價、零股以漲跌停價限價）`
                                 : `市價平倉 ${maskMoney(String(Math.abs(pos.net)), privMoney)}`
                             : '持倉方向或交易條件不明，請使用持倉面板確認'}
-                        disabled={!pos.safeExit || !armed || !activeAccount}
+                        disabled={!pos.safeExit || !armedView || !activeAccount}
                         onClick={() => void flatten()}
                     >
                         平倉
@@ -1362,13 +1431,13 @@ export function FlashOrder({
                 )}
                 <button
                     className={styles.cancelAllBtn}
-                    disabled={workingCount === 0 && otherLotOrders === 0}
+                    disabled={!!paused || (workingCount === 0 && otherLotOrders === 0)}
                     onClick={() => void cancelSymbol()}
                 >
-                    全刪{workingCount > 0 ? ` ${workingCount}` : ''}
+                    全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}
                 </button>
             </div>
-            {pos && (
+            {pos && !paused && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
                         title={market === 'S' && !privMoney ? `${Math.abs(pos.net).toLocaleString()} 股（含零股）` : undefined}>
@@ -1389,14 +1458,14 @@ export function FlashOrder({
                     </span>
                 </div>
             )}
-            {odd && (
+            {odd && !paused && (
                 <div className={styles.oddBanner} title='盤中零股與整股分開撮合，成交價可能與整股五檔不同'>
                     盤中零股 · 以股計 · 只限價 ROD · 僅現股；五檔與成交為零股行情（股）
                     {(panelCredit.cond !== 'Cash' || panelCredit.daytradeShort) && ' · 面板的信用條件在切回整股時恢復'}
                     {oddMatchTime && <span className={styles.oddMatchTime} title='盤中零股約每 5 秒撮合一次；五檔與成交價在撮合時更新'> · 最近撮合 {oddMatchTime}</span>}
                 </div>
             )}
-            {creditTag && (
+            {creditTag && !paused && (
                 <div className={styles.creditBanner[creditBad ? 'bad' : 'ok']} data-testid='flash-credit-banner'>
                     {creditBad ? <Ban size={10} aria-hidden /> : credit.daytradeShort ? <Zap size={10} aria-hidden /> : null}
                     <span>
@@ -1429,10 +1498,10 @@ export function FlashOrder({
                 }}
                 onDoubleClick={recenter}
             >
-                {rows.length === 0 && (
-                    <div className={styles.waiting}>等待報價…</div>
+                {(rows.length === 0 || paused) && (
+                    <div className={styles.waiting}>{paused ?? '等待報價…'}</div>
                 )}
-                {rows.map((price) => {
+                {!paused && rows.map((price) => {
                     const key = keyOf(price);
                     const lv = book.get(key);
                     const mine = myOrders.get(key);
@@ -1460,7 +1529,7 @@ export function FlashOrder({
                                       ? 'down'
                                       : null
                             }
-                            armed={armed}
+                            armed={armedView}
                             buyBlock={buyBlock}
                             sellBlock={sellBlock}
                             credit={rowCredit}
@@ -1470,7 +1539,7 @@ export function FlashOrder({
                         />
                     );
                 })}
-                {lastIdx === -1 && last !== null && rows.length > 0 && (
+                {!paused && lastIdx === -1 && last !== null && rows.length > 0 && (
                     <button
                         className={
                             styles.jumpBtn[lastAbove ? 'top' : 'bottom']
@@ -1481,6 +1550,7 @@ export function FlashOrder({
                     </button>
                 )}
             </div>
+            {!paused && (
             <div className={styles.totalsRow}>
                 {display?.source === 'snapshot' && <span title={display.time}>快照一檔</span>}
                 {odd && !oddQuote && <span title='尚未收到盤中零股行情；梯形暫以整股成交價置中'>等待零股行情</span>}
@@ -1492,13 +1562,45 @@ export function FlashOrder({
                 <span className={styles.totalBid} title={odd ? `${fmtInt(sumBid)} 股` : undefined}>Σ買 {odd ? fmtCompactInt(sumBid) : fmtInt(sumBid)}</span>
                 <span className={styles.totalAsk} title={odd ? `${fmtInt(sumAsk)} 股` : undefined}>Σ賣 {odd ? fmtCompactInt(sumAsk) : fmtInt(sumAsk)}</span>
             </div>
+            )}
             <div className={styles.hint}>
-                {armed
+                {armedView
                     ? odd
                         ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · 點單量=刪單 · Esc 鎖定`
                         : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買${orderSuffix}`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣${orderSuffix}`} · 點單量=刪單 · Esc 鎖定`
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
             </div>
+        </div>
+    );
+}
+
+// 價差對照列：零股面板＝零股成交價 − 整股成交價；個股期面板＝期貨 − 現股，
+// 並提示 1 口對應幾張。用最近成交價，任一方沒有成交就顯示 —
+function FlashRefRow({ contract, odd, own, roundLot }: { contract: ContractInfo; odd: boolean; own: number | null; roundLot: number | null }) {
+    return odd
+        ? <FlashRefLine contract={contract} odd own={own} base={roundLot} />
+        : <FlashBasisRow contract={contract} own={own} />;
+}
+
+// 個股期：現股的最近成交價（即時成交，沒有就用快照）
+function FlashBasisRow({ contract, own }: { contract: ContractInfo; own: number | null }) {
+    const { quote, snapshot } = useDisplayBook(contract.underlying_code ?? '');
+    const base = quote?.tick ? Number(quote.tick.close) : snapshot?.close || null;
+    return <FlashRefLine contract={contract} odd={false} own={own} base={base} />;
+}
+
+function FlashRefLine({ contract, odd, own, base }: { contract: ContractInfo; odd: boolean; own: number | null; base: number | null }) {
+    const s = spreadOf(own, base);
+    const digits = base !== null && Math.abs(base) >= 500 ? 0 : undefined;
+    const sign = (n: number) => (n > 0 ? '+' : n < 0 ? '−' : '');
+    return (
+        <div className={styles.refRow} data-testid='flash-ref'>
+            <span className={styles.refKey}>{odd ? '整股' : '現股'} <b>{base ? fmtPrice(base) : '—'}</b></span>
+            <span className={styles.refKey}>
+                {odd ? '整零差' : '期現差'}{' '}
+                {s ? <b className={s.diff > 0 ? styles.refUp : s.diff < 0 ? styles.refDown : undefined}>{sign(s.diff)}{fmtPrice(Math.abs(s.diff), digits)} ({sign(s.pct)}{Math.abs(s.pct).toFixed(2)}%)</b> : <b>—</b>}
+            </span>
+            {!odd && <span className={styles.refKey}>{lotsPerContract(contract.multiplier)}</span>}
         </div>
     );
 }

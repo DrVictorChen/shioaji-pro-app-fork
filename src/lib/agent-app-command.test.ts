@@ -250,6 +250,15 @@ describe('semantic workspace commands', () => {
         ).rejects.toMatchObject({ code: 'not_found' });
     });
 
+    it('adding or removing a panel keeps the link groups\' codes', async () => {
+        const { context, workspace } = fixture();
+        context.updateWorkspace({ ...workspace(), linkGroups: { A: '2330' } });
+        await executeAgentAppCommand({ name: 'add_panel', args: { type: 'depth' } }, context);
+        expect(workspace().linkGroups).toEqual({ A: '2330' });
+        await executeAgentAppCommand({ name: 'remove_panel', args: { id: 'depth-1' } }, context);
+        expect(workspace().linkGroups).toEqual({ A: '2330' });
+    });
+
     it('adds supported panels and makes singleton addition idempotent', async () => {
         const { context, workspace } = fixture();
         await expect(
@@ -296,6 +305,17 @@ describe('semantic workspace commands', () => {
                 context,
             ),
         ).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('unpinning returns the panel to following the selection and drops its link group', async () => {
+        const { context, workspace } = fixture();
+        const ws = workspace();
+        context.updateWorkspace({ ...ws, linkGroups: { A: '2330' }, blocks: ws.blocks.map((b, i) => (i === 0 ? { ...b, linkGroup: 'A' as const } : b)) });
+        await executeAgentAppCommand({ name: 'set_panel_pin', args: { id: 'chart-1', code: '2317' } }, context);
+        expect(workspace().blocks[0]?.linkGroup).toBeUndefined();
+        await executeAgentAppCommand({ name: 'set_panel_pin', args: { id: 'chart-1', code: null } }, context);
+        expect(workspace().blocks[0]).toMatchObject({ pin: null });
+        expect(workspace().blocks[0]?.linkGroup).toBeUndefined();
     });
 
     it('pins only pinnable panels to resolvable contracts', async () => {

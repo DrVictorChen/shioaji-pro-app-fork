@@ -1,6 +1,6 @@
 // src/components/flash-order.css.ts
 
-import { createContainer, style, styleVariants } from '@vanilla-extract/css';
+import { createContainer, globalStyle, style, styleVariants } from '@vanilla-extract/css';
 import { vars } from '../theme.css';
 
 const COLS = '3rem 1fr 4.8rem 1fr 3rem';
@@ -757,4 +757,71 @@ const menuSegBase = style({
 export const menuSegBtn = styleVariants({
     off: [menuSegBase, { ':hover': { background: vars.color.muted } }],
     on: [menuSegBase, { color: vars.color.amber, borderColor: vars.color.amber, background: 'rgba(224, 164, 60, 0.08)', fontWeight: 600 }],
+});
+
+// 商品列最左邊的種類標籤：「整股｜張」「零股｜股」「股期｜口」
+export const kindTag = style({
+    display: 'inline-flex',
+    alignSelf: 'center',
+    flexShrink: 0,
+    fontFamily: vars.font.body,
+    fontSize: '0.58rem',
+    lineHeight: 1.5,
+    border: `1px solid ${vars.color.borderBright}`,
+    borderRadius: 3,
+    overflow: 'hidden',
+    whiteSpace: 'nowrap',
+});
+globalStyle(`${kindTag} > b`, { padding: '0 4px', fontWeight: 700, color: vars.color.foreground, background: vars.color.muted });
+globalStyle(`${kindTag} > i`, { padding: '0 4px', fontStyle: 'normal', color: vars.color.mutedForeground });
+
+// 價差對照列（零股：整零差；個股期：期現差＋1口=N張）
+export const refRow = style({
+    display: 'flex',
+    flexWrap: 'wrap',
+    columnGap: vars.space.sm,
+    padding: `1px ${vars.space.sm}`,
+    fontFamily: vars.font.body,
+    fontSize: '0.6rem',
+    color: vars.color.mutedForeground,
+    borderBottom: `1px solid ${vars.color.border}`,
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+});
+export const refKey = style({});
+globalStyle(`${refKey} > b`, { fontFamily: vars.font.mono, fontWeight: 600, color: vars.color.foreground });
+export const refUp = style({});
+export const refDown = style({});
+globalStyle(`${refKey} > b${refUp}`, { color: vars.color.up });
+globalStyle(`${refKey} > b${refDown}`, { color: vars.color.down });
+
+// 個股期月份選擇（透明原生 select 疊在標籤上）
+export const monthPick = style({
+    position: 'relative',
+    display: 'inline-flex',
+    alignItems: 'center',
+    alignSelf: 'center',
+    gap: 2,
+    flexShrink: 0,
+    padding: '0 5px',
+    fontFamily: vars.font.body,
+    fontSize: '0.6rem',
+    fontWeight: 600,
+    color: vars.color.accent,
+    background: vars.color.accentDim,
+    borderRadius: 3,
+    cursor: 'pointer',
+});
+export const monthSelect = style({ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%' });
+export const expiryTag = style({
+    alignSelf: 'center',
+    flexShrink: 0,
+    fontFamily: vars.font.body,
+    fontSize: '0.58rem',
+    fontWeight: 700,
+    padding: '0 4px',
+    borderRadius: 3,
+    color: vars.color.danger,
+    border: `1px solid ${vars.color.danger}`,
 });

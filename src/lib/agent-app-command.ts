@@ -283,6 +283,7 @@ export async function executeAgentAppCommand<K extends AgentAppCommandName>(
                 pin: null,
             };
             context.updateWorkspace({
+                ...workspace,
                 blocks: [...workspace.blocks, block],
                 layout: [
                     ...workspace.layout,
@@ -316,6 +317,7 @@ export async function executeAgentAppCommand<K extends AgentAppCommandName>(
                 );
             }
             context.updateWorkspace({
+                ...workspace,
                 blocks: workspace.blocks.filter((block) => block.id !== id),
                 layout: workspace.layout.filter((item) => item.i !== id),
             });
@@ -345,7 +347,9 @@ export async function executeAgentAppCommand<K extends AgentAppCommandName>(
                     `Panel ${id} does not support pinning`,
                 );
             }
-            const updated = { ...panel, pin };
+            // 固定或取消固定都離開連動群組：取消固定＝回到跟隨自選選取
+            const { linkGroup: _group, ...rest } = panel;
+            const updated = { ...rest, pin };
             context.updateWorkspace({
                 ...workspace,
                 blocks: workspace.blocks.map((block) =>

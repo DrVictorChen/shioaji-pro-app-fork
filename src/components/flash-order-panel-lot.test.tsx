@@ -202,7 +202,7 @@ it('an outside unit change can never send the old quantity in the new unit, even
         // fires in the same commit as the new unit, before FlashOrder's passive effects
         useLayoutEffect(() => {
             if (!click) return;
-            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+            r.root.findAll(n => n.type === 'div' && n.props['data-side'] === 'buy')[0]!.props.onClick();
         }, [click]);
         return createElement(FlashOrder, props(stk, { lot, onLotChange: () => undefined }));
     };
@@ -220,7 +220,7 @@ it('a symbol change keeping the unit and quantity never stays armed, even before
     const Wrapped = ({ contract, click }: { contract: ContractInfo; click: boolean }) => {
         useLayoutEffect(() => {
             if (!click) return;
-            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+            r.root.findAll(n => n.type === 'div' && n.props['data-side'] === 'buy')[0]!.props.onClick();
         }, [click]);
         return createElement(FlashOrder, props(contract, { lot: 'IntradayOdd', onLotChange: () => undefined }));
     };
