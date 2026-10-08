@@ -85,7 +85,7 @@ import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
 import { canUpdateOrderPrice } from '../lib/odd-lot';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
-import { PriceBandPrimitive } from '../lib/price-band';
+import { PriceBandPrimitive, type PriceBandPoint } from '../lib/price-band';
 import { notify, placeQuickOrder } from '../lib/trade';
 import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import {
@@ -1063,12 +1063,32 @@ export function CandleChart({
                 const st = outputStyle(inst, def, o.key);
                 if (!st.visible) continue;
                 const color = colorWithOpacity(st.color, st.opacity);
-                // 價格帶（橫式長方形區域）：透明 anchor series 供座標/legend，
-                // 實際繪製交給 PriceBandPrimitive。下緣序列在 `<key>_lo`。
-                if (o.kind === 'band') {
-                    const top = lastVal(pts);
-                    const bottom = lastVal(out[`${o.key}_lo`] ?? []);
-                    if (top === undefined || bottom === undefined) continue;
+                // 價格帶（上下緣序列之間的填色區域）：逐根交給
+                // PriceBandPrimitive 繪製，anchor series 用中線供座標、
+                // legend 與 hover（三者一致）。下緣序列在 `<key>_lo`。
+                // 只有下緣序列真的存在才走 band 分支；編輯器把一般輸出誤選成
+                // 「區域帶」時不會憑空消失，而是退回以一般線繪製（看得見）
+                const loSer = o.kind === 'band' ? out[`${o.key}_lo`] : undefined;
+                if (o.kind === 'band' && loSer) {
+                    const loByTime = new Map(
+                        loSer.map((p) => [p.time, p.value]),
+                    );
+                    const bandPoints: PriceBandPoint[] = [];
+                    const midPts: IndicatorPoint[] = [];
+                    for (const p of pts) {
+                        const lo = loByTime.get(p.time);
+                        if (p.value === undefined || lo === undefined) {
+                            midPts.push({ time: p.time }); // 缺值 → 斷開
+                            continue;
+                        }
+                        bandPoints.push({
+                            time: p.time as UTCTimestamp,
+                            top: p.value,
+                            bottom: lo,
+                        });
+                        midPts.push({ time: p.time, value: (p.value + lo) / 2 });
+                    }
+                    if (bandPoints.length === 0) continue;
                     const anchor = chart.addSeries(
                         LineSeries,
                         {
@@ -1081,16 +1101,16 @@ export function CandleChart({
                         },
                         pane,
                     );
-                    anchor.setData(toLineData(pts));
+                    anchor.setData(toLineData(midPts));
                     anchor.attachPrimitive(
                         new PriceBandPrimitive({
-                            top,
-                            bottom,
+                            points: bandPoints,
+                            // 填色壓低透明度，邊框保持實色才看得見區間
                             fillColor: colorWithOpacity(
                                 st.color,
-                                st.opacity,
+                                Math.min(st.opacity, 20),
                             ),
-                            borderColor: color,
+                            borderColor: st.color,
                             borderStyle: o.border ?? 'solid',
                             borderWidth: st.width,
                         }),
@@ -1099,11 +1119,15 @@ export function CandleChart({
                         anchor as ISeriesApi<'Line' | 'Histogram'>,
                     );
                     firstSeries ??= anchor as ISeriesApi<'Line' | 'Histogram'>;
+                    const lastMid = midPts.reduce<number | undefined>(
+                        (acc, p) => (p.value !== undefined ? p.value : acc),
+                        undefined,
+                    );
                     metas.push({
                         label: o.label,
                         color: st.color,
                         series: anchor as ISeriesApi<'Line' | 'Histogram'>,
-                        last: (top + bottom) / 2,
+                        last: lastMid,
                         precision: inst.precision,
                     });
                     continue;

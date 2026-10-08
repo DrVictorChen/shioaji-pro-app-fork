@@ -82,6 +82,12 @@ export function runCustom(
         if (typeof name !== 'string' || name.trim() === '') {
             throw new Error('plot() 第一個參數要是輸出名稱字串');
         }
+        // 名稱以 _lo 結尾且基底已是 band() 輸出 → 會覆蓋該 band 的下緣
+        if (name.endsWith('_lo') && hints[name.slice(0, -3)]?.kind === 'band') {
+            throw new Error(
+                `plot('${name}') 會覆蓋 band('${name.slice(0, -3)}') 的下緣，請改名`,
+            );
+        }
         if (!Array.isArray(series)) {
             throw new Error(`plot('${name}') 第二個參數要是序列（陣列）`);
         }
@@ -121,6 +127,14 @@ export function runCustom(
         if (typeof name !== 'string' || name.trim() === '') {
             throw new Error('band() 第一個參數要是輸出名稱字串');
         }
+        // 下緣存在 `<name>_lo`：名稱本身不能以 _lo 結尾，也不能撞到使用者
+        // 已經 plot() 出來的同名輸出，否則兩者會互相覆蓋
+        if (name.endsWith('_lo')) {
+            throw new Error(`band('${name}') 名稱不能以 _lo 結尾（保留給下緣）`);
+        }
+        if (`${name}_lo` in outputs && !(name in outputs)) {
+            throw new Error(`band('${name}') 與已存在的輸出 '${name}_lo' 衝突`);
+        }
         const toSer = (v: unknown, which: string): Ser => {
             if (typeof v === 'number' && Number.isFinite(v)) {
                 return new Array<number | null>(n).fill(v);
@@ -141,13 +155,19 @@ export function runCustom(
         if (!(name in outputs)) order.push(name);
         outputs[name] = toSer(upper, '上緣');
         outputs[`${name}_lo`] = toSer(lower, '下緣');
+        // border / width 只收白名單值，不讓任意字串直接存進自訂指標
+        const border =
+            opts?.border === 'solid' || opts?.border === 'dashed'
+                ? opts.border
+                : undefined;
+        const width = opts?.width === 1 || opts?.width === 2 ? opts.width : undefined;
         hints[name] = {
             kind: 'band',
             ...(opts && typeof opts.color === 'string'
                 ? { color: opts.color }
                 : {}),
-            ...(opts?.border ? { border: opts.border } : {}),
-            ...(opts?.width ? { width: opts.width } : {}),
+            ...(border ? { border } : {}),
+            ...(width ? { width } : {}),
         };
     };
 

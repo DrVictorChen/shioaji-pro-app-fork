@@ -22,7 +22,6 @@ import {
     outputStyle,
 } from './indicator-defs';
 import type { IndicatorPoint } from './indicators';
-import { PriceBandPrimitive } from './price-band';
 import type { ChartColors } from './theme-store';
 import type { Candle } from './types/market';
 
@@ -84,44 +83,9 @@ export function renderIndicatorSeries(
             const st = outputStyle(inst, def, o.key);
             if (!st.visible) continue;
             const color = colorWithOpacity(st.color, st.opacity);
-            // 價格帶（同主圖：anchor series + PriceBandPrimitive）
-            if (o.kind === 'band') {
-                const lastDef = (arr: IndicatorPoint[]) => {
-                    for (let i = arr.length - 1; i >= 0; i--) {
-                        const v = arr[i]!.value;
-                        if (v !== undefined) return v;
-                    }
-                    return undefined;
-                };
-                const top = lastDef(pts);
-                const bottom = lastDef(out[`${o.key}_lo`] ?? []);
-                if (top === undefined || bottom === undefined) continue;
-                const anchor = chart.addSeries(
-                    LineSeries,
-                    {
-                        color: 'rgba(0,0,0,0)',
-                        lineVisible: false,
-                        crosshairMarkerVisible: false,
-                        autoscaleInfoProvider: () => null,
-                        ...quiet,
-                        ...priceFormatOpt,
-                    },
-                    pane,
-                );
-                anchor.setData(toLineData(pts));
-                anchor.attachPrimitive(
-                    new PriceBandPrimitive({
-                        top,
-                        bottom,
-                        fillColor: colorWithOpacity(st.color, st.opacity),
-                        borderColor: color,
-                        borderStyle: o.border ?? 'solid',
-                        borderWidth: st.width,
-                    }),
-                );
-                firstSeries ??= anchor;
-                continue;
-            }
+            // 價格帶只在主圖（candle-chart）繪製；回測進出場小圖略過，
+            // 不然 `<key>_lo` 下緣也沒意義。跳過避免 band 輸出被當線畫。
+            if (o.kind === 'band') continue;
             let s: ISeriesApi<'Line' | 'Histogram' | 'Area'>;
             if (st.plot === 'histogram') {
                 s = chart.addSeries(
