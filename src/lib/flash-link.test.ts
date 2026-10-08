@@ -119,6 +119,10 @@ describe('strict spec, expiry and ETF rules', () => {
         expect(pickStockFuture(miniOnly, link(), now)).toEqual({ status: 'noStd' });
         expect(pickStockFuture(miniOnly, link({ spec: 'mini' }), now)).toMatchObject({ status: 'ok', contract: { code: 'QFFJ6' } });
     });
+    it('delivery_date never stands in for a missing last trading date', () => {
+        const broken = rows.map(r => (r.code === 'CDFJ6' ? { ...r, last_trading_date: undefined, delivery_date: '2026-10-21' } as unknown as ContractInfo : r));
+        expect(pickStockFuture(broken, link(), now)).toEqual({ status: 'noExpiry' });
+    });
     it('a series with a month missing its last trading date cannot be trusted', () => {
         const broken = rows.map(r => (r.code === 'CDFJ6' ? { ...r, last_trading_date: '', delivery_date: undefined } as unknown as ContractInfo : r));
         expect(pickStockFuture(broken, link(), now)).toEqual({ status: 'noExpiry' });

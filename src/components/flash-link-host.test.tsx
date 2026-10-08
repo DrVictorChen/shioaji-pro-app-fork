@@ -196,3 +196,16 @@ it('while a lookup is in progress the ladder stays mounted (paused) instead of b
     await show(r, stock('2317', '鴻海'), { kind: 'future' }, { render });
     expect(text(r.root)).toBe('ladder DHFJ6');
 });
+
+it('while paused for a re-fetch the ladder keeps the previous roll-over deadline', async () => {
+    const got: unknown[] = [];
+    const render = (_c: ContractInfo, p: { expiresAt?: number | null; paused?: string }) => { got.push([p.paused, p.expiresAt]); return null; };
+    const r = await mount(tsmc, { kind: 'future', month: 'next' }, { render });
+    const deadline = (got.at(-1) as unknown[])[1];
+    expect(deadline).toBe(Date.parse('2026-10-20T13:30:00+08:00'));
+    mocks.fetchFutures.mockImplementationOnce(() => new Promise(() => undefined));
+    vi.setSystemTime(new Date('2026-10-20T14:00:00+08:00'));
+    await show(r, tsmc, { kind: 'future', month: 'next' }, { render });
+    await show(r, tsmc, { kind: 'future', month: 'next' }, { render });
+    expect(got.at(-1)).toEqual(['載入個股期…', deadline]);
+});

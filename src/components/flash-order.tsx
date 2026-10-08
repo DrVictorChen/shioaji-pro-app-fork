@@ -561,16 +561,19 @@ export function FlashOrder({
     const contractRef = useRef(contract);
     contractRef.current = contract;
     // 確認期間換信用條件也一樣中止（不會用舊條件送出）
-    const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}:${linkKey}`);
+    // 暫停（對應商品查詢中）也算換了狀態：確認中的單作廢，之後恢復也不會復活
+    const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}:${linkKey}:${paused ? 'paused' : ''}`);
     const armedRef = useRef(armed);
     // 真實月份個股期（不是近月別名）在最後交易日收盤後一律不送 — 彈出視窗、照選取也一樣；其他期貨不由這裡判斷
+    const pausedRef = useRef(paused);
+    pausedRef.current = paused;
     const expiresRef = useRef(expiresAt);
     expiresRef.current = expiresAt ?? (isStockFuture(contract) && !contract.target_code ? expiryTime(contract) : null);
     const expiredNow = () => expiresRef.current !== null && expiresRef.current !== undefined && Date.now() >= expiresRef.current;
     const armedAccountKey = useRef(accountKey);
     // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
     // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
-    const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}:${linkKey}`;
+    const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}:${linkKey}:${paused ? 'paused' : ''}`;
     const armedKey = useRef(armKey);
     const armedQtyCurrent = armedMemQty.current === rememberedQty;
     armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent && !paused;
@@ -598,7 +601,7 @@ export function FlashOrder({
     // Account and unit changes still disarm an active ladder.
     useEffect(() => {
         setArmed(false);
-    }, [contract.code, accountKey, lot, creditKey, orderKey, linkKey]);
+    }, [contract.code, accountKey, lot, creditKey, orderKey, linkKey, paused]);
     // 記住的數量被外部改掉（例如切換版面）：點價下單解除
     useEffect(() => {
         if (armed && !armedQtyCurrent) setArmed(false);
@@ -915,6 +918,7 @@ export function FlashOrder({
             notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: CONTRACT_EXPIRED });
             return;
         }
+        if (pausedRef.current) return;
         if (oddLot && price === null) {
             notify({ kind: 'err', title: '⚡ 閃電下單未送出', body: ODD_LOT_TEXT.priceType });
             return;
@@ -984,6 +988,7 @@ export function FlashOrder({
                     beforeSend: () => {
                         if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                         if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
+                        if (pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                         if (enquiryKey !== null && creditEnquireKey(capturedContract) !== enquiryKey) throw new Error('確認期間已跨日或伺服器已切換，可否融資券需重新確認，這筆沒有送出');
                         if (dayBound && taipeiDay() !== clickDay) throw new Error('確認期間已跨日，可否當沖需重新確認，這筆沒有送出');
                         // 確認期間合約更新（例如變成不可當沖）：照目前的規則再看一次
@@ -1029,7 +1034,7 @@ export function FlashOrder({
 
     const cancelAt = useCallback(async (action: Action, price: number) => {
         const capturedAccount = accountRef.current;
-        if (!capturedAccount) return;
+        if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
@@ -1062,7 +1067,7 @@ export function FlashOrder({
 
     const cancelSymbol = useCallback(async () => {
         const capturedAccount = accountRef.current;
-        if (!capturedAccount) return;
+        if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
@@ -1093,7 +1098,7 @@ export function FlashOrder({
         inflightRef.current.add(key);
         const contract = contractRef.current;
         const isContextCurrent = captureContext();
-        if (expiredNow()) {
+        if (expiredNow() || pausedRef.current) {
             inflightRef.current.delete(key);
             notify({ kind: 'err', title: '⚡ 平倉未送出', body: CONTRACT_EXPIRED });
             return;
@@ -1101,6 +1106,7 @@ export function FlashOrder({
         const beforeSend = () => {
             if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
             if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
+            if (pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
             if (!accountMatches(accountRef.current, account)) throw new Error('帳戶已變更，已停止後續下單');
         };
         const action = pos.net > 0 ? 'Sell' : 'Buy';
@@ -1417,7 +1423,7 @@ export function FlashOrder({
                 )}
                 <button
                     className={styles.cancelAllBtn}
-                    disabled={workingCount === 0 && otherLotOrders === 0}
+                    disabled={!!paused || (workingCount === 0 && otherLotOrders === 0)}
                     onClick={() => void cancelSymbol()}
                 >
                     全刪{workingCount > 0 ? ` ${workingCount}` : ''}

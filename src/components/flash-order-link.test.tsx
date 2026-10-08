@@ -205,3 +205,21 @@ it('a real-month future without a mapping (popout, 照選取) is also locked aft
     expect(mocks.place).not.toHaveBeenCalled();
     vi.useRealTimers();
 });
+
+it('entering the paused state voids an order waiting in confirmation, and a paused panel cannot cancel the old contract', async () => {
+    let guard!: () => void;
+    mocks.place.mockImplementation((_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+        guard = opts.beforeSend;
+        return new Promise(() => undefined);
+    });
+    const trade = { contract: { code: 'CDFJ6' }, order: { id: 'o1', action: 'Buy', price: 1090, quantity: 1, order_lot: 'Common', account: accounts[1] }, status: { status: 'Submitted', order_quantity: 1, deal_quantity: 0, cancel_quantity: 0, modified_price: 0, deals: [] }, account: accounts[1] };
+    const r = await mount(cdf, { linkKey: 'A|future|next|2330', trades: [trade] });
+    await arm(r);
+    await act(async () => { buyCell(r).props.onClick(); });
+    expect(() => guard()).not.toThrow();
+    // same contract and link key, now paused while the list is re-fetched
+    await show(r, cdf, { linkKey: 'A|future|next|2330', trades: [trade], paused: '載入個股期…' });
+    expect(() => guard()).toThrow();
+    const cancelAll = r.root.findAllByType('button').find(b => text(b).startsWith('全刪'))!;
+    expect(cancelAll.props.disabled).toBe(true);
+});

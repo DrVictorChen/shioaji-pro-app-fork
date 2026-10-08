@@ -84,9 +84,11 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     if (targetRef) targetRef.current = null;
     // 最後畫出的閃電：查詢中保留它（暫停、不顯示舊合約），數量等面板狀態不因查詢快慢而不同
     const lastShown = useRef<ContractInfo | null>(null);
+    const lastExpiry = useRef<number | null | undefined>(undefined);
     const show = (contract: ContractInfo, props: FlashLinkProps) => {
         if (targetRef) targetRef.current = contract.code;
         lastShown.current = contract;
+        lastExpiry.current = props.expiresAt;
         return render(contract, props);
     };
     const stockCode = link.kind === 'select' ? null : linkedStockCode(source);
@@ -138,7 +140,8 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     const name = `${source.code === source.name || !source.name ? source.code : source.security_type === 'STK' ? `${source.code} ${source.name}` : source.name}`;
 
     const loading = (text: string) => (lastShown.current
-        ? render(lastShown.current, { linkKey, settingsRows, showRef: link.ref, paused: text })
+        // 保留原本的換月截止時間（暫停期間閘門不放寬）
+        ? render(lastShown.current, { linkKey, settingsRows, showRef: link.ref, paused: text, expiresAt: lastExpiry.current })
         : <div className={styles.waiting}>{text}</div>);
     const empty = (icon: ReactNode, title: string, note?: string, action?: ReactNode) => {
         lastShown.current = null; // 閃電已卸載

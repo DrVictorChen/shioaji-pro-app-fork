@@ -50,10 +50,10 @@ export function linkedStockCode(c: ContractInfo): string | null {
 function taipei(now: number): { day: string } {
     return { day: new Date(now + 8 * 3600_000).toISOString().slice(0, 10) };
 }
-/** 個股期最後交易日 13:30（台北）收盤的時刻；之後視為已到期。沒有日期 → null。
- * 只適用個股期 — 其他期貨（例如有夜盤的 UDF）不由這裡判斷 */
-export function expiryTime(c: Pick<ContractInfo, 'last_trading_date' | 'delivery_date'>): number | null {
-    const ltd = c.last_trading_date || c.delivery_date;
+/** 個股期最後交易日 13:30（台北）收盤的時刻；之後視為已到期。沒有最後交易日 → null
+ * （交割日不代替）。只適用個股期 — 其他期貨（例如有夜盤的 UDF）不由這裡判斷 */
+export function expiryTime(c: Pick<ContractInfo, 'last_trading_date'>): number | null {
+    const ltd = c.last_trading_date;
     if (!ltd || !/^\d{4}-\d{2}-\d{2}$/.test(ltd)) return null;
     return Date.parse(`${ltd}T13:30:00+08:00`);
 }
@@ -98,7 +98,7 @@ export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spe
             ? { status: 'expired', month: link.month }
             : { status: 'unlisted', month: link.month };
     }
-    const ltd = contract.last_trading_date || contract.delivery_date;
+    const ltd = contract.last_trading_date;
     // 這個選擇失效的時刻：近月／次月在近月到期時就會換，指定月份到自己到期
     const expiresAt = expiryTime(link.month === 'near' || link.month === 'next' ? live[0]! : contract);
     return { status: 'ok', contract, hasMini, expiresToday: !!ltd && ltd === taipei(now).day, expiresAt, months: live.map(r => r.delivery_month!) };
