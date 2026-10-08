@@ -1011,7 +1011,10 @@ function MainApp() {
     const onLayoutChange = useCallback(
         (next: Layout) => {
             const fromRender = GRID_LEGACY_SCALE / density; // 12/k，整數
-            const prev = new Map(workspace.layout.map((l) => [l.i, l]));
+            // 讀最新版面：RGL 的 mount 回報可能與面板 mount 時的寫入（例如閃電
+            // 存初始單位）落在同一次 commit，用舊的 closure 會蓋掉那筆寫入
+            const current = workspaceRef.current;
+            const prev = new Map(current.layout.map((l) => [l.i, l]));
             // RGL 在 mount 時必發一次 onLayoutChange（含跨密度舍入後的
             // 座標）— 儲存值渲染後與回報一致的面板保留原值，精細版面
             // 不會只因「開了 app」就被粗化回存
@@ -1039,10 +1042,10 @@ function MainApp() {
                     h: l.h,
                 };
             });
-            if (!changed && stored.length === workspace.layout.length) return;
-            updateWorkspace({ ...workspace, layout: stored });
+            if (!changed && stored.length === current.layout.length) return;
+            updateWorkspace({ ...current, layout: stored });
         },
-        [workspace, updateWorkspace, density],
+        [updateWorkspace, density],
     );
 
     const addBlock = useCallback(

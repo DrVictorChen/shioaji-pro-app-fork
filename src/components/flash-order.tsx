@@ -356,9 +356,11 @@ export function FlashOrder({
     const captureContext = useOrderContext(contract, lot);
     const armedRef = useRef(armed);
     const armedAccountKey = useRef(accountKey);
-    // 啟用時的單位：單位一變（含外部改變）立即失效，不等 effect 解除
-    const armedUnitKey = useRef(unitKey);
-    armedRef.current = armed && armedAccountKey.current === accountKey && armedUnitKey.current === unitKey;
+    // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
+    // effect 解除 — 數量保留時也不會把上一檔的啟用帶到新商品
+    const armKey = `${contract.code}:${unitKey}`;
+    const armedKey = useRef(armKey);
+    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const oddRef = useRef(odd);
@@ -945,7 +947,7 @@ export function FlashOrder({
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
                     disabled={!live || !activeAccount}
-                    onClick={() => { armedAccountKey.current = accountKey; armedUnitKey.current = unitKey; setArmed((a) => !a); }}
+                    onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; setArmed((a) => !a); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'

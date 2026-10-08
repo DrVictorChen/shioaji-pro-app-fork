@@ -213,3 +213,21 @@ it('an outside unit change can never send the old quantity in the new unit, even
     expect(mocks.place).not.toHaveBeenCalled();
     expect(qty(r).props.value).toBe(1);
 });
+
+it('a symbol change keeping the unit and quantity never stays armed, even before effects run', async () => {
+    let r!: ReactTestRenderer;
+    const Wrapped = ({ contract, click }: { contract: ContractInfo; click: boolean }) => {
+        useLayoutEffect(() => {
+            if (!click) return;
+            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+        }, [click]);
+        return createElement(FlashOrder, props(contract, { lot: 'IntradayOdd', onLotChange: () => undefined }));
+    };
+    await act(async () => { r = create(createElement(Wrapped, { contract: stk, click: false })); });
+    roots.push(r);
+    await act(async () => { qty(r).props.onChange({ target: { value: '500' } }); });
+    await act(async () => { button(r, '啟用閃電下單').props.onClick(); });
+    await act(async () => { r.update(createElement(Wrapped, { contract: hon, click: true })); });
+    expect(mocks.place).not.toHaveBeenCalled();
+    expect(qty(r).props.value).toBe(500);
+});
