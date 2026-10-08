@@ -209,3 +209,23 @@ it('while paused for a re-fetch the ladder keeps the previous roll-over deadline
     await show(r, tsmc, { kind: 'future', month: 'next' }, { render });
     expect(got.at(-1)).toEqual(['載入個股期…', deadline]);
 });
+
+it('a series without a last trading date pauses with a way out (改為現股)', async () => {
+    mocks.fetchFutures.mockImplementation(async () => tsmcFut.map(f => ({ ...f, last_trading_date: undefined })));
+    const onLinkChange = vi.fn();
+    const r = await mount(tsmc, { kind: 'future' }, { onLinkChange });
+    expect(text(r.root)).toContain('到期日無法確認');
+    const btn = r.root.findAllByType('button').find(b => text(b).includes('改為現股'))!;
+    await act(async () => { btn.props.onClick(); });
+    expect(onLinkChange).toHaveBeenCalledWith(expect.objectContaining({ kind: 'stock' }));
+});
+
+it('a month that is not listed yet can be looked up again', async () => {
+    const r = await mount(stock('2317', '鴻海'), { kind: 'future', month: 'next' });
+    expect(text(r.root)).toContain('沒有次月合約');
+    mocks.fetchFutures.mockImplementation(async () => [fut('DHFJ6', 'DHF', '202610', 2000, '2317'), fut('DHFK6', 'DHF', '202611', 2000, '2317')]);
+    const retry = r.root.findAllByType('button').find(b => text(b).includes('重新查詢'))!;
+    await act(async () => { retry.props.onClick(); });
+    await show(r, stock('2317', '鴻海'), { kind: 'future', month: 'next' });
+    expect(text(r.root)).toContain('ladder DHFK6');
+});

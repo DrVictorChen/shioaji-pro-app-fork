@@ -1032,6 +1032,12 @@ export function FlashOrder({
         [send],
     );
 
+    // 刪單送出前再確認：期間面板暫停或連動、商品變了就不送（不撤到上一檔的委託）
+    const cancelGuard = useCallback(() => {
+        const isContextCurrent = captureContext();
+        return () => { if (!isContextCurrent() || pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE); };
+    }, [captureContext]);
+
     const cancelAt = useCallback(async (action: Action, price: number) => {
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
@@ -1050,7 +1056,7 @@ export function FlashOrder({
                     keyOf(price),
         );
         if (targets.length === 0) return;
-        const results = await cancelOrders(targets.map((t) => t.order.id));
+        const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -1058,7 +1064,7 @@ export function FlashOrder({
             body: `${code} @ ${fmtPrice(price)}：${summary.body}`,
         });
         onOrdersChangedRef.current?.();
-    }, []);
+    }, [cancelGuard]);
 
     const onCancelAt = useCallback(
         (action: Action, price: number) => void cancelAt(action, price),
@@ -1080,7 +1086,7 @@ export function FlashOrder({
             notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
-        const results = await cancelOrders(targets.map((t) => t.order.id));
+        const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -1088,7 +1094,7 @@ export function FlashOrder({
             body: `${code}：${summary.body}`,
         });
         onOrdersChangedRef.current?.();
-    }, []);
+    }, [cancelGuard]);
 
     const flatten = useCallback(async () => {
         const account = accountRef.current;
@@ -1343,7 +1349,7 @@ export function FlashOrder({
                             },
                         },
                     }}
-                    contractLabel={symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`}
+                    contractLabel={paused ?? (symbolLabel.name === contract.code ? contract.code : `${contract.code} ${symbolLabel.name}`)}
                     summary={flashOrderSummary(flashSettings, market, accountShort, { orderType: clickOrderType, octype: clickOctype, futuresPriceType: mktPriceType })}
                     ariaLabel='閃電下單設定'
                     onOpenChange={open => { settingsOpenRef.current = open; }}
@@ -1542,6 +1548,7 @@ export function FlashOrder({
                     </button>
                 )}
             </div>
+            {!paused && (
             <div className={styles.totalsRow}>
                 {display?.source === 'snapshot' && <span title={display.time}>快照一檔</span>}
                 {odd && !oddQuote && <span title='尚未收到盤中零股行情；梯形暫以整股成交價置中'>等待零股行情</span>}
@@ -1553,6 +1560,7 @@ export function FlashOrder({
                 <span className={styles.totalBid} title={odd ? `${fmtInt(sumBid)} 股` : undefined}>Σ買 {odd ? fmtCompactInt(sumBid) : fmtInt(sumBid)}</span>
                 <span className={styles.totalAsk} title={odd ? `${fmtInt(sumAsk)} 股` : undefined}>Σ賣 {odd ? fmtCompactInt(sumAsk) : fmtInt(sumAsk)}</span>
             </div>
+            )}
             <div className={styles.hint}>
                 {armedView
                     ? odd

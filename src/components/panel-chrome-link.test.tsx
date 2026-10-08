@@ -64,3 +64,11 @@ it('鎖定 from the menu locks the current code; a locked panel can go back to �
     act(() => { items(r)[4]!.props.onClick(); });
     expect(onMode).toHaveBeenLastCalledWith('pin');
 });
+
+it('an unsent draft in one group\'s code box does not carry over to another group with the same code', () => {
+    const { r } = render('A');
+    act(() => { r.root.findAllByType('input')[0]!.props.onChange({ target: { value: '2317' } }); });
+    const sameCode = [{ id: 'A' as const, code: '2330', count: 1 }, { id: 'B' as const, code: '2330', count: 1 }, { id: 'C' as const, code: null, count: 0 }];
+    act(() => { r.update(createElement(PanelChrome, { title: '閃電下單', symbolCode: '2330', pinnable: true, pin: null, currentCode: '2330', onPinChange: vi.fn(), link: { mode: 'B', groups: sameCode, onMode: vi.fn(), onGroupCode: vi.fn() } })); });
+    expect(r.root.findAllByType('input')[0]!.props.value).toBe('2330');
+});

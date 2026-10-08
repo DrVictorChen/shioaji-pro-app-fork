@@ -5,7 +5,7 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'rea
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
 import type { ContractInfo } from '../lib/types/contract';
-const mocks = vi.hoisted(() => ({ place: vi.fn(), notify: vi.fn(), store: new Map<string, string>() }));
+const mocks = vi.hoisted(() => ({ place: vi.fn(), notify: vi.fn(), cancel: vi.fn(), store: new Map<string, string>() }));
 const accounts: Account[] = [
     { account_type: 'S', broker_id: 'BR', account_id: 'A1234', signed: true, person_id: '', username: '' },
     { account_type: 'F', broker_id: 'BR', account_id: 'F5678', signed: true, person_id: '', username: '' },
@@ -19,7 +19,7 @@ vi.mock('../hooks/use-display-book', () => ({
     useDisplayBook: (code: string) => (code === 'CDFK6' ? { quote: undefined, snapshot: undefined, book: undefined }
         : { quote: { tick: { close: code === 'CDFJ6' ? '1095' : '1085', volume: 1 } }, snapshot: undefined, book: undefined }),
 }));
-vi.mock('../lib/shioaji', () => ({ cancelOrder: vi.fn(), cancelOrders: vi.fn() }));
+vi.mock('../lib/shioaji', () => ({ cancelOrder: vi.fn(), cancelOrders: mocks.cancel }));
 vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: mocks.place, placeStockExitByShares: vi.fn() }));
 vi.mock('../lib/stream', () => ({ getAliasFor: () => undefined }));
 vi.mock('../lib/tick-bands', () => ({ useTickBandsVersion: () => 0 }));
@@ -222,4 +222,26 @@ it('entering the paused state voids an order waiting in confirmation, and a paus
     expect(() => guard()).toThrow();
     const cancelAll = r.root.findAllByType('button').find(b => text(b).startsWith('全刪'))!;
     expect(cancelAll.props.disabled).toBe(true);
+});
+
+it('a cancel still waiting to be dispatched is dropped once the panel pauses (or the link changes)', async () => {
+    let guard!: () => void;
+    mocks.cancel.mockImplementation((_ids: string[], _settled: unknown, beforeSend: () => void) => { guard = beforeSend; return new Promise(() => undefined); });
+    const trade = { contract: { code: 'CDFJ6' }, order: { id: 'o1', action: 'Buy', price: 1090, quantity: 1, order_lot: 'Common', account: accounts[1] }, status: { status: 'Submitted', order_quantity: 1, deal_quantity: 0, cancel_quantity: 0, modified_price: 0, deals: [] }, account: accounts[1] };
+    const r = await mount(cdf, { linkKey: 'A|future|near|2330', trades: [trade] });
+    await act(async () => { r.root.findAllByType('button').find(b => text(b).startsWith('全刪'))!.props.onClick(); });
+    expect(mocks.cancel).toHaveBeenCalledOnce();
+    expect(() => guard()).not.toThrow();
+    await show(r, cdf, { linkKey: 'A|future|near|2317', trades: [trade], paused: '載入個股期…' });
+    expect(() => guard()).toThrow();
+});
+
+it('the settings dialog of a paused panel names no contract', async () => {
+    const r = await mount(cdf, { paused: '載入個股期…' });
+    await act(async () => { r.root.findAll(n => n.type === 'button' && n.props['aria-label'] === '單位與委託條件')[0]!.props.onClick(); });
+    const more = r.root.findAll(n => n.type === 'button' && n.props.role === 'menuitem' && text(n).includes('更多設定'))[0];
+    if (more) await act(async () => { more.props.onClick(); });
+    const dlg = r.root.findAll(n => n.props.role === 'dialog')[0];
+    expect(dlg && text(dlg)).not.toContain('CDFJ6');
+    expect(text(r.root)).not.toContain('Σ買');
 });

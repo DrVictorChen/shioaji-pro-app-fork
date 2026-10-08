@@ -45,3 +45,5 @@ export const emptyBtn = style({
 });
 
 export const monthSelect = style({ width: 'auto', flex: '1 1 0', minWidth: 0, border: 'none', borderRadius: 0 });
+
+export const emptyActions = style({ display: 'inline-flex', gap: 6 });

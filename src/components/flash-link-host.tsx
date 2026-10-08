@@ -191,11 +191,15 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
             button('改為小型', () => set({ spec: 'mini' })));
     }
     if (pick?.status === 'noExpiry') {
-        return empty(<Ban size={18} aria-hidden />, `${stockCode} 個股期到期日無法確認`, '暫停送單');
+        return empty(<Ban size={18} aria-hidden />, `${stockCode} 個股期到期日無法確認`, '暫停送單',
+            button(<><ArrowLeftRight size={11} aria-hidden /> 改為現股</>, () => set({ kind: 'stock' })));
     }
     if (pick?.status === 'unlisted') {
         return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有${pick.month === 'next' ? '次月' : ` ${monthLabel(pick.month)} `}合約`, undefined,
-            button('改為近月', () => set({ month: 'near' })));
+            <span className={hostStyles.emptyActions}>
+                {button('改為近月', () => set({ month: 'near' }))}
+                {button(<><RotateCw size={11} aria-hidden /> 重新查詢</>, () => loadStockFutures(stockCode))}
+            </span>);
     }
     if (pick?.status !== 'ok' || !picked) return loading('載入個股期…');
     const monthText = link.month === 'near' ? '近月' : link.month === 'next' ? '次月' : monthLabel(link.month);

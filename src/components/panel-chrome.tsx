@@ -52,7 +52,7 @@ export function PanelChrome({
     }, [menuOpen]);
     const [editCode, setEditCode] = useState(pin ?? '');
     const [editGroupCode, setEditGroupCode] = useState(groupCode ?? '');
-    useEffect(() => setEditGroupCode(groupCode ?? ''), [groupCode]);
+    useEffect(() => setEditGroupCode(groupCode ?? ''), [groupCode, group]);
     // 鎖定時代碼已顯示在鎖定輸入框，標題不重複，把空間留給商品名稱
     const pinned = pinnable && !!onPinChange && pin !== null && pin !== undefined;
     // 鎖定輸入框正在輸入新代碼時，舊名稱會誤導 — 未按 Enter 套用前先隱藏
