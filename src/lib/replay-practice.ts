@@ -1,3 +1,10 @@
+// src/lib/replay-practice.ts — 行情回放的本機模擬練習：純計算與 localStorage
+// 讀寫。只處理歷史 ticks 與本機紀錄，不呼叫任何下單、撤單或券商交易 API。
+
+import type { ContractInfo } from './types/contract';
+import { contractMultiplier } from './utils/contract-cost';
+import { dateStrOffset } from './utils/kbars';
+
 export interface ReplayPracticePosition {
     side: 'long' | 'short';
     entry: number;
@@ -10,13 +17,37 @@ export interface ReplayPracticeTrade extends ReplayPracticePosition {
     code: string;
     exit: number;
     exitedAt: number;
+    // 已乘口數的點數（每口點數 × 口數）
     points: number;
     estimatedPnl: number;
 }
 
-export function replayPoints(position: ReplayPracticePosition, exit: number): number {
+export const REPLAY_TRADES_KEY = 'sj-pro-replay-practice-trades-v1';
+const MAX_TRADES = 500;
+
+// 未選日期（預設「今天」）時要嘗試的交易日。期權先試明天：夜盤屬於下一個
+// 交易日，dateStrOffset 的負數代表未來；明天還沒有資料再退回今天。
+export function replayFetchDates(selectedDate: string, isFop: boolean): string[] {
+    if (selectedDate) return [selectedDate];
+    return isFop ? [dateStrOffset(-1), dateStrOffset(0)] : [dateStrOffset(0)];
+}
+
+// 每口（每張）的點數差，不含口數
+export function replayPointDiff(position: ReplayPracticePosition, price: number): number {
     const direction = position.side === 'long' ? 1 : -1;
-    return (exit - position.entry) * direction * position.quantity;
+    return (price - position.entry) * direction;
+}
+
+// 已乘口數的點數
+export function replayPoints(position: ReplayPracticePosition, exit: number): number {
+    return replayPointDiff(position, exit) * position.quantity;
+}
+
+// 每 1 單位數量的金額乘數：期權沿用 contractMultiplier()；股票以「張」計，
+// 一張 1,000 股。
+export function replayMultiplier(contract: ContractInfo): number {
+    if (contract.security_type === 'STK') return 1000;
+    return contractMultiplier(contract);
 }
 
 export function closeReplayPosition(
@@ -38,12 +69,33 @@ export function closeReplayPosition(
     };
 }
 
+export interface ReplayTradeSummary {
+    count: number;
+    estimatedPnl: number;
+}
+
+// 累計損益按商品分開：不同乘數的商品加總沒有意義
+export function summarizeReplayTrades(
+    trades: readonly ReplayPracticeTrade[],
+    code: string,
+): ReplayTradeSummary {
+    let count = 0;
+    let estimatedPnl = 0;
+    for (const t of trades) {
+        if (t.code !== code) continue;
+        count += 1;
+        estimatedPnl += t.estimatedPnl;
+    }
+    return { count, estimatedPnl };
+}
+
 export function loadReplayTrades(raw: string | null): ReplayPracticeTrade[] {
     if (!raw) return [];
     try {
         const parsed = JSON.parse(raw) as unknown;
         if (!Array.isArray(parsed)) return [];
         return parsed.filter((row): row is ReplayPracticeTrade => {
+            if (!row || typeof row !== 'object') return false;
             const r = row as Partial<ReplayPracticeTrade>;
             return (
                 typeof r.id === 'string' &&
@@ -53,8 +105,44 @@ export function loadReplayTrades(raw: string | null): ReplayPracticeTrade[] {
                     (v) => typeof v === 'number' && Number.isFinite(v),
                 )
             );
-        }).slice(-500);
+        }).slice(-MAX_TRADES);
     } catch {
         return [];
+    }
+}
+
+type ReadStorage = Pick<Storage, 'getItem'>;
+type WriteStorage = Pick<Storage, 'setItem'>;
+
+function defaultStorage(): Storage | undefined {
+    try {
+        return typeof localStorage === 'undefined' ? undefined : localStorage;
+    } catch {
+        // 存取 localStorage 本身就可能被封鎖而拋錯
+        return undefined;
+    }
+}
+
+// localStorage 被封鎖或讀取失敗時回傳空陣列，不在 render 中拋錯
+export function readReplayTrades(storage: ReadStorage | undefined = defaultStorage()): ReplayPracticeTrade[] {
+    if (!storage) return [];
+    try {
+        return loadReplayTrades(storage.getItem(REPLAY_TRADES_KEY));
+    } catch {
+        return [];
+    }
+}
+
+// 寫滿（QuotaExceededError）或被封鎖時回傳 false，不拋錯
+export function writeReplayTrades(
+    trades: readonly ReplayPracticeTrade[],
+    storage: WriteStorage | undefined = defaultStorage(),
+): boolean {
+    if (!storage) return false;
+    try {
+        storage.setItem(REPLAY_TRADES_KEY, JSON.stringify(trades.slice(-MAX_TRADES)));
+        return true;
+    } catch {
+        return false;
     }
 }
