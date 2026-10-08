@@ -111,6 +111,8 @@ export function assertTradingLive() {
 
 // 手動下單確認被取消 — 呼叫端的錯誤通知會顯示這個訊息
 export class OrderConfirmCancelled extends Error {
+    // 取消確認＝確定沒有送出
+    readonly mutationNotStarted = true as const;
     constructor() {
         super('已取消下單');
         this.name = 'OrderConfirmCancelled';

@@ -51,6 +51,7 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                             {request.simulation ? '模擬環境' : '正式環境'}
                         </span>
                     )}
+                    {request.awaitingMode && <span className={styles.note}>確認伺服器模式中…</span>}
                 </div>
                 <div className={styles.body}>
                     <div className={styles.actionLine[dir]}>
@@ -105,7 +106,8 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                     </button>
                     <button
                         className={styles.confirmBtn[dir]}
-                        disabled={!!request.livePriceCode && livePrice === undefined}
+                        disabled={(!!request.livePriceCode && livePrice === undefined) || !!request.awaitingMode}
+                        title={request.awaitingMode ? '正在確認伺服器模式（模擬／正式），請稍候' : undefined}
                         onClick={() => resolveOrderConfirm(true)}
                     >
                         確認{actionText}

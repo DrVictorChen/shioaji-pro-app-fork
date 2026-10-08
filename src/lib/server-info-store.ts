@@ -65,7 +65,13 @@ export function observeServerInfo(request: ServerInfoRequest, info: ServerInfo |
     const { base } = request;
     if (base !== syncBase()) return;
     if ((applied.get(base) ?? 0) > request.sequence) return;
-    if (infos.get(base)?.simulation !== info?.simulation) modeVersion += 1;
+    const previous = infos.get(base)?.simulation;
+    if (previous !== info?.simulation) modeVersion += 1;
+    // 已知模式變了（例如同一位址的 sidecar 由模擬重啟成正式）：通知其他視窗
+    // （彈出視窗）作廢它們的副本，開著的確認與送單閘門因此不算同一個
+    if (typeof previous === 'boolean' && typeof info?.simulation === 'boolean' && previous !== info.simulation) {
+        channel?.postMessage({ kind: 'server-info-invalidated', base });
+    }
     applied.set(base, request.sequence);
     if (info) infos.set(base, info);
     else infos.delete(base);

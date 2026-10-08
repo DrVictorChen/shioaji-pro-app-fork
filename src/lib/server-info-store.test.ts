@@ -209,3 +209,24 @@ it('captureServerMode: unknown at capture → rebased to the mode known after ap
     info.observeServerInfo(info.beginServerInfoRequest(), simulation);
     expect(guard()).toBe(false);
 });
+
+it('a mode change observed here is broadcast so other windows (popouts) invalidate their copy', async () => {
+    const info = await import('./server-info-store');
+    const posted: unknown[] = [];
+    const Orig = globalThis.BroadcastChannel;
+    class Fake { constructor(public name: string) {} postMessage(m: unknown) { posted.push(m); } addEventListener() {} close() {} }
+    vi.stubGlobal('BroadcastChannel', Fake);
+    vi.stubGlobal('window', globalThis.window ?? {});
+    try {
+        runtime.base = 'broadcast-a';
+        info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+        posted.length = 0;
+        info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+        expect(posted).toEqual([]);
+        info.observeServerInfo(info.beginServerInfoRequest(), production);
+        expect(posted).toContainEqual({ kind: 'server-info-invalidated', base: 'broadcast-a' });
+    } finally {
+        vi.unstubAllGlobals();
+        if (Orig) globalThis.BroadcastChannel = Orig;
+    }
+});

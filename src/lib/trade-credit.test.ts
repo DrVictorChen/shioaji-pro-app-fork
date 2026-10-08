@@ -122,3 +122,8 @@ it('without a confirmation, a mode learned during the order is not adopted (unkn
     await expect(placeQuickOrder(stock, 'Buy', 100, 1, { account })).rejects.toMatchObject({ mutationNotStarted: true });
     expect(m.stock).not.toHaveBeenCalled();
 });
+
+it('a cancelled confirmation is a definite "not sent" (mutationNotStarted)', async () => {
+    m.confirm.mockResolvedValue(false);
+    await expect(placeQuickOrder(stock, 'Buy', 100, 1, { account })).rejects.toMatchObject({ mutationNotStarted: true, message: '已取消下單' });
+});

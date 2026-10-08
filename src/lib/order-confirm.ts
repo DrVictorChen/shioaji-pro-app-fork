@@ -9,7 +9,7 @@
 
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
-import { captureServerMode, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, subscribeServerInfo, type ServerModeGuard } from './server-info-store';
+import { captureServerMode, getServerModeVersion, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, subscribeServerInfo, type ServerModeGuard } from './server-info-store';
 import { getApiBase } from './runtime';
 import type { Action } from './types/order';
 import type { Account } from './types/portfolio';
@@ -34,6 +34,8 @@ export interface OrderConfirmRequest {
     credit?: string;
     // true=模擬、false=正式、null=未知（server 未回應）
     simulation: boolean | null;
+    // 開啟時重新取得伺服器模式還沒完成：先不能按確認
+    awaitingMode?: boolean;
 }
 
 interface PendingConfirm {
@@ -44,6 +46,10 @@ interface PendingConfirm {
     sameServer: ServerModeGuard;
     // shown to the user (after refreshing /info); approval before that is ignored
     started: boolean;
+    // API base when the dialog was shown; the mode is only ever adopted on it
+    base: string;
+    // server mode version when it started waiting for the refresh
+    awaitVersion?: number;
 }
 
 /** 確認視窗開著時伺服器或模式變了（例如模擬 sidecar 重啟成正式）：舊的確認不算數 */
@@ -67,8 +73,8 @@ export function getPendingOrderConfirm(): OrderConfirmRequest | null {
 
 export function resolveOrderConfirm(approved: boolean): void {
     if (!pending) return;
-    // 還沒顯示（仍在取得 /info）的確認不能被按下確認
-    if (approved && !pending.started) return;
+    // 還沒顯示、或仍在取得最新模式的確認不能被按下確認
+    if (approved && (!pending.started || pending.request.awaitingMode)) return;
     const current = pending;
     pending = null;
     emit();
@@ -127,10 +133,13 @@ export function primeOrderConfirmSimulation(): Promise<void> {
 subscribeServerInfo(() => {
     const current = pending;
     if (!current?.started || current.request.simulation !== null) return;
+    if (getApiBase() !== current.base) return;
     const s = currentSimulation();
     if (s === null) return;
+    // 只在模式真的有新的觀察時採用（仍在等待時，舊的快取值不算）
+    if (current.request.awaitingMode && getServerModeVersion() === current.awaitVersion) return;
     current.sameServer = captureServerMode();
-    current.request = { ...current.request, simulation: s };
+    current.request = { ...current.request, simulation: s, awaitingMode: false };
     emit();
 });
 
@@ -141,7 +150,7 @@ export function requestOrderConfirm(
     // 不排隊（排隊會讓使用者對著過期價格按確認）
     if (pending) {
         return Promise.reject(
-            new Error('已有待確認的委託 — 請先確認或取消上一筆'),
+            Object.assign(new Error('已有待確認的委託 — 請先確認或取消上一筆'), { mutationNotStarted: true as const }),
         );
     }
     return new Promise<boolean>((resolve, reject) => {
@@ -159,21 +168,38 @@ export function requestOrderConfirm(
             reject,
             sameServer: captureServerMode(),
             started: false,
+            base: getApiBase(),
         };
         pending = current;
+        const prime = primeOrderConfirmSimulation();
+        let settled = false;
         const start = () => {
             if (pending !== current) return;
             // 視窗顯示的模式與送單閘門取自同一個時間點（取得最新 /info 之後）
+            current.base = getApiBase();
             current.sameServer = captureServerMode();
-            current.request = { ...withAccount, simulation: currentSimulation() };
+            // 800ms 還沒取得最新模式：不沿用可能過時的舊值，顯示未知且先不能確認
+            current.request = settled
+                ? { ...withAccount, simulation: currentSimulation() }
+                : { ...withAccount, simulation: null, awaitingMode: true };
+            current.awaitVersion = getServerModeVersion();
             current.started = true;
             emit();
         };
-        // 環境資訊最多等 800ms — 拿不到就以未知呈現
-        void Promise.race([
-            primeOrderConfirmSimulation(),
-            new Promise<void>((r) => setTimeout(r, 800)),
-        ]).then(start);
+        void prime.then(() => {
+            settled = true;
+            if (pending !== current || !current.started || !current.request.awaitingMode) return;
+            // 取得最新模式：同一位址才採用（換了位址時閘門維持原位址，按確認會被拒絕）
+            if (getApiBase() === current.base) {
+                current.sameServer = captureServerMode();
+                current.request = { ...withAccount, simulation: currentSimulation(), awaitingMode: false };
+            } else {
+                current.request = { ...withAccount, simulation: null, awaitingMode: false };
+            }
+            emit();
+        });
+        // 環境資訊最多等 800ms — 拿不到就先顯示（未知、不能確認）
+        void Promise.race([prime, new Promise<void>((r) => setTimeout(r, 800))]).then(start);
     });
 }
 
