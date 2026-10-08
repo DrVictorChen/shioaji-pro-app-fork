@@ -281,3 +281,24 @@ it('clearing the quantity field drops that unit from memory instead of snapping 
     await typeQty(r, 6);
     expect(o.state.qtyMemory).toEqual({ Common: 6, IntradayOdd: 500 });
 });
+
+it('an invalid quantity restored into a mounted panel (same unit) is 1 at once and disarmed', async () => {
+    let r!: ReactTestRenderer;
+    const Wrapped = ({ mem, click }: { mem: Setting; click: boolean }) => {
+        useLayoutEffect(() => {
+            if (!click) return;
+            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+        }, [click]);
+        return createElement(FlashOrder, props(stk, { lot: 'Common', onLotChange: () => undefined, qtyMemory: mem, onQtyMemoryChange: () => undefined }));
+    };
+    await act(async () => { r = create(createElement(Wrapped, { mem: { Common: 3 }, click: false })); });
+    roots.push(r);
+    await act(async () => { button(r, '啟用閃電下單').props.onClick(); });
+    await act(async () => { r.update(createElement(Wrapped, { mem: { Common: 10000 }, click: true })); });
+    expect(mocks.place).not.toHaveBeenCalled();
+    expect(qty(r).props.value).toBe(1);
+    // after the notice drops the invalid record, it stays 1 (not the old 3)
+    await act(async () => { r.update(createElement(Wrapped, { mem: {}, click: false })); });
+    expect(qty(r).props.value).toBe(1);
+    expect(text(r.root)).toContain('啟用閃電下單');
+});

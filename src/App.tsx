@@ -199,6 +199,7 @@ function BlockBody({
     onFlashQtyChange,
     onSessionConfigChange,
     refreshTrading,
+    workspaceGen,
 }: {
     block: Block;
     contract: ContractInfo | null;
@@ -223,6 +224,8 @@ function BlockBody({
     onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
+    /** bumps whenever a whole workspace is applied (layout / preset / reset / agent) */
+    workspaceGen: number;
 }) {
     if (contract?.security_type === 'IND' && indexBlockMessage(block.type)) {
         return <IndexBlockUnavailable type={block.type} />;
@@ -308,6 +311,9 @@ function BlockBody({
         case 'flash':
             return contract ? (
                 <LiveFlashOrder
+                    // 套用版面（含同一個 block id）＝重新建立面板：數量依該版面
+                    // 的記住數量還原（關閉則 1），點價下單一律解除
+                    key={workspaceGen}
                     snapshot={snapshot}
                     contract={contract}
                     trades={dockProps.trades}
@@ -529,6 +535,8 @@ interface BlockViewProps {
     onFlashQtyChange: (id: string, qty: FlashQtySetting) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
+    /** bumps whenever a whole workspace is applied (layout / preset / reset / agent) */
+    workspaceGen: number;
 }
 
 function BlockView(props: BlockViewProps) {
@@ -986,6 +994,14 @@ function MainApp() {
         setWorkspace(w);
         saveWorkspace(w);
     }, []);
+    // Applying a whole workspace (saved layout, preset, reset, agent command)
+    // rebuilds the flash panels even when block ids repeat, so their quantity
+    // and click-to-trade state come from the applied layout, never the old one.
+    const [workspaceGen, setWorkspaceGen] = useState(0);
+    const replaceWorkspace = useCallback((w: Workspace) => {
+        setWorkspaceGen((g) => g + 1);
+        updateWorkspace(w);
+    }, [updateWorkspace]);
 
     const indicatorService = useMemo(() => new IndicatorInstanceService({
         getWorkspace: () => workspaceRef.current,
@@ -1241,14 +1257,14 @@ function MainApp() {
     );
 
     const resetWorkspace = useCallback(() => {
-        updateWorkspace(structuredClone(DEFAULT_WORKSPACE));
-    }, [updateWorkspace]);
+        replaceWorkspace(structuredClone(DEFAULT_WORKSPACE));
+    }, [replaceWorkspace]);
 
     const loadPreset = useCallback(
         (name: string) => {
             const preset = LAYOUT_PRESETS.find((p) => p.name === name);
             if (preset) {
-                updateWorkspace(structuredClone(preset.workspace));
+                replaceWorkspace(structuredClone(preset.workspace));
                 trackActivity('套版面', name);
                 notify({
                     kind: 'info',
@@ -1257,7 +1273,7 @@ function MainApp() {
                 });
             }
         },
-        [updateWorkspace],
+        [replaceWorkspace],
     );
 
     // ---- profiles ----
@@ -1288,7 +1304,7 @@ function MainApp() {
         (name: string) => {
             const p = profiles.find((x) => x.name === name);
             if (p) {
-                updateWorkspace(structuredClone(p.workspace));
+                replaceWorkspace(structuredClone(p.workspace));
                 trackActivity('套版面', name);
                 notify({
                     kind: 'info',
@@ -1297,7 +1313,7 @@ function MainApp() {
                 });
             }
         },
-        [profiles, updateWorkspace],
+        [profiles, replaceWorkspace],
     );
 
     // App-state reads remain available during setup with Harness disabled.
@@ -1326,10 +1342,10 @@ function MainApp() {
                     selectedRef.current = contract;
                     setSelected(contract);
                 },
-                updateWorkspace,
+                updateWorkspace: replaceWorkspace,
                 createPanelId: newBlockId,
         }, { readOnly: !agentHarnessEnabled });
-    }, [agentHarnessEnabled, updateWorkspace]);
+    }, [agentHarnessEnabled, replaceWorkspace]);
 
     const deleteProfile = useCallback(
         (name: string) => {
@@ -1488,6 +1504,7 @@ function MainApp() {
                                     onFlashQtyChange={setBlockFlashQty}
                                     onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
+                                    workspaceGen={workspaceGen}
                                 />
                             </div>
                         ))}

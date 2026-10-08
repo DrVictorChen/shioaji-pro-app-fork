@@ -329,7 +329,7 @@ export function FlashOrder({
     });
     // 記住數量開啟且這個單位有合法紀錄時，紀錄就是數量：切換版面等外部還原、
     // 換單位，都在同一次 render 生效；其他情況用輸入值（單位不同視為 1）
-    const qty = rememberedQty ?? (qtyEntry.unit === unitKey ? qtyEntry.qty : 1);
+    const qty = remembered.invalid ? 1 : rememberedQty ?? (qtyEntry.unit === unitKey ? qtyEntry.qty : 1);
     const qtyNowRef = useRef(qty);
     qtyNowRef.current = qty;
     // 點價下單啟用時這個單位記住的數量；之後由外部（切換版面）改掉就失效
@@ -372,6 +372,8 @@ export function FlashOrder({
             title: '記住的數量已改為 1',
             body: `這個閃電面板記住的數量（${String(bad)} ${unitName}）不符合單位限制${qtySlot === 'IntradayOdd' ? `（零股每筆 1～${ODD_LOT_MAX_SHARES} 股）` : ''}，已改為 1 ${unitName}，請確認數量後再下單。`,
         });
+        // 先把數量定在 1，移除紀錄後也不會回到舊的輸入值
+        setQtyEntry({ unit: unitKeyRef.current, qty: 1 });
         setQtyMemory(rest);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [invalidRemembered, qtySlot]);
