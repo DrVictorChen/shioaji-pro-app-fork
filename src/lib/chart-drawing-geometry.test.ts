@@ -419,6 +419,12 @@ describe('從一疊物件裡挑出點到的那個', () => {
         const picked = pickDrawing(list, projector, SIZE, { x: 250, y: 120 }, undefined, undefined, (d) => d.id === 'line');
         expect(picked?.drawing.id).toBe('line');
         expect(picked?.hit).toEqual({ kind: 'anchor', index: 0 });
+        // 沒選取（控制點沒畫）時，蓋在端點上的標籤仍要選得到
+        const low = { id: 'low', tool: 'box' as const, hidden: false, anchors: [{ time: 1500, price: 150 }, { time: 2300, price: 50 }] };
+        expect(pickDrawing([low, backFib], projector, SIZE, { x: 190, y: 300 })?.drawing.id).toBe('fib');
+        // 單選且鎖定時控制點不畫 → 不攔截上層點選
+        const lockedLine = { ...backLine, locked: true };
+        expect(pickDrawing([box, lockedLine], projector, SIZE, { x: 250, y: 120 }, undefined, undefined, () => false)?.drawing.id).toBe('box');
         // 方框外的後方線本體照樣選得到
         expect(pickDrawing(list, projector, SIZE, { x: 500, y: 120 })?.drawing.id).toBe('line');
     });

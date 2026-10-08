@@ -267,6 +267,11 @@ const sameBox = (a: Box | null, b: Box | null) =>
         Math.round(a.right) === Math.round(b.right) &&
         Math.round(a.bottom) === Math.round(b.bottom));
 
+// 與 DrawingLayer 的規則一致：單選且未鎖定畫控制點；多選一律畫淡色控制點
+function handlesVisible(selectedIds: readonly string[], d: Pick<Drawing, 'id' | 'locked'>): boolean {
+    return selectedIds.includes(d.id) && (selectedIds.length > 1 || !d.locked);
+}
+
 export function useChartDrawings(opts: {
     contract: ContractBase;
     // 週期／交易時段等會替換投影資料的 context。
@@ -711,7 +716,7 @@ export function useChartDrawings(opts: {
             const layer = layerOf();
             if (!layer) return null;
             const sel = stateRef.current.selectedIds;
-            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => sel.includes(d.id));
+            return pickDrawing(stateRef.current.drawings, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => handlesVisible(sel, d));
         };
 
         const measureLabel = (a: DrawingAnchor, b: DrawingAnchor) => {
@@ -1664,7 +1669,7 @@ export function useChartDrawings(opts: {
         if (!layer || !pt || !projector) return null;
         const { drawings: list, selectedIds: sel } = stateRef.current;
         if (!list.length) return null;
-        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => sel.includes(d.id));
+        const picked = pickDrawing(list, projector, layer.paneSize, pt, undefined, layer.formatPrice, (d) => handlesVisible(sel, d));
         if (!picked) return null;
         return sel.includes(picked.drawing.id) ? 'selected' : 'other';
     }, []);

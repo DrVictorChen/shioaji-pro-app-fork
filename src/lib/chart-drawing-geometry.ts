@@ -379,14 +379,15 @@ export function hitTest(
     at: Point,
     tolerance = HIT_TOLERANCE,
     extra?: ShapeExtra,
-    only?: 'overlay',
+    only?: 'overlay' | 'labels',
 ): Hit | null {
-    // only='overlay'：只測永遠畫在上層的部分 — 控制點與斐波那契價位標籤。
-    // K 棒後方的物件這兩樣仍畫在上層，點選順序要跟畫面一致。
+    // only='overlay'：只測永遠畫在上層的部分 — 控制點與斐波那契價位標籤；
+    // 'labels'：控制點沒畫出來時只測標籤。K 棒後方的物件這兩樣仍畫在
+    // 上層，點選順序要跟畫面一致。
     // 命中範圍加大後相鄰控制點可能同時落在範圍內 — 取最近的那個
     let nearest = -1;
     let nearestDist = ANCHOR_RADIUS + tolerance;
-    for (let i = 0; i < pts.length; i++) {
+    for (let i = 0; only !== 'labels' && i < pts.length; i++) {
         const pt = pts[i]!;
         const d = Math.hypot(at.x - pt.x, at.y - pt.y);
         if (d <= nearestDist) {
@@ -397,7 +398,7 @@ export function hitTest(
     if (nearest >= 0) return { kind: 'anchor', index: nearest };
     const shape = shapeOf(tool, pts, size, extra);
     if (!shape) return null;
-    if (only === 'overlay' && shape.kind !== 'fib') return null;
+    if (only && shape.kind !== 'fib') return null;
     tolerance = Math.max(tolerance, (extra?.style?.width ?? 0) / 2);
     const near = (seg: Segment) => distanceToSegment(at, seg.a, seg.b) <= tolerance;
     if (shape.kind === 'line') {
@@ -415,7 +416,7 @@ export function hitTest(
         const band = fib.bandOpacity > 0 && ys.length > 1 && inX && at.y >= Math.min(...ys) && at.y <= Math.max(...ys);
         const labels = fibLabels(shape, fib, extra?.anchors ?? pts.map((p) => ({ time: p.x, price: p.y })), size.width, extra?.formatPrice);
         const label = labels.some((r) => r.text && at.x >= r.left - tolerance - 2 && at.x <= r.right + tolerance + 2 && at.y >= r.top - tolerance - 2 && at.y <= r.bottom + tolerance + 2);
-        if (only === 'overlay') return label ? { kind: 'body' } : null;
+        if (only) return label ? { kind: 'body' } : null;
         const hit =
             band || label ||
             (inX && shape.levels.some((l) => Math.abs(at.y - l.y) <= tolerance)) ||
@@ -453,8 +454,8 @@ export function pickDrawing<
     at: Point,
     tolerance = HIT_TOLERANCE,
     formatPrice?: (price: number) => string,
-    // 選取中的物件（控制點只在選取時畫出來）
-    isSelected?: (d: T) => boolean,
+    // 這個物件的控制點目前有沒有畫出來（選取中；單選且鎖定時不畫）
+    handlesVisible?: (d: T) => boolean,
 ): { drawing: T; hit: Hit; points: Point[] } | null {
     for (let pass = 0; pass < 2; pass++) {
         for (let i = list.length - 1; i >= 0; i--) {
@@ -469,9 +470,8 @@ export function pickDrawing<
             if (!behind || pass === 1) {
                 hit = hitTest(d.tool, points, size, at, tolerance, extra);
             } else {
-                hit = hitTest(d.tool, points, size, at, tolerance, extra, 'overlay');
-                // 沒選取時控制點沒畫出來，不算上層命中（留給本體那一輪）
-                if (hit?.kind === 'anchor' && !isSelected?.(d)) hit = null;
+                // 控制點沒畫出來時不算上層命中（留給本體那一輪），但標籤照測
+                hit = hitTest(d.tool, points, size, at, tolerance, extra, handlesVisible?.(d) ? 'overlay' : 'labels');
             }
             if (hit) return { drawing: d, hit, points };
         }
