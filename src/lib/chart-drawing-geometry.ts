@@ -368,7 +368,7 @@ export function distanceToSegment(p: Point, a: Point, b: Point): number {
 export type Hit = { kind: 'anchor'; index: number } | { kind: 'body' };
 
 export const ANCHOR_RADIUS = 4;
-// 可視線維持 1px，但線身與端點仍保留約 22px／30px 的容易操作範圍。
+// 命中範圍與畫出來的線寬無關：細線也保留約 22px（線身）／30px（端點）的操作範圍。
 export const HIT_TOLERANCE = 11;
 
 // 控制點優先於本體 — 不然抓不到疊在線上的端點
