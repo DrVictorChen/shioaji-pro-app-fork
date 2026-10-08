@@ -1,7 +1,7 @@
 // 閃電下單的整股／零股是「面板」的設定，不是股票的：一個閃電放張、一個放股，
 // 換股票各自維持；單位跟版面（workspace block）或彈出視窗一起存。下單面板、
 // 鋪單、K 線圖仍依股票記憶（#232），不在這裡。
-import { createElement } from 'react';
+import { createElement, useLayoutEffect } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
@@ -123,8 +123,10 @@ it('ignores the old per-symbol flash records and never writes them', async () =>
 it('reports the unit to its owner and restores it from the owner (reload / layout switch / popout)', async () => {
     const owner = owned();
     const r = await mount(stk, owner.extra());
+    // the default-derived unit is saved once on mount, then the user's pick
+    expect(owner.state.changes).toEqual(['Common']);
     await pickUnit(r, 'IntradayOdd');
-    expect(owner.state.changes).toEqual(['IntradayOdd']);
+    expect(owner.state.changes).toEqual(['Common', 'IntradayOdd']);
     await show(r, stk, owner.extra());
     expect(unit(r)).toBe('股');
     // a fresh mount (reload) reads the saved unit, on any stock
@@ -136,8 +138,10 @@ it('reports the unit to its owner and restores it from the owner (reload / layou
 
 it('a panel with no saved unit (upgraded) starts from the 設為預設 unit, not the old per-symbol record', async () => {
     mocks.store.set(LEGACY_KEY, JSON.stringify({ flash: { '2330': 'IntradayOdd' } }));
-    const plain = await mount(stk, owned().extra());
+    const plainOwner = owned();
+    const plain = await mount(stk, plainOwner.extra());
     expect(unit(plain)).toBe('張');
+    expect(plainOwner.state.lot).toBe('Common');
     mocks.store.set(DEFAULTS_KEY, JSON.stringify({ S: { lot: 'IntradayOdd', qty: 300 } }));
     const odd = await mount(hon, owned().extra());
     expect(unit(odd)).toBe('股');
@@ -178,4 +182,34 @@ it('changing the unit in settings still resets the quantity to 1 and disarms', a
     await pickUnit(r, 'IntradayOdd');
     expect(qty(r).props.value).toBe(1);
     expect(text(r.root)).toContain('啟用閃電下單');
+});
+
+it('saves the default-derived unit once, so a later default change does not flip it on reload or popout', async () => {
+    const owner = owned();
+    await mount(stk, owner.extra());
+    expect(owner.state.lot).toBe('Common');
+    // another panel makes 零股 the default
+    mocks.store.set(DEFAULTS_KEY, JSON.stringify({ S: { lot: 'IntradayOdd', qty: 300 } }));
+    const reloaded = await mount(stk, owner.extra());
+    expect(unit(reloaded)).toBe('張');
+    expect(owner.state.changes).toEqual(['Common']);
+});
+
+it('an outside unit change can never send the old quantity in the new unit, even before effects run', async () => {
+    let r!: ReactTestRenderer;
+    const Wrapped = ({ lot, click }: { lot: Lot; click: boolean }) => {
+        // fires in the same commit as the new unit, before FlashOrder's passive effects
+        useLayoutEffect(() => {
+            if (!click) return;
+            r.root.findAll(n => n.type === 'div' && String(n.props.title ?? '').startsWith('限價買 '))[0]!.props.onClick();
+        }, [click]);
+        return createElement(FlashOrder, props(stk, { lot, onLotChange: () => undefined }));
+    };
+    await act(async () => { r = create(createElement(Wrapped, { lot: 'IntradayOdd', click: false })); });
+    roots.push(r);
+    await act(async () => { qty(r).props.onChange({ target: { value: '500' } }); });
+    await act(async () => { button(r, '啟用閃電下單').props.onClick(); });
+    await act(async () => { r.update(createElement(Wrapped, { lot: 'Common', click: true })); });
+    expect(mocks.place).not.toHaveBeenCalled();
+    expect(qty(r).props.value).toBe(1);
 });

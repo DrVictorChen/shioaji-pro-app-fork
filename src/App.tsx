@@ -1179,9 +1179,11 @@ function MainApp() {
     // generic per-block field update (persisted with the workspace)
     const patchBlock = useCallback(
         (id: string, patch: Partial<Block>) => {
-            updateWorkspace(withBlockPatch(workspace, id, patch));
+            // read the latest workspace: several panels may patch in one commit
+            // (e.g. flash panels saving their initial unit on mount)
+            updateWorkspace(withBlockPatch(workspaceRef.current, id, patch));
         },
-        [workspace, updateWorkspace],
+        [updateWorkspace],
     );
     const setBlockFlashAccounts = useCallback(
         (id: string, flashAccounts: FlashAccountKeys) =>

@@ -292,11 +292,31 @@ export function FlashOrder({
     const panelLot: FlashLot = ownLot ?? defaultFor('S').lot;
     // 期貨沒有零股：照常以「口」下單，面板單位不變，回到股票時恢復
     const lot: FlashLot = market === 'F' ? 'Common' : panelLot;
-    const [qty, setQty] = useState(() => lot === defaultFor(market).lot ? defaultFor(market).qty : 1);
+    // 數量只屬於輸入時的商品類別與單位：單位或類別一變（包含切換版面等外部
+    // 改變），同一次 render 就視為 1、點價下單也用 1，不等 effect（#204）
+    const unitKey = `${market}:${lot}`;
+    const unitKeyRef = useRef(unitKey);
+    unitKeyRef.current = unitKey;
+    const [qtyEntry, setQtyEntry] = useState(() => ({ unit: unitKey, qty: lot === defaultFor(market).lot ? defaultFor(market).qty : 1 }));
+    const qty = qtyEntry.unit === unitKey ? qtyEntry.qty : 1;
+    const setQty = useCallback((v: number | ((prev: number) => number)) => setQtyEntry(prev => {
+        const unit = unitKeyRef.current;
+        const base = prev.unit === unit ? prev.qty : 1;
+        return { unit, qty: typeof v === 'function' ? v(base) : v };
+    }), []);
     const setPanelLot = (next: FlashLot) => {
         setLocalLot(next);
         onLotChange?.(next);
     };
+    // 沒存過單位的面板（新開或升級前）把建立時的預設單位存一次，之後別的
+    // 面板改「設為預設」不會在重新整理、切換版面或彈出時改到這個面板
+    const onLotChangeRef = useRef(onLotChange);
+    onLotChangeRef.current = onLotChange;
+    const savedLotValid = isFlashLot(savedLot);
+    useEffect(() => {
+        if (!savedLotValid) onLotChangeRef.current?.(panelLot);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [savedLotValid]);
     const odd = market === 'S' && lot === 'IntradayOdd';
     // 盤中零股是另一個撮合市場：零股模式的五檔、成交價與單量一律取零股
     // 行情（intraday_odd，量以股計），只在這個面板處於零股時才訂閱；
@@ -336,7 +356,9 @@ export function FlashOrder({
     const captureContext = useOrderContext(contract, lot);
     const armedRef = useRef(armed);
     const armedAccountKey = useRef(accountKey);
-    armedRef.current = armed && armedAccountKey.current === accountKey;
+    // 啟用時的單位：單位一變（含外部改變）立即失效，不等 effect 解除
+    const armedUnitKey = useRef(unitKey);
+    armedRef.current = armed && armedAccountKey.current === accountKey && armedUnitKey.current === unitKey;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const oddRef = useRef(odd);
@@ -371,7 +393,8 @@ export function FlashOrder({
     useEffect(() => {
         const prev = unitRef.current;
         unitRef.current = { market, lot };
-        if (prev.market !== market || prev.lot !== lot) setQty(1);
+        // 回到原單位時不讓舊數量復活
+        if (prev.market !== market || prev.lot !== lot) setQtyEntry({ unit: `${market}:${lot}`, qty: 1 });
     }, [market, lot]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
@@ -922,7 +945,7 @@ export function FlashOrder({
                 <button
                     className={styles.armBtn[armed ? 'on' : 'off']}
                     disabled={!live || !activeAccount}
-                    onClick={() => { armedAccountKey.current = accountKey; setArmed((a) => !a); }}
+                    onClick={() => { armedAccountKey.current = accountKey; armedUnitKey.current = unitKey; setArmed((a) => !a); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
