@@ -134,8 +134,8 @@ async function confirmManualOrder(
     account?: Account,
     livePriceCode?: string,
     credit?: string,
-): Promise<void> {
-    if (!getRiskSettings().confirmManualOrders) return;
+): Promise<boolean> {
+    if (!getRiskSettings().confirmManualOrders) return false;
     const approved = await requestOrderConfirm({
         code: contract.code,
         name: (contract as Partial<ContractInfo>).name,
@@ -150,6 +150,7 @@ async function confirmManualOrder(
         ...(credit ? { credit } : {}),
     });
     if (!approved) throw new OrderConfirmCancelled();
+    return true;
 }
 
 const CREDIT_NOTE: Record<CreditLabel, string> = { 融資: '融資', 融券: '融券', 借券: '借券', 借券豁免: '借券豁免', 現沖: '現股當沖' };
@@ -233,7 +234,7 @@ export async function placeQuickOrder(
         if (blocked) throw mutationNotStartedError(blocked);
     }
     if ((opts?.source ?? 'manual') === 'manual') {
-        await confirmManualOrder(
+        const confirmed = await confirmManualOrder(
             contract,
             action,
             price,
@@ -247,7 +248,8 @@ export async function placeQuickOrder(
             credit,
         );
         // 確認視窗守到按下確認；開始時模式未知（冷啟動）就以確認後的模式為準
-        sameServerMode.rebaseIfUnknown();
+        // （只在使用者真的看過確認視窗之後）
+        if (confirmed) sameServerMode.rebaseIfUnknown();
     }
     assertTradingLive();
     if (getApiBase() !== startedBase) throw mutationNotStartedError('確認期間伺服器已切換，請重新確認');
@@ -368,7 +370,7 @@ export async function placeStockExitByShares(
     if (odd && (!Number.isFinite(limitPrice) || !limitPrice || limitPrice <= 0)) throw mutationNotStartedError('零股需要有效漲跌停價，尚未送出任何分單');
     // 拆單前先做一次合併的手動確認（整張市價＋零股限價兩腳只問一次，
     // 內層 placeQuickOrder 一律 source:'auto' 免得連問兩次）
-    await confirmManualOrder(
+    const exitConfirmed = await confirmManualOrder(
         contract,
         action,
         null,
@@ -379,7 +381,7 @@ export async function placeStockExitByShares(
             : undefined,
         capturedAccount,
     );
-    serverMode.rebaseIfUnknown();
+    if (exitConfirmed) serverMode.rebaseIfUnknown();
     assertTradingLive();
     if (getApiBase() !== base) throw mutationNotStartedError('確認期間伺服器已切換');
     if (!serverMode()) throw mutationNotStartedError(SERVER_MODE_CHANGED_MESSAGE);
@@ -398,7 +400,7 @@ export async function placeStockExitByShares(
     }
     if (odd > 0) {
         if (getApiBase() !== base) throw new Error('伺服器已切換；先前分單可能已送出，剩餘分單未送出');
-        if (out.length > 0 && !serverMode()) throw new Error(`${SERVER_MODE_CHANGED_MESSAGE}；整張分單已送出，零股分單未送出`);
+        if (out.length > 0 && !serverMode()) throw new Error('確認後伺服器或模式已變更：整張分單已送出，零股分單未送出，請核對委託');
         if (!limitPrice) {
             throw new Error('零股需要漲跌停價作為限價，無法取得');
         }
@@ -415,7 +417,13 @@ export async function placeStockExitByShares(
             );
         } catch (e) {
             // 整張那一腳已送出：這筆不能報成「沒有送出」
-            if (out.length > 0) throw new Error(`整張分單已送出，零股分單未送出：${e instanceof Error ? e.message : String(e)}`);
+            if (out.length > 0) {
+                const msg = e instanceof Error ? e.message : String(e);
+                // 只有確定沒送出（mutationNotStarted）才說未送出；否則結果未知
+                throw new Error((e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted
+                    ? `整張分單已送出，零股分單未送出：${msg}`
+                    : `整張分單已送出，零股分單結果未知，請核對委託，勿直接重送：${msg}`);
+            }
             throw e;
         }
     }

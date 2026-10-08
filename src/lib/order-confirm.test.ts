@@ -41,6 +41,7 @@ describe('requestOrderConfirm', () => {
     it('preloads the server mode for a tile before its first confirmation', async () => {
         await primeOrderConfirmSimulation();
         const promise = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         expect(getPendingOrderConfirm()?.simulation).toBe(true);
         // the dialog also refreshes /info when it opens (the badge must not be stale)
         expect(fetchInfo).toHaveBeenCalled();
@@ -122,6 +123,7 @@ describe('server mode changes while the confirmation is open', () => {
         const store = await import('./server-info-store');
         store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
         const promise = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
         resolveOrderConfirm(true);
         await expect(promise).rejects.toMatchObject({ mutationNotStarted: true, message: ORDER_CONFIRM_SERVER_CHANGED });
@@ -130,32 +132,52 @@ describe('server mode changes while the confirmation is open', () => {
         const store = await import('./server-info-store');
         store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
         const promise = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         resolveOrderConfirm(true);
         await expect(promise).resolves.toBe(true);
     });
 });
 
 describe('server mode unknown when the confirmation opens', () => {
-    it('the dialog learning the mode (simulation) for the first time does not refuse the approval', async () => {
+    it('the dialog is not exposed (and cannot be approved) until it has refreshed the mode', async () => {
         const store = await import('./server-info-store');
         store.forgetServerInfo('');
+        let release!: () => void;
+        vi.mocked(fetchInfo).mockImplementationOnce(() => new Promise(res => { release = () => {
+            store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+            res({ simulation: false } as never);
+        }; }));
         const promise = requestOrderConfirm(req);
-        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        expect(getPendingOrderConfirm()).toBeNull();
+        resolveOrderConfirm(true); // premature approval is ignored
+        release();
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
+        expect(getPendingOrderConfirm()?.simulation).toBe(false);
         resolveOrderConfirm(true);
         await expect(promise).resolves.toBe(true);
     });
-    it('but learning it is production after a change refuses', async () => {
-        const store = await import('./server-info-store');
-        store.forgetServerInfo('');
-        const promise = requestOrderConfirm(req);
-        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
-        resolveOrderConfirm(true);
-        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+    it('a slow first /info that arrives after the dialog opened updates the badge and the gate (cold production start)', async () => {
+        vi.useFakeTimers();
+        try {
+            const store = await import('./server-info-store');
+            store.forgetServerInfo('');
+            vi.mocked(fetchInfo).mockImplementationOnce(() => new Promise(() => undefined));
+            const promise = requestOrderConfirm(req);
+            await vi.advanceTimersByTimeAsync(900);
+            expect(getPendingOrderConfirm()?.simulation).toBeNull();
+            store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+            expect(getPendingOrderConfirm()?.simulation).toBe(false);
+            resolveOrderConfirm(true);
+            await expect(promise).resolves.toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
     });
     it('an approval while the server info was cleared (restart in progress) refuses', async () => {
         const store = await import('./server-info-store');
         store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
         const promise = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         store.observeServerInfo(store.beginServerInfoRequest(), undefined);
         resolveOrderConfirm(true);
         await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
@@ -167,11 +189,17 @@ describe('the dialog badge and the gate read the same current mode', () => {
         const store = await import('./server-info-store');
         store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
         const first = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         expect(getPendingOrderConfirm()?.simulation).toBe(true);
         resolveOrderConfirm(false);
         await first;
         store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+        vi.mocked(fetchInfo).mockImplementationOnce(async () => {
+            store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+            return { simulation: false } as never;
+        });
         const second = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         expect(getPendingOrderConfirm()?.simulation).toBe(false);
         resolveOrderConfirm(true);
         await expect(second).resolves.toBe(true);

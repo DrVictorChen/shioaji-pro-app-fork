@@ -185,3 +185,9 @@ it('a split exit approved once stops before the odd-lot leg if the server mode c
     expect((err as { mutationNotStarted?: boolean }).mutationNotStarted).toBeUndefined();
     expect(String(err.message)).toContain('零股分單未送出');
 });
+it('an odd leg that fails after dispatch is reported as unknown, not as unsent', async () => {
+    m.stock.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('連線中斷'));
+    const err = await placeStockExitByShares(contract, 'Sell', 1500, account).catch(e => e);
+    expect(String(err.message)).toContain('零股分單結果未知');
+    expect(String(err.message)).not.toContain('零股分單未送出');
+});

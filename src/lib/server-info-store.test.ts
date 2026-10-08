@@ -187,3 +187,25 @@ it('keeps ordering per base and ignores late responses after a server switch', a
         expect(probe.seen.info).toBeUndefined();
     } finally { await probe.unmount(); }
 });
+
+it('captureServerMode: a guard captured with an unknown mode never rebases across API bases', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-a';
+    const guard = info.captureServerMode();
+    runtime.base = 'guard-b';
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    guard.rebaseIfUnknown();
+    expect(guard()).toBe(false);
+});
+
+it('captureServerMode: unknown at capture → rebased to the mode known after approval on the same base', async () => {
+    const info = await import('./server-info-store');
+    runtime.base = 'guard-c';
+    const guard = info.captureServerMode();
+    info.observeServerInfo(info.beginServerInfoRequest(), production);
+    expect(guard()).toBe(false);
+    guard.rebaseIfUnknown();
+    expect(guard()).toBe(true);
+    info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+    expect(guard()).toBe(false);
+});

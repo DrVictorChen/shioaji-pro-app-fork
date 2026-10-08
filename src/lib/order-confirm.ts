@@ -9,7 +9,8 @@
 
 import { fetchInfo } from './shioaji';
 import { getAccountState } from './account-store';
-import { captureServerMode, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from './server-info-store';
+import { captureServerMode, knownServerInfo, SERVER_MODE_CHANGED_MESSAGE, subscribeServerInfo, type ServerModeGuard } from './server-info-store';
+import { getApiBase } from './runtime';
 import type { Action } from './types/order';
 import type { Account } from './types/portfolio';
 
@@ -39,8 +40,10 @@ interface PendingConfirm {
     request: OrderConfirmRequest;
     resolve: (approved: boolean) => void;
     reject: (error: Error) => void;
-    // the server and mode when the dialog opened (server-info-store)
+    // the server and mode when the dialog was shown (server-info-store)
     sameServer: ServerModeGuard;
+    // shown to the user (after refreshing /info); approval before that is ignored
+    started: boolean;
 }
 
 /** 確認視窗開著時伺服器或模式變了（例如模擬 sidecar 重啟成正式）：舊的確認不算數 */
@@ -59,11 +62,13 @@ export function subscribeOrderConfirm(listener: () => void): () => void {
 }
 
 export function getPendingOrderConfirm(): OrderConfirmRequest | null {
-    return pending?.request ?? null;
+    return pending?.started ? pending.request : null;
 }
 
 export function resolveOrderConfirm(approved: boolean): void {
     if (!pending) return;
+    // 還沒顯示（仍在取得 /info）的確認不能被按下確認
+    if (approved && !pending.started) return;
     const current = pending;
     pending = null;
     emit();
@@ -77,7 +82,7 @@ export function resolveOrderConfirm(approved: boolean): void {
 // 環境 badge：一律取伺服器資訊 store 目前的模式（與送單閘門同一份），
 // 不另外長期快取 — sidecar 在同一位址由模擬重啟成正式時不會顯示舊的「模擬」
 let simulationOverride: boolean | null | undefined;
-let simulationInflight: Promise<void> | null = null;
+let simulationInflight: { base: string; promise: Promise<void> } | null = null;
 function currentSimulation(): boolean | null {
     if (simulationOverride !== undefined) return simulationOverride;
     const s = knownServerInfo()?.simulation;
@@ -99,16 +104,35 @@ function selectedAccountLabel(unit: string): string | undefined {
 
 /** 重新取得 /info（更新 store）；確認視窗開啟時一律取一次最新的模式 */
 export function primeOrderConfirmSimulation(): Promise<void> {
-    simulationInflight ??= fetchInfo()
-        .then(() => undefined)
-        .catch(() => {
-            // 未知就未知 — 不阻塞下單確認
-        })
-        .finally(() => {
-            simulationInflight = null;
-        });
-    return simulationInflight;
+    // 只共用同一個伺服器位址上進行中的請求
+    const base = getApiBase();
+    if (simulationInflight?.base === base) return simulationInflight.promise;
+    const entry = {
+        base,
+        promise: fetchInfo()
+            .then(() => undefined)
+            .catch(() => {
+                // 未知就未知 — 不阻塞下單確認
+            })
+            .finally(() => {
+                if (simulationInflight === entry) simulationInflight = null;
+            }),
+    };
+    simulationInflight = entry;
+    return entry.promise;
 }
+
+// 確認視窗開著時才第一次得知模式（例如 /info 超過 800ms 才回來）：
+// 更新標示並以新的模式為閘門基準，讓使用者看著正確的環境按確認
+subscribeServerInfo(() => {
+    const current = pending;
+    if (!current?.started || current.request.simulation !== null) return;
+    const s = currentSimulation();
+    if (s === null) return;
+    current.sameServer = captureServerMode();
+    current.request = { ...current.request, simulation: s };
+    emit();
+});
 
 export function requestOrderConfirm(
     request: Omit<OrderConfirmRequest, 'simulation'>,
@@ -134,6 +158,7 @@ export function requestOrderConfirm(
             resolve,
             reject,
             sameServer: captureServerMode(),
+            started: false,
         };
         pending = current;
         const start = () => {
@@ -141,6 +166,7 @@ export function requestOrderConfirm(
             // 視窗顯示的模式與送單閘門取自同一個時間點（取得最新 /info 之後）
             current.sameServer = captureServerMode();
             current.request = { ...withAccount, simulation: currentSimulation() };
+            current.started = true;
             emit();
         };
         // 環境資訊最多等 800ms — 拿不到就以未知呈現

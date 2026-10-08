@@ -4,12 +4,12 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from './types/portfolio';
 import type { ContractBase } from './types/contract';
-const m = vi.hoisted(() => ({ confirm: vi.fn(), stock: vi.fn(), future: vi.fn(), accounts: [] as Account[], confirmOn: true }));
+const m = vi.hoisted(() => ({ confirm: vi.fn(), stock: vi.fn(), future: vi.fn(), accounts: [] as Account[], confirmOn: true, onRisk: undefined as undefined | (() => void) }));
 vi.mock('./runtime', () => ({ getApiBase: () => 'fixture' }));
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accounts, selectedStock: m.accounts[0], selectedFutures: undefined }) }));
 vi.mock('./activity', () => ({ trackActivity: vi.fn() }));
 vi.mock('./order-confirm', () => ({ requestOrderConfirm: m.confirm, accountConfirmLabel: (a: Account) => a.account_id }));
-vi.mock('./risk', () => ({ checkOrderAllowed: () => null, getRiskSettings: () => ({ confirmManualOrders: m.confirmOn }) }));
+vi.mock('./risk', () => ({ checkOrderAllowed: () => null, getRiskSettings: () => { m.onRisk?.(); return { confirmManualOrders: m.confirmOn }; } }));
 vi.mock('./stream', () => ({ getStreamStatus: () => 'live' }));
 vi.mock('./trading-mirror-lease', () => ({ getTradingMirrorFresh: () => true }));
 vi.mock('./shioaji', () => ({ placeStockOrder: m.stock, placeFuturesOrder: m.future, fetchTrades: vi.fn(), cancelOrders: vi.fn() }));
@@ -24,6 +24,7 @@ beforeEach(() => {
     vi.clearAllMocks();
     m.accounts = [account];
     m.confirmOn = true;
+    m.onRisk = undefined;
     m.confirm.mockResolvedValue(true);
     m.stock.mockResolvedValue({ status: { status: 'PendingSubmit' } });
 });
@@ -109,5 +110,15 @@ it('runs afterConfirm after the confirmation and before dispatch; a throw refuse
     const afterConfirm = vi.fn(async () => { order.push('after'); throw new Error('目前不能融資'); });
     await expect(placeQuickOrder(stock, 'Buy', 100, 1, { account, orderCond: 'MarginTrading', afterConfirm })).rejects.toMatchObject({ mutationNotStarted: true, message: '目前不能融資' });
     expect(order).toEqual(['confirm', 'after']);
+    expect(m.stock).not.toHaveBeenCalled();
+});
+
+it('without a confirmation, a mode learned during the order is not adopted (unknown → production refuses)', async () => {
+    m.confirmOn = false;
+    const store = await import('./server-info-store');
+    store.forgetServerInfo('fixture');
+    // the mode becomes known as production right where a confirmation would have been
+    m.onRisk = () => { store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never); };
+    await expect(placeQuickOrder(stock, 'Buy', 100, 1, { account })).rejects.toMatchObject({ mutationNotStarted: true });
     expect(m.stock).not.toHaveBeenCalled();
 });

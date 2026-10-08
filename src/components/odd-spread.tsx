@@ -726,7 +726,10 @@ async function confirmHedge(rec: SpreadExecRecord) {
             unit: p.leg === 'odd' ? '股' : '張',
             accountLabel: accountConfirmLabel(rec.account),
             note: `整零價差補單（${p.leg === 'odd' ? '盤中零股' : '整股'}・最新價限價 ROD）：${p.reason}`,
-        }).catch(() => false);
+        }).catch((e: unknown) => {
+            if ((e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '整零價差：補單未送出', body: e instanceof Error ? e.message : String(e) });
+            return false;
+        });
         if (!ok) return;
     }
     if (!acceptHedge(rec.id, { version, leg, action, quantity, orders })) {

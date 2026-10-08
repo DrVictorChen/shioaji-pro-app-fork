@@ -130,7 +130,7 @@ export interface ServerModeGuard {
 }
 
 export function captureServerMode(): ServerModeGuard {
-    let base = syncBase();
+    const base = syncBase();
     let simulation = infos.get(base)?.simulation;
     let version = modeVersion;
     const same = (() => {
@@ -141,8 +141,8 @@ export function captureServerMode(): ServerModeGuard {
         return modeVersion === version || current === true;
     }) as ServerModeGuard;
     same.rebaseIfUnknown = () => {
-        if (typeof simulation === 'boolean') return;
-        base = syncBase();
+        // 只在同一個位址上改以目前的模式為準；換了位址永遠不算同一個
+        if (typeof simulation === 'boolean' || syncBase() !== base) return;
         simulation = infos.get(base)?.simulation;
         version = modeVersion;
     };
