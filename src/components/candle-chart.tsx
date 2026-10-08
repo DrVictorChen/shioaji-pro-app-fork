@@ -1089,13 +1089,32 @@ export function CandleChart({
                         midPts.push({ time: p.time, value: (p.value + lo) / 2 });
                     }
                     if (bandPoints.length === 0) continue;
+                    // 主圖：不參與自動縮放（牆在畫面外時不硬拉比例）。
+                    // 副圖：band 就是這個 pane 唯一的內容，必須提供價格範圍，
+                    // 否則整個 pane 沒有尺度（預設 -0.5~0.5），畫了也看不見。
+                    let bandMin = Infinity;
+                    let bandMax = -Infinity;
+                    for (const bp of bandPoints) {
+                        const lo = Math.min(bp.top, bp.bottom);
+                        const hi = Math.max(bp.top, bp.bottom);
+                        if (lo < bandMin) bandMin = lo;
+                        if (hi > bandMax) bandMax = hi;
+                    }
                     const anchor = chart.addSeries(
                         LineSeries,
                         {
                             color: 'rgba(0,0,0,0)',
                             lineVisible: false,
                             crosshairMarkerVisible: false,
-                            autoscaleInfoProvider: () => null,
+                            autoscaleInfoProvider:
+                                pane === 0
+                                    ? () => null
+                                    : () => ({
+                                          priceRange: {
+                                              minValue: bandMin,
+                                              maxValue: bandMax,
+                                          },
+                                      }),
                             ...labelOpts,
                             ...priceFormatOpt,
                         },
