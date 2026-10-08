@@ -426,7 +426,8 @@ export function hitTest(
     return inside ? { kind: 'body' } : null;
 }
 
-// 從一疊物件裡挑出游標點到的那個。後畫的疊在上面，所以從尾端往前找。
+// 從一疊物件裡挑出游標點到的那個。後畫的疊在上面，所以從尾端往前找；
+// 畫在 K 棒前方的物件整層蓋在後方物件之上，所以先找前方、再找後方。
 //
 // 篩選規則只有一條：隱藏的跳過。**鎖定的照樣選得到** — 鎖定擋的是拖曳，
 // 不是選取；選不到就沒辦法解鎖或改樣式，物件會永遠黏在圖上拿不掉。
@@ -435,6 +436,7 @@ export function pickDrawing<
         tool: DrawingTool;
         anchors: DrawingAnchor[];
         hidden: boolean;
+        behind?: boolean;
         text?: string;
         fib?: FibOptions;
     },
@@ -446,13 +448,17 @@ export function pickDrawing<
     tolerance = HIT_TOLERANCE,
     formatPrice?: (price: number) => string,
 ): { drawing: T; hit: Hit; points: Point[] } | null {
-    for (let i = list.length - 1; i >= 0; i--) {
-        const d = list[i]!;
-        if (d.hidden) continue;
-        const points = projectAnchors(projector, d.anchors);
-        if (!points) continue;
-        const hit = hitTest(d.tool, points, size, at, tolerance, { ...d, formatPrice });
-        if (hit) return { drawing: d, hit, points };
+    for (let pass = 0; pass < 2; pass++) {
+        const wantBehind = pass === 1;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const d = list[i]!;
+            if (d.hidden) continue;
+            if ((d.behind === true && d.tool !== 'text') !== wantBehind) continue;
+            const points = projectAnchors(projector, d.anchors);
+            if (!points) continue;
+            const hit = hitTest(d.tool, points, size, at, tolerance, { ...d, formatPrice });
+            if (hit) return { drawing: d, hit, points };
+        }
     }
     return null;
 }

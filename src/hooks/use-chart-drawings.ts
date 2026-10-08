@@ -39,6 +39,9 @@ import {
     showAllDrawings,
     toolDef,
     updateDrawing,
+    setDrawingsBehind,
+    canSendBehind,
+    isBehindCandles,
     useDrawings,
     useDrawingSettings,
     DRAWING_TOOL_DEFS,
@@ -195,6 +198,10 @@ export interface ChartDrawingsApi {
     toggleHidden: () => void;
     setLocked: (id: string, v: boolean) => void;
     setHidden: (id: string, v: boolean) => void;
+    // 顯示在 K 棒前方／後方（文字註記不適用，一律前方）
+    setBehind: (id: string, v: boolean) => void;
+    // 選取中的物件：有任一個在前方就全部移到後方，否則全部移到前方
+    toggleBehind: () => void;
     rename: (id: string, name: string) => void;
     reorder: (id: string, toIndex: number) => void;
     duplicate: () => void;
@@ -1383,6 +1390,19 @@ export function useChartDrawings(opts: {
         [patchOne],
     );
 
+    const setBehind = useCallback(
+        (id: string, v: boolean) => tx(() => setDrawingsBehind(stateRef.current.symbolKey, [id], v)),
+        [tx],
+    );
+
+    const toggleBehind = useCallback(() => {
+        const { selectedIds: ids, drawings: list, symbolKey: key } = stateRef.current;
+        const sel = list.filter((d) => ids.includes(d.id) && canSendBehind(d));
+        if (!sel.length) return;
+        const behind = sel.some((d) => !isBehindCandles(d));
+        tx(() => setDrawingsBehind(key, ids, behind));
+    }, [tx]);
+
     const toggleLock = useCallback(() => {
         const { selectedIds: ids, drawings: list, symbolKey: key } = stateRef.current;
         const sel = list.filter((d) => ids.includes(d.id));
@@ -1690,6 +1710,8 @@ export function useChartDrawings(opts: {
         toggleHidden,
         setLocked,
         setHidden,
+        setBehind,
+        toggleBehind,
         rename,
         reorder,
         duplicate,

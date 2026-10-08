@@ -97,7 +97,7 @@ export interface DrawingAnchor {
 
 export interface DrawingStyle {
     color: string; // 線色（#rrggbb）
-    width: number; // 線寬 1–4
+    width: number; // 線寬：LINE_WIDTHS 其中之一（0.5、1–4）
     dash: 'solid' | 'dashed';
     fillOpacity: number; // 方框／通道的填色透明度 0–1
     // 線條（與文字）的不透明度 0.1–1：蓋在 K 棒上時可以半透明，不把 K 棒
@@ -107,9 +107,19 @@ export interface DrawingStyle {
 
 export const MIN_LINE_OPACITY = 0.1;
 
-// 新物件線條的預設不透明度：略透明，蓋在 K 棒上仍看得到 K 棒；淺色底上
-// 同樣的透明度看起來較淡，所以淺色主題稍微不透明一點
+// 可選的線寬（px）。0.5 給想要極細輔助線的使用者；選取時另外加粗
+// SELECTED_EXTRA_WIDTH，細線選取後一樣看得出來。
+export const LINE_WIDTHS = [0.5, 1, 2, 3, 4] as const;
+
+// 新物件預設畫在 K 棒前方，所以線條預設半透明（50%），讓後面的 K 棒透出來。
+// 使用者在樣式裡挑過不透明度（settings.lineOpacity）就照使用者的。
 export const DEFAULT_LINE_OPACITY: Record<'dark' | 'light', number> = {
+    dark: 0.5,
+    light: 0.5,
+};
+
+// 文字註記一律畫在最上層、而且要讀得清楚，不套用線條的 50% 預設
+export const DEFAULT_TEXT_OPACITY: Record<'dark' | 'light', number> = {
     dark: 0.85,
     light: 0.9,
 };
@@ -121,6 +131,9 @@ export interface Drawing {
     style: DrawingStyle;
     locked: boolean; // 鎖定：不可拖曳、改價、刪除（仍可選取與改樣式）
     hidden: boolean; // 隱藏：不繪製，但仍保存
+    // 畫在 K 棒後方。沒有這個欄位＝前方（舊資料、新物件的預設）。
+    // 文字註記不支援，一律在前方。
+    behind?: boolean;
     createdAt: number;
     // 時間只供顯示；跨視窗合併與歷史檢查一律使用 revision。
     updatedAt: number;
@@ -128,6 +141,15 @@ export interface Drawing {
     name?: string; // 物件列表裡的名稱（沒設就用工具名稱）
     text?: string; // 文字註記的內容
     fib?: FibOptions; // 斐波那契的比例、色帶、標籤、延伸（沒設就用預設）
+}
+
+// 這個物件畫在 K 棒後方嗎？文字註記、缺欄位的舊資料都算前方。
+export function isBehindCandles(d: { tool: DrawingTool; behind?: boolean }): boolean {
+    return d.behind === true && d.tool !== 'text';
+}
+
+export function canSendBehind(d: { tool: DrawingTool }): boolean {
+    return d.tool !== 'text';
 }
 
 export const MAX_TEXT_LENGTH = 200;
@@ -266,7 +288,7 @@ export function defaultStyleFor(
     return {
         ...s.defaultStyle,
         color: s.toolColors[tool] ?? TOOL_DEFAULT_COLORS[mode][tool],
-        opacity: s.lineOpacity ?? DEFAULT_LINE_OPACITY[mode],
+        opacity: s.lineOpacity ?? (tool === 'text' ? DEFAULT_TEXT_OPACITY : DEFAULT_LINE_OPACITY)[mode],
     };
 }
 
@@ -307,11 +329,18 @@ export function isDrawingColor(v: unknown): v is string {
     return typeof v === 'string' && HEX_COLOR.test(v);
 }
 
+// 夾到最接近的可選線寬（舊資料的 1–4 整數維持原值）
+export function nearestLineWidth(w: number): number {
+    let best: number = LINE_WIDTHS[0];
+    for (const c of LINE_WIDTHS) if (Math.abs(c - w) < Math.abs(best - w)) best = c;
+    return best;
+}
+
 function sanitizeBaseStyle(v: unknown, fallback: DrawingBaseStyle): DrawingBaseStyle {
     const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
     const width =
         typeof o.width === 'number' && Number.isFinite(o.width)
-            ? Math.min(4, Math.max(1, Math.round(o.width)))
+            ? nearestLineWidth(o.width)
             : fallback.width;
     const dash = o.dash === 'solid' || o.dash === 'dashed' ? o.dash : fallback.dash;
     const fillOpacity =
@@ -365,6 +394,7 @@ export function sanitizeDrawing(v: unknown): Drawing | null {
         style: sanitizeStyle(d.style, TOOL_DEFAULT_COLORS.dark[tool]),
         locked: d.locked === true,
         hidden: d.hidden === true,
+        ...(d.behind === true && tool !== 'text' ? { behind: true } : {}),
         createdAt: typeof d.createdAt === 'number' && Number.isFinite(d.createdAt) ? d.createdAt : 0,
         updatedAt:
             typeof d.updatedAt === 'number' && Number.isFinite(d.updatedAt)
@@ -1431,7 +1461,7 @@ export function addDrawing(
     tool: DrawingTool,
     anchors: DrawingAnchor[],
     style: DrawingStyle,
-    extra?: Pick<Drawing, 'text' | 'fib' | 'name'>,
+    extra?: Pick<Drawing, 'text' | 'fib' | 'name' | 'behind'>,
 ): Drawing | null {
     if ((store[key]?.length ?? 0) >= MAX_DRAWINGS_PER_SYMBOL) return null;
     const now = stamp();
@@ -1446,6 +1476,7 @@ export function addDrawing(
         updatedAt: now,
         revision: nextRevision(),
         ...(extra?.name ? { name: extra.name } : {}),
+        ...(extra?.behind === true && tool !== 'text' ? { behind: true } : {}),
         ...(tool === 'text' ? { text: extra?.text ?? '' } : {}),
         ...(tool === 'fib' ? { fib: sanitizeFibOptions(extra?.fib ?? defaultFibOptions()) } : {}),
     };
@@ -1577,7 +1608,24 @@ export function duplicateDrawing(
         text: source.text,
         fib: source.fib,
         name: source.name,
+        behind: source.behind,
     });
+}
+
+// 前方／後方：前方就拿掉欄位（與舊資料同形），文字註記不接受後方
+export function setDrawingsBehind(key: string, ids: readonly string[], behind: boolean) {
+    const list = store[key];
+    if (!list) return;
+    const want = new Set(ids);
+    let changed = false;
+    const next = list.map((d) => {
+        if (!want.has(d.id) || !canSendBehind(d) || isBehindCandles(d) === behind) return d;
+        changed = true;
+        if (behind) return { ...d, behind: true };
+        const { behind: _drop, ...rest } = d;
+        return rest;
+    });
+    if (changed) commit(key, next);
 }
 
 // 隱藏的物件點不到，取消選取後就只能從這裡找回來

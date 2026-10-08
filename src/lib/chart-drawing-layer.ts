@@ -24,6 +24,7 @@ import {
 import {
     fibOptionsOf,
     contrastTextColor,
+    isBehindCandles,
     type Drawing,
     type DrawingAnchor,
     type DrawingStyle,
@@ -82,7 +83,7 @@ export interface DrawingLayerState {
     editingId: string | null;
 }
 
-// 選取中的線多畫幾 px。預設線寬 1～2px，+1.5 才分得出選取前後。
+// 選取中的線多畫幾 px。線寬最細 0.5px，+1.5 才分得出選取前後。
 export const SELECTED_EXTRA_WIDTH = 1.5;
 
 const EMPTY_STATE: DrawingLayerState = {
@@ -95,6 +96,27 @@ const EMPTY_STATE: DrawingLayerState = {
 };
 
 type DrawTarget = Parameters<IPrimitivePaneRenderer['draw']>[0];
+// all：整個物件；body：線條與填色（不含文字標籤）；labels：只畫文字標籤
+export type PaintPart = 'all' | 'body' | 'labels';
+
+// 某一層要畫哪些物件、畫哪個部分（依清單順序＝圖層順序）。選取控制點
+// 只在 front 層畫，由呼叫端處理。
+export function drawingPassPlan<D extends Pick<Drawing, 'tool' | 'hidden' | 'behind'>>(
+    drawings: readonly D[],
+    pass: DrawingPass,
+): { drawing: D; part: PaintPart }[] {
+    const out: { drawing: D; part: PaintPart }[] = [];
+    for (const d of drawings) {
+        if (d.hidden) continue;
+        const behind = isBehindCandles(d);
+        if (pass === 'back') {
+            if (behind) out.push({ drawing: d, part: 'body' });
+        } else {
+            out.push({ drawing: d, part: behind ? 'labels' : 'all' });
+        }
+    }
+    return out;
+}
 
 function withAlpha(hex: string, alpha: number): string {
     const m = typeof hex === 'string' ? /^#([0-9a-f]{6})$/i.exec(hex.trim()) : null;
@@ -104,17 +126,28 @@ function withAlpha(hex: string, alpha: number): string {
 }
 
 
+// 兩個 pane view 共用同一套繪製，依物件的「K 棒前方／後方」分流：
+// - back（zOrder 'bottom'）：behind 物件的線條與填色
+// - front（zOrder 'top'）：其餘物件；以及不論前後一律在上層的東西 —
+//   文字註記、斐波那契價位標籤、選取控制點、繪製中的草稿、價差量測
+export type DrawingPass = 'front' | 'back';
+
 class DrawingRenderer implements IPrimitivePaneRenderer {
-    constructor(private readonly _layer: DrawingLayer) {}
+    constructor(
+        private readonly _layer: DrawingLayer,
+        private readonly _pass: DrawingPass = 'front',
+    ) {}
 
     draw(target: DrawTarget): void {
         const layer = this._layer;
         const projector = layer.projector();
         if (!projector) return;
+        const front = this._pass === 'front';
         target.useBitmapCoordinateSpace((scope) => {
             // pane 的畫布就是命中判定的座標系來源 — 兩邊共用同一個
-            // 元素，游標座標與畫出來的位置不可能對不上
-            layer.noteCanvas(scope.context.canvas, scope.mediaSize);
+            // 元素，游標座標與畫出來的位置不可能對不上（上下兩層畫布
+            // 大小位置相同，以上層為準）
+            if (front) layer.noteCanvas(scope.context.canvas, scope.mediaSize);
             const ctx = scope.context;
             const hr = scope.horizontalPixelRatio;
             const vr = scope.verticalPixelRatio;
@@ -124,16 +157,17 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
             const multi = selected.size > 1;
             const fmt = layer.formatPrice;
 
-            for (const d of state.drawings) {
-                if (d.hidden) continue;
+            for (const { drawing: d, part } of drawingPassPlan(state.drawings, this._pass)) {
                 const pts = projectAnchors(projector, d.anchors);
                 if (!pts) continue;
                 const isSel = selected.has(d.id);
-                this._paint(ctx, hr, vr, size, d, pts, isSel, d.locked, fmt, state.editingId === d.id);
+                this._paint(ctx, hr, vr, size, d, pts, isSel, d.locked, fmt, state.editingId === d.id, part);
+                if (!front) continue;
                 // 多選時不畫控制點（拖控制點只對單一物件有意義），改畫外框提示
                 if (isSel && !d.locked && !multi) this._paintHandles(ctx, hr, vr, pts, d.style.color);
                 if (isSel && multi) this._paintHandles(ctx, hr, vr, pts, d.style.color, true);
             }
+            if (!front) return;
 
             const draft = state.draft;
             if (draft) {
@@ -157,7 +191,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
 
             if (state.measure) this._paintMeasure(ctx, hr, vr, projector, state.measure);
         });
-        layer.notifyDrawn();
+        if (front) layer.notifyDrawn();
     }
 
     private _stroke(ctx: CanvasRenderingContext2D, hr: number, vr: number, seg: Segment) {
@@ -178,10 +212,13 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
         locked: boolean,
         fmt: (p: number) => string,
         editing: boolean,
+        part: PaintPart = 'all',
     ): void {
         const style = d.style;
         const shape: Shape | null = shapeOf(d.tool, pts, size, d);
         if (!shape) return;
+        // 後方物件在上層只補畫文字類標籤（目前只有斐波那契有）
+        if (part === 'labels' && shape.kind !== 'fib') return;
         ctx.save();
         ctx.strokeStyle = style.color;
         // 選取中加粗當作視覺回饋；命中範圍由 geometry 獨立控制，
@@ -233,7 +270,8 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 this._stroke(ctx, hr, vr, shape.base);
                 this._stroke(ctx, hr, vr, shape.parallel);
                 ctx.setLineDash([4 * hr, 4 * hr]);
-                ctx.lineWidth = Math.max(1, style.width - 1) * hr;
+                // 中線比邊線細一級，但不比邊線粗（0.5px／1px 時同寬）
+                ctx.lineWidth = Math.max(Math.min(1, style.width), style.width - 1) * hr;
                 this._stroke(ctx, hr, vr, shape.mid);
                 break;
             }
@@ -244,7 +282,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                     fibLevelColor(fib.levels[index]!, fib, style.color, mode);
                 // 相鄰兩條比例線之間的半透明色帶（TradingView 式）：顏色取
                 // 離 0 較遠的那一條
-                if (fib.bandOpacity > 0) {
+                if (part !== 'labels' && fib.bandOpacity > 0) {
                     ctx.globalAlpha = baseAlpha;
                     const sorted = [...shape.levels].sort((p, q) => p.level - q.level);
                     for (let i = 0; i + 1 < sorted.length; i++) {
@@ -260,14 +298,14 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                     }
                     ctx.globalAlpha = lineAlpha;
                 }
-                for (const l of shape.levels) {
+                for (const l of part === 'labels' ? [] : shape.levels) {
                     ctx.strokeStyle = colorOf(l.index);
                     this._stroke(ctx, hr, vr, {
                         a: { x: shape.left, y: l.y },
                         b: { x: shape.right, y: l.y },
                     });
                 }
-                if (shape.diag) {
+                if (part !== 'labels' && shape.diag) {
                     ctx.strokeStyle = style.color;
                     ctx.setLineDash([3 * hr, 3 * hr]);
                     ctx.globalAlpha *= 0.7;
@@ -276,7 +314,7 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
                 }
                 // 標籤：回撤範圍外側、線的顏色＋圖表背景色描邊，蓋在 K 棒上
                 // 也讀得清楚（不用實心底框）
-                if (fib.showLevel || fib.showPrice) {
+                if (part !== 'body' && (fib.showLevel || fib.showPrice)) {
                     ctx.setLineDash([]);
                     ctx.font = `${fib.fontSize * vr}px sans-serif`;
                     for (const at of fibLabels(shape, fib, d.anchors, size.width, fmt)) {
@@ -408,12 +446,17 @@ class DrawingRenderer implements IPrimitivePaneRenderer {
 }
 
 class DrawingPaneView implements IPrimitivePaneView {
-    constructor(private readonly _layer: DrawingLayer) {}
+    constructor(
+        private readonly _layer: DrawingLayer,
+        private readonly _pass: DrawingPass,
+    ) {}
     zOrder(): PrimitivePaneViewZOrder {
-        return 'top'; // 畫在 K 棒之上 — 壓力線被 K 棒蓋住就沒意義了
+        // 預設畫在 K 棒之上 — 壓力線被 K 棒蓋住就沒意義了；使用者把個別
+        // 物件設成「K 棒後方」時，那些物件的線條改由 bottom 這層畫
+        return this._pass === 'front' ? 'top' : 'bottom';
     }
     renderer(): IPrimitivePaneRenderer {
-        return new DrawingRenderer(this._layer);
+        return new DrawingRenderer(this._layer, this._pass);
     }
 }
 
@@ -503,7 +546,7 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
     // getTimes：目前圖上 K 棒的時間陣列（遞增）。切換週期／載入更舊的
     // 歷史都會換一份，所以用 callback 每次重讀，不快照。
     constructor(private readonly _getTimes: () => number[]) {
-        this._views = [new DrawingPaneView(this)];
+        this._views = [new DrawingPaneView(this, 'back'), new DrawingPaneView(this, 'front')];
         this._axisPaneViews = [new DrawingAxisPaneView(this)];
     }
 

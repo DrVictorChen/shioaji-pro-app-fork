@@ -2324,12 +2324,35 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         const api = await setup();
         await act(async () => api().setTool('horizontal'));
         await down(50, 150);
-        expect(api().selected!.style.opacity).toBe(0.85); // 深色主題預設略透明
-        for (const o of [0.7, 0.6, 0.5]) await act(async () => api().applyStyle({ opacity: o }));
-        expect(api().selected!.style.opacity).toBe(0.5);
-        expect(getDrawingSettings().lineOpacity).toBe(0.5);
+        expect(api().selected!.style.opacity).toBe(0.5); // 新物件在 K 棒前方，預設 50% 透明
+        expect(api().selected!.behind).toBeUndefined();
+        for (const o of [0.8, 0.7, 0.6]) await act(async () => api().applyStyle({ opacity: o }));
+        expect(api().selected!.style.opacity).toBe(0.6);
+        expect(getDrawingSettings().lineOpacity).toBe(0.6);
         await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
-        expect(api().drawings[0]!.style.opacity).toBe(0.85);
+        expect(api().drawings[0]!.style.opacity).toBe(0.5);
+    });
+
+    it('K 棒前方／後方：浮動工具列切換選取、物件列表切換單一物件，都可復原；文字註記不受影響', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 1 }, { time: 1060, price: 2 }], DEFAULT_DRAWING_STYLE)!;
+        const t = addDrawing('TXF', 'text', [{ time: 1000, price: 1 }], DEFAULT_DRAWING_STYLE, { text: '註記' })!;
+        await act(async () => {});
+        await down(700, 350); // 取得鍵盤（空白處）
+        await act(async () => { api().select(a.id); api().select(t.id, true); });
+        await act(async () => api().toggleBehind());
+        expect(api().drawings.find((d) => d.id === a.id)!.behind).toBe(true);
+        expect(api().drawings.find((d) => d.id === t.id)!.behind).toBeUndefined();
+        await act(async () => api().toggleBehind()); // 全部都在後方 → 移回前方
+        const back = api().drawings.find((d) => d.id === a.id)!;
+        expect('behind' in back).toBe(false); // 前方＝拿掉欄位，與舊資料同形
+        await act(async () => api().setBehind(a.id, true));
+        await act(async () => api().setBehind(t.id, true)); // 文字不接受
+        expect(api().drawings.find((d) => d.id === t.id)!.behind).toBeUndefined();
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings.find((d) => d.id === a.id)!.behind).toBeUndefined();
+        await key({ key: 'z', code: 'KeyZ', ctrlKey: true });
+        expect(api().drawings.find((d) => d.id === a.id)!.behind).toBe(true);
     });
 
     it('物件列表操作：改名、隱藏、鎖定、調整圖層都可復原', async () => {

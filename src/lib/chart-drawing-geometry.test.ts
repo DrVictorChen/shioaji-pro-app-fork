@@ -373,7 +373,7 @@ describe('命中判定', () => {
 });
 
 describe('從一疊物件裡挑出點到的那個', () => {
-    const obj = (id: string, price: number, patch: Partial<{ hidden: boolean }> = {}) => ({
+    const obj = (id: string, price: number, patch: Partial<{ hidden: boolean; behind: boolean }> = {}) => ({
         id,
         tool: 'horizontal' as const,
         anchors: [{ time: 1000, price }],
@@ -396,6 +396,13 @@ describe('從一疊物件裡挑出點到的那個', () => {
     it('重疊時後畫的優先（畫在上面的先選到）', () => {
         const list = [obj('older', 250), obj('newer', 250)];
         expect(pickDrawing(list, projector, SIZE, at(150))?.drawing.id).toBe('newer');
+    });
+
+    it('K 棒前方的物件整層蓋在後方物件上，重疊時先選到前方的', () => {
+        const list = [obj('front', 250), obj('back', 250, { behind: true })];
+        expect(pickDrawing(list, projector, SIZE, at(150))?.drawing.id).toBe('front');
+        // 只有後方物件時照樣選得到
+        expect(pickDrawing([obj('back', 250, { behind: true })], projector, SIZE, at(150))?.drawing.id).toBe('back');
     });
 
     it('沒點到任何物件時回 null', () => {

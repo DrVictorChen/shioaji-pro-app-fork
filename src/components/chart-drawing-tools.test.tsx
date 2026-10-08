@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DrawingSettingsDialog, isImeKey, parseLevels, placeFloatingToolbar, placeStylePopover, Popover, PriceInput, TextEditor } from './chart-drawing-tools';
+import { ChartObjectList, DrawingSettingsDialog, isImeKey, parseLevels, placeFloatingToolbar, placeStylePopover, Popover, PriceInput, TextEditor } from './chart-drawing-tools';
 import { escStackDepth } from '../hooks/use-esc-close';
 import { __resetDrawingsForTest, addDrawing, DEFAULT_DRAWING_STYLE, flushDrawingWrites, getDrawings, reloadDrawingsFromStorage, takeDrawingNotices } from '../lib/chart-drawings';
 import type { ChartDrawingsApi } from '../hooks/use-chart-drawings';
@@ -109,6 +109,13 @@ describe('設定對話框：規則 R 與欄位 diff', () => {
         expect(api.setText).toHaveBeenCalledWith(d.id, '繼續編輯 X');
     });
 
+    it('線寬可選 0.5px（原有 1–4 保留）', async () => {
+        const { api } = await dialog('trend');
+        for (const w of [0.5, 1, 2, 3, 4]) expect(view.root.findAllByProps({ 'aria-label': `線寬 ${w}` }).length).toBeGreaterThan(0);
+        await act(async () => view.root.findByProps({ 'aria-label': '線寬 0.5' }).props.onClick());
+        expect(api.applyStyle).toHaveBeenCalledWith({ width: 0.5 });
+    });
+
     it('改價格只提交 price，改時間只提交 time', async () => {
         const { api, d } = await dialog('trend');
         await act(async () => view.root.findAllByProps({ role: 'tab' })[1]!.props.onClick());
@@ -118,6 +125,30 @@ describe('設定對話框：規則 R 與欄位 diff', () => {
         const time = view.root.findAllByType('input').find((n) => n.props.type === 'datetime-local')!;
         await act(async () => time.props.onBlur({ target: { value: '2026-10-01T12:00' } }));
         expect(api.setAnchor).toHaveBeenLastCalledWith(d.id, 0, { time: new Date('2026-10-01T12:00').getTime() / 1000 });
+    });
+});
+
+describe('物件列表：K 棒前方／後方與 0.5px 線寬', () => {
+    const mk = (id: string, tool: 'trend' | 'text', behind?: boolean) => ({
+        id, tool, anchors: [], style: DEFAULT_DRAWING_STYLE, locked: false, hidden: false, createdAt: 0, updatedAt: 0,
+        ...(behind ? { behind: true } : {}),
+    });
+    it('線類物件有前方／後方按鈕並切換；文字註記沒有', async () => {
+        const setBehind = vi.fn();
+        const api = {
+            objectListOpen: true, selectedIds: [], onInteraction: vi.fn(), focusChart: vi.fn(), setBehind,
+            drawings: [mk('front', 'trend'), mk('back', 'trend', true), mk('note', 'text')],
+        } as unknown as ChartDrawingsApi;
+        await act(async () => { view = create(createElement(ChartObjectList, { api })); });
+        const btn = (label: string) => view.root.findAll((n) => n.type === 'button' && n.props['aria-label'] === label);
+        const toBack = btn('趨勢線 移到 K 棒後方');
+        const toFront = btn('趨勢線 移到 K 棒前方');
+        expect(toBack).toHaveLength(1);
+        expect(toFront).toHaveLength(1);
+        expect(view.root.findAll((n) => n.type === 'button' && /文字.*K 棒/.test(String(n.props['aria-label'])))).toHaveLength(0);
+        await act(async () => toBack[0]!.props.onClick({ stopPropagation() {} }));
+        await act(async () => toFront[0]!.props.onClick({ stopPropagation() {} }));
+        expect(setBehind.mock.calls).toEqual([['front', true], ['back', false]]);
     });
 });
 

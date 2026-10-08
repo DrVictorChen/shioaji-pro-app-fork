@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     DEFAULT_LINE_OPACITY,
+    DEFAULT_TEXT_OPACITY,
+    LINE_WIDTHS,
+    nearestLineWidth,
+    setDrawingsBehind,
     anchorCount,
     drawingLabel,
     fibOptionsOf,
@@ -958,6 +962,66 @@ describe('線條不透明度', () => {
         const picked = sanitizeSettings({ lineOpacity: 0.5 });
         expect(defaultStyleFor(picked, 'box', 'dark').opacity).toBe(0.5);
         expect(sanitizeSettings({ lineOpacity: 7 }).lineOpacity).toBe(1);
+    });
+});
+
+describe('K 棒前方／後方', () => {
+    const base = { id: 'x', tool: 'trend', anchors: [{ time: 1, price: 2 }, { time: 2, price: 3 }], style: { color: '#123456', width: 2 } };
+
+    it('舊資料沒有 behind／opacity：前方、不透明，外觀不變', () => {
+        const d = sanitizeDrawing(base)!;
+        expect('behind' in d).toBe(false);
+        expect(d.style.opacity).toBe(1);
+        expect(d.style.width).toBe(2);
+    });
+
+    it('behind 只認 true；文字註記一律前方', () => {
+        expect(sanitizeDrawing({ ...base, behind: true })!.behind).toBe(true);
+        expect('behind' in sanitizeDrawing({ ...base, behind: 'yes' })!).toBe(false);
+        expect('behind' in sanitizeDrawing({ id: 't', tool: 'text', anchors: [{ time: 1, price: 2 }], behind: true, text: 'a' })!).toBe(false);
+    });
+
+    it('新物件預設在前方、線條 50% 透明；文字註記維持較不透明；使用者挑過的不透明度優先', () => {
+        const s = sanitizeSettings({});
+        expect(defaultStyleFor(s, 'trend', 'dark').opacity).toBe(0.5);
+        expect(defaultStyleFor(s, 'horizontal', 'light').opacity).toBe(0.5);
+        expect(defaultStyleFor(s, 'text', 'dark').opacity).toBe(DEFAULT_TEXT_OPACITY.dark);
+        expect(defaultStyleFor(sanitizeSettings({ lineOpacity: 0.8 }), 'trend', 'dark').opacity).toBe(0.8);
+        const d = addDrawing('TXF', 'trend', base.anchors, defaultStyleFor(s, 'trend', 'dark'))!;
+        expect(d.behind).toBeUndefined();
+    });
+
+    it('setDrawingsBehind：切到後方加欄位、切回前方拿掉欄位；文字不受影響；複製保留設定', () => {
+        const a = addDrawing('TXF', 'trend', base.anchors, DEFAULT_DRAWING_STYLE)!;
+        const t = addDrawing('TXF', 'text', [{ time: 1, price: 2 }], DEFAULT_DRAWING_STYLE, { text: 'n' })!;
+        setDrawingsBehind('TXF', [a.id, t.id], true);
+        expect(getDrawings('TXF').find((d) => d.id === a.id)!.behind).toBe(true);
+        expect(getDrawings('TXF').find((d) => d.id === t.id)!.behind).toBeUndefined();
+        const copy = duplicateDrawing('TXF', a.id, (x) => x)!;
+        expect(copy.behind).toBe(true);
+        setDrawingsBehind('TXF', [a.id], false);
+        expect('behind' in getDrawings('TXF').find((d) => d.id === a.id)!).toBe(false);
+        // 沒有變化就不寫入（不產生新 revision）
+        const before = getDrawings('TXF');
+        setDrawingsBehind('TXF', [a.id], false);
+        expect(getDrawings('TXF')).toBe(before);
+    });
+});
+
+describe('線寬', () => {
+    it('可選 0.5px，原有的 1–4 保留', () => {
+        expect([...LINE_WIDTHS]).toEqual([0.5, 1, 2, 3, 4]);
+    });
+
+    it('載入時夾到最接近的可選線寬：0.5 保留、舊整數不變、壞值退回預設', () => {
+        const base = { id: 'x', tool: 'horizontal', anchors: [{ time: 1, price: 2 }] };
+        expect(sanitizeDrawing({ ...base, style: { width: 0.5 } })!.style.width).toBe(0.5);
+        for (const w of [1, 2, 3, 4]) expect(sanitizeDrawing({ ...base, style: { width: w } })!.style.width).toBe(w);
+        expect(sanitizeDrawing({ ...base, style: { width: 9 } })!.style.width).toBe(4);
+        expect(sanitizeDrawing({ ...base, style: { width: 0 } })!.style.width).toBe(0.5);
+        expect(sanitizeDrawing({ ...base, style: { width: 'x' } })!.style.width).toBe(2);
+        expect(nearestLineWidth(1.4)).toBe(1);
+        expect(sanitizeSettings({ defaultStyle: { width: 0.5 } }).defaultStyle.width).toBe(0.5);
     });
 });
 
