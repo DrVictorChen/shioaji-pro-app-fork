@@ -94,6 +94,8 @@ export interface Block {
     flashQty?: import('./flash-qty-memory').FlashQtySetting;
     // 閃電下單面板自己的信用條件（整股：現股／融資／融券／借券／借券豁免＋現股當沖先賣），換股票不變；缺省 = 現股
     flashCredit?: import('./flash-account').FlashCredit;
+    // 閃電下單面板自己的委託條件（效期／期貨倉別／範圍市價），換商品不變；缺省 = ROD、自動、市價
+    flashOrder?: import('./flash-account').FlashOrderOpts;
     // Market-pulse presets can open multiple panels on distinct views.
     pulseVisualization?: 'distribution' | 'flow';
     pulseSections?: PulseSection[];
