@@ -742,7 +742,10 @@ export function useChartDrawings(opts: {
 
         // startAnchors：按下當下的時間／價格 — 拖單一控制點時，其他點原樣保留
         type DragItem = { id: string; tool: DrawingTool; plan: DragPlan; startAnchors: DrawingAnchor[] };
-        let drag: { items: DragItem[]; before: Drawing[]; key: string; context: string } | null = null;
+        let drag: { items: DragItem[]; before: Drawing[]; key: string; context: string; startAt: Point; moved: boolean } | null = null;
+        // 按下後移動超過這個距離才算拖曳：單純點選控制點不能因為磁吸
+        // （端點吸附半徑比控制點命中半徑大）而改到座標、留下一步編輯。
+        const DRAG_START_PX = 3;
         let activeMove: ((e: MouseEvent) => void) | null = null;
         let activeUp: ((e: MouseEvent) => void) | null = null;
         // 拖曳中的 mousemove 合併到下一個 animation frame 才寫進 store —
@@ -785,6 +788,10 @@ export function useChartDrawings(opts: {
             if (drag.key !== stateRef.current.symbolKey || drag.context !== stateRef.current.contextKey || stateRef.current.tradeArmed) {
                 cancelDragRef.current?.();
                 return;
+            }
+            if (!drag.moved) {
+                if (Math.hypot(pt.x - drag.startAt.x, pt.y - drag.startAt.y) < DRAG_START_PX) return;
+                drag.moved = true;
             }
             const layer = layerOf();
             const projector = layer?.projector();
@@ -978,7 +985,7 @@ export function useChartDrawings(opts: {
             }
             const key = stateRef.current.symbolKey;
             historyRef.current.begin(key, getDrawingHistoryStart());
-            drag = { items, before: getDrawings(key), key, context: stateRef.current.contextKey };
+            drag = { items, before: getDrawings(key), key, context: stateRef.current.contextKey, startAt: pt, moved: false };
             dragIdsRef.current = items.map((item) => item.id);
 
             const move = (ev: MouseEvent) => {

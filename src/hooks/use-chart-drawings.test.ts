@@ -1878,6 +1878,34 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect([25090, 25110, 25080, 25100]).toContain(d.anchors[1]!.price);
     });
 
+    it('磁吸開啟時拖曳端點會吸到另一條線的端點（優先於 K 棒開高低收）', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        addDrawing('TXF', 'trend', [{ time: 1180, price: 25084 }, { time: 1120, price: 24900 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => api().setMagnet(true));
+        await down(30, 100); // A 的第二點
+        await up(31, 112); // 靠近 B 的端點（x=30, y=116）
+        const d = api().drawings.find((x) => x.id === a.id)!;
+        expect(d.anchors[0]).toEqual({ time: 1000, price: 25000 });
+        expect(d.anchors[1]).toEqual({ time: 1180, price: 25084 });
+    });
+
+    it('只點選端點不移動：即使旁邊有可吸附的端點也不改座標、不留復原步驟', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        // B 的端點離 A 的第二點 16px：在吸附半徑內、控制點命中半徑外
+        addDrawing('TXF', 'trend', [{ time: 1180, price: 25084 }, { time: 1120, price: 24900 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => api().setMagnet(true));
+        await down(30, 100);
+        await up(31, 101); // 手抖 1px 也算點選
+        expect(api().selectedIds).toEqual([a.id]);
+        expect(api().drawings.find((x) => x.id === a.id)!.anchors).toEqual([
+            { time: 1000, price: 25000 },
+            { time: 1180, price: 25100 },
+        ]);
+        expect(api().canUndo).toBe(false);
+    });
+
     it('拖曳期間其他 writer 新增物件，拖曳繼續並保留新增物件', async () => {
         const api = await setup();
         addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
