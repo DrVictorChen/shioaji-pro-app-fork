@@ -1357,7 +1357,9 @@ export function FlashOrder({
             <div className={styles.actionBar}>
                 <button
                     className={`${styles.mktBtn.buy} ${armed && !odd && !buyBlock ? '' : styles.disabledCell}`}
-                    disabled={odd || !!buyBlock}
+                    // 可否融資券的 0 只讓按鈕變淡、仍可點（點下去會重新查）；固定規則才停用
+                    disabled={odd || !!ruleBlockRef.current.Buy}
+                    data-blocked={buyBlock ? true : undefined}
                     title={odd ? ODD_LOT_TEXT.priceType : buyBlock ?? undefined}
                     onClick={() => void send('Buy', null)}
                 >
@@ -1365,7 +1367,8 @@ export function FlashOrder({
                 </button>
                 <button
                     className={`${styles.mktBtn.sell} ${armed && !odd && !sellBlock ? '' : styles.disabledCell}`}
-                    disabled={odd || !!sellBlock}
+                    disabled={odd || !!ruleBlockRef.current.Sell}
+                    data-blocked={sellBlock ? true : undefined}
                     title={odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined}
                     onClick={() => void send('Sell', null)}
                 >

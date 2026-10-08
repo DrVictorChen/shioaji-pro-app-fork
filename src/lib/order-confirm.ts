@@ -38,6 +38,8 @@ export interface OrderConfirmRequest {
     awaitingMode?: boolean;
     // 開啟時的 /info 失敗：無法確認模式（請取消後重試）
     modeUnavailable?: boolean;
+    // 顯示後伺服器或模式變了：這個確認已失效（按確認也不會送出）
+    serverChanged?: boolean;
 }
 
 interface PendingConfirm {
@@ -52,6 +54,10 @@ interface PendingConfirm {
     base: string;
     // request sequence when the dialog opened; only later /info responses count
     openSequence: number;
+    // a known mode has been shown: its guard is kept for good (no later recapture)
+    shownKnown: boolean;
+    // the caller's own gate, pinned at approval to what the dialog showed
+    callerGate?: ServerModeGuard;
     refreshFailed: boolean;
 }
 
@@ -77,10 +83,11 @@ export function getPendingOrderConfirm(): OrderConfirmRequest | null {
 export function resolveOrderConfirm(approved: boolean): void {
     if (!pending) return;
     // 還沒顯示、或仍在取得最新模式的確認不能被按下確認
-    if (approved && (!pending.started || pending.request.awaitingMode || pending.request.simulation === null)) return;
+    if (approved && !pending.shownKnown) return;
     const current = pending;
     pending = null;
     emit();
+    if (approved && current.callerGate) current.callerGate.rebaseTo(current.sameServer.snapshot());
     if (approved && !current.sameServer()) {
         current.reject(Object.assign(new Error(ORDER_CONFIRM_SERVER_CHANGED), { mutationNotStarted: true as const }));
         return;
@@ -136,10 +143,18 @@ export function primeOrderConfirmSimulation(): Promise<void> {
 function refreshPendingMode() {
     const current = pending;
     if (!current?.started) return;
+    // 已經顯示過模式：閘門固定不再更新；之後失效就只能取消重下
+    if (current.shownKnown) {
+        if (!current.request.serverChanged && !current.sameServer()) {
+            current.request = { ...current.request, serverChanged: true };
+            emit();
+        }
+        return;
+    }
     const fresh = getApiBase() === current.base && serverInfoFreshSince(current.openSequence);
     if (fresh) {
-        if (!current.request.awaitingMode && current.request.simulation !== null) return;
         current.sameServer = captureServerMode();
+        current.shownKnown = true;
         current.request = { ...current.request, simulation: currentSimulation(), awaitingMode: false, modeUnavailable: false };
     } else {
         if (current.request.awaitingMode && current.request.modeUnavailable === current.refreshFailed) return;
@@ -151,6 +166,7 @@ subscribeServerInfo(refreshPendingMode);
 
 export function requestOrderConfirm(
     request: Omit<OrderConfirmRequest, 'simulation'>,
+    opts?: { serverMode?: ServerModeGuard },
 ): Promise<boolean> {
     // 手動單一次一筆；已有待確認委託時直接拒絕新請求，
     // 不排隊（排隊會讓使用者對著過期價格按確認）
@@ -177,6 +193,8 @@ export function requestOrderConfirm(
             base: getApiBase(),
             openSequence: currentServerInfoSequence(),
             refreshFailed: false,
+            shownKnown: false,
+            callerGate: opts?.serverMode,
         };
         pending = current;
         // 開啟時一律另發一次 /info（不沿用可能卡住的預載請求）

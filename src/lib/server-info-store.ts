@@ -43,8 +43,12 @@ function syncBase() {
     activeBase = base;
     channel = typeof window === 'undefined' || typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(`sj-trading-state:${base}`);
     channel?.addEventListener('message', event => {
-        if (event.data?.kind === 'server-info-invalidated' && event.data.base === base && base === getApiBase()) {
-            invalidate(base);
+        if (event.data?.base !== base || base !== getApiBase()) return;
+        if (event.data?.kind === 'server-info-invalidated') invalidate(base);
+        // 另一個視窗得知的模式與這裡已知的不同：這裡的副本過時了
+        else if (event.data?.kind === 'server-mode-observed') {
+            const mine = infos.get(base)?.simulation;
+            if (typeof mine === 'boolean' && typeof event.data.simulation === 'boolean' && mine !== event.data.simulation) invalidate(base);
         }
     });
     return base;
@@ -75,6 +79,10 @@ export function observeServerInfo(request: ServerInfoRequest, info: ServerInfo |
     // 已知模式因 /info 失敗而變成未知也一樣廣播（之後恢復時可能已是正式）
     if (typeof previous === 'boolean' && previous !== info?.simulation) {
         channel?.postMessage({ kind: 'server-info-invalidated', base });
+    }
+    // 第一次得知（或改變）模式也告訴其他視窗；模式不同的視窗會作廢自己的副本
+    if (typeof info?.simulation === 'boolean' && previous !== info.simulation) {
+        channel?.postMessage({ kind: 'server-mode-observed', base, simulation: info.simulation });
     }
     applied.set(base, request.sequence);
     if (info) { observations += 1; freshest.set(base, request.sequence); }
@@ -139,7 +147,14 @@ export interface ServerModeGuard {
      * 改以目前的伺服器與模式為準，之後再變就不送。避免冷啟動第一筆正式單
      * 因確認視窗第一次取得模式而被誤擋。 */
     rebaseIfUnknown(): void;
+    /** 目前記下的位址、模式與代次 */
+    snapshot(): ServerModeSnapshot;
+    /** 開始時模式未知：改以使用者按下確認當下（確認視窗）記下的狀態為準，
+     * 只在同一位址；之後任何變化都不算同一個 */
+    rebaseTo(snap: ServerModeSnapshot): void;
 }
+
+export interface ServerModeSnapshot { base: string; simulation: boolean | undefined; version: number }
 
 export function captureServerMode(): ServerModeGuard {
     const base = syncBase();
@@ -157,6 +172,12 @@ export function captureServerMode(): ServerModeGuard {
         if (typeof simulation === 'boolean' || syncBase() !== base) return;
         simulation = infos.get(base)?.simulation;
         version = modeVersion;
+    };
+    same.snapshot = () => ({ base, simulation, version });
+    same.rebaseTo = snap => {
+        if (typeof simulation === 'boolean' || snap.base !== base || typeof snap.simulation !== 'boolean') return;
+        simulation = snap.simulation;
+        version = snap.version;
     };
     return same;
 }

@@ -182,12 +182,10 @@ describe('server mode unknown when the confirmation opens', () => {
         const promise = requestOrderConfirm(req);
         await vi.waitFor(() => expect(getPendingOrderConfirm()).not.toBeNull());
         store.observeServerInfo(store.beginServerInfoRequest(), undefined);
-        // the mode is unknown again: the dialog goes back to waiting and ignores approval
-        expect(getPendingOrderConfirm()).toMatchObject({ awaitingMode: true, simulation: null });
+        // the shown confirmation is stale for good: marked, and an approval refuses
+        expect(getPendingOrderConfirm()).toMatchObject({ serverChanged: true });
         resolveOrderConfirm(true);
-        expect(getPendingOrderConfirm()).not.toBeNull();
-        resolveOrderConfirm(false);
-        await expect(promise).resolves.toBe(false);
+        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
     });
 });
 
@@ -315,5 +313,36 @@ describe('the dialog only accepts a mode learned after it opened', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('a dialog that has shown a mode keeps that guard', () => {
+    it('known → unknown → same mode again does not revive the approval', async () => {
+        const store = await import('./server-info-store');
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        const promise = requestOrderConfirm(req);
+        await vi.waitFor(() => expect(getPendingOrderConfirm()?.simulation).toBe(true));
+        store.observeServerInfo(store.beginServerInfoRequest(), undefined);
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        resolveOrderConfirm(true);
+        await expect(promise).rejects.toMatchObject({ mutationNotStarted: true });
+    });
+    it('the caller\'s gate is pinned at approval to the mode the user saw (cold production start)', async () => {
+        const store = await import('./server-info-store');
+        store.forgetServerInfo('');
+        const gate = store.captureServerMode(); // the caller's gate, captured while the mode was unknown
+        vi.mocked(fetchInfo).mockImplementationOnce(async () => {
+            store.observeServerInfo(store.beginServerInfoRequest(), { simulation: false } as never);
+            return { simulation: false } as never;
+        });
+        const promise = requestOrderConfirm(req, { serverMode: gate });
+        await vi.waitFor(() => expect(getPendingOrderConfirm()?.simulation).toBe(false));
+        expect(gate()).toBe(false); // production discovered, not yet approved
+        resolveOrderConfirm(true);
+        expect(gate()).toBe(true); // the user approved while seeing 正式
+        await expect(promise).resolves.toBe(true);
+        // a later change invalidates it again
+        store.observeServerInfo(store.beginServerInfoRequest(), { simulation: true } as never);
+        expect(gate()).toBe(false);
     });
 });

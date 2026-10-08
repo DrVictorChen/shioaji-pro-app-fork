@@ -317,13 +317,12 @@ export function GridTicket({
                 unit,
                 note: `網格鋪單 ${prices.length} 檔 × ${qtyPer}${odd ? ' 股・盤中零股限價 ROD' : ''}`,
                 accountLabel: accountConfirmLabel(gridAccount),
-            }).catch((e: unknown) => {
+            }, batch.serverMode ? { serverMode: batch.serverMode } : undefined).catch((e: unknown) => {
                 // 確認期間伺服器模式變更等：照實說未送出（不是取消）
                 if ((e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '鋪單未送出', body: e instanceof Error ? e.message : String(e) });
                 return false;
             });
             if (!approved) return;
-            batch.serverMode?.rebaseIfUnknown();
         }
         if (!isSelectedAccountUnchanged(gridAccount)) {
             notify({ kind: 'err', title: '鋪單未送出', body: ACCOUNT_CHANGED_MESSAGE });

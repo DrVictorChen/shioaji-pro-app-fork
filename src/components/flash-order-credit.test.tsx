@@ -193,7 +193,7 @@ it('a stock that definitely cannot 融券 (unit 0) stops both sides and says why
     const r = await mount(stk, owned({ cond: 'ShortSelling', daytradeShort: false }).extra());
     expect(tag(r)!.props['data-bad']).toBe(true);
     expect(text(banner(r)!)).toContain('2330 目前不能融券');
-    expect(button(r, '市價融券賣')!.props.disabled).toBe(true);
+    expect(button(r, '市價融券賣')!.props['data-blocked']).toBe(true);
     await arm(r);
     expect(cell(r, 'sell').props['data-blocked']).toBe(true);
     await act(async () => { cell(r, 'sell').props.onClick(); });
@@ -206,8 +206,9 @@ it('融資 on a stock whose margin ratio is 0 stops only 融資買進; 融資賣
     const r = await mount(stk, owned({ cond: 'MarginTrading', daytradeShort: false }).extra());
     expect(text(banner(r)!)).toContain('目前不能融資買進');
     expect(text(banner(r)!)).toContain('融資賣出');
-    expect(button(r, '市價融資買')!.props.disabled).toBe(true);
-    expect(button(r, '市價融資賣')!.props.disabled).toBe(false);
+    // shown faded (clickable to re-check); the click itself is refused while the answer is 0
+    expect(button(r, '市價融資買')!.props['data-blocked']).toBe(true);
+    expect(button(r, '市價融資賣')!.props['data-blocked']).toBeUndefined();
     await arm(r);
     expect(cell(r, 'buy').props['data-blocked']).toBe(true);
     expect(cell(r, 'sell').props['data-blocked']).toBeUndefined();
@@ -553,9 +554,12 @@ it('a cached 0 does not block all day: the click re-queries a blocked answer and
     expect(text(banner(r)!)).toContain('目前不能融資買進');
     mocks.post.mockImplementation(async () => enquire('2330'));
     await arm(r);
-    await act(async () => { button(r, '市價融資買')!.props.onClick?.(); });
-    await act(async () => { cell(r, 'buy').props.onClick(); });
+    // the market button stays clickable so a click can re-check (it is only shown faded)
+    expect(button(r, '市價融資買')!.props.disabled).toBe(false);
+    await act(async () => { button(r, '市價融資買')!.props.onClick(); });
     await flush();
-    expect(mocks.place).toHaveBeenCalled();
-    expect(mocks.place.mock.calls.at(-1)![4]).toMatchObject({ orderCond: 'MarginTrading' });
+    expect(mocks.place).toHaveBeenCalledOnce();
+    expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderCond: 'MarginTrading' });
+    // the fresh answer reaches the panel: no longer shown as blocked
+    expect(text(banner(r)!)).not.toContain('目前不能融資買進');
 });

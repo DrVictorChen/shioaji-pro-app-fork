@@ -60,8 +60,12 @@ export function loadCreditEnquire(contract: ContractKey, opts?: { fresh?: boolea
     }).then(rows => (Array.isArray(rows) ? rows.find(r => r?.stock_id === contract.code) : undefined));
     cache.set(key, p);
     p.catch(() => { if (cache.get(key) === p) cache.delete(key); });
+    // 重新查到的結果通知畫面（例如點擊時重查發現額度已恢復）
+    if (opts?.fresh) void p.then(() => { if (cache.get(key) === p) cacheListeners.forEach(l => l(key)); }, () => undefined);
     return p;
 }
+
+const cacheListeners = new Set<(key: string) => void>();
 
 export function resetCreditEnquireCache(): void {
     cache.clear();
@@ -88,17 +92,25 @@ export function useCreditEnquire(contract: ContractKey, enabled: boolean): Credi
         const t = setTimeout(() => setDayTick(n => n + 1), msToTaipeiMidnight() + 1000);
         return () => clearTimeout(t);
     }, [active, key]);
+    // 別處（點擊時）重新查到的新結果：重新讀取
+    const [refreshTick, setRefreshTick] = useState(0);
+    useEffect(() => {
+        if (!active) return;
+        const onFresh = (k: string) => { if (k === key) setRefreshTick(n => n + 1); };
+        cacheListeners.add(onFresh);
+        return () => { cacheListeners.delete(onFresh); };
+    }, [active, key]);
     useEffect(() => {
         if (!active) return;
         let alive = true;
-        setState({ key, loading: true, failed: false });
+        if (refreshTick === 0) setState({ key, loading: true, failed: false });
         loadCreditEnquire(contract).then(
             row => { if (alive) setState({ key, row, loading: false, failed: false }); },
             () => { if (alive) setState({ key, loading: false, failed: true }); },
         );
         return () => { alive = false; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [active, key]);
+    }, [active, key, refreshTick]);
     if (!active) return { loading: false, failed: false };
     // an answer for another stock, server or day never applies
     if (state.key !== key) return { key, loading: true, failed: false };

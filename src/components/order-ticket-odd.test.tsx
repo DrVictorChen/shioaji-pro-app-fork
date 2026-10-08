@@ -185,4 +185,9 @@ it('a 現沖 sell confirmation does not send if the same stock stops being day-t
     await act(async () => { approve(true); await pending; });
     expect(m.confirm).toHaveBeenCalledOnce();
     expect(sent).toBe(0);
+    // the 當沖 toggle stays visible so it can be cancelled on a no-longer-day-tradable stock
+    expect(btn('✓ 現沖先賣（當日回補）')).toBeDefined();
+    await act(async () => { btn('✓ 現沖先賣（當日回補）').props.onClick(); });
+    expect(btn('✓ 現沖先賣（當日回補）')).toBeUndefined();
+    expect(btn('現股當沖先賣')).toBeUndefined();
 });

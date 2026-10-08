@@ -277,3 +277,28 @@ it('captureServerMode: unknown at capture allows only the first discovery as sim
     info.observeServerInfo(info.beginServerInfoRequest(), simulation);
     expect(guard()).toBe(false);
 });
+
+it('the first discovery of a mode is announced; a peer with a different known mode invalidates, the same mode does not', async () => {
+    const info = await import('./server-info-store');
+    const posted: unknown[] = [];
+    const handlers: ((e: { data: unknown }) => void)[] = [];
+    class Fake { constructor(public name: string) {} postMessage(m: unknown) { posted.push(m); } addEventListener(_t: string, h: (e: { data: unknown }) => void) { handlers.push(h); } close() {} }
+    vi.stubGlobal('BroadcastChannel', Fake);
+    vi.stubGlobal('window', globalThis.window ?? {});
+    try {
+        runtime.base = 'announce-a';
+        info.forgetServerInfo('announce-a');
+        posted.length = 0;
+        info.observeServerInfo(info.beginServerInfoRequest(), production);
+        expect(posted).toContainEqual({ kind: 'server-mode-observed', base: 'announce-a', simulation: false });
+        // this window knows production; a peer announcing production changes nothing
+        const g = info.captureServerMode();
+        handlers.at(-1)!({ data: { kind: 'server-mode-observed', base: 'announce-a', simulation: false } });
+        expect(g()).toBe(true);
+        // a peer announcing simulation means our copy is stale
+        handlers.at(-1)!({ data: { kind: 'server-mode-observed', base: 'announce-a', simulation: true } });
+        expect(g()).toBe(false);
+    } finally {
+        vi.unstubAllGlobals();
+    }
+});

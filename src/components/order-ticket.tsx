@@ -333,9 +333,8 @@ export function OrderTicket({
                             : ''
                     }${!isFutures && daytradeShort && action === 'Sell' ? '・現股當沖' : ''}`,
                     accountLabel: accountConfirmLabel(orderAccount),
-                });
+                }, { serverMode: sameServerMode });
                 if (!approved) throw new Error('已取消下單');
-                sameServerMode.rebaseIfUnknown();
             }
             if (!sameServerMode()) throw new Error(SERVER_MODE_CHANGED_MESSAGE);
             // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
@@ -552,9 +551,8 @@ export function OrderTicket({
                     accountLabel: `分倉 ${allocation.length} 戶：${allocation
                         .map((e) => `${accountConfirmLabel(e.account)}×${e.qty}`)
                         .join('、')}`,
-                });
+                }, { serverMode: sameServerMode });
                 if (!approved) throw new Error('已取消下單');
-                sameServerMode.rebaseIfUnknown();
             }
             if (!sameServerMode()) throw new Error(SERVER_MODE_CHANGED_MESSAGE);
             // 確認期間切換了單位：股數與張數不能混用，整筆不送（#204）
@@ -1050,7 +1048,8 @@ export function OrderTicket({
                     action === 'Sell' &&
                     orderLot === 'Common' &&
                     orderCond === 'Cash' &&
-                    contract.day_trade === 'Yes' && (
+                    // 已勾選但此股票已不可當沖時仍顯示，讓使用者能取消（送單會被擋下）
+                    (contract.day_trade === 'Yes' || daytradeShort) && (
                         <div className={styles.fieldRow}>
                             <span className={styles.fieldLabel}>沖賣</span>
                             <div className={styles.segGroup}>
@@ -1058,7 +1057,7 @@ export function OrderTicket({
                                     className={
                                         styles.seg[daytradeShort ? 'on' : 'off']
                                     }
-                                    title='現股當沖先賣（無券先賣，當日需回補）'
+                                    title={contract.day_trade === 'Yes' ? '現股當沖先賣（無券先賣，當日需回補）' : '此股票目前不可現股當沖先賣，請取消'}
                                     onClick={() => {
                                         setDaytradeShort((v) => !v);
                                         setArmed(false);

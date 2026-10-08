@@ -76,7 +76,7 @@ it.each(['context', 'account'])('rechecks %s before the odd remainder of a stock
     // the whole-lot leg went out, so the refusal of the odd leg is never reported as "nothing sent"
     expect(err).toBeInstanceOf(Error);
     expect((err as { mutationNotStarted?: boolean }).mutationNotStarted).toBeUndefined();
-    expect(String(err.message)).toContain('整張分單已送出，零股分單未送出');
+    expect(String(err.message)).toContain('整張分單已送出，零股分單未成立');
 });
 it('passes explicit Cover and retains Auto default', async () => {
     const future = {...contract,security_type:'FUT',exchange:'TAIFEX'} as ContractBase;
@@ -189,5 +189,5 @@ it('an odd leg that fails after dispatch is reported as unknown, not as unsent',
     m.stock.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('連線中斷'));
     const err = await placeStockExitByShares(contract, 'Sell', 1500, account).catch(e => e);
     expect(String(err.message)).toContain('零股分單結果未知');
-    expect(String(err.message)).not.toContain('零股分單未送出');
+    expect(String(err.message)).not.toContain('零股分單未成立');
 });

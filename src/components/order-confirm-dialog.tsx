@@ -51,6 +51,7 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                             {request.simulation ? '模擬環境' : '正式環境'}
                         </span>
                     )}
+                    {request.serverChanged && <span className={styles.note}>伺服器或模式已變更，這筆不會送出，請取消後重新下單</span>}
                     {request.awaitingMode && <span className={styles.note}>{request.modeUnavailable ? '無法確認伺服器模式（模擬／正式），請取消後重試' : '確認伺服器模式中…'}</span>}
                 </div>
                 <div className={styles.body}>
@@ -106,7 +107,7 @@ function ConfirmModal({ request }: { request: OrderConfirmRequest }) {
                     </button>
                     <button
                         className={styles.confirmBtn[dir]}
-                        disabled={(!!request.livePriceCode && livePrice === undefined) || !!request.awaitingMode || request.simulation === null}
+                        disabled={(!!request.livePriceCode && livePrice === undefined) || !!request.awaitingMode || request.simulation === null || !!request.serverChanged}
                         title={request.awaitingMode ? '正在確認伺服器模式（模擬／正式），請稍候' : undefined}
                         onClick={() => resolveOrderConfirm(true)}
                     >
