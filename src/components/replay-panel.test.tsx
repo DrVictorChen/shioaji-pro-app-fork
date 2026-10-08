@@ -27,6 +27,7 @@ function view(over: Partial<ReplayPanelViewProps> = {}) {
         cursor: 10,
         tickCount: 100,
         curPrice: 23010,
+        curTime: 100,
         onSeek: () => {},
         code: 'TXFJ6',
         isStock: false,
@@ -84,5 +85,11 @@ describe('回放面板', () => {
     it('累計損益只顯示目前商品並標示筆數', () => {
         const html = view({ summary: { count: 3, estimatedPnl: -1200 } });
         expect(html).toContain('TXFJ6 累計估算 -1,200（3 筆）');
+    });
+
+    it('倒帶到進場之前時平倉按鈕停用', () => {
+        const pos = { side: 'long' as const, entry: 23000, enteredAt: 200, quantity: 1 };
+        expect(view({ position: pos, curTime: 100 })).toMatch(/disabled=""[^>]*title="回放位置在進場之前，無法平倉"/);
+        expect(view({ position: pos, curTime: 200 })).not.toContain('回放位置在進場之前');
     });
 });

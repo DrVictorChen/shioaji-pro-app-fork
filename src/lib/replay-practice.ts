@@ -89,6 +89,26 @@ export function summarizeReplayTrades(
     return { count, estimatedPnl };
 }
 
+// 與 localStorage 一致只保留最近 500 筆，重新開啟後累計不會變
+export function appendReplayTrade(
+    trades: readonly ReplayPracticeTrade[],
+    trade: ReplayPracticeTrade,
+): ReplayPracticeTrade[] {
+    return [...trades, trade].slice(-MAX_TRADES);
+}
+
+// 依 id 合併兩份紀錄（例如另一個回放面板已寫入的）：保留 a 的順序，再接上 b 獨有的
+// （exitedAt 是回放的歷史時間，不能拿來排序新舊）
+export function mergeReplayTrades(
+    a: readonly ReplayPracticeTrade[],
+    b: readonly ReplayPracticeTrade[],
+): ReplayPracticeTrade[] {
+    const byId = new Map<string, ReplayPracticeTrade>();
+    for (const t of a) byId.set(t.id, t);
+    for (const t of b) if (!byId.has(t.id)) byId.set(t.id, t);
+    return [...byId.values()].slice(-MAX_TRADES);
+}
+
 export function loadReplayTrades(raw: string | null): ReplayPracticeTrade[] {
     if (!raw) return [];
     try {

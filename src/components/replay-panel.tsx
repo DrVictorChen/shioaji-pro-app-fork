@@ -20,7 +20,9 @@ import * as dock from './bottom-dock.css';
 import * as styles from './replay-panel.css';
 import { AsyncStatus } from './async-status';
 import {
+    appendReplayTrade,
     closeReplayPosition,
+    mergeReplayTrades,
     readReplayTrades,
     replayFetchDates,
     replayMultiplier,
@@ -118,6 +120,14 @@ export function ReplayPanel({ contract }: { contract: ContractInfo }) {
         setCursor(0);
         setPosition(null);
         ticksRef.current = [];
+        // 換日期立即清掉上一個日期的線與 seek 索引，沒有資料時不會殘留舊圖
+        pointsRef.current = [];
+        tickToPointRef.current = [];
+        if (seekRaf.current) {
+            cancelAnimationFrame(seekRaf.current);
+            seekRaf.current = 0;
+        }
+        seriesRef.current?.setData([]);
         const isFop =
             contract.security_type === 'FUT' ||
             contract.security_type === 'OPT';
@@ -247,7 +257,11 @@ export function ReplayPanel({ contract }: { contract: ContractInfo }) {
 
     const closePosition = () => {
         if (!cur || !position) return;
-        setTrades((old) => [...old, closeReplayPosition(position, contract.code, cur.price, cur.time, multiplier)]);
+        // 倒帶到進場之前不能平倉，避免產生不可能的成交
+        if (cur.time < position.enteredAt) return;
+        const trade = closeReplayPosition(position, contract.code, cur.price, cur.time, multiplier);
+        // 先併入其他面板已寫入的紀錄，避免多個回放面板互相覆蓋
+        setTrades((old) => appendReplayTrade(mergeReplayTrades(readReplayTrades(), old), trade));
         setPosition(null);
     };
 
@@ -270,6 +284,7 @@ export function ReplayPanel({ contract }: { contract: ContractInfo }) {
             cursor={idx}
             tickCount={ticks.length}
             curPrice={cur?.price}
+            curTime={cur?.time}
             onSeek={seek}
             code={contract.code}
             isStock={contract.security_type === 'STK'}
@@ -300,6 +315,7 @@ export interface ReplayPanelViewProps {
     cursor: number;
     tickCount: number;
     curPrice: number | undefined;
+    curTime: number | undefined;
     onSeek: (idx: number) => void;
     code: string;
     isStock: boolean;
@@ -325,6 +341,8 @@ export function ReplayPanelView(p: ReplayPanelViewProps) {
         p.position && p.curPrice !== undefined ? replayPointDiff(p.position, p.curPrice) : 0;
     const floatingPnl = p.position ? diff * p.position.quantity * p.multiplier : 0;
     const canTrade = p.loaded && p.curPrice !== undefined && p.cursor > 0;
+    const canFlatten =
+        !!p.position && p.loaded && p.curPrice !== undefined && p.curTime !== undefined && p.curTime >= p.position.enteredAt;
     return (
         <div className={styles.wrap}>
             <div className={styles.controls}>
@@ -434,7 +452,10 @@ export function ReplayPanelView(p: ReplayPanelViewProps) {
                     <button className={styles.practiceSell} disabled={!canTrade || !!p.position} onClick={() => p.onOpen('short')}>
                         模擬賣出
                     </button>
-                    <button className={styles.practiceFlat} disabled={!canTrade || !p.position} onClick={p.onClose}>
+                    <button className={styles.practiceFlat} disabled={!canFlatten}
+                        title={p.position && !canFlatten ? '回放位置在進場之前，無法平倉' : undefined}
+                        onClick={p.onClose}
+                    >
                         模擬平倉
                     </button>
                 </div>

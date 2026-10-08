@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ContractInfo } from './types/contract';
 import {
+    appendReplayTrade,
     closeReplayPosition,
     loadReplayTrades,
+    mergeReplayTrades,
     readReplayTrades,
     REPLAY_TRADES_KEY,
     replayFetchDates,
@@ -111,5 +113,21 @@ describe('localStorage 讀寫不拋錯', () => {
         expect(writeReplayTrades([trade('TXF', 1)], storage)).toBe(true);
         expect(map.has(REPLAY_TRADES_KEY)).toBe(true);
         expect(readReplayTrades(storage)).toEqual([trade('TXF', 1)]);
+    });
+});
+
+describe('多面板紀錄合併與上限', () => {
+    it('依 id 合併，保留既有順序並接上另一份獨有的紀錄', () => {
+        const a = [trade('TXF', 1, 'a1'), trade('TXF', 2, 'a2')];
+        const b = [trade('TXF', 2, 'a2'), trade('MXF', 3, 'b1')];
+        expect(mergeReplayTrades(a, b).map((t) => t.id)).toEqual(['a1', 'a2', 'b1']);
+    });
+
+    it('新增紀錄後與 localStorage 一樣只保留 500 筆', () => {
+        const many = Array.from({ length: 500 }, (_, i) => trade('TXF', i, String(i)));
+        const next = appendReplayTrade(many, trade('TXF', 999, 'new'));
+        expect(next).toHaveLength(500);
+        expect(next[0]!.id).toBe('1');
+        expect(next[499]!.id).toBe('new');
     });
 });
