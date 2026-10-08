@@ -1,7 +1,7 @@
 // 閃電下單「記住數量」：每個面板一個開關（預設開，新面板與升級前的面板都開），
 // 開啟時張／股／口各記一個數量，跟面板設定一起存；關閉時清掉。還原前重新檢查
 // 單位上限，不合法回到 1 並提示；還原或換單位後點價下單仍是解除狀態。
-import { createElement, useLayoutEffect, useState } from 'react';
+import { createElement, StrictMode, useLayoutEffect, useState } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Account } from '../lib/types/portfolio';
@@ -219,4 +219,15 @@ it('an invalid remembered quantity is 1 even when the 設為預設 quantity of t
     const r = await mountOwned(o, stk);
     expect(qty(r).props.value).toBe(1);
     expect(o.state.qtyMemory).toEqual({});
+});
+
+it('an invalid remembered quantity gives exactly one notice (StrictMode re-runs effects)', async () => {
+    const o = owner('IntradayOdd', { Common: 3, IntradayOdd: 5000 });
+    let r!: ReactTestRenderer;
+    await act(async () => { r = create(createElement(StrictMode, null, createElement(o.Owned, { contract: stk }))); });
+    roots.push(r);
+    expect(qty(r).props.value).toBe(1);
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
+    expect(String(mocks.notify.mock.calls[0]![0].body)).toContain('5000 股');
+    expect(o.state.qtyMemory).toEqual({ Common: 3 });
 });

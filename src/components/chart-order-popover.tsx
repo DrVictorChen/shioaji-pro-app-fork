@@ -308,7 +308,7 @@ export function OrderSettingsPanel({
                             </button>
                         ))}
                     </div>
-                    <span className={styles.info} data-testid='remember-qty-text'>{layout.rememberQty.text}</span>
+                    <span className={styles.rowNote} data-testid='remember-qty-text'>{layout.rememberQty.text}</span>
                 </div>
             )}
             {layout.orderType && (

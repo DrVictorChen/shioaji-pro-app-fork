@@ -357,8 +357,9 @@ export function FlashOrder({
     const invalidRemembered = qtyMemory !== false && rememberedFlashQty(qtyMemory, qtySlot).invalid;
     useEffect(() => {
         if (!invalidRemembered) return;
+        // 以最新的記憶再確認一次：已處理過（例如 StrictMode 重跑 effect）就不重複提示
         const mem = qtyMemoryRef.current;
-        if (mem === false) return;
+        if (mem === false || !rememberedFlashQty(mem, qtySlot).invalid) return;
         const { [qtySlot]: bad, ...rest } = mem;
         const unitName = qtySlot === 'F' ? '口' : qtySlot === 'IntradayOdd' ? '股' : '張';
         notify({

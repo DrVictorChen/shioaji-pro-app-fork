@@ -194,6 +194,13 @@ export const info = style({
     fontSize: '0.66rem',
 });
 
+// a note under a row's control (second grid column)
+export const rowNote = style({
+    gridColumn: '2',
+    color: vars.color.foreground,
+    fontSize: '0.66rem',
+});
+
 export const summary = style({
     borderTop: `1px solid ${vars.color.border}`,
     paddingTop: '8px',
