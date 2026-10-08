@@ -1029,7 +1029,7 @@ export function FlashOrder({
         } catch (error) {
             if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
             // 確定一筆都沒送出（例如確認期間伺服器模式變更）：照實說未送出
-            else if ((error as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '⚡ 平倉未送出', body: error instanceof Error ? error.message : String(error) });
+            else if ((error as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）', body: error instanceof Error ? error.message : String(error) });
             else notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
         } finally { inflightRef.current.delete(key); }
     }, [pos, stillPanelAccount, captureContext]);

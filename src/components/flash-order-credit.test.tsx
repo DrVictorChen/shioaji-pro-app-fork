@@ -510,7 +510,7 @@ it('a flatten refused before anything went out says 未送出, not "maybe partly
     await arm(r);
     await act(async () => { button(r, '平倉')!.props.onClick(); });
     await flush();
-    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', title: '⚡ 平倉未送出' });
+    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）' });
 });
 
 it('the post-confirmation re-check never blocks a 融資賣出 (repayment)', async () => {

@@ -108,7 +108,8 @@ export function OrderTicket({
     const priceTouched = useRef(false);
     const orderLotRef = useRef(orderLot);
     orderLotRef.current = orderLot;
-    const captureContext = useOrderContext(contract, orderLot);
+    // 確認期間換買賣方向或信用條件（例如快捷鍵）也算換了，舊確認不送
+    const captureContext = useOrderContext(contract, `${orderLot}:${action}:${orderCond}:${daytradeShort}`);
 
     // ---- multi-account: chip + split-order (分倉) state ----
     const [acctMenuOpen, setAcctMenuOpen] = useState(false);
