@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
+import { accountMatches, flashAccountKey, flashPopoutParams, loadPopoutFlashAccounts, loadPopoutFlashLot, savePopoutFlashLot, newPopoutWindowId, pinnedFlashAccounts, reseedPopoutFlashAccounts, resolveFlashAccount, savePopoutFlashAccounts, scopedFlashRows, touchPopoutFlashAccounts } from './flash-account';
 import type { Account } from './types/portfolio';
 const a: Account = { account_type: 'F', broker_id: 'B', account_id: 'A', signed: true, person_id: '', username: '' };
 const b = { ...a, account_id: 'B' };
@@ -158,5 +158,39 @@ describe('per-panel flash account (#139)', () => {
         savePopoutFlashAccounts('mine', { F: 'F:B:C' });
         expect(loadPopoutFlashAccounts('theirs')).toEqual({ F: 'F:B:B' });
         expect(loadPopoutFlashAccounts('mine')).toEqual({ F: 'F:B:C' });
+    }));
+
+    it('a popout keeps its own unit by window id: seeded from the opening panel, kept on reload and account changes', () => withStorage(() => {
+        const odd = flashPopoutParams({}, main, 'panel:odd:2330', 'IntradayOdd');
+        const round = flashPopoutParams({}, main, 'panel:round:2330', 'Common');
+        expect(loadPopoutFlashLot(odd.win)).toBe('IntradayOdd');
+        expect(loadPopoutFlashLot(round.win)).toBe('Common');
+        // the popout's own change and later account changes never lose it
+        savePopoutFlashLot(round.win, 'IntradayOdd');
+        savePopoutFlashAccounts(round.win, { F: flashAccountKey(b) });
+        touchPopoutFlashAccounts(round.win);
+        expect(loadPopoutFlashAccounts(round.win)).toEqual({ F: flashAccountKey(b) });
+        expect(loadPopoutFlashLot(round.win)).toBe('IntradayOdd');
+        // merely focusing an open window keeps its unit; a recreated window takes the panel's
+        expect(flashPopoutParams({}, main, 'panel:odd:2330', 'Common').win).toBe(odd.win);
+        expect(loadPopoutFlashLot(odd.win)).toBe('IntradayOdd');
+        reseedPopoutFlashAccounts(odd.win, {}, main, 'Common');
+        expect(loadPopoutFlashLot(odd.win)).toBe('Common');
+        // a tile reopened without a panel unit keeps the tile's own unit
+        const tile = flashPopoutParams(undefined, main, 'tile:2330');
+        expect(loadPopoutFlashLot(tile.win)).toBeUndefined();
+        savePopoutFlashLot(tile.win, 'IntradayOdd');
+        reseedPopoutFlashAccounts(tile.win, undefined, main);
+        expect(loadPopoutFlashLot(tile.win)).toBe('IntradayOdd');
+    }));
+    it('ignores a malformed popout unit and an unknown window', () => withStorage(store => {
+        store.set('sj-pro-flash-popout-windows', JSON.stringify({ w: { keys: {}, at: 1, lot: 'Odd' } }));
+        expect(loadPopoutFlashLot('w')).toBeUndefined();
+        expect(loadPopoutFlashLot(null)).toBeUndefined();
+        expect(loadPopoutFlashLot('nope')).toBeUndefined();
+        savePopoutFlashLot(null, 'IntradayOdd');
+        savePopoutFlashLot('fresh', 'IntradayOdd');
+        expect(loadPopoutFlashLot('fresh')).toBe('IntradayOdd');
+        expect(loadPopoutFlashAccounts('fresh')).toEqual({});
     }));
 });

@@ -120,9 +120,13 @@ import {
     reseedPopoutFlashAccounts,
     loadPopoutFlashAccounts,
     savePopoutFlashAccounts,
+    loadPopoutFlashLot,
+    savePopoutFlashLot,
     touchPopoutFlashAccounts,
     type FlashAccountKeys,
+    type FlashLot,
 } from './lib/flash-account';
+import { loadFlashOrderDefault } from './lib/chart-order-settings';
 
 const POPOUT_TYPES: ReadonlySet<string> = new Set([
     'chart',
@@ -188,6 +192,7 @@ function BlockBody({
     onPulseConfigChange,
     onWallConfigChange,
     onFlashAccountsChange,
+    onFlashLotChange,
     onSessionConfigChange,
     refreshTrading,
 }: {
@@ -210,6 +215,7 @@ function BlockBody({
         rows: number,
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
+    onFlashLotChange: (id: string, lot: FlashLot) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }) {
@@ -304,6 +310,8 @@ function BlockBody({
                     onOrdersChanged={dockProps.onTradesChanged}
                     accountKeys={block.flashAccounts}
                     onAccountKeysChange={(keys) => onFlashAccountsChange(block.id, keys)}
+                    lot={block.flashLot}
+                    onLotChange={(flashLot) => onFlashLotChange(block.id, flashLot)}
                 />
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
@@ -510,6 +518,7 @@ interface BlockViewProps {
         rows: number,
     ) => void;
     onFlashAccountsChange: (id: string, keys: FlashAccountKeys) => void;
+    onFlashLotChange: (id: string, lot: FlashLot) => void;
     onSessionConfigChange: (id: string, patch: SessionConfigPatch) => void;
     refreshTrading: () => void;
 }
@@ -549,8 +558,10 @@ function BlockView(props: BlockViewProps) {
                     POPOUT_TYPES.has(block.type)
                         ? () => {
                               const global = mainFlashSelection();
+                              // 彈出視窗沿用這個面板的單位（從沒選過＝設為預設的單位）
+                              const flashLot = block.flashLot ?? loadFlashOrderDefault('S').lot;
                               const flashParams = block.type === 'flash'
-                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`)
+                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`, flashLot)
                                   : undefined;
                               void openPopout(
                                   block.type,
@@ -561,7 +572,7 @@ function BlockView(props: BlockViewProps) {
                                       ...popoutSessionParam(block),
                                       ...flashParams,
                                   },
-                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global) : undefined,
+                                  flashParams ? () => reseedPopoutFlashAccounts(flashParams.win, block.flashAccounts, global, flashLot) : undefined,
                               );
                           }
                         : undefined
@@ -603,6 +614,8 @@ function PopoutView({
     const popoutPositionsState = { data: trading.positions, refresh: tradingActionObserved };
     // popout 不在 workspace 裡 — 帳戶依視窗 id 存在本機（開啟時由開啟端固定並預先寫入）
     const [flashAccounts, setFlashAccounts] = useState(() => loadPopoutFlashAccounts(POPOUT_WINDOW_ID));
+    // 單位同樣依視窗 id 存（開啟端預先寫入面板的單位），重新整理後保留
+    const [flashLot, setFlashLot] = useState(() => loadPopoutFlashLot(POPOUT_WINDOW_ID));
     // heartbeat: a long-open popout must not be evicted as "stale"
     useEffect(() => {
         if (type !== 'flash' || !POPOUT_WINDOW_ID) return;
@@ -688,6 +701,11 @@ function PopoutView({
                         onAccountKeysChange={(keys) => {
                             setFlashAccounts(keys);
                             savePopoutFlashAccounts(POPOUT_WINDOW_ID, keys);
+                        }}
+                        lot={flashLot}
+                        onLotChange={(lot) => {
+                            setFlashLot(lot);
+                            savePopoutFlashLot(POPOUT_WINDOW_ID, lot);
                         }}
                     />
                 );
@@ -1170,6 +1188,10 @@ function MainApp() {
             patchBlock(id, { flashAccounts }),
         [patchBlock],
     );
+    const setBlockFlashLot = useCallback(
+        (id: string, flashLot: FlashLot) => patchBlock(id, { flashLot }),
+        [patchBlock],
+    );
     const setBlockSessionConfig = useCallback(
         (id: string, patch: SessionConfigPatch) => {
             updateWorkspace(withBlockSessionConfig(workspace, id, patch));
@@ -1439,6 +1461,7 @@ function MainApp() {
                                     onPulseConfigChange={setBlockPulseConfig}
                                     onWallConfigChange={setBlockWallConfig}
                                     onFlashAccountsChange={setBlockFlashAccounts}
+                                    onFlashLotChange={setBlockFlashLot}
                                     onSessionConfigChange={setBlockSessionConfig}
                                     refreshTrading={refreshTrading}
                                 />

@@ -11,7 +11,7 @@ import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 
 import { ensureAccounts, useAccounts } from '../lib/account-store';
 import { usePrivacyMode } from '../lib/privacy';
-import { accountMatches, flashAccountKey, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashMarket } from '../lib/flash-account';
+import { accountMatches, flashAccountKey, isFlashLot, resolveFlashAccount, scopedFlashRows, type FlashAccountKeys, type FlashLot, type FlashMarket } from '../lib/flash-account';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
 import { ChevronDown, Zap } from 'lucide-react';
 import {
@@ -26,7 +26,6 @@ import {
 import { useQuote, useTradingLive } from '../hooks/use-stream';
 import { displayBook } from '../lib/display-book';
 import { flashOrderSummary, loadFlashOrderDefault, normalizeChartOrder, saveFlashOrderDefault } from '../lib/chart-order-settings';
-import { loadOrderLotPreference, saveOrderLotPreference, QUICK_ORDER_LOTS } from '../lib/order-lot-preference';
 import { OrderSettingsButton } from './chart-order-popover';
 import { useDisplayBook } from '../hooks/use-display-book';
 import type { Snapshot } from '../lib/types/market';
@@ -229,6 +228,8 @@ export function FlashOrder({
     onAccountKeysChange,
     followMain = true,
     reconcilePending = false,
+    lot: savedLot,
+    onLotChange,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -247,6 +248,11 @@ export function FlashOrder({
     /** Orders or positions await reconciliation (missed or unapplied
      * reports): today's fills may be incomplete, so no FIFO cost. */
     reconcilePending?: boolean;
+    // this panel's own unit (整股／盤中零股): kept across symbol changes and
+    // persisted by the owner (workspace block / popout window) through
+    // onLotChange. Undefined = never chosen → the 設為預設 unit.
+    lot?: FlashLot;
+    onLotChange?: (lot: FlashLot) => void;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -278,11 +284,19 @@ export function FlashOrder({
     const defaultSnapshot = useRef<Record<FlashMarket, ReturnType<typeof loadFlashOrderDefault>> | null>(null);
     defaultSnapshot.current ??= { S: loadFlashOrderDefault('S'), F: loadFlashOrderDefault('F') };
     const defaultFor = (m: FlashMarket) => defaultSnapshot.current![m];
-    const initialLot = () => loadOrderLotPreference('flash', contract, QUICK_ORDER_LOTS, defaultFor(market).lot);
-    const [qty, setQty] = useState(() => initialLot() === defaultFor(market).lot ? defaultFor(market).qty : 1);
-    // 股票：整股（張）或盤中零股（股）（#204）— 每個面板自己的 state
-    const [lot, setLot] = useState<'Common' | 'IntradayOdd'>(initialLot);
-    const lotPreferences = useRef(new Map<string, 'Common' | 'IntradayOdd'>());
+    // 股票：整股（張）或盤中零股（股）（#204）是「這個面板」的設定，換股票不變；
+    // 有 onLotChange 時由擁有者（版面 block／彈出視窗）保存，否則只在元件內。
+    // 從沒選過（含升級前的面板）＝建立時的「設為預設」單位，不讀舊的依股票紀錄
+    const [localLot, setLocalLot] = useState<FlashLot | undefined>(isFlashLot(savedLot) ? savedLot : undefined);
+    const ownLot = onLotChange ? (isFlashLot(savedLot) ? savedLot : undefined) : localLot;
+    const panelLot: FlashLot = ownLot ?? defaultFor('S').lot;
+    // 期貨沒有零股：照常以「口」下單，面板單位不變，回到股票時恢復
+    const lot: FlashLot = market === 'F' ? 'Common' : panelLot;
+    const [qty, setQty] = useState(() => lot === defaultFor(market).lot ? defaultFor(market).qty : 1);
+    const setPanelLot = (next: FlashLot) => {
+        setLocalLot(next);
+        onLotChange?.(next);
+    };
     const odd = market === 'S' && lot === 'IntradayOdd';
     // 盤中零股是另一個撮合市場：零股模式的五檔、成交價與單量一律取零股
     // 行情（intraday_odd，量以股計），只在這個面板處於零股時才訂閱；
@@ -344,30 +358,21 @@ export function FlashOrder({
         setFollow(true);
     }, [contract.code]);
 
-    // Account changes still disarm an active ladder.
+    // Account and unit changes still disarm an active ladder.
     useEffect(() => {
         setArmed(false);
-    }, [contract.code, accountKey]);
+    }, [contract.code, accountKey, lot]);
 
-    // 換商品優先恢復該代碼的單位，未選過則沿用面板預設。
-    // 數量只在輸入時的單位有效：商品類別（股票／期貨）或單位一變就歸 1 —
-    // 比對的是切換「之前」的類別與單位（render 後的 odd 已經是新商品的值），
-    // 500 股絕不會變成 500 口或 500 張（#204）
-    const lotRef = useRef(lot);
-    lotRef.current = lot;
-    const unitClassRef = useRef<FlashMarket>(market);
-    const symbolRef = useRef({ code: contract.code, market });
+    // 換商品時單位跟著面板走、不變；數量只在輸入時的單位有效：商品類別
+    // （股票／期貨）或單位一變就歸 1，單位沒變就保留（零股 500 股換股票仍是
+    // 500 股）。500 股絕不會變成 500 口或 500 張（#204）。單位由外部改變
+    // （例如切換版面）也一樣歸 1
+    const unitRef = useRef({ market, lot });
     useEffect(() => {
-        if (symbolRef.current.code === contract.code && symbolRef.current.market === market) return;
-        symbolRef.current = { code: contract.code, market };
-        const prevClass = unitClassRef.current;
-        unitClassRef.current = market;
-        const d = defaultFor(market);
-        const nextLot = market === 'F' ? 'Common' : lotPreferences.current.get(contract.code) ?? loadOrderLotPreference('flash', contract, QUICK_ORDER_LOTS, d.lot);
-        if (prevClass !== market || lotRef.current !== nextLot || lotRef.current === 'IntradayOdd') setQty(1);
-        setLot(nextLot);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [contract.code, market]);
+        const prev = unitRef.current;
+        unitRef.current = { market, lot };
+        if (prev.market !== market || prev.lot !== lot) setQty(1);
+    }, [market, lot]);
 
     // safety: drop out of armed mode the moment the feed isn't LIVE so a
     // click can't fire into a dead connection (issue #2)
@@ -889,16 +894,14 @@ export function FlashOrder({
                             // 換單位一律先上鎖，股數與張數不能互換
                             armedRef.current = false;
                             setArmed(false);
-                            lotPreferences.current.set(contract.code, next.lot);
-                            saveOrderLotPreference('flash', contract, next.lot);
-                            setLot(next.lot);
+                            setPanelLot(next.lot);
                         }
                         setQty(next.qty);
                     }}
                     onSaveDefault={() => {
                         saveFlashOrderDefault(market, flashSettings);
                         defaultSnapshot.current![market] = flashSettings;
-                        notify({ kind: 'info', title: '已設為閃電下單預設', body: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量（這個面板換商品時也是）；其他現有面板維持原設定，帳號不變。` });
+                        notify({ kind: 'info', title: '已設為閃電下單預設', body: `新開的${market === 'F' ? '期貨' : '股票'}閃電下單面板使用這組單位與數量；其他現有面板維持原設定，帳號不變。` });
                     }}
                     layout={{
                         title: '閃電下單設定',

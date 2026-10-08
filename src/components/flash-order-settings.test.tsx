@@ -172,7 +172,7 @@ it('a futures panel that later switches to a stock keeps the stock default it ha
     await act(async () => writer.unmount());
 });
 
-it('remembers the symbol unit across navigation and reload, while unit changes reset quantity to 1', async () => {
+it('keeps the panel unit (not a per-symbol one) across navigation, while unit changes reset quantity to 1', async () => {
     const render = async (c = stk) => { await act(async () => { view.update(createElement(FlashOrder, { contract: c, trades: [], positions: [] })); }); };
     await mount(stk);
     await act(async () => { gear().props.onClick(); });
@@ -181,16 +181,9 @@ it('remembers the symbol unit across navigation and reload, while unit changes r
     await act(async () => { btnIn(pop()!, '完成').props.onClick(); });
     await render({ ...stk, reference: 101 });
     expect(qty().props.value).toBe(500);
+    // another stock: same panel unit, same quantity (per-panel since the flash-lot change)
     await render({ ...stk, code: '2317' });
-    expect(qty().props.value).toBe(1);
-    expect(qty().props['aria-label']).toBe('數量');
-    await act(async () => { qty().props.onChange({ target: { value: '7' } }); });
-    await render();
-    expect(qty().props.value).toBe(1);
-    expect(qty().props['aria-label']).toBe('數量（股）');
-    await act(async () => view.unmount());
-    await mount(stk);
-    expect(qty().props.value).toBe(1);
+    expect(qty().props.value).toBe(500);
     expect(qty().props['aria-label']).toBe('數量（股）');
     await render({ ...fut, code: stk.code });
     expect(qty().props.value).toBe(1);
