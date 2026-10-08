@@ -307,6 +307,17 @@ describe('semantic workspace commands', () => {
         ).rejects.toMatchObject({ code: 'not_found' });
     });
 
+    it('unpinning returns the panel to following the selection and drops its link group', async () => {
+        const { context, workspace } = fixture();
+        const ws = workspace();
+        context.updateWorkspace({ ...ws, linkGroups: { A: '2330' }, blocks: ws.blocks.map((b, i) => (i === 0 ? { ...b, linkGroup: 'A' as const } : b)) });
+        await executeAgentAppCommand({ name: 'set_panel_pin', args: { id: 'chart-1', code: '2317' } }, context);
+        expect(workspace().blocks[0]?.linkGroup).toBeUndefined();
+        await executeAgentAppCommand({ name: 'set_panel_pin', args: { id: 'chart-1', code: null } }, context);
+        expect(workspace().blocks[0]).toMatchObject({ pin: null });
+        expect(workspace().blocks[0]?.linkGroup).toBeUndefined();
+    });
+
     it('pins only pinnable panels to resolvable contracts', async () => {
         const { context, workspace, resolveContract } = fixture();
         await expect(

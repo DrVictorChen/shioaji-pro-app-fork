@@ -26,14 +26,14 @@ const txf = { code: 'TXFR1', name: '臺股期貨 近月', security_type: 'FUT', 
 
 const text = (n: ReactTestInstance): string => n.children.map(c => (typeof c === 'string' ? c : text(c))).join('');
 const roots: ReactTestRenderer[] = [];
-type Seen = { code: string; linkKey: string };
+type Seen = { code: string; linkKey: string; paused?: string };
 let seen: Seen[] = [];
 const host = (source: ContractInfo, link: Partial<FlashLink>, extra: Record<string, unknown> = {}) => createElement(FlashLinkHost, {
     source,
     link: { ...DEFAULT_FLASH_LINK, ...link },
     group: 'A',
     onLinkChange: vi.fn(),
-    render: (c: ContractInfo, p: { linkKey: string }) => { seen.push({ code: c.code, linkKey: p.linkKey }); return createElement('i', null, `ladder ${c.code}`); },
+    render: (c: ContractInfo, p: { linkKey: string; paused?: string }) => { seen.push({ code: c.code, linkKey: p.linkKey, paused: p.paused }); return createElement('i', null, `ladder ${c.code}`); },
     ...extra,
 });
 const mount = async (source: ContractInfo, link: Partial<FlashLink>, extra: Record<string, unknown> = {}) => {
@@ -78,8 +78,8 @@ it('個股期 maps a stock to its near-month standard future, and follows the gr
     expect(text(r.root)).toContain('ladder CDFJ6');
     await show(r, stock('2317', '鴻海'), { kind: 'future' });
     expect(text(r.root)).toContain('ladder DHFJ6');
-    // never rendered the old stock's future against the new stock
-    expect(seen.filter(s => s.linkKey.includes('2317')).every(s => s.code === 'DHFJ6')).toBe(true);
+    // the old stock's future is never live against the new stock (only kept, paused, while looking up)
+    expect(seen.filter(s => s.linkKey.includes('2317') && !s.paused).every(s => s.code === 'DHFJ6')).toBe(true);
 });
 
 it('個股期 spec and month settings pick mini / next month', async () => {
@@ -180,4 +180,19 @@ it('次月 missing for a one-month stock offers 改為近月, not 改為現股',
     const btn = r.root.findAllByType('button').find(b => text(b).includes('改為近月'))!;
     await act(async () => { btn.props.onClick(); });
     expect(onLinkChange).toHaveBeenCalledWith(expect.objectContaining({ month: 'near' }));
+});
+
+it('while a lookup is in progress the ladder stays mounted (paused) instead of being replaced', async () => {
+    let release!: (rows: ContractInfo[]) => void;
+    const r = await mount(tsmc, { kind: 'future' });
+    expect(text(r.root)).toContain('ladder CDFJ6');
+    mocks.fetchFutures.mockImplementationOnce(() => new Promise(res => { release = res; }));
+    const pausedSeen: unknown[] = [];
+    const render = (c: ContractInfo, p: { linkKey: string; paused?: string }) => { pausedSeen.push(p.paused); seen.push({ code: c.code, linkKey: p.linkKey }); return createElement('i', null, `ladder ${c.code}${p.paused ? ' paused' : ''}`); };
+    await show(r, stock('2317', '鴻海'), { kind: 'future' }, { render });
+    expect(text(r.root)).toContain('paused');
+    expect(pausedSeen.at(-1)).toBe('載入個股期…');
+    await act(async () => { release([fut('DHFJ6', 'DHF', '202610', 2000, '2317')]); });
+    await show(r, stock('2317', '鴻海'), { kind: 'future' }, { render });
+    expect(text(r.root)).toBe('ladder DHFJ6');
 });

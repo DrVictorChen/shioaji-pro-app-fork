@@ -262,6 +262,7 @@ export function FlashOrder({
     settingsRows,
     showRef = true,
     expiresAt = null,
+    paused,
 }: {
     contract: ContractInfo;
     snapshot?: Snapshot;
@@ -309,6 +310,8 @@ export function FlashOrder({
     showRef?: boolean;
     /** 對應的個股期到期時刻（最後交易日收盤）；之後點下去或確認中的都不送 */
     expiresAt?: number | null;
+    /** 對應商品查詢中：面板保留（數量等狀態不重設），但不顯示舊合約、不能啟用或送出 */
+    paused?: string;
 }) {
     const { quote, snapshot: initialSnapshot, book: lotDisplay } = useDisplayBook(contract.code, snapshot, contract);
     const live = useTradingLive();
@@ -560,9 +563,9 @@ export function FlashOrder({
     // 確認期間換信用條件也一樣中止（不會用舊條件送出）
     const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}:${linkKey}`);
     const armedRef = useRef(armed);
-    // 真實月份期貨（不是近月別名）在最後交易日收盤後一律不送 — 彈出視窗、照選取也一樣
+    // 真實月份個股期（不是近月別名）在最後交易日收盤後一律不送 — 彈出視窗、照選取也一樣；其他期貨不由這裡判斷
     const expiresRef = useRef(expiresAt);
-    expiresRef.current = expiresAt ?? (contract.security_type === 'FUT' && !contract.target_code ? expiryTime(contract) : null);
+    expiresRef.current = expiresAt ?? (isStockFuture(contract) && !contract.target_code ? expiryTime(contract) : null);
     const expiredNow = () => expiresRef.current !== null && expiresRef.current !== undefined && Date.now() >= expiresRef.current;
     const armedAccountKey = useRef(accountKey);
     // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
@@ -570,7 +573,7 @@ export function FlashOrder({
     const armKey = `${contract.code}:${unitKey}:${creditKey}:${orderKey}:${linkKey}`;
     const armedKey = useRef(armKey);
     const armedQtyCurrent = armedMemQty.current === rememberedQty;
-    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent;
+    armedRef.current = armed && armedAccountKey.current === accountKey && armedKey.current === armKey && armedQtyCurrent && !paused;
     const qtyRef = useRef(qty);
     qtyRef.current = qty;
     const oddRef = useRef(odd);
@@ -1160,6 +1163,9 @@ export function FlashOrder({
 
     return (
         <div className={styles.wrap}>
+            {paused ? (
+                <div className={styles.symbolRow}><span className={styles.symbolName}>{paused}</span></div>
+            ) : (
             <div className={styles.symbolRow} title={symbolLabel.title}>
                 <span className={styles.kindTag} data-testid='flash-kind'>
                     <b>{market === 'S' ? (odd ? '零股' : '整股') : isStockFuture(contract) ? '股期' : contract.security_type === 'OPT' ? '選擇權' : '期貨'}</b>
@@ -1182,7 +1188,8 @@ export function FlashOrder({
                 {symbolExtra}
                 <span className={styles.symbolMeta}>{symbolLabel.meta}</span>
             </div>
-            {showRef && (odd || isStockFuture(contract)) && (
+            )}
+            {!paused && showRef && (odd || isStockFuture(contract)) && (
                 <FlashRefRow contract={contract} odd={odd} own={odd ? last : tradedLast} roundLot={tradedLast} />
             )}
             <div className={styles.controls}>
@@ -1342,7 +1349,7 @@ export function FlashOrder({
                 <span className={styles.rowBreak} aria-hidden />
                 <button
                     className={styles.armBtn[armedView ? 'on' : 'off']}
-                    disabled={!live || !activeAccount}
+                    disabled={!live || !activeAccount || !!paused}
                     onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed(!armedView); }}
                 >
                     {!live ? (
@@ -1394,7 +1401,7 @@ export function FlashOrder({
                 >
                     {mktLabel}{sellCredit}賣
                 </button>
-                {pos && (
+                {pos && !paused && (
                     <button
                         className={`${styles.flatBtn} ${armedView ? '' : styles.disabledCell}`}
                         title={pos.safeExit
@@ -1416,7 +1423,7 @@ export function FlashOrder({
                     全刪{workingCount > 0 ? ` ${workingCount}` : ''}
                 </button>
             </div>
-            {pos && (
+            {pos && !paused && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
                         title={market === 'S' && !privMoney ? `${Math.abs(pos.net).toLocaleString()} 股（含零股）` : undefined}>
@@ -1477,10 +1484,10 @@ export function FlashOrder({
                 }}
                 onDoubleClick={recenter}
             >
-                {rows.length === 0 && (
-                    <div className={styles.waiting}>等待報價…</div>
+                {(rows.length === 0 || paused) && (
+                    <div className={styles.waiting}>{paused ?? '等待報價…'}</div>
                 )}
-                {rows.map((price) => {
+                {!paused && rows.map((price) => {
                     const key = keyOf(price);
                     const lv = book.get(key);
                     const mine = myOrders.get(key);
@@ -1518,7 +1525,7 @@ export function FlashOrder({
                         />
                     );
                 })}
-                {lastIdx === -1 && last !== null && rows.length > 0 && (
+                {!paused && lastIdx === -1 && last !== null && rows.length > 0 && (
                     <button
                         className={
                             styles.jumpBtn[lastAbove ? 'top' : 'bottom']

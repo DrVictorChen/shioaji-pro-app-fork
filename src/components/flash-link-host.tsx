@@ -5,7 +5,7 @@
 // 點價下單，確認中的那筆也不送。
 
 import { CirclePause, ArrowLeftRight, Ban, ChevronDown, RotateCw } from 'lucide-react';
-import { useEffect, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from 'react';
 import { ensureContract, getCachedContract, primeContract, useContract } from '../lib/contracts-cache';
 import { expiryTime, linkedStockCode, monthLabel, pickStockFuture, type FlashLink } from '../lib/flash-link';
 import { fetchFutures } from '../lib/shioaji';
@@ -66,6 +66,7 @@ export interface FlashLinkProps {
     settingsRows: ReactNode;
     showRef: boolean;
     expiresAt?: number | null;
+    paused?: string;
 }
 
 const KIND_OPTIONS = [['select', '照選取'], ['stock', '現股'], ['future', '個股期']] as const;
@@ -81,8 +82,11 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     targetRef?: MutableRefObject<string | null>;
 }) {
     if (targetRef) targetRef.current = null;
+    // 最後畫出的閃電：查詢中保留它（暫停、不顯示舊合約），數量等面板狀態不因查詢快慢而不同
+    const lastShown = useRef<ContractInfo | null>(null);
     const show = (contract: ContractInfo, props: FlashLinkProps) => {
         if (targetRef) targetRef.current = contract.code;
+        lastShown.current = contract;
         return render(contract, props);
     };
     const stockCode = link.kind === 'select' ? null : linkedStockCode(source);
@@ -110,7 +114,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     const settingsRows = (
         <>
             <SettingsSegRow label='對應商品' value={link.kind} options={KIND_OPTIONS} onPick={kind => set({ kind })} />
-            {link.kind === 'future' && (pick?.status === 'ok' && pick.hasMini || link.spec === 'mini') && (
+            {link.kind === 'future' && (pick?.status === 'ok' && pick.hasMini || link.spec === 'mini' || pick?.status === 'noStd') && (
                 <SettingsSegRow label='規格' value={link.spec}
                     options={[['std', '標準'], ['mini', '小型']]} onPick={spec => set({ spec })} />
             )}
@@ -133,14 +137,20 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     const linkKey = `${group}|${link.kind}|${link.spec}|${link.month}|${source.code}`;
     const name = `${source.code === source.name || !source.name ? source.code : source.security_type === 'STK' ? `${source.code} ${source.name}` : source.name}`;
 
-    const empty = (icon: ReactNode, title: string, note?: string, action?: ReactNode) => (
-        <div className={hostStyles.empty}>
-            {icon}
-            <div className={hostStyles.emptyTitle}>{title}</div>
-            {note && <div className={hostStyles.emptyNote}>{note}</div>}
-            {action}
-        </div>
-    );
+    const loading = (text: string) => (lastShown.current
+        ? render(lastShown.current, { linkKey, settingsRows, showRef: link.ref, paused: text })
+        : <div className={styles.waiting}>{text}</div>);
+    const empty = (icon: ReactNode, title: string, note?: string, action?: ReactNode) => {
+        lastShown.current = null; // 閃電已卸載
+        return (
+            <div className={hostStyles.empty}>
+                {icon}
+                <div className={hostStyles.emptyTitle}>{title}</div>
+                {note && <div className={hostStyles.emptyNote}>{note}</div>}
+                {action}
+            </div>
+        );
+    };
     const button = (label: ReactNode, onClick: () => void) => (
         <button type='button' className={hostStyles.emptyBtn} onClick={onClick}>{label}</button>
     );
@@ -154,9 +164,9 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
         const target = needStock ? stock : source;
         if (target) return show(target, { linkKey, settingsRows, showRef: link.ref });
         if (stockFailed === needStock) return empty(<Ban size={18} aria-hidden />, `找不到 ${needStock}`);
-        return <div className={styles.waiting}>載入商品…</div>;
+        return loading('載入商品…');
     }
-    if (!fut || fut.status === 'loading') return <div className={styles.waiting}>載入個股期…</div>;
+    if (!fut || fut.status === 'loading') return loading('載入個股期…');
     if (fut.status === 'error') {
         return empty(<Ban size={18} aria-hidden />, '個股期合約載入失敗', undefined,
             button(<><RotateCw size={11} aria-hidden /> 重試</>, () => loadStockFutures(stockCode)));
@@ -173,11 +183,18 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
         return empty(<Ban size={18} aria-hidden />, `${monthLabel(pick.month)} 合約已到期`, undefined,
             button('改為近月', () => set({ month: 'near' })));
     }
+    if (pick?.status === 'noStd') {
+        return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有標準規格個股期`, undefined,
+            button('改為小型', () => set({ spec: 'mini' })));
+    }
+    if (pick?.status === 'noExpiry') {
+        return empty(<Ban size={18} aria-hidden />, `${stockCode} 個股期到期日無法確認`, '暫停送單');
+    }
     if (pick?.status === 'unlisted') {
         return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有${pick.month === 'next' ? '次月' : ` ${monthLabel(pick.month)} `}合約`, undefined,
             button('改為近月', () => set({ month: 'near' })));
     }
-    if (pick?.status !== 'ok' || !picked) return <div className={styles.waiting}>載入個股期…</div>;
+    if (pick?.status !== 'ok' || !picked) return loading('載入個股期…');
     const monthText = link.month === 'near' ? '近月' : link.month === 'next' ? '次月' : monthLabel(link.month);
     const symbolExtra = (
         <>

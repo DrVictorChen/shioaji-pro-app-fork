@@ -35,10 +35,10 @@ export function normalizeFlashLink(v: unknown): FlashLink {
     };
 }
 
-/** 個股期（ETF 期貨不算；spec_kind 缺省時不排除） */
+/** 個股期。ETF 期貨不算：spec_kind 有值就必須是 stock_fut；缺省時標的不可是 ETF（00 開頭） */
 export function isStockFuture(c: Pick<ContractInfo, 'security_type' | 'underlying_kind' | 'underlying_code' | 'spec_kind'>): boolean {
-    return c.security_type === 'FUT' && c.underlying_kind === 'S' && !!c.underlying_code
-        && (c.spec_kind === undefined || c.spec_kind === 'stock_fut');
+    if (c.security_type !== 'FUT' || c.underlying_kind !== 'S' || !c.underlying_code) return false;
+    return c.spec_kind ? c.spec_kind === 'stock_fut' : !/^00/.test(c.underlying_code);
 }
 
 /** 現股／個股期面板的標的股票；不是股票也不是個股期 → null（暫停） */
@@ -50,9 +50,10 @@ export function linkedStockCode(c: ContractInfo): string | null {
 function taipei(now: number): { day: string } {
     return { day: new Date(now + 8 * 3600_000).toISOString().slice(0, 10) };
 }
-/** 最後交易日 13:30（台北）收盤的時刻；之後視為已到期。沒有日期 → null */
+/** 個股期最後交易日 13:30（台北）收盤的時刻；之後視為已到期。沒有日期 → null。
+ * 只適用個股期 — 其他期貨（例如有夜盤的 UDF）不由這裡判斷 */
 export function expiryTime(c: Pick<ContractInfo, 'last_trading_date' | 'delivery_date'>): number | null {
-    const ltd = c.last_trading_date ?? c.delivery_date;
+    const ltd = c.last_trading_date || c.delivery_date;
     if (!ltd || !/^\d{4}-\d{2}-\d{2}$/.test(ltd)) return null;
     return Date.parse(`${ltd}T13:30:00+08:00`);
 }
@@ -66,6 +67,8 @@ export type StockFuturePick =
     | { status: 'unlisted'; month: string }
     | { status: 'none' }
     | { status: 'noMini' }
+    | { status: 'noStd' }
+    | { status: 'noExpiry' }
     | { status: 'expired'; month: string };
 
 /** 依面板的規格與月份，從某檔股票的個股期合約中選出要下單的真實月份合約 */
@@ -74,13 +77,17 @@ export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spe
     // ETF 期貨不是個股期（spec_kind 缺省時不排除）
     const real = rows.filter(r => isStockFuture(r) && !r.target_code && /^\d{6}$/.test(r.delivery_month ?? ''));
     if (real.length === 0) return { status: 'none' };
-    const mult = new Map<string, number>();
-    for (const r of real) mult.set(r.root ?? '', Math.max(mult.get(r.root ?? '') ?? 0, r.multiplier ?? 0));
-    const roots = [...mult.entries()].sort((a, b) => b[1] - a[1]);
-    const hasMini = roots.length > 1 && roots[roots.length - 1]![1] < roots[0]![1];
-    const root = link.spec === 'mini' ? (hasMini ? roots[roots.length - 1]![0] : null) : roots[0]![0];
-    if (root === null) return { status: 'noMini' };
-    const series = real.filter(r => (r.root ?? '') === root).sort((a, b) => a.delivery_month!.localeCompare(b.delivery_month!));
+    // 規格依實際每口股數：標準（≥1,000 股，一般 2,000）、小型（< 1,000，一般 100）；對不到就不替換
+    const isMini = (r: ContractInfo) => (r.multiplier ?? 0) > 0 && r.multiplier! < 1000;
+    const isStd = (r: ContractInfo) => (r.multiplier ?? 0) >= 1000;
+    const hasMini = real.some(isMini) && real.some(isStd);
+    const ofSpec = real.filter(link.spec === 'mini' ? isMini : isStd);
+    if (ofSpec.length === 0) return { status: link.spec === 'mini' ? 'noMini' : 'noStd' };
+    // 同規格有多個 root 時取每口股數最大（標準）或最小（小型）的那一個
+    const pickRoot = ofSpec.reduce((a, b) => (link.spec === 'mini' ? (b.multiplier! < a.multiplier! ? b : a) : (b.multiplier! > a.multiplier! ? b : a))).root ?? '';
+    const series = ofSpec.filter(r => (r.root ?? '') === pickRoot).sort((a, b) => a.delivery_month!.localeCompare(b.delivery_month!));
+    // 任一月份沒有最後交易日：無法判斷到期與近月／次月，不送
+    if (series.some(r => expiryTime(r) === null)) return { status: 'noExpiry' };
     const live = series.filter(r => !expired(r, now));
     const contract = link.month === 'near' ? live[0] : link.month === 'next' ? live[1] : live.find(r => r.delivery_month === link.month);
     if (!contract) {
@@ -91,7 +98,7 @@ export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spe
             ? { status: 'expired', month: link.month }
             : { status: 'unlisted', month: link.month };
     }
-    const ltd = contract.last_trading_date ?? contract.delivery_date;
+    const ltd = contract.last_trading_date || contract.delivery_date;
     // 這個選擇失效的時刻：近月／次月在近月到期時就會換，指定月份到自己到期
     const expiresAt = expiryTime(link.month === 'near' || link.month === 'next' ? live[0]! : contract);
     return { status: 'ok', contract, hasMini, expiresToday: !!ltd && ltd === taipei(now).day, expiresAt, months: live.map(r => r.delivery_month!) };

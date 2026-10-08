@@ -113,6 +113,23 @@ describe('stock futures only', () => {
     });
 });
 
+describe('strict spec, expiry and ETF rules', () => {
+    it('標準 never resolves to a mini series when only the mini is returned', () => {
+        const miniOnly = rows.filter(r => r.root === 'QFF');
+        expect(pickStockFuture(miniOnly, link(), now)).toEqual({ status: 'noStd' });
+        expect(pickStockFuture(miniOnly, link({ spec: 'mini' }), now)).toMatchObject({ status: 'ok', contract: { code: 'QFFJ6' } });
+    });
+    it('a series with a month missing its last trading date cannot be trusted', () => {
+        const broken = rows.map(r => (r.code === 'CDFJ6' ? { ...r, last_trading_date: '', delivery_date: undefined } as unknown as ContractInfo : r));
+        expect(pickStockFuture(broken, link(), now)).toEqual({ status: 'noExpiry' });
+    });
+    it('an ETF future without spec_kind is still not a stock future (00xx underlying)', () => {
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050' } as ContractInfo)).toBe(false);
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '00878' } as ContractInfo)).toBe(false);
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '2330' } as ContractInfo)).toBe(true);
+    });
+});
+
 describe('spread row', () => {
     it('difference and percentage against the base; missing side → null', () => {
         expect(spreadOf(1080, 1085)).toEqual({ diff: -5, pct: -5 / 1085 * 100 });

@@ -173,6 +173,29 @@ it('flatten is also refused once the mapped future has expired, including a pend
     vi.useRealTimers();
 });
 
+it('other futures (UDF, index) are not judged expired by this feature — they trade after 13:30 on their last day', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-21T15:01:00+08:00'));
+    const udf = { code: 'UDFJ6', name: '美國道瓊期貨 202610', security_type: 'FUT', exchange: 'TAIFEX', delivery_month: '202610', last_trading_date: '2026-10-21', underlying_kind: 'I', multiplier: 20, reference: 100, limit_up: 200, limit_down: 1 } as unknown as ContractInfo;
+    const r = await mount(udf);
+    await arm(r);
+    await act(async () => { buyCell(r).props.onClick(); });
+    expect(mocks.place).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+});
+
+it('a paused panel (lookup in progress) cannot be armed or send, and shows the reason instead of the ladder', async () => {
+    const r = await mount(stk, { linkKey: 'A|future|2330' });
+    await arm(r);
+    await show(r, stk, { linkKey: 'A|future|2317', paused: '載入個股期…' });
+    expect(text(r.root)).toContain('載入個股期…');
+    expect(text(r.root)).not.toContain('台積電');
+    await arm(r);
+    expect(text(r.root)).not.toContain('點價即下單');
+    await act(async () => { buyCell(r)?.props.onClick(); });
+    expect(mocks.place).not.toHaveBeenCalled();
+});
+
 it('a real-month future without a mapping (popout, 照選取) is also locked after its last trading close', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-21T13:31:00+08:00'));
