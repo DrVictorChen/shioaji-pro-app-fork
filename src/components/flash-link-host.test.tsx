@@ -257,3 +257,18 @@ it('freshly fetched futures replace stale cached copies of the same contract', a
     await mount(tsmc, { kind: 'future' }, { render: (c: ContractInfo) => { got = c; return null; } });
     expect(got).toMatchObject({ code: 'CDFJ6', multiplier: 2000, last_trading_date: '2026-10-20' });
 });
+
+it('two panels on the same stock share one re-fetch at roll-over; a late failure cannot undo a success', async () => {
+    const a = await mount(tsmc, { kind: 'future' });
+    const b = await mount(tsmc, { kind: 'future' });
+    expect(mocks.fetchFutures).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(new Date('2026-10-20T14:00:00+08:00'));
+    await act(async () => {
+        a.update(host(tsmc, { kind: 'future' }));
+        b.update(host(tsmc, { kind: 'future' }));
+    });
+    await show(a, tsmc, { kind: 'future' });
+    expect(mocks.fetchFutures).toHaveBeenCalledTimes(2);
+    expect(text(a.root)).toContain('ladder CDFK6');
+    expect(text(b.root)).toContain('ladder CDFK6');
+});

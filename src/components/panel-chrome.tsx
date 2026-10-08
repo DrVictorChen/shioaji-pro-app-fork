@@ -51,8 +51,11 @@ export function PanelChrome({
         return () => window.removeEventListener('keydown', onKey);
     }, [menuOpen]);
     const [editCode, setEditCode] = useState(pin ?? '');
-    const [editGroupCode, setEditGroupCode] = useState(groupCode ?? '');
-    useEffect(() => setEditGroupCode(groupCode ?? ''), [groupCode, group]);
+    // 草稿綁定「群組＋目前代碼」：群組代碼一變（或換群組），同一次 render 就顯示新代碼
+    const draftKey = `${group ?? ''}:${groupCode ?? ''}`;
+    const [groupDraft, setGroupDraft] = useState<{ key: string; value: string } | null>(null);
+    const editGroupCode = groupDraft?.key === draftKey ? groupDraft.value : groupCode ?? '';
+    const setEditGroupCode = (value: string) => setGroupDraft({ key: draftKey, value });
     // 鎖定時代碼已顯示在鎖定輸入框，標題不重複，把空間留給商品名稱
     const pinned = pinnable && !!onPinChange && pin !== null && pin !== undefined;
     // 鎖定輸入框正在輸入新代碼時，舊名稱會誤導 — 未按 Enter 套用前先隱藏

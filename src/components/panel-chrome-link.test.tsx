@@ -72,3 +72,12 @@ it('an unsent draft in one group\'s code box does not carry over to another grou
     act(() => { r.update(createElement(PanelChrome, { title: '閃電下單', symbolCode: '2330', pinnable: true, pin: null, currentCode: '2330', onPinChange: vi.fn(), link: { mode: 'B', groups: sameCode, onMode: vi.fn(), onGroupCode: vi.fn() } })); });
     expect(r.root.findAllByType('input')[0]!.props.value).toBe('2330');
 });
+
+it('the group code box shows a new group code in the same render', () => {
+    const { r } = render('A');
+    const moved = [{ id: 'A' as const, code: '2317', count: 3 }, groups[1]!, groups[2]!];
+    let seen = '';
+    act(() => { r.update(createElement(PanelChrome, { title: '閃電下單', symbolCode: '2317', pinnable: true, pin: null, currentCode: '2317', onPinChange: vi.fn(), link: { mode: 'A', groups: moved, onMode: vi.fn(), onGroupCode: vi.fn() } })); });
+    seen = r.root.findAllByType('input')[0]!.props.value;
+    expect(seen).toBe('2317');
+});

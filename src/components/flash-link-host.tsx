@@ -20,18 +20,30 @@ const futures = new Map<string, FuturesEntry>();
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach(l => l());
 
-function loadStockFutures(code: string) {
+// 同一檔共用進行中的查詢；只有最新一次查詢的結果能寫回（晚到的失敗不會蓋掉成功）
+const inflight = new Map<string, number>();
+let requestSeq = 0;
+function loadStockFutures(code: string, force = false) {
+    if (inflight.has(code) && !force) return;
+    const id = ++requestSeq;
+    inflight.set(code, id);
     futures.set(code, { status: 'loading' });
     emit();
+    const current = () => inflight.get(code) === id;
     fetchFutures({ underlyingCode: code }).then(rows => {
+        if (!current()) return;
         // 以這次取得的資料為準（更新快取裡可能過時的同代碼合約）
         for (const row of rows) primeContract(row);
         futures.set(code, { status: 'ok', rows, at: Date.now() });
-    }, () => futures.set(code, { status: 'error' })).finally(emit);
+    }, () => { if (current()) futures.set(code, { status: 'error' }); }).finally(() => {
+        if (current()) inflight.delete(code);
+        emit();
+    });
 }
 
 export function resetStockFuturesCache() {
     futures.clear();
+    inflight.clear();
 }
 
 function useStockFutures(code: string | null): FuturesEntry | undefined {
@@ -183,7 +195,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
     if (!fut || fut.status === 'loading') return loading('載入個股期…');
     if (fut.status === 'error') {
         return empty(<Ban size={18} aria-hidden />, '個股期合約載入失敗', undefined,
-            button(<><RotateCw size={11} aria-hidden /> 重試</>, () => loadStockFutures(stockCode)));
+            button(<><RotateCw size={11} aria-hidden /> 重試</>, () => loadStockFutures(stockCode, true)));
     }
     if (pick?.status === 'none') {
         return empty(<Ban size={18} aria-hidden />, `${stockCode}${source.security_type === 'STK' && source.name ? ` ${source.name}` : ''} 沒有個股期貨`, '群組換到有個股期的股票時自動恢復',
@@ -209,7 +221,7 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
         return empty(<Ban size={18} aria-hidden />, `${stockCode} 沒有${pick.month === 'next' ? '次月' : ` ${monthLabel(pick.month)} `}合約`, undefined,
             <span className={hostStyles.emptyActions}>
                 {button('改為近月', () => set({ month: 'near' }))}
-                {button(<><RotateCw size={11} aria-hidden /> 重新查詢</>, () => loadStockFutures(stockCode))}
+                {button(<><RotateCw size={11} aria-hidden /> 重新查詢</>, () => loadStockFutures(stockCode, true))}
             </span>);
     }
     if (pick?.status !== 'ok' || !picked) return loading('載入個股期…');
