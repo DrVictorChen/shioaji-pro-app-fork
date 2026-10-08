@@ -380,12 +380,18 @@ export function hitTest(
     tolerance = HIT_TOLERANCE,
     extra?: ShapeExtra,
 ): Hit | null {
+    // 命中範圍加大後相鄰控制點可能同時落在範圍內 — 取最近的那個
+    let nearest = -1;
+    let nearestDist = ANCHOR_RADIUS + tolerance;
     for (let i = 0; i < pts.length; i++) {
         const pt = pts[i]!;
-        if (Math.hypot(at.x - pt.x, at.y - pt.y) <= ANCHOR_RADIUS + tolerance) {
-            return { kind: 'anchor', index: i };
+        const d = Math.hypot(at.x - pt.x, at.y - pt.y);
+        if (d <= nearestDist) {
+            nearest = i;
+            nearestDist = d;
         }
     }
+    if (nearest >= 0) return { kind: 'anchor', index: nearest };
     const shape = shapeOf(tool, pts, size, extra);
     if (!shape) return null;
     tolerance = Math.max(tolerance, (extra?.style?.width ?? 0) / 2);
@@ -456,22 +462,27 @@ export function pickDrawing<
  * 共用，讓兩條線可以精確共用端點；畫面距離而非時間／價格距離決定
  * 是否吸附，縮放後手感才一致。
  */
+export const ANCHOR_SNAP_PX = 20;
+
 export function nearestDrawingAnchor<
-    T extends { id: string; anchors: DrawingAnchor[]; hidden: boolean },
+    T extends { id: string; anchors: DrawingAnchor[]; hidden: boolean; tool?: string },
 >(
     list: readonly T[],
     projector: Projector,
     at: Point,
-    tolerance = 20,
+    tolerance = ANCHOR_SNAP_PX,
     excludeId?: string,
 ): DrawingAnchor | null {
     let best: { anchor: DrawingAnchor; distance: number } | null = null;
     for (const drawing of list) {
-        if (drawing.hidden || drawing.id === excludeId) continue;
-        for (const anchor of drawing.anchors) {
-            const x = projector.xOfTime(anchor.time);
-            const y = projector.yOfPrice(anchor.price);
-            if (x === null || y === null) continue;
+        // 文字的錨點是文字框位置，不是線的端點，不當吸附目標
+        if (drawing.hidden || drawing.id === excludeId || drawing.tool === 'text') continue;
+        // 跟繪製／點選一致：有任何控制點投影不出來，整個物件就不在畫面上
+        const pts = projectAnchors(projector, drawing.anchors);
+        if (!pts) continue;
+        for (let i = 0; i < pts.length; i++) {
+            const anchor = drawing.anchors[i]!;
+            const { x, y } = pts[i]!;
             const distance = Math.hypot(at.x - x, at.y - y);
             if (distance <= tolerance && (!best || distance < best.distance)) {
                 best = { anchor, distance };

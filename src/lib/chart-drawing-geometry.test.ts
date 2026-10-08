@@ -207,6 +207,25 @@ describe('投影', () => {
         expect(nearestDrawingAnchor(drawings, projector, { x: 103, y: 151 }, 20, 'line-a')).toBeNull();
         expect(nearestDrawingAnchor(drawings, projector, { x: 140, y: 151 })).toBeNull();
     });
+
+    it('文字錨點與投影不完整（不在畫面上）的物件不當吸附目標', () => {
+        const drawings = [
+            { id: 'note', tool: 'text', hidden: false, anchors: [{ time: 1000, price: 250 }] },
+            {
+                id: 'offscreen',
+                tool: 'trend',
+                hidden: false,
+                anchors: [
+                    { time: 1000, price: 250 },
+                    { time: -1, price: 260 },
+                ],
+            },
+        ];
+        const partial: Projector = { ...projector, xOfTime: (t) => (t < 0 ? null : t / 10) };
+        expect(nearestDrawingAnchor(drawings, partial, { x: 100, y: 150 })).toBeNull();
+        // 同一條線完整投影得到時才吸附
+        expect(nearestDrawingAnchor(drawings, projector, { x: 101, y: 150 })).toEqual({ time: 1000, price: 250 });
+    });
 });
 
 describe('各工具的形狀', () => {
@@ -302,6 +321,12 @@ describe('命中判定', () => {
             index: 1,
         });
         expect(hitTest('trend', [a, b], SIZE, { x: 150, y: 100 })).toEqual({ kind: 'body' });
+    });
+
+    it('相鄰控制點都在命中範圍內時取最近的', () => {
+        const near: Point = { x: 112, y: 100 };
+        expect(hitTest('trend', [a, near], SIZE, { x: 112, y: 100 })).toEqual({ kind: 'anchor', index: 1 });
+        expect(hitTest('trend', [a, near], SIZE, { x: 101, y: 100 })).toEqual({ kind: 'anchor', index: 0 });
     });
 
     it('容差內算命中，容差外不算', () => {

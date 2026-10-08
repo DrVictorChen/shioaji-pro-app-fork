@@ -54,6 +54,7 @@ import {
 import {
     dragPoints,
     formatSpan,
+    ANCHOR_SNAP_PX,
     magnetAnchor,
     nearestDrawingAnchor,
     measureStats,
@@ -677,15 +678,20 @@ export function useChartDrawings(opts: {
             if (!anchor) return null;
             const bars = getBarsRef.current?.();
             if (stateRef.current.settings.magnet) {
-                // 既有端點優先，才能在相同位置精確接續另一條線。
-                const existing = nearestDrawingAnchor(
-                    stateRef.current.drawings,
-                    projector,
-                    pt,
-                    20,
-                    excludeDrawingId,
-                );
-                if (existing) return existing;
+                // 既有端點優先，才能在相同位置精確接續另一條線。文字與量測
+                // 不吸到別的圖形端點（文字要放在游標處、量測照舊貼 K 棒）。
+                const existing =
+                    t === 'text' || t === 'measure'
+                        ? null
+                        : nearestDrawingAnchor(
+                              stateRef.current.drawings,
+                              projector,
+                              pt,
+                              ANCHOR_SNAP_PX,
+                              excludeDrawingId,
+                          );
+                // 水平線仍要落在合法跳動價位上
+                if (existing) return { time: existing.time, price: snapPrice(t, existing.price) };
                 if (bars?.length) {
                     // 再貼齊最近 K 棒的開高低收（本來就是合法價位）。
                     return magnetAnchor(anchor, bars, (p) => projector.yOfPrice(p), pt.y);
