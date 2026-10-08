@@ -782,6 +782,16 @@ export function useChartDrawings(opts: {
         const setChartInteractive = (on: boolean) =>
             chartRef.current?.applyOptions({ handleScroll: on, handleScale: on });
 
+        // 一旦超過門檻就鎖定為拖曳（之後拉回原點也算拖曳）。每個原始
+        // mousemove 都要先過這裡，不能只看 RAF 合併後的那一點。
+        const noteDragMove = (pt: Point): boolean => {
+            if (!drag) return false;
+            if (!drag.moved && Math.hypot(pt.x - drag.startAt.x, pt.y - drag.startAt.y) >= DRAG_START_PX) {
+                drag.moved = true;
+            }
+            return drag.moved;
+        };
+
         const commitDrag = (pt: Point) => {
             if (!drag) return;
             // 寫回前再核對物件商品與投影 context，攔下 context effect 前的遲到事件。
@@ -789,10 +799,7 @@ export function useChartDrawings(opts: {
                 cancelDragRef.current?.();
                 return;
             }
-            if (!drag.moved) {
-                if (Math.hypot(pt.x - drag.startAt.x, pt.y - drag.startAt.y) < DRAG_START_PX) return;
-                drag.moved = true;
-            }
+            if (!noteDragMove(pt)) return;
             const layer = layerOf();
             const projector = layer?.projector();
             if (!projector) return;
@@ -992,6 +999,7 @@ export function useChartDrawings(opts: {
                 if (!drag) return;
                 const p = layerOf()?.pointOf(ev);
                 if (!p) return;
+                if (!noteDragMove(p)) return;
                 pendingPt = p;
                 frame ??= raf(() => {
                     frame = null;

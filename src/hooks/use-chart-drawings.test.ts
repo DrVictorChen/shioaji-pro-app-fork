@@ -1906,6 +1906,18 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(api().canUndo).toBe(false);
     });
 
+    it('拖曳門檻看原始 mousemove：超過 3px 後拉回原點放開仍算拖曳', async () => {
+        const api = await setup();
+        const a = addDrawing('TXF', 'trend', [{ time: 1000, price: 25000 }, { time: 1180, price: 25100 }], DEFAULT_DRAWING_STYLE)!;
+        addDrawing('TXF', 'trend', [{ time: 1180, price: 25084 }, { time: 1120, price: 24900 }], DEFAULT_DRAWING_STYLE);
+        await act(async () => api().setMagnet(true));
+        await down(30, 100);
+        await act(async () => docL.get('mousemove')?.(ev(30, 106)));
+        await up(31, 101);
+        expect(api().drawings.find((x) => x.id === a.id)!.anchors[1]).toEqual({ time: 1180, price: 25084 });
+        expect(api().canUndo).toBe(true);
+    });
+
     it('拖曳期間其他 writer 新增物件，拖曳繼續並保留新增物件', async () => {
         const api = await setup();
         addDrawing('TXF', 'horizontal', [{ time: 1000, price: 25000 }], DEFAULT_DRAWING_STYLE);
