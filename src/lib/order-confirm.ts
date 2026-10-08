@@ -171,7 +171,8 @@ export function requestOrderConfirm(
             base: getApiBase(),
         };
         pending = current;
-        const prime = primeOrderConfirmSimulation();
+        // 開啟時一律另發一次 /info（不沿用可能卡住的預載請求）
+        const prime = fetchInfo().then(() => undefined, () => undefined);
         let settled = false;
         const start = () => {
             if (pending !== current) return;

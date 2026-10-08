@@ -401,7 +401,10 @@ export async function placeStockExitByShares(
         );
     }
     if (odd > 0) {
-        if (getApiBase() !== base) throw new Error('伺服器已切換；先前分單可能已送出，剩餘分單未送出');
+        if (getApiBase() !== base) {
+            if (out.length === 0) throw mutationNotStartedError('伺服器已切換，尚未送出任何分單');
+            throw new Error('伺服器已切換；整張分單已送出，零股分單未送出');
+        }
         if (out.length > 0 && !serverMode()) throw new Error('確認後伺服器或模式已變更：整張分單已送出，零股分單未送出，請核對委託');
         if (!limitPrice) {
             throw new Error('零股需要漲跌停價作為限價，無法取得');

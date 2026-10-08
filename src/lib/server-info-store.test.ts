@@ -230,3 +230,20 @@ it('a mode change observed here is broadcast so other windows (popouts) invalida
         if (Orig) globalThis.BroadcastChannel = Orig;
     }
 });
+
+it('a known mode lost to a failed /info is broadcast too, so a popout cannot keep a stale 模擬 guard', async () => {
+    const info = await import('./server-info-store');
+    const posted: unknown[] = [];
+    class Fake { constructor(public name: string) {} postMessage(m: unknown) { posted.push(m); } addEventListener() {} close() {} }
+    vi.stubGlobal('BroadcastChannel', Fake);
+    vi.stubGlobal('window', globalThis.window ?? {});
+    try {
+        runtime.base = 'broadcast-b';
+        info.observeServerInfo(info.beginServerInfoRequest(), simulation);
+        posted.length = 0;
+        info.observeServerInfo(info.beginServerInfoRequest(), undefined);
+        expect(posted).toContainEqual({ kind: 'server-info-invalidated', base: 'broadcast-b' });
+    } finally {
+        vi.unstubAllGlobals();
+    }
+});

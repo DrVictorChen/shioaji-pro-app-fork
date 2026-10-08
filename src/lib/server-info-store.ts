@@ -69,7 +69,8 @@ export function observeServerInfo(request: ServerInfoRequest, info: ServerInfo |
     if (previous !== info?.simulation) modeVersion += 1;
     // 已知模式變了（例如同一位址的 sidecar 由模擬重啟成正式）：通知其他視窗
     // （彈出視窗）作廢它們的副本，開著的確認與送單閘門因此不算同一個
-    if (typeof previous === 'boolean' && typeof info?.simulation === 'boolean' && previous !== info.simulation) {
+    // 已知模式因 /info 失敗而變成未知也一樣廣播（之後恢復時可能已是正式）
+    if (typeof previous === 'boolean' && previous !== info?.simulation) {
         channel?.postMessage({ kind: 'server-info-invalidated', base });
     }
     applied.set(base, request.sequence);
