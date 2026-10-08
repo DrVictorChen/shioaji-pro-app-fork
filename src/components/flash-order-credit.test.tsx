@@ -440,3 +440,20 @@ it('a stock menu left open when the panel switches to futures does not swallow E
     await show(r, stk);
     expect(menu(r)).toBeUndefined();
 });
+
+it('a pending 現沖 sell is refused at dispatch if the stock stops being day-tradable meanwhile', async () => {
+    let guard!: () => void;
+    mocks.place.mockImplementation((_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+        guard = opts.beforeSend;
+        return new Promise(() => undefined);
+    });
+    const owner = owned({ cond: 'Cash', daytradeShort: true });
+    const r = await mount(stk, owner.extra());
+    await arm(r);
+    await act(async () => { cell(r, 'sell').props.onClick(); });
+    await flush();
+    expect(() => guard()).not.toThrow();
+    // same symbol, refreshed contract: no longer day-tradable
+    await show(r, { ...stk, day_trade: 'OnlyBuy' } as ContractInfo, owner.extra());
+    expect(() => guard()).toThrow();
+});

@@ -573,7 +573,8 @@ export function FlashOrder({
     useEffect(() => {
         if (!menuShown) return;
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); menuOpenRef.current = false; setMenuOpenState(false); }
+            // the menu may already be gone (e.g. switched to futures) before this listener is removed
+            if (e.key === 'Escape' && menuOpenRef.current) { e.stopImmediatePropagation(); e.preventDefault(); menuOpenRef.current = false; setMenuOpenState(false); }
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
@@ -885,6 +886,9 @@ export function FlashOrder({
                     beforeSend: () => {
                         if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                         if (enquiryKey !== null && creditEnquireKey(capturedContract) !== enquiryKey) throw new Error('確認期間已跨日或伺服器已切換，可否融資券需重新確認，這筆沒有送出');
+                        // 確認期間合約更新（例如變成不可當沖）：照目前的規則再看一次
+                        const nowBlocked = creditOn ? ruleBlockRef.current[action] : null;
+                        if (nowBlocked) throw new Error(nowBlocked);
                         if (!accountMatches(accountRef.current, capturedAccount)) throw new Error('帳戶已變更，已停止後續下單');
                     },
                     ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
