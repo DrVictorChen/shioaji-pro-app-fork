@@ -169,6 +169,30 @@ describe('agent harness native POST proxy', () => {
         expect((error as Error).message).toContain('使用者未核准');
     });
 
+    it('marks the native main-window-only refusal as not started and says why (#244)', async () => {
+        // agent_harness_post rejects every non-main window before any HTTP
+        // (desktop ensure_agent_command_window); popouts / flash tiles hit it.
+        mocks.invoke.mockRejectedValue('此視窗無權呼叫 Agent 原生命令');
+        const error = await apiPost('/api/v1/order/cancel_order', { trade_id: 't-1' }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(Error);
+        expect(error).toMatchObject({ mutationNotStarted: true });
+        expect((error as Error).message).toContain('主視窗');
+        expect((error as Error).message).toContain('此視窗無權呼叫 Agent 原生命令');
+    });
+
+    it.each(['錯誤：此視窗無權呼叫 Agent 原生命令', '此視窗無權呼叫 Agent 原生命令。'])('does not mark a near-match native error %s as not started', async text => {
+        mocks.invoke.mockRejectedValue(text);
+        const error = await apiPost('/api/v1/order/cancel_order', { trade_id: 't-1' }).catch((caught: unknown) => caught);
+        expect(error).toBe(text);
+    });
+
+    it('does not mark an HTTP response with the same text as not started', async () => {
+        mocks.invoke.mockResolvedValue({ status: 403, body: '{"code":403,"message":"此視窗無權呼叫 Agent 原生命令"}' });
+        const error = await apiPost('/api/v1/order/cancel_order', { trade_id: 't-1' }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toMatchObject({ mutationNotStarted: true });
+    });
+
     it('never falls back to unsigned HTTP for an Agent mutation', async () => {
         mocks.harnessEnabled = false;
         const browserFetch = vi.spyOn(globalThis, 'fetch');
