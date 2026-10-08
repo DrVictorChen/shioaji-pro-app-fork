@@ -10,6 +10,7 @@ import {
     spreadOf,
     lotsPerContract,
     expiryTime,
+    isStockFuture,
 } from './flash-link';
 
 const fut = (code: string, root: string, month: string, ltd: string, multiplier: number, target: string | null = null) => ({
@@ -92,9 +93,19 @@ describe('stock futures only', () => {
     it('expiry instant is 13:30 Taipei on the last trading day', () => {
         expect(expiryTime(rows[2]!)).toBe(Date.UTC(2026, 9, 21, 5, 30));
     });
-    it('the picked contract carries its expiry instant', () => {
+    it('the picked contract carries the instant its pick goes stale', () => {
         const r = pickStockFuture(rows, link(), now);
         expect(r.status === 'ok' && r.expiresAt).toBe(Date.UTC(2026, 9, 21, 5, 30));
+        // 次月 (11 月) changes to 12 月 when the near month expires, not at its own expiry
+        const next = pickStockFuture(rows, link({ month: 'next' }), now);
+        expect(next.status === 'ok' && next.expiresAt).toBe(Date.UTC(2026, 9, 21, 5, 30));
+        // a chosen month is valid until its own expiry
+        const chosen = pickStockFuture(rows, link({ month: '202611' }), now);
+        expect(chosen.status === 'ok' && chosen.expiresAt).toBe(Date.UTC(2026, 10, 18, 5, 30));
+    });
+    it('an ETF future is not a stock future anywhere', () => {
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050', spec_kind: 'etf_fut' } as ContractInfo)).toBe(false);
+        expect(linkedStockCode({ code: 'NYFJ6', security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050', spec_kind: 'etf_fut' } as ContractInfo)).toBeNull();
     });
 });
 

@@ -154,3 +154,31 @@ it('the ladder already shows locked in the commit where the link key changes (be
     await act(async () => { r.update(createElement(Wrapped, { linkKey: 'A|future|2317', look: true })); });
     expect(seen).toEqual([false]);
 });
+
+it('flatten is also refused once the mapped future has expired, including a pending confirmation', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-21T13:29:00+08:00'));
+    let guard!: () => void;
+    mocks.place.mockImplementation((_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+        guard = opts.beforeSend;
+        return new Promise(() => undefined);
+    });
+    const position = { code: 'CDFJ6', direction: 'Buy', quantity: 1, price: 1090, pnl: 0, last_price: 1095, account: accounts[1] };
+    const r = await mount(cdf, { expiresAt: Date.parse('2026-10-21T13:30:00+08:00'), positions: [position] });
+    await arm(r);
+    await act(async () => { button(r, '平倉').props.onClick(); });
+    expect(mocks.place).toHaveBeenCalledOnce();
+    vi.setSystemTime(new Date('2026-10-21T13:30:05+08:00'));
+    expect(() => guard()).toThrow(/到期/);
+    vi.useRealTimers();
+});
+
+it('a real-month future without a mapping (popout, 照選取) is also locked after its last trading close', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-21T13:31:00+08:00'));
+    const r = await mount({ ...cdf, last_trading_date: '2026-10-21' } as ContractInfo);
+    await arm(r);
+    await act(async () => { buyCell(r).props.onClick(); });
+    expect(mocks.place).not.toHaveBeenCalled();
+    vi.useRealTimers();
+});

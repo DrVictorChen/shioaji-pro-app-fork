@@ -35,8 +35,10 @@ export function normalizeFlashLink(v: unknown): FlashLink {
     };
 }
 
-export function isStockFuture(c: Pick<ContractInfo, 'security_type' | 'underlying_kind' | 'underlying_code'>): boolean {
-    return c.security_type === 'FUT' && c.underlying_kind === 'S' && !!c.underlying_code;
+/** 個股期（ETF 期貨不算；spec_kind 缺省時不排除） */
+export function isStockFuture(c: Pick<ContractInfo, 'security_type' | 'underlying_kind' | 'underlying_code' | 'spec_kind'>): boolean {
+    return c.security_type === 'FUT' && c.underlying_kind === 'S' && !!c.underlying_code
+        && (c.spec_kind === undefined || c.spec_kind === 'stock_fut');
 }
 
 /** 現股／個股期面板的標的股票；不是股票也不是個股期 → null（暫停） */
@@ -70,8 +72,7 @@ export type StockFuturePick =
 export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spec' | 'month'>, now = Date.now()): StockFuturePick {
     // 近月／次月別名（…R1／…R2）不用：下單一律用真實月份
     // ETF 期貨不是個股期（spec_kind 缺省時不排除）
-    const real = rows.filter(r => r.security_type === 'FUT' && !r.target_code && /^\d{6}$/.test(r.delivery_month ?? '')
-        && (r.spec_kind === undefined || r.spec_kind === 'stock_fut'));
+    const real = rows.filter(r => isStockFuture(r) && !r.target_code && /^\d{6}$/.test(r.delivery_month ?? ''));
     if (real.length === 0) return { status: 'none' };
     const mult = new Map<string, number>();
     for (const r of real) mult.set(r.root ?? '', Math.max(mult.get(r.root ?? '') ?? 0, r.multiplier ?? 0));
@@ -90,7 +91,9 @@ export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spe
             : { status: 'unlisted', month: link.month };
     }
     const ltd = contract.last_trading_date ?? contract.delivery_date;
-    return { status: 'ok', contract, hasMini, expiresToday: !!ltd && ltd === taipei(now).day, expiresAt: expiryTime(contract), months: live.map(r => r.delivery_month!) };
+    // 這個選擇失效的時刻：近月／次月在近月到期時就會換，指定月份到自己到期
+    const expiresAt = expiryTime(link.month === 'near' || link.month === 'next' ? live[0]! : contract);
+    return { status: 'ok', contract, hasMini, expiresToday: !!ltd && ltd === taipei(now).day, expiresAt, months: live.map(r => r.delivery_month!) };
 }
 
 /** 價差：a − b 與相對 b 的百分比；任一方沒有價格 → null */

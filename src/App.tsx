@@ -638,7 +638,7 @@ function BlockView(props: BlockViewProps) {
                               // 彈出視窗沿用這個面板的單位（從沒選過＝設為預設的單位）
                               const flashSeed = { lot: block.flashLot ?? loadFlashOrderDefault('S').lot, qty: block.flashQty, credit: block.flashCredit ?? CASH_CREDIT, order: block.flashOrder ?? DEFAULT_ORDER_OPTS };
                               const flashParams = block.type === 'flash'
-                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${contract?.code ?? ''}`, flashSeed)
+                                  ? flashPopoutParams(block.flashAccounts, global, `panel:${block.id}:${flashTargetRef.current ?? ''}`, flashSeed)
                                   : undefined;
                               void openPopout(
                                   block.type,

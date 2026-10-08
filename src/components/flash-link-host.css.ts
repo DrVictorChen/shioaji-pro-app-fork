@@ -43,3 +43,5 @@ export const emptyBtn = style({
     borderRadius: vars.radius.sm,
     cursor: 'pointer',
 });
+
+export const monthSelect = style({ width: 'auto', flex: '1 1 0', minWidth: 0, border: 'none', borderRadius: 0 });

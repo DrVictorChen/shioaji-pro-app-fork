@@ -7,15 +7,15 @@
 import { CirclePause, ArrowLeftRight, Ban, ChevronDown, RotateCw } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from 'react';
 import { ensureContract, getCachedContract, primeContract, useContract } from '../lib/contracts-cache';
-import { linkedStockCode, monthLabel, pickStockFuture, type FlashLink } from '../lib/flash-link';
+import { expiryTime, linkedStockCode, monthLabel, pickStockFuture, type FlashLink } from '../lib/flash-link';
 import { fetchFutures } from '../lib/shioaji';
 import type { ContractInfo } from '../lib/types/contract';
-import { SettingsSegRow } from './chart-order-popover';
+import { SettingsSegRow, settingsSelectClass } from './chart-order-popover';
 import * as styles from './flash-order.css';
 import * as hostStyles from './flash-link-host.css';
 
 // ---- 個股期合約（依標的股票快取）----
-type FuturesEntry = { status: 'loading' } | { status: 'ok'; rows: ContractInfo[] } | { status: 'error' };
+type FuturesEntry = { status: 'loading' } | { status: 'ok'; rows: ContractInfo[]; at: number } | { status: 'error' };
 const futures = new Map<string, FuturesEntry>();
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach(l => l());
@@ -25,7 +25,7 @@ function loadStockFutures(code: string) {
     emit();
     fetchFutures({ underlyingCode: code }).then(rows => {
         for (const row of rows) if (!getCachedContract(row.code)) primeContract(row);
-        futures.set(code, { status: 'ok', rows });
+        futures.set(code, { status: 'ok', rows, at: Date.now() });
     }, () => futures.set(code, { status: 'error' })).finally(emit);
 }
 
@@ -38,20 +38,26 @@ function useStockFutures(code: string | null): FuturesEntry | undefined {
         l => { listeners.add(l); return () => listeners.delete(l); },
         () => (code ? futures.get(code) : undefined),
     );
+    // 載入之後有合約到期（換月）就重新取得，新掛牌的月份才會出現；重新取得期間暫停
+    const stale = entry?.status === 'ok' && entry.rows.some(r => {
+        const t = expiryTime(r);
+        return t !== null && t > entry.at && t <= Date.now();
+    });
     useEffect(() => {
-        if (code && !futures.has(code)) loadStockFutures(code);
-    }, [code]);
-    return entry;
+        if (code && (!futures.has(code) || stale)) loadStockFutures(code);
+    }, [code, stale]);
+    return stale ? { status: 'loading' } : entry;
 }
 
 // 近月到期換月：每次 render 都用當下時間判斷，並在到期那一刻重新 render
+// （分段計時：setTimeout 上限約 24.8 天）
 function useRerenderAt(at: number | null) {
-    const [, bump] = useState(0);
+    const [tick, bump] = useState(0);
     useEffect(() => {
-        if (at === null) return;
-        const t = setTimeout(() => bump(n => n + 1), Math.max(0, at - Date.now()) + 50);
+        if (at === null || Date.now() > at + 1000) return;
+        const t = setTimeout(() => bump(n => n + 1), Math.min(Math.max(0, at - Date.now()) + 50, 6 * 3600_000));
         return () => clearTimeout(t);
-    }, [at]);
+    }, [at, tick]);
 }
 
 export interface FlashLinkProps {
@@ -110,9 +116,15 @@ export function FlashLinkHost({ source, link, group, onLinkChange, render, targe
             )}
             {link.kind === 'future' && (
                 <SettingsSegRow label='月份' value={link.month}
-                    options={[['near', '近月', months[0] && monthLabel(months[0])], ['next', '次月', months[1] && monthLabel(months[1])],
-                        ...months.slice(2).map(m => [m, monthLabel(m)] as const)]}
-                    onPick={month => set({ month })} />
+                    options={[['near', '近月', months[0] && monthLabel(months[0])], ['next', '次月', months[1] && monthLabel(months[1])]]}
+                    onPick={month => set({ month })}
+                    extra={(
+                        <select className={`${settingsSelectClass} ${hostStyles.monthSelect}`} aria-label='指定月份'
+                            value={/^\d{6}$/.test(link.month) ? link.month : ''} onChange={e => { if (e.target.value) set({ month: e.target.value }); }}>
+                            <option value=''>指定月份</option>
+                            {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+                        </select>
+                    )} />
             )}
             <SettingsSegRow label='價差對照' value={link.ref ? 'on' : 'off'}
                 options={[['on', '顯示'], ['off', '隱藏']]} onPick={v => set({ ref: v === 'on' })} />

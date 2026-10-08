@@ -369,12 +369,14 @@ export function OrderSettingsPanel({
 }
 
 /** 設定面板的一列分段按鈕（閃電的對應商品、規格、月份、價差對照） */
-export function SettingsSegRow<T extends string>({ label, value, options, onPick, note }: {
+export function SettingsSegRow<T extends string>({ label, value, options, onPick, note, extra }: {
     label: string;
     value: T;
     options: readonly (readonly [T, string, string?])[];
     onPick: (v: T) => void;
     note?: string;
+    /** 分段按鈕後面的控制項（例：指定月份的下拉） */
+    extra?: ReactNode;
 }) {
     return (
         <div className={styles.row}>
@@ -383,9 +385,10 @@ export function SettingsSegRow<T extends string>({ label, value, options, onPick
                 {options.map(([v, text, sub]) => (
                     <button key={v} type='button' className={styles.segBtn[value === v ? 'on' : 'off']} aria-pressed={value === v}
                         title={sub} onClick={() => { if (value !== v) onPick(v); }}>
-                        {text}{sub && <small> {sub}</small>}
+                        {text}
                     </button>
                 ))}
+                {extra}
             </div>
             {note && <span className={styles.rowNote}>{note}</span>}
         </div>
@@ -400,3 +403,5 @@ export function SettingsInfoRow({ label, text }: { label: string; text: string }
         </div>
     );
 }
+
+export const settingsSelectClass = styles.select;

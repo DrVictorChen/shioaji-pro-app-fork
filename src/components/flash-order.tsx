@@ -49,7 +49,7 @@ import { clampLotQuantity, CREDIT_TEXT, creditLabel, isOddLot, ODD_LOT_MAX_SHARE
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
-import { isStockFuture, lotsPerContract, spreadOf } from '../lib/flash-link';
+import { expiryTime, isStockFuture, lotsPerContract, spreadOf } from '../lib/flash-link';
 import * as styles from './flash-order.css';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
@@ -560,8 +560,9 @@ export function FlashOrder({
     // 確認期間換信用條件也一樣中止（不會用舊條件送出）
     const captureContext = useOrderContext(contract, `${lot}:${creditKey}:${orderKey}:${linkKey}`);
     const armedRef = useRef(armed);
+    // 真實月份期貨（不是近月別名）在最後交易日收盤後一律不送 — 彈出視窗、照選取也一樣
     const expiresRef = useRef(expiresAt);
-    expiresRef.current = expiresAt;
+    expiresRef.current = expiresAt ?? (contract.security_type === 'FUT' && !contract.target_code ? expiryTime(contract) : null);
     const expiredNow = () => expiresRef.current !== null && expiresRef.current !== undefined && Date.now() >= expiresRef.current;
     const armedAccountKey = useRef(accountKey);
     // 啟用時的商品與單位：換商品或單位一變（含外部改變）立即失效，不等
@@ -1089,8 +1090,14 @@ export function FlashOrder({
         inflightRef.current.add(key);
         const contract = contractRef.current;
         const isContextCurrent = captureContext();
+        if (expiredNow()) {
+            inflightRef.current.delete(key);
+            notify({ kind: 'err', title: '⚡ 平倉未送出', body: CONTRACT_EXPIRED });
+            return;
+        }
         const beforeSend = () => {
             if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+            if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
             if (!accountMatches(accountRef.current, account)) throw new Error('帳戶已變更，已停止後續下單');
         };
         const action = pos.net > 0 ? 'Sell' : 'Buy';

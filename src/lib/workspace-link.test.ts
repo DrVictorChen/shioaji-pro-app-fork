@@ -42,6 +42,12 @@ describe('link groups', () => {
         expect(blockSourceCode(w.blocks[1]!, w)).toBe('2603');
         expect(blockSourceCode(w.blocks[2]!, w)).toBe('2454');
     });
+    it('joining a group nobody uses any more starts from the panel\'s code, not the old hidden one', () => {
+        let w = withLinkMode(ws(), 'f1', 'C', '2330');
+        w = withLinkMode(w, 'f1', 'main', null);
+        w = withLinkMode(w, 'f2', 'C', '2603');
+        expect(blockSourceCode(w.blocks[1]!, w)).toBe('2603');
+    });
     it('summarises each group for the menu', () => {
         let w = withLinkMode(ws(), 'f1', 'A', '2330');
         w = withLinkMode(w, 'f2', 'A', '2330');

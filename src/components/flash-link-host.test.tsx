@@ -161,3 +161,14 @@ it('passes the picked contract\'s expiry instant to the ladder', async () => {
     await mount(tsmc, { kind: 'future' }, { render: (_c: ContractInfo, p: { expiresAt?: number }) => { expiresAt = p.expiresAt; return null; } });
     expect(expiresAt).toBe(Date.parse('2026-10-20T13:30:00+08:00'));
 });
+
+it('after a contract expires the futures list is fetched again (newly listed months appear) and rolls to the next month', async () => {
+    const r = await mount(tsmc, { kind: 'future' });
+    expect(text(r.root)).toContain('ladder CDFJ6');
+    expect(mocks.fetchFutures).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(new Date('2026-10-20T14:00:00+08:00'));
+    await show(r, tsmc, { kind: 'future' });
+    await show(r, tsmc, { kind: 'future' });
+    expect(mocks.fetchFutures).toHaveBeenCalledTimes(2);
+    expect(text(r.root)).toContain('ladder CDFK6');
+});

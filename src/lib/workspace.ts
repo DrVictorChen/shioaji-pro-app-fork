@@ -145,7 +145,8 @@ export function blockSourceCode(block: Block, w: Workspace): string | null {
 export function withLinkMode(w: Workspace, id: string, mode: LinkMode, currentCode: string | null): Workspace {
     if (mode === 'pin' && !currentCode) return w;
     const linkGroups = { ...w.linkGroups };
-    if (isLinkGroup(mode) && !linkGroups[mode] && currentCode) linkGroups[mode] = currentCode;
+    const unused = isLinkGroup(mode) && !w.blocks.some((b) => b.id !== id && blockLinkMode(b) === mode);
+    if (isLinkGroup(mode) && currentCode && (!linkGroups[mode] || unused)) linkGroups[mode] = currentCode;
     return {
         ...w,
         linkGroups,
