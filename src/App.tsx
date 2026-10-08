@@ -624,7 +624,7 @@ function BlockView(props: BlockViewProps) {
                 pin={block.pin}
                 currentCode={selected?.code ?? null}
                 onPinChange={(pin) => onPinChange(block.id, pin)}
-                link={{
+                link={block.type !== 'flash' ? undefined : {
                     mode: linkMode,
                     groups: linkGroups,
                     // 目前的來源代碼：鎖定／群組用自己的代碼（即使合約還在載入），跟自選才用選取
@@ -1083,7 +1083,10 @@ function MainApp() {
     const workspaceGenRef = useRef(workspaceGen);
     workspaceGenRef.current = workspaceGen;
     const replaceWorkspace = useCallback((w: Workspace) => {
-        setWorkspaceGen((g) => g + 1);
+        // ref 同步前進：套用前就發出的群組代碼查詢，晚回來時立刻知道已作廢
+        const next = workspaceGenRef.current + 1;
+        workspaceGenRef.current = next;
+        setWorkspaceGen(next);
         updateWorkspace(w);
     }, [updateWorkspace]);
 

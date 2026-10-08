@@ -128,9 +128,10 @@ export interface Workspace {
 // ---- 連動群組 ----
 export type LinkMode = 'main' | 'pin' | LinkGroupId;
 
+// 連動群組這版只給閃電下單（其他面板的送單閘門不含群組身分）
 export function blockLinkMode(block: Block): LinkMode {
     if (block.pin) return 'pin';
-    return isLinkGroup(block.linkGroup) ? block.linkGroup : 'main';
+    return block.type === 'flash' && isLinkGroup(block.linkGroup) ? block.linkGroup : 'main';
 }
 
 /** 面板的來源代碼：鎖定代碼、群組代碼；null = 跟自選選取 */
@@ -144,6 +145,7 @@ export function blockSourceCode(block: Block, w: Workspace): string | null {
 /** 切換連動方式。加入沒人用的群組時以面板目前的代碼當群組代碼 */
 export function withLinkMode(w: Workspace, id: string, mode: LinkMode, currentCode: string | null): Workspace {
     if (mode === 'pin' && !currentCode) return w;
+    if (isLinkGroup(mode) && w.blocks.find((b) => b.id === id)?.type !== 'flash') return w;
     const linkGroups = { ...w.linkGroups };
     const unused = isLinkGroup(mode) && !w.blocks.some((b) => b.id !== id && blockLinkMode(b) === mode);
     if (isLinkGroup(mode) && currentCode && (!linkGroups[mode] || unused)) linkGroups[mode] = currentCode;

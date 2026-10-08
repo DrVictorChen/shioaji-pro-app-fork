@@ -34,11 +34,9 @@ describe('link groups', () => {
     });
     it('changing a group\'s code moves every member and nobody else', () => {
         let w = withLinkMode(ws(), 'f1', 'A', '2330');
-        w = withLinkMode(w, 'c1', 'A', '2330');
         w = withLinkMode(w, 'f2', 'B', '2603');
         w = withGroupCode(w, 'A', '2317');
         expect(blockSourceCode(w.blocks[0]!, w)).toBe('2317');
-        expect(blockSourceCode(w.blocks[3]!, w)).toBe('2317');
         expect(blockSourceCode(w.blocks[1]!, w)).toBe('2603');
         expect(blockSourceCode(w.blocks[2]!, w)).toBe('2454');
     });
@@ -56,6 +54,13 @@ describe('link groups', () => {
             { id: 'B', code: null, count: 0 },
             { id: 'C', code: null, count: 0 },
         ]);
+    });
+    it('only flash panels join groups; other panels keep following the selection', () => {
+        const w = withLinkMode(ws(), 'c1', 'A', '2330');
+        expect(w.blocks[3]!.linkGroup).toBeUndefined();
+        const forced = { ...ws(), linkGroups: { A: '2330' }, blocks: ws().blocks.map(b => (b.id === 'c1' ? { ...b, linkGroup: 'A' as const } : b)) };
+        expect(blockLinkMode(forced.blocks[3]!)).toBe('main');
+        expect(blockSourceCode(forced.blocks[3]!, forced)).toBeNull();
     });
     it('ignores an unknown saved group', () => {
         const w = { ...ws(), blocks: [{ id: 'x', type: 'flash', pin: null, linkGroup: 'Z' }] } as unknown as Workspace;
