@@ -13,7 +13,7 @@ import { fetchAccountBalance, fetchMargin, fetchPositions, fetchTradeCacheHealth
 import { ensureStream, getStreamStatus, isStreamOwner, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
 import { applyPositionFill, markPosition, positionFill, reportBody } from './portfolio-projection';
 import { projectOrderReport, projectTradeDeal } from './order-projection';
-import { orderCodeHint } from './order-code-hints';
+import { onOrderCodeHintsChanged, orderCodeHint } from './order-code-hints';
 import { parseEventId, reportLedger } from './report-ledger';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { takeMutationIntent, type MutationIntent } from './mutation-intent';
@@ -868,6 +868,26 @@ function start() {
         releasePendingDeals(trade.order.id);
         schedulePublish();
     });
+    // a background-engine New report parked before the engine's snapshot
+    // named its order id: try it again once the id is known
+    const stopHints = onOrderCodeHintsChanged(() => {
+        let changed = false;
+        for (const [key, pending] of [...pendingOrders]) {
+            if (pending.kind !== 'order') continue;
+            const ref = (reportBody(pending)?.order as { account?: { broker_id?: string; account_id?: string } })?.account;
+            const code = orderCodeHint(pending.id, ref);
+            if (!code) continue;
+            const projected = projectOrderReport(state.trades, pending, getAccountState().accounts, code);
+            if (!projected) continue;
+            state = { ...state, trades: projected };
+            if (pending.ts) orderTimes.set(key, pending.ts);
+            pendingOrders.delete(key);
+            if (pendingReportKeys.delete(key) && pendingReportKeys.size === 0) resolve('orders', ['pending-report'], undefined, MSG.pendingReport);
+            releasePendingDeals(pending.id);
+            changed = true;
+        }
+        if (changed) schedulePublish();
+    });
     const stopOrders = onOrderEvent(report => {
         eventSequence++;
         if (queryEvents && queryEvents.length >= 1000) queryOverflow = true;
@@ -888,7 +908,7 @@ function start() {
             const key = `${report.market}:${ref?.broker_id}:${ref?.account_id}:${report.id}`;
             if (report.ts && report.ts < (orderTimes.get(key) ?? 0)) return;
             if (queryEvents && queryEvents.length < 1000) queryEvents.push(report);
-            const trades = projectOrderReport(state.trades, report, getAccountState().accounts, orderCodeHint(report.id));
+            const trades = projectOrderReport(state.trades, report, getAccountState().accounts, orderCodeHint(report.id, ref));
             if (trades) {
                 state = { ...state, trades };
                 if (report.ts) orderTimes.set(key, report.ts);
@@ -963,7 +983,7 @@ function start() {
     };
     const stopStatus = subscribeStatusStore(statusChanged);
     import.meta.hot?.dispose(() => {
-        stopMutations(); stopResponses(); stopOrders(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); lastTicks.clear(); stopStatus(); channel?.close();
+        stopMutations(); stopResponses(); stopOrders(); stopHints(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); lastTicks.clear(); stopStatus(); channel?.close();
         positionQuotes.forEach(entry => entry.release?.());
         if (publishTimer) clearTimeout(publishTimer);
         clearInterval(stateHeartbeat);

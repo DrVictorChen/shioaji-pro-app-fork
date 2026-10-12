@@ -9,6 +9,8 @@ import type { AccountRef } from '../lib/bracket-core';
 import { accountTag, type CondRow } from '../lib/conditional/rows';
 import { closeHowText, loadFlattenPreview, planFlatten, quantityText, workingInScope, inScope, type FlattenPreviewData, type FlattenResult, type FlattenScope } from '../lib/conditional/flatten';
 import { flattenSummary, remainingText, runFlatten } from '../lib/conditional/runtime';
+import { remainingScopes } from '../lib/conditional/flatten-text';
+import { currentProtectionEnv } from '../lib/protection-env';
 import { setConditionalSettings, useConditionalSettings } from '../lib/conditional/settings';
 import { useBracketPolicy } from '../lib/conditional/bracket-policy';
 import { BRACKET_POLICY_TEXT, DEFAULT_BRACKET_POLICY } from '../lib/execution/bracket-contract';
@@ -130,6 +132,7 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
     const [busy, setBusy] = useState(false);
     const [result, setResult] = useState<FlattenResult | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const runEnv = useRef<string | null>(null);
     const scope = scopeOf(kind, contract, account);
     useEffect(() => { setArmed(false); }, [kind]);
     // the preview reads positions / orders fresh from the broker when the
@@ -170,6 +173,7 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
         if (conditionalDemoActive()) { setError('示範資料：不會執行全平並取消'); return; }
         setBusy(true);
         setError(null);
+        runEnv.current = currentProtectionEnv();
         void runFlatten(scope).then(setResult, e => setError(e instanceof Error ? e.message : String(e))).finally(() => setBusy(false));
     };
     const scopeOptions = [
@@ -180,12 +184,24 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
     const closes = preview?.plan.orders ?? [];
     const retryRemaining = () => {
         if (!result?.remaining.length) return;
-        const first = result.remaining[0]!.account;
-        const sameAcct = result.remaining.every(o => o.account.account_id === first.account_id && o.account.account_type === first.account_type);
-        const next: FlattenScope = sameAcct ? { type: 'code', codes: [...new Set(result.remaining.map(o => o.code))], account: first } : { type: 'all' };
+        // only where it ran: another server / mode never gets these closes
+        if (runEnv.current !== currentProtectionEnv()) {
+            setError('伺服器或模擬／正式模式已和全平時不同，未再平倉；請重新開啟全平並取消預覽');
+            return;
+        }
         setBusy(true);
         setError(null);
-        void runFlatten(next).then(setResult, e => setError(e instanceof Error ? e.message : String(e))).finally(() => setBusy(false));
+        void (async () => {
+            const merged: FlattenResult = { stopped: 0, cancelled: 0, cancelFailed: [], sent: [], notSent: [], skipped: [], remaining: [] };
+            // one run per account, only its remaining products (never 全部帳戶)
+            for (const scope of remainingScopes(result.remaining)) {
+                const r = await runFlatten(scope);
+                for (const k of ['cancelFailed', 'sent', 'notSent', 'skipped', 'remaining'] as const) (merged[k] as unknown[]).push(...r[k]);
+                merged.stopped += r.stopped;
+                merged.cancelled += r.cancelled;
+            }
+            setResult(merged);
+        })().catch(e => setError(e instanceof Error ? e.message : String(e))).finally(() => setBusy(false));
     };
     return (
         <Dialog title='全平並取消' tone='danger' icon={<OctagonX size={14} aria-hidden />} onClose={onClose} narrow

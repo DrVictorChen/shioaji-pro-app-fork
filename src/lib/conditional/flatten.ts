@@ -247,6 +247,10 @@ export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): 
                 sentFor.push({ account, order: o });
             } catch (e) {
                 const notStarted = (e as { mutationNotStarted?: boolean })?.mutationNotStarted;
+                const partial = (e as { partialSent?: number })?.partialSent;
+                if (partial) result.sent.push({ code: o.code, action: o.action, quantity: partial, market: o.market, account: o.account });
+                // anything that may have gone out is read back too
+                if (!notStarted) sentFor.push({ account, order: o });
                 result.notSent.push(`${o.code}：${notStarted ? '未送出' : '結果不明，請核對委託，勿直接重送'}（${e instanceof Error ? e.message : String(e)}）`);
             }
         }
@@ -273,6 +277,12 @@ async function readBack(sentFor: { account: Account; order: FlattenOrder }[], qu
                 const codes = orders.map(o => o.code);
                 const plan = planFlatten(raw.map(r => ({ ...r, account })), { type: 'code', codes, account: account as AccountRef });
                 left.push(...plan.orders);
+                // a holding the plan cannot read (direction / quantity unclear,
+                // both sides): never reported as closed
+                for (const s of plan.skipped) {
+                    const sent = orders.find(o => o.code === s.code);
+                    if (sent && !plan.orders.some(o => o.code === s.code)) left.push({ ...sent, unconfirmed: true });
+                }
             } catch {
                 // unknown: everything sent for this account stays to be checked
                 left.push(...orders.map(o => ({ ...o, unconfirmed: true })));
@@ -299,8 +309,14 @@ async function sendClose(o: FlattenOrder, account: Account, serverMode: ServerMo
     const odd = o.quantity % 1000;
     if (lots > 0) await placeQuickOrder(contract, o.action, null, lots, { source: 'auto', bypassRisk: true, account, serverMode });
     if (odd > 0) {
+        // the whole lots already went out: say so (they are read back)
+        const partial = lots > 0 ? { partialSent: lots * 1000 } : {};
         const limit = o.action === 'Sell' ? contract.limit_down : contract.limit_up;
-        if (!limit || !(limit > 0)) throw Object.assign(new Error(`零股 ${odd} 股需要漲跌停價，未送出`), { mutationNotStarted: lots === 0 });
-        await placeQuickOrder(contract, o.action, limit, odd, { source: 'auto', bypassRisk: true, account, orderLot: 'IntradayOdd', serverMode });
+        if (!limit || !(limit > 0)) throw Object.assign(new Error(`零股 ${odd} 股需要漲跌停價，未送出`), { mutationNotStarted: lots === 0, ...partial });
+        try {
+            await placeQuickOrder(contract, o.action, limit, odd, { source: 'auto', bypassRisk: true, account, orderLot: 'IntradayOdd', serverMode });
+        } catch (e) {
+            throw Object.assign(e instanceof Error ? e : new Error(String(e)), partial);
+        }
     }
 }

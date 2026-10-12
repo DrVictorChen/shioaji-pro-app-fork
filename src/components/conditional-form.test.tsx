@@ -169,5 +169,33 @@ describe('NewConditionalDialog', () => {
         await click(r, '時間');
         expect(text(r.root)).toContain('整股市價、零股限價');
     });
+
+    it('stocks 指定時間送單: 限價 then 盤中零股 is not blocked by the hidden send style (review)', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-12T01:00:00Z')); // 09:00 台北
+        try {
+            const r = render(STK);
+            await click(r, '時間');
+            await click(r, '指定時間');
+            await type(r, '送單時間', '12:00');
+            await click(r, '限價');
+            expect(text(r.root)).toContain('指定時間送單沒有觸發價');
+            await click(r, '盤中零股');
+            expect(text(r.root)).not.toContain('指定時間送單沒有觸發價');
+            expect(button(r, '建立').props.disabled).toBe(false);
+        } finally { vi.useRealTimers(); }
+    });
+
+    it('stocks 二擇一 成交後刪對應口數 in 盤中零股: the summary says ROD and that the other side waits (engine rule)', async () => {
+        const r = render(STK);
+        await click(r, '二擇一');
+        await click(r, '盤中零股');
+        await click(r, '成交後刪對應口數');
+        await type(r, '上方價', '1100');
+        await type(r, '下方價', '900');
+        const all = text(r.root);
+        expect(all).toContain('零股以漲跌停價限價（ROD）送出');
+        expect(all).not.toContain('IOC');
+    });
 });
 
