@@ -772,6 +772,34 @@ describe('Shioaji 1.7.6 report identity and cache health', () => {
         expect(reasons('positions')).not.toContain('unknown-fill');
     });
 
+    it('a background-engine order (no HTTP response, native New without full_code) applies with the engine\'s code hint (QA 10/12)', async () => {
+        const hints = await import('./order-code-hints');
+        hints.setOrderCodeHint((id, account) => id === 'fx05' && account?.account_id === 'fixture-futures' ? 'TXFJ6' : null);
+        try {
+            await deliver(byId('v1:FO:FSTREAM:RESET1:12'));
+            await deliver(byId('v1:FD:FSTREAM:RESET1:8'));
+            expect(store.getTradingState().positions.filter(p => p.code === 'TXFJ6')[0]).toMatchObject({ quantity: 1, direction: 'Buy' });
+            expect(reasons('positions')).not.toContain('metadata-missing');
+            expect(reasons('orders')).not.toContain('pending-report');
+            expect(mocks.trades).not.toHaveBeenCalled();
+        } finally { hints.setOrderCodeHint(null); }
+    });
+
+    it('a New parked before the engine named its order id is replayed once it does, with its deal', async () => {
+        const hints = await import('./order-code-hints');
+        try {
+            await deliver(byId('v1:FO:FSTREAM:RESET1:12'));
+            await deliver(byId('v1:FD:FSTREAM:RESET1:8'));
+            expect(reasons('orders')).toContain('pending-report');
+            expect(reasons('positions')).toContain('metadata-missing');
+            hints.setOrderCodeHint(id => id === 'fx05' ? 'TXFJ6' : null);
+            await act(async () => { hints.orderCodeHintsChanged(); vi.advanceTimersByTime(50); });
+            expect(store.getTradingState().positions.filter(p => p.code === 'TXFJ6')[0]).toMatchObject({ quantity: 1 });
+            expect(reasons('orders')).not.toContain('pending-report');
+            expect(reasons('positions')).not.toContain('metadata-missing');
+        } finally { hints.setOrderCodeHint(null); }
+    });
+
     it('keeps deal-before-order as metadata-missing and clears only that reason on replay', async () => {
         await deliver({ state: 'StockOrder', data: { StockOrder: { ...body(byId('v1:SO:SSTREAM:RESET1:1')), event_id: 'opaque-report' } } });
         expect(reasons('orders')).toEqual(expect.arrayContaining(['untrackable-event']));

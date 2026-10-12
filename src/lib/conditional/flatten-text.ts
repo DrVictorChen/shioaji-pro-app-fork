@@ -15,3 +15,17 @@ export function closeHowText(market: 'stock' | 'futures', quantity: number): str
     const odd = quantity % 1000;
     return lots > 0 && odd > 0 ? '整股市價、零股限價' : odd > 0 ? '零股限價' : '整股市價';
 }
+
+type ScopeAccount = { account_type: 'S' | 'F'; broker_id: string; account_id: string };
+
+/** 再平倉: one scope per account (full key), each with only its remaining products. */
+export function remainingScopes(remaining: readonly { account: ScopeAccount; code: string }[]): { type: 'code'; codes: string[]; account: ScopeAccount }[] {
+    const byAccount = new Map<string, { account: ScopeAccount; codes: Set<string> }>();
+    for (const o of remaining) {
+        const key = `${o.account.account_type}:${o.account.broker_id}:${o.account.account_id}`;
+        const g = byAccount.get(key) ?? { account: o.account, codes: new Set<string>() };
+        g.codes.add(o.code);
+        byAccount.set(key, g);
+    }
+    return [...byAccount.values()].map(g => ({ type: 'code' as const, codes: [...g.codes], account: g.account }));
+}

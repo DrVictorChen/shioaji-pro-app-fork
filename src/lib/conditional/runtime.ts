@@ -12,6 +12,7 @@ import { notify } from '../trade';
 import { getDisplayTriggers, getExits, onTimedFlatten, removeTriggerStrict, setTriggerGroup, setTriggerPaused, type TriggerOrder } from '../trigger-engine';
 import { executeFlatten, inScope, quantityText, type FlattenResult, type FlattenScope } from './flatten';
 import { recordFlattenLeftovers } from './flatten-leftovers';
+export { remainingScopes } from './flatten-text';
 import { getConditionalSettings } from './settings';
 
 const codesOf = (t: Pick<TriggerOrder, 'code' | 'orderCode'>) => [t.code, t.orderCode].filter((c): c is string => !!c);
