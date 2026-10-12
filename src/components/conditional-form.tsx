@@ -326,13 +326,14 @@ function TriggerForm({ target, onClose, defaults }: { target: Target; onClose: (
     const [send, setSend] = useState<SendState>({ type: target.futures ? defaults.send : 'MKT', ticks: '−2' });
     const [validity, setValidity] = useState<ValidityState>({ type: defaults.validity, date: '' });
     const { busy, error, submit } = useSubmit();
-    const last = useLastPrice(target.resolved ?? '');
+    const odd = !target.futures && target.lot === 'IntradayOdd';
+    // an odd-lot trigger watches the 盤中零股 feed
+    const last = useLastPrice(target.resolved ?? '', odd);
     const p = parseNum(price);
     const q = Number(qty);
     const condition: 'below' | 'above' = op === 'below' || op === 'crossDown' ? 'below' : 'above';
     const cross = op === 'crossDown' || op === 'crossUp';
     const market: SessionMarket = target.futures ? 'futures' : 'stock';
-    const odd = !target.futures && target.lot === 'IntradayOdd';
     const sendValue = odd ? { type: 'MKT' as const } : sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
     const validityValue = validityOf(validity, market);
     const crossed = !cross && p !== null && last !== undefined && (condition === 'below' ? last <= p : last >= p);
@@ -401,13 +402,13 @@ function OcoForm({ target, onClose, defaults }: { target: Target; onClose: () =>
     const [mode, setMode] = useState<'trigger' | 'fill'>(defaults.ocoMode);
     const [validity, setValidity] = useState<ValidityState>({ type: defaults.validity, date: '' });
     const { busy, error, submit } = useSubmit();
-    const last = useLastPrice(target.resolved ?? '');
+    const odd = !target.futures && target.lot === 'IntradayOdd';
+    const last = useLastPrice(target.resolved ?? '', odd);
     const market: SessionMarket = target.futures ? 'futures' : 'stock';
     const pu = parseNum(up.price);
     const pd = parseNum(down.price);
     const qu = Number(up.qty);
     const qd = Number(down.qty);
-    const odd = !target.futures && target.lot === 'IntradayOdd';
     const sendValue = odd ? { type: 'MKT' as const } : sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
     const validityValue = validityOf(validity, market);
     const problem = commonProblem(target) ?? priceProblem(target, pu, '上方價') ?? priceProblem(target, pd, '下方價')
@@ -459,7 +460,9 @@ function OcoForm({ target, onClose, defaults }: { target: Target; onClose: () =>
                         現價在中間時同時盯兩邊：
                         <b className={up.action === 'Buy' ? styles.up : styles.down}>漲到 {fmtNum(pu)} {orderWords(target, up.action, qu, sendValue, pu)}</b>，或
                         <b className={down.action === 'Buy' ? styles.up : styles.down}>跌到 {fmtNum(pd)} {orderWords(target, down.action, qd, sendValue, pd)}</b>；
-                        {mode === 'trigger' ? '任一邊觸發，另一邊立刻刪除。' : '任一邊成交多少，另一邊就扣掉多少口數，其餘繼續盯價（限價以 IOC 送出）。'}
+                        {mode === 'trigger' ? '任一邊觸發，另一邊立刻刪除。' : odd
+                            ? '任一邊成交多少，另一邊就扣掉多少股；零股以漲跌停價限價（ROD）送出，這筆委託結束前另一邊暫停盯價。'
+                            : `任一邊成交多少，另一邊就扣掉多少${unit === '張' ? '張' : '口'}，其餘繼續盯價（限價以 IOC 送出）。`}
                         {APPROVAL}
                         {outside && <span className={styles.tone.err}> 目前價不在兩個價格之間，建立後下一筆成交就會觸發一邊。</span>}
                     </>
