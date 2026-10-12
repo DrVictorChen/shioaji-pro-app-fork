@@ -163,8 +163,9 @@ simulated portfolio instead of once over the whole history:
 - `ctx.series(symbol)` returns that asset's read-only history up to and
   including the current bar: `time`, `open`, `high`, `low`, `close`, `volume`,
   `hl2`, `hlc3`, `ohlc4`, and `availability`. An omitted symbol selects the
-  primary asset. Later bars are never included, so indicators computed from it
-  cannot look ahead. Pass these arrays to `ta.*`; the current bar is the last
+  primary asset. Each asset keeps its own clock; a missing or unavailable row
+  has `null` prices and `availability` `false`. Later bars are never included,
+  so indicators computed from it cannot look ahead. Pass these arrays to `ta.*`; the current bar is the last
   element (`const i = s.close.length - 1`).
 - `asset(symbol)` returns the current bar of a named asset (`available`,
   OHLCV); `currentPosition(symbol)` returns the filled simulated position.
