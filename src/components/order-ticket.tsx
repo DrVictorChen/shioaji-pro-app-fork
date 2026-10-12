@@ -1156,8 +1156,6 @@ export function OrderTicket({
                         </div>
                     </div>
                 )}
-                <BracketStatusList code={contract.code} />
-                <ConditionalBracketCards code={contract.code} />
 
                 {multi && (
                     <div className={styles.fieldRow}>
@@ -1464,6 +1462,10 @@ export function OrderTicket({
                     {feedback.text}
                 </span>
             )}
+            {/* after the submit button: ended / handed-over cards never push
+                下單 below the fold (TXF QA 2026-10-12) */}
+            <BracketStatusList code={contract.code} />
+            <ConditionalBracketCards code={contract.code} />
         </div>
     );
 }

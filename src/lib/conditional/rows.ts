@@ -350,11 +350,13 @@ function bgBracketRow(v: BracketView, s: Sources): CondRow {
         account: { account_type: v.account.accountType, broker_id: v.account.brokerId, account_id: v.account.accountId },
         env: v.env,
         attention: v.attention || anomaly,
-        paused: v.paused,
+        // an ended level is not paused or resumable, even if its program is
+        // paused (QA 2026-10-12: an ended card showed ▷)
+        paused: v.paused && !ended,
         actions: {
             ...NO_ACTIONS,
-            pause: v.actions.pause,
-            resume: v.actions.resume,
+            pause: v.actions.pause && !ended,
+            resume: v.actions.resume && !ended,
             send: v.actions.decide,
             keep: v.actions.decide,
             handled: v.actions.markHandled,
@@ -371,6 +373,23 @@ function bgBracketRow(v: BracketView, s: Sources): CondRow {
         createdAt: v.createdAt,
         ended: ended && !v.attention && !anomaly,
     };
+}
+
+/** Who keeps a row running: 'background' = the App's background engine
+ * (keeps running after the window closes), 'window' = this window's engine
+ * (only while a window is open), null = nothing running (ended, a record to
+ * check, a send whose result is unknown). Shown only while
+ * 「背景持續執行（實驗）」 is on. */
+export function rowRunner(row: CondRow): 'background' | 'window' | null {
+    if (row.ended) return null;
+    const src = row.source;
+    switch (src.type) {
+        case 'bgBracket': return 'background';
+        case 'trigger': return 'background' in src.trigger ? 'background' : 'window';
+        case 'oco': return src.triggers.length > 0 && src.triggers.every(t => 'background' in t) ? 'background' : 'window';
+        case 'bracket': return 'window';
+        default: return null;
+    }
 }
 
 /** Background bracket rows alone (the order ticket's list). */

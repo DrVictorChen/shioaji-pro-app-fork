@@ -21,7 +21,7 @@ import { DepthLadder } from './components/depth-ladder';
 import { DepthMap } from './components/depth-map';
 import { EventToasts } from './components/event-toasts';
 import { PendingTriggers } from './components/pending-triggers';
-import { ConditionalPanel } from './components/conditional-panel';
+import { ConditionalPanel, OPEN_CONDITIONAL_PANEL_EVENT } from './components/conditional-panel';
 import { PendingConfirmPanel } from './components/pending-confirm';
 import { FeatureGate } from './components/feature-gate';
 import { FlashOrder } from './components/flash-order';
@@ -1223,6 +1223,23 @@ function MainApp() {
                 1300,
             );
         });
+    }, []);
+
+    // 「查看條件單管理」 from the order ticket's bracket cards: jump to the
+    // panel, or open it (singleton) when the workspace has none
+    const openConditionalRef = useRef<() => void>(() => undefined);
+    openConditionalRef.current = () => {
+        const existing = workspace.blocks.find((b) => b.type === 'conditional');
+        if (existing) locateBlock(existing.id);
+        else {
+            const id = addBlock('conditional');
+            if (id) locateBlock(id);
+        }
+    };
+    useEffect(() => {
+        const open = () => openConditionalRef.current();
+        window.addEventListener(OPEN_CONDITIONAL_PANEL_EVENT, open);
+        return () => window.removeEventListener(OPEN_CONDITIONAL_PANEL_EVENT, open);
     }, []);
 
     // Persistent research links are owned by the backtest panel. The App
