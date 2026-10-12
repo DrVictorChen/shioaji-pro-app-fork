@@ -234,12 +234,24 @@ const ORDER_OUTCOME_PATHS = new Set([
     '/api/v1/order/place_comboorder',
 ]);
 
+// 2xx 但 body 讀不完／解析失敗：委託可能已成立 → 結果不確定
+async function parseDispatchedBody<T>(res: Response, path: string): Promise<T> {
+    try {
+        return (await res.json()) as T;
+    } catch (error) {
+        throw markDispatchedOrderError(error, path, true);
+    }
+}
+
 // After the request may have left (beforeDispatch passed), a transport error
 // on an order-sending path is ambiguous: the order may exist. Errors from the
 // pre-dispatch gates are rethrown untouched.
 function markDispatchedOrderError(error: unknown, path: string, dispatched: boolean): unknown {
     if (!dispatched || !ORDER_OUTCOME_PATHS.has(path)) return error;
-    if (typeof error !== 'object' || error === null) return error;
+    // 原生橋接可能丟字串（例如 'UI trading proxy request failed: timeout'）
+    if (typeof error !== 'object' || error === null) {
+        return Object.assign(new Error(String(error)), { mutationOutcomeUnknown: true as const });
+    }
     const e = error as Record<string, unknown>;
     if (e.mutationNotStarted === true || e.mutationOutcomeUnknown === true || typeof e.status === 'number') return error;
     return Object.assign(error, { mutationOutcomeUnknown: true as const });
@@ -344,7 +356,7 @@ export async function apiPost<T>(
         });
         opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res, path);
-        return res.json() as Promise<T>;
+        return parseDispatchedBody<T>(res, path);
     }
     const timedMutation = path === '/api/v1/order/place_order' || path === '/api/v1/order/cancel_order';
     return runWithTimeout(async signal => {
@@ -362,7 +374,7 @@ export async function apiPost<T>(
         }
         opts?.onResponse?.(res);
         if (!res.ok) await throwApiError(res, path);
-        return res.json() as Promise<T>;
+        return parseDispatchedBody<T>(res, path);
     }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);
 }
 

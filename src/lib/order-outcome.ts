@@ -49,7 +49,7 @@ export function classifyOrderError(e: unknown): OrderErrorKind {
 }
 
 export const OUTCOME_UNKNOWN_GUIDANCE =
-    '委託可能已經成立。請等待委託回報，或到「委託」分頁確認；確認前請勿重新下單。已自動更新委託一次。';
+    '委託可能已經成立。請等待委託回報，或到「委託」分頁確認；確認前請勿重新下單。系統會自動更新委託一次。';
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -79,7 +79,7 @@ export function reconcileAfterUnknownOutcome(): void {
     if (reconcileQueued) return;
     reconcileQueued = true;
     void import('./trading-state')
-        .then(({ refreshTradingState }) => refreshTradingState('orders'))
+        .then(({ reconcileOrdersOnce }) => reconcileOrdersOnce())
         .catch(() => { /* 對帳失敗由委託分頁的待對帳狀態呈現 */ })
         .finally(() => { reconcileQueued = false; });
 }

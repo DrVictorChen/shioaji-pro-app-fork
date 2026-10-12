@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { reconcileAfterUnknownOutcome } from './order-outcome';
 import { createAccountQuery } from './account-query';
 // src/lib/trigger-engine.ts — client-side stop-loss / take-profit triggers.
 //
@@ -823,6 +824,7 @@ function exitUnknown(t: TriggerOrder, rec: ExitRecord, message: string) {
     updateExit(rec.id, x => ({ ...x, status: 'unknown', detail: `送單結果未知：${message}`, at: Date.now() }));
     notify({ kind: 'err', title: '觸價單結果未知',
         body: `${t.code} ${message} — 請至委託／持倉手動對帳；系統不會自動重送` });
+    reconcileAfterUnknownOutcome();
 }
 
 const notStarted = (e: unknown) => !!(e as { mutationNotStarted?: boolean })?.mutationNotStarted;

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const refresh = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock('./trading-state', () => ({ refreshTradingState: refresh }));
+vi.mock('./trading-state', () => ({ reconcileOrdersOnce: refresh }));
 
 import { apiPost } from './api';
 import { classifyHttpOrderError, classifyOrderError, orderErrorNotice, reportOrderError } from './order-outcome';
@@ -85,6 +85,22 @@ describe('apiPost order errors (#249)', () => {
     });
 });
 
+describe('apiPost ambiguous transport (#249 review)', () => {
+    it('a 2xx order response whose body cannot be read is an unknown outcome', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('{"order": {', { status: 200, headers: { 'Content-Type': 'application/json' } })));
+        const e = await failure(apiPost('/api/v1/order/place_order', {}));
+        expect(classifyOrderError(e)).toBe('unknown');
+        expect(agentSeesNotSent(e)).toBe(false);
+    });
+    it('a non-Error rejection after dispatch becomes an unknown-outcome Error', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => { throw 'UI trading proxy request failed: timeout'; }));
+        const e = await failure(apiPost('/api/v1/order/place_order', {}));
+        expect(e).toBeInstanceOf(Error);
+        expect(classifyOrderError(e)).toBe('unknown');
+        expect(e.message).toContain('timeout');
+    });
+});
+
 describe('orderErrorNotice / reportOrderError (#249)', () => {
     it('unknown outcome never says 失敗, guides to the orders tab, and reconciles orders once', async () => {
         const unknown = Object.assign(new Error('委託結果不確定（HTTP 409 OrderOutcomeUnknown）：x'), { mutationOutcomeUnknown: true });
@@ -97,7 +113,6 @@ describe('orderErrorNotice / reportOrderError (#249)', () => {
         expect(reportOrderError('圖表下單', unknown, notify)).toBe('unknown');
         expect(reportOrderError('組合單', unknown, notify)).toBe('unknown');
         await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
-        expect(refresh).toHaveBeenCalledWith('orders');
         expect(notify).toHaveBeenCalledTimes(2);
     });
 
