@@ -730,7 +730,7 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
         ?? (at !== null && at <= Date.now() ? '時間已過；只能設定今天還沒到的時間' : null)
         ?? (mode === 'send' && (!Number.isSafeInteger(q) || q <= 0) ? '數量必須是正整數' : null)
         ?? (mode === 'send' ? lotProblem(target, [q]) : null)
-        ?? (mode === 'send' && send.type === 'LMT' ? '指定時間送單沒有觸發價，請選市價或範圍市價' : null)
+        ?? (mode === 'send' && !odd && send.type === 'LMT' ? '指定時間送單沒有觸發價，請選市價或範圍市價' : null)
         ?? (typeof sendValue === 'string' ? sendValue : null);
     const create = () => void submit(async () => {
         if (problem || !target.contract || !target.account || at === null || typeof sendValue === 'string') return false;

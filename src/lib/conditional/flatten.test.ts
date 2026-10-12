@@ -183,6 +183,31 @@ describe('read-back after sending (2330 QA 10/12)', () => {
         expect(r.remaining).toMatchObject([{ code: 'TXFJ6', quantity: 1, unconfirmed: true }]);
     });
 
+    it('a holding the read-back cannot read (both sides) stays unconfirmed, never closed (review)', async () => {
+        let reads = 0;
+        m.positions.mockImplementation(async (a: Account) => {
+            if (a !== F) return [];
+            return reads++ === 0 ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1 }]
+                : [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1 }, { id: 2, code: 'TXFJ6', direction: 'Sell', quantity: 1 }];
+        });
+        const r = await executeFlatten({ type: 'all' }, { stopConditional, sleep: noWait });
+        expect(r.remaining).toMatchObject([{ code: 'TXFJ6', unconfirmed: true }]);
+    });
+
+    it('stocks: whole lots sent, the odd remainder failed: counted as sent in part and read back (review)', async () => {
+        let reads = 0;
+        m.positions.mockImplementation(async (a: Account) => a !== S ? []
+            : [{ id: 1, code: '2330', direction: 'Buy', quantity: reads++ === 0 ? 8006 : 6, cond: 'Cash' }]);
+        m.place.mockImplementation(async (_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { orderLot?: string }) => {
+            if (opts.orderLot === 'IntradayOdd') throw new Error('timeout');
+            return { order: { id: 'x' }, status: { status: 'PendingSubmit' } };
+        });
+        const r = await executeFlatten({ type: 'account', account: { account_type: 'S', broker_id: 'bs', account_id: 's1' } }, { stopConditional, sleep: noWait });
+        expect(r.sent).toMatchObject([{ code: '2330', quantity: 8000 }]);
+        expect(r.notSent.join()).toContain('2330');
+        expect(r.remaining).toMatchObject([{ code: '2330', quantity: 6 }]);
+    });
+
     it('wording: 張＋股 and 整股市價、零股限價', () => {
         expect(quantityText('stock', 8006)).toBe('8 張＋6 股');
         expect(quantityText('stock', 300)).toBe('300 股');
