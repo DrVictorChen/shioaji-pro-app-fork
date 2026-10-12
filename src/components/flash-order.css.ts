@@ -947,8 +947,10 @@ export const protectAnchor = style({
 
 const protectBase = style({
     display: 'flex',
+    flexWrap: 'wrap',
     alignItems: 'center',
-    gap: 5,
+    columnGap: 5,
+    rowGap: 0,
     width: '100%',
     padding: `2px ${vars.space.sm}`,
     fontFamily: vars.font.body,

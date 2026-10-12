@@ -1880,7 +1880,8 @@ export function FlashOrder({
                     : armedView
                     ? odd
                         ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · 點單量=刪單 · Esc 鎖定`
-                        : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買${orderSuffix}`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣${orderSuffix}`} · 點單量=刪單 · Esc 鎖定`
+                        : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買${orderSuffix}`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣${orderSuffix}`}${
+                            protect.on ? (protectBlock ? ' · 自動停損停利條件不符，進場不送' : ' · 進場附停損停利') : ''} · 點單量=刪單 · Esc 鎖定`
                     : triggerMode
                     ? '觸價模式 — 點「啟用閃電下單」後點價即掛觸價單 · 點虛線標=刪除'
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
