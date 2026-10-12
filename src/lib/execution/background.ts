@@ -525,8 +525,11 @@ async function stopWindowConditionals(detail: string): Promise<void> {
         const scope = d.codes ? { type: 'code' as const, codes: d.codes, account } : { type: 'account' as const, account };
         const r = await stopConditionalInScope(scope);
         const drained = r.failed.length === 0 && await waitInFlight(scope);
-        ok = drained;
-        why = r.failed.length ? r.failed.join('；') : drained ? '' : '本視窗有條件單仍在送單';
+        // an order that just went out may have armed new protection: stop again
+        const again = drained ? await stopConditionalInScope(scope) : { stopped: 0, failed: [] as string[] };
+        const failed = [...r.failed, ...again.failed];
+        ok = drained && failed.length === 0;
+        why = failed.length ? failed.join('；') : drained ? '' : '本視窗有條件單仍在送單';
     } catch (e) {
         why = e instanceof Error ? e.message : String(e);
     }
