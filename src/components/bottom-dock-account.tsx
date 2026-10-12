@@ -380,7 +380,12 @@ function PnlSection({
                                 key={`${r.accountKey}-${r.market}-${r.id}-${'dseq' in r ? r.dseq : r.date}`}
                                 className={styles.pnlDetailRow}
                             >
-                                <span>{canonicalBrokerCode(r.code) || r.code}</span>
+                                <span
+                                    // 查不到名稱時滑過顯示券商回傳的原始代號（含看不到的字元），方便回報
+                                    title={names[nameKey(r)] ? undefined : `原始代號 ${JSON.stringify(r.code)}`}
+                                >
+                                    {canonicalBrokerCode(r.code) || r.code}
+                                </span>
                                 <span className={styles.pnlDetailName}>
                                     {names[nameKey(r)] ?? ''}
                                 </span>

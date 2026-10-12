@@ -106,6 +106,8 @@ it('#286 production realized rows (padded / long-form futures codes) show names 
     expect(json).toContain('小型臺指期貨10');
     expect(json).toContain('美國那斯達克100期貨');
     expect(json).not.toContain('微型臺指期貨10');
+    // 查不到名稱的列滑過可看到券商原始代號（回報用）
+    expect(view!.root.findAll(node => node.type === 'span' && node.props.title === '原始代號 "TMF202610"')).toHaveLength(1);
     expect(json).toContain('"MXFJ6"');
     // 合約查詢恢復後，按重新整理（列內容不變）會補查還沒有名稱的列
     tmfOnline = true;
