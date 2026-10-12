@@ -96,6 +96,10 @@ it('#285: never reloads onto another program\'s server whose account cannot be c
         if (cmd === 'process_alive') return true;
         throw new Error('harness command failed');
     });
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(mocks.reload).toHaveBeenCalledTimes(1);
+    // the watch's checks also await real module loads: keep the clock moving
+    // until it reloads (slow CI runners need more than one poll)
+    await vi.waitFor(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+        expect(mocks.reload).toHaveBeenCalledTimes(1);
+    }, { timeout: 15_000, interval: 20 });
 });
