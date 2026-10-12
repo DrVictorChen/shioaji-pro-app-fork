@@ -17,8 +17,8 @@
 // the window's own trigger engine does (see trigger-engine.ts).
 
 import { useSyncExternalStore } from 'react';
-import { setOrderCodeHint } from '../order-code-hints';
-import { backgroundFillCount, orderCodeOf } from './background-orders';
+import { orderCodeHintsChanged, setOrderCodeHint } from '../order-code-hints';
+import { backgroundFills, backgroundFillsIncreased, orderCodeOf } from './background-orders';
 import { ensureContract } from '../contracts-cache';
 import { isMainWindow } from '../main-window-commands';
 import { currentProtectionEnv, onProtectionEnvChange } from '../protection-env';
@@ -168,9 +168,15 @@ export function useBackgroundPrograms(): OrderProgram[] {
 }
 
 /** A background order filled: the window's positions / orders did not send
- * it, so read them again (rate-limited by the trading store itself). */
+ * it, so read them again — now, and once more after the trading store's
+ * cooldown (a read already in flight or just finished would swallow it). */
+let trailingFillRefresh: ReturnType<typeof setTimeout> | null = null;
+export const FILL_REFRESH_TRAIL_MS = 2500;
 function afterBackgroundFill(): void {
-    void import('../trading-state').then(m => m.refreshTradingState('all')).catch(() => undefined);
+    const refresh = () => void import('../trading-state').then(m => m.refreshTradingState('all')).catch(() => undefined);
+    refresh();
+    if (trailingFillRefresh) clearTimeout(trailingFillRefresh);
+    trailingFillRefresh = setTimeout(() => { trailingFillRefresh = null; refresh(); }, FILL_REFRESH_TRAIL_MS);
 }
 
 let refreshing: Promise<void> | null = null;
@@ -194,10 +200,11 @@ export function refreshBackground(): Promise<void> {
             const first = health === null;
             if (view.revision !== revision || JSON.stringify(h) !== JSON.stringify(health)) {
                 revision = view.revision;
-                const filledBefore = backgroundFillCount(programs);
+                const filledBefore = backgroundFills(programs);
                 const hadPrograms = programs.length > 0 || !first;
                 programs = view.programs;
-                if (isMainWindow() && hadPrograms && backgroundFillCount(programs) > filledBefore) afterBackgroundFill();
+                orderCodeHintsChanged();
+                if (isMainWindow() && hadPrograms && backgroundFillsIncreased(filledBefore, backgroundFills(programs))) afterBackgroundFill();
                 health = h;
                 emit();
             }
@@ -571,7 +578,7 @@ export function startBackgroundExecution(): void {
     if (started || !isTauri) return;
     started = true;
     const main = isMainWindow();
-    setOrderCodeHint(id => orderCodeOf(programs, id));
+    setOrderCodeHint((id, account) => orderCodeOf(programs, id, account));
     void import('@tauri-apps/api/event').then(({ listen }) => {
         // a change between the first read and the listener being ready would
         // be missed: read again once it listens

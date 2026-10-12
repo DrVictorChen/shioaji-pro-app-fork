@@ -2,21 +2,29 @@
 // order code for its report pipeline, and a positions / orders read after a
 // background fill (QA 10/12: 持倉暫未套用 banner and stale rows).
 import { expect, it } from 'vitest';
-import { backgroundFillCount, orderCodeOf } from './background-orders';
+import { backgroundFills, backgroundFillsIncreased, orderCodeOf } from './background-orders';
 import type { OrderProgram } from './model';
 
-const program = (orderId: string | null, filled: number) => ({
-    id: 'p', binding: { contract: { orderCode: 'TXFJ6', quoteCode: 'TXFR1' } },
+const program = (id: string, orderId: string | null, filled: number, code = 'TXFJ6', accountId = 'a1') => ({
+    id, binding: { account: { accountType: 'F', brokerId: 'b', accountId }, contract: { orderCode: code, quoteCode: 'TXFR1' } },
     levels: [{ orders: [{ key: 'k', orderId, filled }] }],
 }) as unknown as OrderProgram;
+const A1 = { broker_id: 'b', account_id: 'a1' };
 
-it('orderCodeOf: the program that sent the trade id', () => {
-    expect(orderCodeOf([program('T1', 0)], 'T1')).toBe('TXFJ6');
-    expect(orderCodeOf([program('T1', 0)], 'T2')).toBeNull();
-    expect(orderCodeOf([program(null, 0)], '')).toBeNull();
+it('orderCodeOf: the program of that account that sent the trade id', () => {
+    expect(orderCodeOf([program('p', 'T1', 0)], 'T1', A1)).toBe('TXFJ6');
+    expect(orderCodeOf([program('p', 'T1', 0)], 'T2', A1)).toBeNull();
+    expect(orderCodeOf([program('p', null, 0)], '', A1)).toBeNull();
+    // another account's program never names the contract
+    expect(orderCodeOf([program('p', 'T1', 0, 'TXFJ6', 'other')], 'T1', A1)).toBeNull();
+    // ambiguous: two programs, two codes → no answer
+    expect(orderCodeOf([program('p', 'T1', 0), program('q', 'T1', 0, 'MXFJ6')], 'T1', A1)).toBeNull();
 });
 
-it('backgroundFillCount rises with each fill', () => {
-    expect(backgroundFillCount([program('T1', 0)])).toBe(0);
-    expect(backgroundFillCount([program('T1', 1), program('T2', 2)])).toBe(3);
+it('a fill is noticed per order, even when another program disappears in the same snapshot', () => {
+    const before = backgroundFills([program('p', 'T1', 1), program('q', 'T2', 0)]);
+    expect(backgroundFillsIncreased(before, backgroundFills([program('p', 'T1', 1), program('q', 'T2', 0)]))).toBe(false);
+    // p (1 lot) removed, q fills 1: the total is unchanged but q filled
+    expect(backgroundFillsIncreased(before, backgroundFills([program('q', 'T2', 1)]))).toBe(true);
+    expect(backgroundFillsIncreased(before, backgroundFills([program('r', 'T3', 1)]))).toBe(true);
 });

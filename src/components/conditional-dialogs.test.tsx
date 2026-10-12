@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const F = { account_type: 'F', broker_id: 'b', account_id: '9804567', person_id: '', signed: true, username: '' };
 const TXF = { code: 'TXFJ6', target_code: 'TXFJ6', security_type: 'FUT', exchange: 'TAIFEX' };
-const m = vi.hoisted(() => ({ run: vi.fn(), preview: vi.fn(), desktop: false, reachable: true, getPolicy: vi.fn(), setPolicy: vi.fn(), setLocal: vi.fn() }));
+const m = vi.hoisted(() => ({ env: 'srv|simulation', run: vi.fn(), preview: vi.fn(), desktop: false, reachable: true, getPolicy: vi.fn(), setPolicy: vi.fn(), setLocal: vi.fn() }));
 
 vi.mock('../lib/account-store', () => ({ useAccounts: () => ({ accounts: [F], selectedFutures: F, selectedStock: null }) }));
 vi.mock('../lib/trading-state', () => ({ useTradingState: () => ({
@@ -18,6 +18,7 @@ vi.mock('../lib/trading-state', () => ({ useTradingState: () => ({
 vi.mock('../lib/conditional/runtime', () => ({ runFlatten: m.run, flattenSummary: () => '完成摘要',
     remainingText: (r: { remaining: { code: string; quantity: number }[] }) => r.remaining.map(o => `${o.code} 仍有 ${o.quantity}`) }));
 vi.mock('../lib/conditional/flatten', async (orig) => ({ ...(await orig<typeof import('../lib/conditional/flatten')>()), loadFlattenPreview: m.preview }));
+vi.mock('../lib/protection-env', () => ({ currentProtectionEnv: () => m.env }));
 vi.mock('../lib/shioaji', () => ({}));
 vi.mock('../lib/trade', () => ({}));
 vi.mock('../lib/execution/background', () => ({ backgroundSupported: () => m.desktop, useBackgroundHealth: () => (m.desktop && m.reachable ? {} : null),
@@ -121,6 +122,43 @@ describe('FlattenDialog', () => {
         expect(text(r.root)).toContain('2330 仍有 7000');
         await act(async () => { button(r, '再平倉剩餘部位').props.onClick(); });
         expect(m.run).toHaveBeenLastCalledWith({ type: 'code', codes: ['2330'], account: acct });
+    });
+
+    it('再平倉 after a run across accounts: one run per account with only its products; never 全部帳戶 (review)', async () => {
+        const a1 = { account_type: 'S', broker_id: 'b', account_id: '1' };
+        const a2 = { account_type: 'S', broker_id: 'b2', account_id: '1' };
+        m.run.mockResolvedValueOnce({ stopped: 0, cancelled: 0, cancelFailed: [], sent: [], notSent: [], skipped: [],
+            remaining: [{ account: a1, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' },
+                { account: a2, code: '2317', action: 'Sell', quantity: 1000, market: 'stock' }] });
+        const r = render();
+        await settle();
+        await act(async () => { button(r, '全部帳戶').props.onClick(); });
+        await settle();
+        await act(async () => { button(r, '確認全平').props.onClick(); });
+        vi.advanceTimersByTime(500);
+        await act(async () => { button(r, '再按一次：確認全平').props.onClick(); });
+        m.run.mockClear();
+        await act(async () => { button(r, '再平倉剩餘部位').props.onClick(); });
+        expect(m.run.mock.calls.map(c => c[0])).toEqual([
+            { type: 'code', codes: ['2330'], account: a1 }, { type: 'code', codes: ['2317'], account: a2 }]);
+    });
+
+    it('再平倉 refuses after a server / mode switch (review)', async () => {
+        const acct = { account_type: 'S', broker_id: 'b', account_id: '1' };
+        m.run.mockResolvedValueOnce({ stopped: 0, cancelled: 0, cancelFailed: [], sent: [], notSent: [], skipped: [],
+            remaining: [{ account: acct, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' }] });
+        const r = render();
+        await settle();
+        await act(async () => { button(r, '確認全平').props.onClick(); });
+        vi.advanceTimersByTime(500);
+        await act(async () => { button(r, '再按一次：確認全平').props.onClick(); });
+        m.run.mockClear();
+        m.env = 'srv|production';
+        try {
+            await act(async () => { button(r, '再平倉剩餘部位').props.onClick(); });
+            expect(m.run).not.toHaveBeenCalled();
+            expect(text(r.root)).toContain('伺服器或模擬／正式模式已和全平時不同');
+        } finally { m.env = 'srv|simulation'; }
     });
 
     it('scope 全部帳戶 runs for every account', async () => {
