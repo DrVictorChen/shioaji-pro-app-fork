@@ -22,8 +22,8 @@ vi.mock('../lib/shioaji', () => ({ fetchInfo: () => new Promise(() => undefined)
 vi.mock('../lib/trade', () => ({ notify: m.notify }));
 vi.mock('../lib/bracket', () => ({ ensureBracketHost: m.host, registerBracket: m.register, registrationFailureText: String,
     validateBracketRequest: () => null }));
-vi.mock('./bracket-status', () => ({ BracketStatusList: () => null }));
-vi.mock('./conditional-panel', () => ({ ConditionalBracketCards: () => null }));
+vi.mock('./bracket-status', () => ({ BracketStatusList: () => createElement('section', { 'data-cards': 'window' }) }));
+vi.mock('./conditional-panel', () => ({ ConditionalBracketCards: () => createElement('section', { 'data-cards': 'background' }) }));
 vi.mock('../lib/execution/background', () => ({ backgroundOwnerForNew: m.owner, createBackgroundBracket: m.create }));
 vi.mock('../lib/protection-env', () => ({ currentProtectionEnv: () => 'http://127.0.0.1:1|simulation' }));
 vi.mock('../hooks/use-stream', () => ({ useQuote: () => ({ tick: { close: '100' } }), useTradingLive: () => true }));
@@ -103,4 +103,16 @@ it('a bracket the engine refused after the entry went out is said plainly, never
     expect(m.future).toHaveBeenCalledOnce();
     expect(feedback()).toContain('背景括號單未建立');
     expect(m.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '括號單保護未確認' }));
+});
+
+it('bracket cards come after the submit button, never above it', async () => {
+    await act(async () => { view = create(createElement(OrderTicket, { contract, onPlaced: vi.fn() })); });
+    const order: string[] = [];
+    const walk = (n: ReactTestInstance) => {
+        if (n.type === 'button' && /買進下單/.test(text(n))) order.push('submit');
+        if (n.type === 'section') order.push(String(n.props['data-cards']));
+        n.children.forEach(c => { if (typeof c !== 'string') walk(c); });
+    };
+    walk(view.root);
+    expect(order).toEqual(['submit', 'window', 'background']);
 });
