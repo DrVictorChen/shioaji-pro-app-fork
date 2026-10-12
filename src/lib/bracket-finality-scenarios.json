@@ -1,5 +1,5 @@
 {
-  "about": "#177 — when is an entry order final in an order listing refreshed this session (update_status)? One rule for the window bracket (src/lib/bracket-core.ts listingRowFinality) and the background engine (src-tauri execution/sidecar.rs row_evidence); both test suites read this file. working = may still fill; filled / ended = final; inconsistent = counts contradict each other, taken as no evidence.",
+  "about": "#177 — when is an entry order final in an order listing refreshed this session (update_status)? One rule for the window bracket (src/lib/bracket-core.ts listingRowFinality) and the background engine (src-tauri execution/sidecar.rs row_evidence); both test suites read this file. working = may still fill; filled / ended = final; inconsistent = counts contradict each other, taken as no evidence. reports: a 2-lot entry driven by its order / deal reports in order — a successful Cancel report (op_code 00) comes from the exchange and closes the entry's remaining quantity; a failed or code-less Cancel and an UpdateQty (a reduction) leave it open; a fill after the close is counted but never protected (未受保護). closed = the entry is over; protected = lots the bracket protects; unprotected = lots after the close.",
   "rows": [
     {
       "name": "Inactive (the SDK's placeholder before the broker answered) is still working",
@@ -538,6 +538,216 @@
         }
       },
       "expect": "ended"
+    }
+  ],
+  "reports": [
+    {
+      "name": "a successful Cancel closes the entry",
+      "steps": [
+        {
+          "op": "Cancel",
+          "opCode": "00"
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 0,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a failed Cancel leaves it open",
+      "steps": [
+        {
+          "op": "Cancel",
+          "opCode": "88"
+        }
+      ],
+      "expect": {
+        "closed": false,
+        "protected": 0,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a Cancel without op_code is no evidence",
+      "steps": [
+        {
+          "op": "Cancel",
+          "opCode": ""
+        }
+      ],
+      "expect": {
+        "closed": false,
+        "protected": 0,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a reduction (UpdateQty) never closes it",
+      "steps": [
+        {
+          "op": "UpdateQty",
+          "opCode": "00"
+        }
+      ],
+      "expect": {
+        "closed": false,
+        "protected": 0,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a fill after a reduction is still protected",
+      "steps": [
+        {
+          "op": "UpdateQty",
+          "opCode": "00"
+        },
+        {
+          "fill": "000001",
+          "quantity": 1
+        }
+      ],
+      "expect": {
+        "closed": false,
+        "protected": 1,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a fill after a failed Cancel is still protected",
+      "steps": [
+        {
+          "op": "Cancel",
+          "opCode": "88"
+        },
+        {
+          "fill": "000001",
+          "quantity": 1
+        }
+      ],
+      "expect": {
+        "closed": false,
+        "protected": 1,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a fill before the Cancel stays protected",
+      "steps": [
+        {
+          "fill": "000001",
+          "quantity": 1
+        },
+        {
+          "op": "Cancel",
+          "opCode": "00"
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 1,
+        "unprotected": 0
+      }
+    },
+    {
+      "name": "a fill after the Cancel is an anomaly: 未受保護, never protected",
+      "steps": [
+        {
+          "op": "Cancel",
+          "opCode": "00"
+        },
+        {
+          "fill": "000001",
+          "quantity": 1
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 0,
+        "unprotected": 1
+      }
+    },
+    {
+      "name": "one fill before and one after the Cancel",
+      "steps": [
+        {
+          "fill": "000001",
+          "quantity": 1
+        },
+        {
+          "op": "Cancel",
+          "opCode": "00"
+        },
+        {
+          "fill": "000002",
+          "quantity": 1
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 1,
+        "unprotected": 1
+      }
+    },
+    {
+      "name": "the same late fill twice counts once",
+      "steps": [
+        {
+          "op": "Cancel",
+          "opCode": "00"
+        },
+        {
+          "fill": "000001",
+          "quantity": 1
+        },
+        {
+          "fill": "000001",
+          "quantity": 1
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 0,
+        "unprotected": 1
+      }
+    },
+    {
+      "name": "a reduction, then the Cancel, then a fill",
+      "steps": [
+        {
+          "op": "UpdateQty",
+          "opCode": "00"
+        },
+        {
+          "op": "Cancel",
+          "opCode": "00"
+        },
+        {
+          "fill": "000001",
+          "quantity": 1
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 0,
+        "unprotected": 1
+      }
+    },
+    {
+      "name": "a failed New closes it",
+      "steps": [
+        {
+          "op": "New",
+          "opCode": "88"
+        }
+      ],
+      "expect": {
+        "closed": true,
+        "protected": 0,
+        "unprotected": 0
+      }
     }
   ]
 }

@@ -32,12 +32,13 @@ const F: AccountRef = { account_type: 'F', broker_id: 'fixture-broker-F', accoun
 const reports = (fixture as unknown[]).map(f => normalizeOrderEvent(f)!);
 const raws = fixture as unknown as { state: string; data: Record<string, Record<string, unknown>> }[];
 
-/** The entry's order report (fixture #1) as a Cancel with this op_code. */
-function cancelReport(opCode: string) {
+/** The entry's order report (fixture #1) as this operation with this op_code. */
+function orderReport(opType: string, opCode: string) {
     const raw = raws[1]!;
     return normalizeOrderEvent({ ...raw, data: { [raw.state]: { ...raw.data[raw.state],
-        operation: { op_type: 'Cancel', op_code: opCode, op_msg: opCode === '00' ? '' : '刪單失敗' } } } })!;
+        operation: { op_type: opType, op_code: opCode, op_msg: opCode === '00' ? '' : '失敗' } } } })!;
 }
+const cancelReport = (opCode: string) => orderReport('Cancel', opCode);
 
 function plan(over: Partial<BracketPlan> = {}): BracketPlan {
     return {
@@ -57,6 +58,21 @@ function row(status: string, deals: { seq: string; quantity: number }[], cancell
             deals: deals.map((d, i) => ({ ...d, price: 100, ts: i + 1 })) },
     } as unknown as Trade;
 }
+
+describe('shared with the background engine: a 2-lot entry driven by its reports', () => {
+    for (const c of shared.reports) {
+        it(c.name, () => {
+            let p = plan();
+            c.steps.forEach((step, i) => {
+                p = 'op' in step
+                    ? applyEntryOrderReport(p, orderReport(step.op!, step.opCode!), i + 1)
+                    : applyEntryFill(p, { orderId: 'fixture-f1', key: `fixture-f1:${step.fill}`, quantity: step.quantity! }, i + 1);
+            });
+            expect({ closed: p.entryClosed, protected: protectionQuantity(p), unprotected: unprotectedQuantity(p) })
+                .toEqual(c.expect);
+        });
+    }
+});
 
 describe('when the entry is over', () => {
     it('Inactive is still working, from the cache or a refreshed listing', () => {
