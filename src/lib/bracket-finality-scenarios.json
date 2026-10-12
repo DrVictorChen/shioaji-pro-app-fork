@@ -1,0 +1,470 @@
+{
+  "about": "#177 — when is an entry order final in an order listing refreshed this session (update_status)? One rule for the window bracket (src/lib/bracket-core.ts listingRowFinality) and the background engine (src-tauri execution/sidecar.rs row_evidence); both test suites read this file. working = may still fill; filled / ended = final; inconsistent = counts contradict each other, taken as no evidence.",
+  "rows": [
+    {
+      "name": "Inactive (the SDK's placeholder before the broker answered) is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Inactive"
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "Submitted without counts is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted"
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "Inactive with one of two lots filled is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Inactive",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "PendingSubmit with one of two lots filled is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "PendingSubmit",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "PreSubmitted with one of two lots filled is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "PreSubmitted",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "Submitted with one of two lots filled is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "PartFilled with one of two lots filled is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "PartFilled",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "SomethingNew with one of two lots filled is still working",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "SomethingNew",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "Filled, every lot filled",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Filled",
+          "cancel_quantity": 0,
+          "deal_quantity": 2,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 2
+            }
+          ]
+        }
+      },
+      "expect": "filled"
+    },
+    {
+      "name": "Filled what a reduction left (reduced by 1, then filled 1)",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Filled",
+          "cancel_quantity": 1,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "filled"
+    },
+    {
+      "name": "Cancelled with every count stated, accounting for every lot",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Cancelled",
+          "cancel_quantity": 1,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "ended"
+    },
+    {
+      "name": "Failed",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Failed",
+          "cancel_quantity": 0,
+          "deal_quantity": 0,
+          "deals": []
+        }
+      },
+      "expect": "ended"
+    },
+    {
+      "name": "Submitted with nothing left to work (all cancelled)",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "cancel_quantity": 2,
+          "deal_quantity": 0,
+          "deals": []
+        }
+      },
+      "expect": "ended"
+    },
+    {
+      "name": "Inactive with every lot cancelled has nothing left to work",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Inactive",
+          "cancel_quantity": 2,
+          "deal_quantity": 0,
+          "deals": []
+        }
+      },
+      "expect": "ended"
+    },
+    {
+      "name": "Submitted with one lot still open",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "cancel_quantity": 1,
+          "deal_quantity": 0,
+          "deals": []
+        }
+      },
+      "expect": "working"
+    },
+    {
+      "name": "Cancelled without the counts is no evidence",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Cancelled"
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "Cancelled whose counts leave a lot unaccounted is no evidence",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Cancelled",
+          "cancel_quantity": 1,
+          "deal_quantity": 0,
+          "deals": []
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "Filled without fills is no evidence",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Filled"
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "PartFilled without fills is no evidence",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "PartFilled",
+          "cancel_quantity": 0,
+          "deal_quantity": 0,
+          "deals": []
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "the same fill listed twice",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            },
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "deal_quantity that differs from the fills",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "deal_quantity": 2,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "order_quantity above the order",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "order_quantity": 3
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "cancelled beyond the order",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "cancel_quantity": 3
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "a fill without its sequence",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "deals": [
+            {
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "a zero-quantity fill",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 0
+            }
+          ]
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "deals that are not a list",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "deals": "x"
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "a quantity with a fraction",
+      "row": {
+        "order": {
+          "quantity": "2.5"
+        },
+        "status": {
+          "status": "Submitted"
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "a quantity as a whole-number string",
+      "row": {
+        "order": {
+          "quantity": "2.00"
+        },
+        "status": {
+          "status": "Filled",
+          "cancel_quantity": "0",
+          "deal_quantity": "2",
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": "2"
+            }
+          ]
+        }
+      },
+      "expect": "filled"
+    }
+  ]
+}

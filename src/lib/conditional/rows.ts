@@ -11,6 +11,7 @@ import {
     isLive,
     protectionQuantity,
     unprotectedQuantity,
+    lateFillQuantity,
     workingEntryAfterExit,
     type AccountRef,
     type BracketPlan,
@@ -304,6 +305,9 @@ function bracketStatus(p: BracketPlan, legs: TriggerOrder[], s: Sources): { text
         return { text: `已成交，停損停利尚未建立${p.issues.length ? `（${p.issues[p.issues.length - 1]!.detail}）` : ''}`, tone: 'err', attention: true };
     }
     if (p.exit?.status === 'unknown' && !p.exit.acknowledged) return { text: EXIT_TEXT.unknown!, tone: 'err', attention: true };
+    if (lateFillQuantity(p) > 0) {
+        return { text: `未受保護 ${unprotected} ${unit}：進場單結束後才成交，不會自動補保護，請核對持倉`, tone: 'err', attention: true };
+    }
     if (unprotected > 0) return { text: `未受保護 ${unprotected} ${unit}，請對帳後處理`, tone: 'err', attention: true };
     if (workingEntryAfterExit(p) > 0) return { text: `已出場，進場單仍有 ${workingEntryAfterExit(p)} ${unit}未成交`, tone: 'err', attention: true };
     if (p.exit && (p.exit.status === 'not-sent' || p.exit.status === 'incomplete')) {
