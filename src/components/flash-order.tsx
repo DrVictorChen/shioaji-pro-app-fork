@@ -18,7 +18,15 @@ import { creditEnquireCond, creditSideBlocks, creditStatus, prepareCreditOrder, 
 import { getApiBase } from '../lib/runtime';
 import { captureServerMode } from '../lib/server-info-store';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
-import { Ban, ChevronDown, Zap } from 'lucide-react';
+import { Ban, ChevronDown, Crosshair, ShieldCheck, Zap } from 'lucide-react';
+import { useFlashLadder } from '../hooks/use-flash-ladder';
+import { dayEnd, sessionEnd } from '../lib/conditional/session';
+import { getConditionalSettings } from '../lib/conditional/settings';
+import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, flashProtectPlan, flashProtectText, positionEffect,
+    protectConditionProblem, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf, triggerSendText, type LadderMark } from '../lib/flash-trigger';
+import type { TriggerValidity } from '../lib/trigger-engine';
+import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger } from '../lib/flash-conditional';
+import { FlashProtectStrip } from './flash-protect';
 import {
     type ReactNode,
     memo,
@@ -59,6 +67,60 @@ const keyOf = (p: number) => p.toFixed(2);
 const FOLLOW_GLOBAL = '__follow__';
 const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
 const CONTRACT_EXPIRED = '合約已到期，這筆沒有送出';
+const REVERSE_TEXT = '自動停損停利開啟時不送反手單（數量大於持倉）；請先平倉，或關閉自動停損停利';
+const NO_MARKS: LadderMark[] = [];
+
+/** 觸價單的預設有效期：條件單設定的「本盤／今日」 */
+function defaultValidity(futures: boolean, now = Date.now()): TriggerValidity {
+    const market = futures ? 'futures' : 'stock';
+    const type = getConditionalSettings().defaultValidity;
+    return { type, until: type === 'session' ? sessionEnd(now, market) : dayEnd(now, market) };
+}
+
+/** Marks of one side and price, grouped as the ladder shows them. */
+interface MarkGroup {
+    side: 'buy' | 'sell';
+    price: number;
+    marks: LadderMark[];
+}
+
+const markQty = (ms: LadderMark[]) => ms.reduce((n, m) => n + m.quantity, 0);
+
+function MarkChips({ side, price, marks, dragging, onMarkDown }: {
+    side: 'buy' | 'sell';
+    price: number;
+    marks: LadderMark[];
+    dragging: boolean;
+    onMarkDown: (g: MarkGroup, e: { button: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
+}) {
+    const triggers = marks.filter(m => m.kind === 'trigger');
+    const stops = marks.filter(m => m.kind === 'stop');
+    const takes = marks.filter(m => m.kind === 'take');
+    const trig = triggers.length > 0 && (
+        <button
+            type='button'
+            key='t'
+            data-testid='flash-trigger-mark'
+            className={`${styles.mark[side === 'buy' ? 'triggerBuy' : 'triggerSell']} ${triggers.every(m => m.editable) ? '' : styles.markLocked} ${
+                triggers.every(m => m.paused) ? styles.markPaused : ''} ${triggers.some(m => m.pending) ? styles.markPending : ''} ${dragging ? styles.markDragging : ''}`}
+            title={triggers.map(m => m.title).join('\n')}
+            onPointerDown={e => onMarkDown({ side, price, marks: triggers }, e)}
+            onClick={e => e.stopPropagation()}
+        >
+            {triggers.some(m => m.protects) ? <ShieldCheck size={8} aria-hidden /> : <Crosshair size={8} aria-hidden />}
+            {markQty(triggers)}
+        </button>
+    );
+    const prot = (ms: LadderMark[], kind: 'stop' | 'take') => ms.length > 0 && (
+        <span key={kind} data-testid={`flash-${kind}-mark`} className={`${styles.mark[kind]} ${ms.some(m => m.pending) ? styles.markPending : ''}`}
+            title={ms.map(m => m.title).join('\n')} onClick={e => e.stopPropagation()}>
+            {kind === 'stop' ? '損' : '利'}{markQty(ms)}
+        </span>
+    );
+    // the trigger sits on the outer edge (buy: left, sell: right)
+    const items = side === 'buy' ? [trig, prot(stops, 'stop'), prot(takes, 'take')] : [prot(stops, 'stop'), prot(takes, 'take'), trig];
+    return <span className={styles.markSlotSide[side]}>{items}</span>;
+}
 
 function accountChangedBeforeSend(error: unknown): boolean {
     return error instanceof Error && error.message === ACCOUNT_CHANGED_DURING_CONFIRMATION;
@@ -113,6 +175,14 @@ interface RowProps {
     compact: boolean;
     onCell: (action: Action, price: number) => void;
     onCancelAt: (action: Action, price: number) => void;
+    /** #216 觸價模式：點價＝掛觸價單 */
+    triggerMode: boolean;
+    buyMarks: LadderMark[];
+    sellMarks: LadderMark[];
+    /** this row is where a dragged trigger would go */
+    drop: 'ok' | 'bad' | null;
+    dragSide: 'buy' | 'sell' | null;
+    onMarkDown: (g: MarkGroup, e: { button: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
 }
 
 const FlashRow = memo(function FlashRow({
@@ -137,11 +207,17 @@ const FlashRow = memo(function FlashRow({
     compact,
     onCell,
     onCancelAt,
+    triggerMode,
+    buyMarks,
+    sellMarks,
+    drop,
+    dragSide,
+    onMarkDown,
 }: RowProps) {
     const vol = compact ? fmtCompactInt : fmtInt;
     const exact = (v: number | undefined) => (compact && v !== undefined && v >= 10_000 ? `${fmtInt(v)} 股` : undefined);
     return (
-        <div className={styles.row[isLast ? 'last' : 'normal']}>
+        <div className={`${styles.row[isLast ? 'last' : 'normal']} ${drop ? styles.dropRow[drop] : ''}`}>
             <div className={styles.chipCell}>
                 {buyFill > 0 && (
                     <span
@@ -163,7 +239,7 @@ const FlashRow = memo(function FlashRow({
             </div>
             <div
                 className={`${styles.buyCell} ${armed && !buyBlock ? '' : styles.disabledCell} ${buyBlock ? styles.blockedSide : ''}`}
-                title={buyBlock ?? (armed ? `${credit.buy}限價買 ${text}` : '先啟用閃電下單')}
+                title={buyBlock ?? (!armed ? '先啟用閃電下單' : triggerMode ? `觸價買 ${text}：成交價漲到（或跌到）${text} 時送出買單` : `${credit.buy}限價買 ${text}`)}
                 data-side='buy'
                 data-blocked={buyBlock ? true : undefined}
                 onClick={() => onCell('Buy', price)}
@@ -177,6 +253,7 @@ const FlashRow = memo(function FlashRow({
                 <span className={styles.cellText} title={exact(bid)}>
                     {bid !== undefined ? vol(bid) : ''}
                 </span>
+                {buyMarks.length > 0 && <MarkChips side='buy' price={price} marks={buyMarks} dragging={dragSide === 'buy'} onMarkDown={onMarkDown} />}
             </div>
             <div
                 className={`${styles.priceCell} ${
@@ -201,7 +278,7 @@ const FlashRow = memo(function FlashRow({
             </div>
             <div
                 className={`${styles.sellCell} ${armed && !sellBlock ? '' : styles.disabledCell} ${sellBlock ? styles.blockedSide : ''}`}
-                title={sellBlock ?? (armed ? `${credit.sell}限價賣 ${text}` : '先啟用閃電下單')}
+                title={sellBlock ?? (!armed ? '先啟用閃電下單' : triggerMode ? `觸價賣 ${text}：成交價跌到（或漲到）${text} 時送出賣單` : `${credit.sell}限價賣 ${text}`)}
                 data-side='sell'
                 data-blocked={sellBlock ? true : undefined}
                 onClick={() => onCell('Sell', price)}
@@ -215,6 +292,7 @@ const FlashRow = memo(function FlashRow({
                 <span className={styles.cellText} title={exact(ask)}>
                     {ask !== undefined ? vol(ask) : ''}
                 </span>
+                {sellMarks.length > 0 && <MarkChips side='sell' price={price} marks={sellMarks} dragging={dragSide === 'sell'} onMarkDown={onMarkDown} />}
             </div>
             <div className={styles.chipCell}>
                 {mySell > 0 && (
@@ -494,7 +572,18 @@ export function FlashOrder({
     const clickOrderType: OrderType = odd ? 'ROD' : panelOrder.orderType;
     const clickOctype: FuturesOCType | undefined = market === 'F' ? panelOrder.octype : undefined;
     const mktPriceType: 'MKT' | 'MKP' = market === 'F' ? panelOrder.futuresPriceType : 'MKT';
-    const orderKey = `${clickOrderType}:${clickOctype ?? ''}:${mktPriceType}`;
+    // #216 自動停損停利與觸價後送出方式也是面板的條件：一變就解除點價
+    const protect = panelOrder.protect ?? DEFAULT_PROTECT;
+    const triggerSendSetting = panelOrder.triggerSend ?? DEFAULT_TRIGGER_SEND;
+    const orderKey = `${clickOrderType}:${clickOctype ?? ''}:${mktPriceType}:${protect.on ? flashProtectText(protect) : 'off'}:${JSON.stringify(triggerSendSetting)}`;
+    // 自動停損停利開啟但目前條件不能附加：點價不送（不會改成無保護送出）
+    const protectBlock = protect.on
+        ? protectConditionProblem({ market, odd, creditCond: credit.cond, daytradeShort: credit.daytradeShort, octype: clickOctype })
+        : null;
+    // 觸價單觸發後只以現股送出（同 K 線圖，#263）
+    const triggerBlock = triggerConditionProblem({ market, creditCond: credit.cond, daytradeShort: credit.daytradeShort });
+    const protectRef = useRef({ protect, block: protectBlock });
+    protectRef.current = { protect, block: protectBlock };
     // 非預設才顯示標籤
     const orderTags = [
         ...(clickOrderType !== 'ROD' ? [clickOrderType] : []),
@@ -526,6 +615,16 @@ export function FlashOrder({
     // 零股約每 5 秒撮合一次 — 顯示最近一次撮合（零股成交）時間
     const oddMatchTime = odd ? fmtClock(oddQuote?.tick?.time) : '';
     const [armed, setArmed] = useState(false);
+    // #216 觸價模式：點價＝掛觸價單。鎖定（含 Esc、換商品／帳戶／條件）時一起關閉
+    const [triggerModeState, setTriggerMode] = useState(false);
+    const triggerMode = triggerModeState && !triggerBlock && !paused;
+    const triggerModeRef = useRef(triggerMode);
+    triggerModeRef.current = triggerMode;
+    const triggerRef = useRef({ setting: triggerSendSetting, block: triggerBlock });
+    triggerRef.current = { setting: triggerSendSetting, block: triggerBlock };
+    useEffect(() => {
+        if (!armed) setTriggerMode(false);
+    }, [armed]);
     const [anchor, setAnchor] = useState<number | null>(null);
     const [follow, setFollow] = useState(true);
     const [rowCount, setRowCount] = useState(21);
@@ -891,6 +990,16 @@ export function FlashOrder({
         return { net, avg, avgKey: keyOf(roundToTick(contract, avg)), pnl, safeExit, mixed, twoWay, stale, fifo: fifoOk };
     }, [positions, trades, contract, reconcilePending, lotLast]);
 
+    // #216 持倉換成下單單位（整股：張；零股：股；期貨：口），判斷進場／減倉／反手
+    const heldRef = useRef({ held: 0, exitSafe: false });
+    heldRef.current = { held: pos ? (market === 'S' && !odd ? pos.net / 1000 : pos.net) : 0, exitSafe: !!pos?.safeExit };
+    // 觸價方向只看真正的成交價（零股看零股成交），不拿參考價充數
+    const triggerPriceRef = useRef<number | null>(null);
+    triggerPriceRef.current = odd ? (oddQuote?.tick ? Number(oddQuote.tick.close) : null) : tradedLast;
+    const ladder = useFlashLadder({ code: contract.code, odd, account: activeAccount }, market === 'F');
+    const ladderBackgroundRef = useRef(ladder.background);
+    ladderBackgroundRef.current = ladder.background;
+
 
     // ---- order actions (all gated by the arm toggle) ----
 
@@ -938,6 +1047,54 @@ export function FlashOrder({
                 if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
                 if (!armedRef.current) throw new Error('閃電下單已鎖定，這筆沒有送出');
             }
+            const beforeSend = () => {
+                if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
+                if (pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
+                gate?.check();
+                // 確認期間合約更新（例如變成不可當沖）：照目前的規則再看一次
+                const nowBlocked = creditOn ? ruleBlockRef.current[action] : null;
+                if (nowBlocked) throw new Error(nowBlocked);
+                if (!accountMatches(accountRef.current, capturedAccount)) throw new Error('帳戶已變更，已停止後續下單');
+            };
+            // #216 自動停損停利：進場（開倉或加碼）附括號單；減倉照送不附；反手不送
+            const prot = protectRef.current;
+            const effect = positionEffect(heldRef.current.held, action, q);
+            if (prot.protect.on && effect !== 'reduce') {
+                if (prot.block) throw new Error(`${prot.block}（自動停損停利開啟中，這筆沒有送出）`);
+                if (effect === 'reverse') throw new Error(REVERSE_TEXT);
+                const refPrice = price ?? triggerPriceRef.current;
+                if (!refPrice) throw new Error('尚未收到成交價，無法計算停損停利，這筆沒有送出');
+                const background = ladderBackgroundRef.current;
+                const result = await flashPlaceBracket({
+                    contract: capturedContract,
+                    account: capturedAccount,
+                    action,
+                    entry: price === null ? { type: 'MKT' } : { type: 'LMT', price },
+                    plan: flashProtectPlan(prot.protect, q),
+                    refPrice,
+                    order: {
+                        orderType: clickOrder.orderType,
+                        ...(futures ? { octype: clickOrder.octype === 'New' ? 'New' as const : 'Auto' as const, futuresPriceType: clickOrder.priceType } : {}),
+                        beforeSend,
+                        isAccountCurrent: stillPanelAccount(capturedAccount),
+                        serverMode,
+                        confirmNote: `附自動停損停利（${flashProtectText(prot.protect)}${background ? '・背景執行' : ''}）`,
+                    },
+                });
+                if (result === 'placed' || result === 'trigger') {
+                    notify({
+                        kind: 'ok',
+                        title: `⚡ ${action === 'Buy' ? '買進' : '賣出'}已送出・附停損停利`,
+                        body: `${capturedContract.code} ${q} @ ${price === null ? '市價' : fmtPrice(price)}・${flashProtectText(prot.protect)}（成交後依成交價計算）`,
+                    });
+                } else if (!result.error.startsWith('進場單已送出')) {
+                    // nothing was sent (the entry-out case was already notified)
+                    throw new Error(result.error);
+                }
+                onOrdersChangedRef.current?.();
+                return;
+            }
             const trade = await placeQuickOrder(
                 capturedContract,
                 action,
@@ -950,16 +1107,7 @@ export function FlashOrder({
                     // 確認之後重新查可否融資券（不用快取）：確認期間變成 0 就不送；
                     // 查詢失敗照樣不擋（由券商端決定）
                     ...(gate?.afterConfirm ? { afterConfirm: gate.afterConfirm } : {}),
-                    beforeSend: () => {
-                        if (!isContextCurrent()) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
-                        if (expiredNow()) throw new Error(CONTRACT_EXPIRED);
-                        if (pausedRef.current) throw new Error(ORDER_CONTEXT_CHANGED_MESSAGE);
-                        gate?.check();
-                        // 確認期間合約更新（例如變成不可當沖）：照目前的規則再看一次
-                        const nowBlocked = creditOn ? ruleBlockRef.current[action] : null;
-                        if (nowBlocked) throw new Error(nowBlocked);
-                        if (!accountMatches(accountRef.current, capturedAccount)) throw new Error('帳戶已變更，已停止後續下單');
-                    },
+                    beforeSend,
                     ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
                     ...(creditOn ? { orderCond: clickCredit.cond, daytradeShort: clickCredit.daytradeShort } : {}),
                     // 委託條件：效期用於限價；期貨另帶倉別與市價鈕的價別
@@ -979,7 +1127,8 @@ export function FlashOrder({
                 title: `⚡ ${oddLot ? '零股' : ''}${label ?? ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
                 body: `${capturedContract.code} ${q}${oddLot ? ' 股' : ''} @ ${
                     price === null ? '市價' : fmtPrice(price)
-                }${conditions ? ` · ${conditions}` : ''} (${trade.status.status})`,
+                }${conditions ? ` · ${conditions}` : ''} (${trade.status.status})${
+                    prot.protect.on ? ' · 減倉，未附加停損停利' : ''}`,
             });
             onOrdersChangedRef.current?.();
         } catch (e) {
@@ -991,10 +1140,162 @@ export function FlashOrder({
         }
     }, [stillPanelAccount, captureContext]);
 
+    // #216 觸價模式：在點的價位掛觸價單（不是限價）。方向由成交價決定；
+    // 反向且數量在持倉內＝停損停利出場（不擋風控、期貨平倉），其他＝進場
+    // 觸價單（觸發時套用風控）；自動停損停利開啟的進場附括號單
+    const placeTriggerAt = useCallback(async (action: Action, price: number) => {
+        const capturedAccount = accountRef.current;
+        if (!armedRef.current || !triggerModeRef.current || !capturedAccount) return;
+        const capturedContract = contractRef.current;
+        const fail = (body: string) => notify({ kind: 'err', title: '⚡ 觸價單未建立', body });
+        if (pausedRef.current) return;
+        if (expiredNow()) { fail(CONTRACT_EXPIRED); return; }
+        const { setting, block } = triggerRef.current;
+        if (block) { fail(block); return; }
+        const condition = clickCondition(price, triggerPriceRef.current);
+        if (condition !== 'above' && condition !== 'below') { fail(condition); return; }
+        const oddLot = oddRef.current;
+        const futures = capturedContract.security_type !== 'STK';
+        const q = Math.max(1, qtyRef.current);
+        const clickOrder = orderRef.current;
+        const effect = positionEffect(heldRef.current.held, action, q);
+        const intent = triggerIntent({ market: futures ? 'F' : 'S', octype: clickOrder.octype, effect, exitSafe: heldRef.current.exitSafe });
+        const send = triggerSendOf(setting, { market: futures ? 'F' : 'S', odd: oddLot, mktPriceType: clickOrder.priceType, action });
+        const validity = defaultValidity(futures);
+        const key = `trigger:${oddLot ? 'odd:' : ''}${action}:${keyOf(price)}`;
+        if (inflightRef.current.has(key)) return;
+        inflightRef.current.add(key);
+        force();
+        try {
+            const prot = protectRef.current;
+            if (prot.protect.on && intent.role === 'entry' && effect !== 'reduce') {
+                if (prot.block) { fail(`${prot.block}（自動停損停利開啟中）`); return; }
+                if (effect === 'reverse') { fail(REVERSE_TEXT); return; }
+                const result = await flashPlaceBracket({
+                    contract: capturedContract,
+                    account: capturedAccount,
+                    action,
+                    entry: { type: 'touch', price, condition, send: send ?? { type: 'MKT' }, validity },
+                    plan: flashProtectPlan(prot.protect, q),
+                    refPrice: price,
+                    order: futures && clickOrder.octype === 'New' ? { octype: 'New' } : {},
+                });
+                if (typeof result === 'object') { fail(result.error); return; }
+                // the window engine announces its own triggers; the background one does not
+                if (ladderBackgroundRef.current) {
+                    notify({ kind: 'info', title: '⚡ 觸價單已掛・附停損停利（背景執行）', body: `${capturedContract.code} 成交價 ${condition === 'above' ? '≥' : '≤'} ${fmtPrice(price)} → ${action === 'Buy' ? '買' : '賣'} ${q}・${flashProtectText(prot.protect)}` });
+                }
+                return;
+            }
+            await flashAddTrigger({
+                code: capturedContract.code,
+                condition,
+                price,
+                action,
+                quantity: q,
+                kind: triggerKind(condition, action),
+                ...(intent.role === 'entry' ? { role: 'entry' as const } : {}),
+                ...(intent.octype ? { octype: intent.octype } : {}),
+                ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
+                ...(send ? { send } : {}),
+                validity,
+            }, capturedContract, capturedAccount);
+        } finally {
+            inflightRef.current.delete(key);
+            force();
+        }
+    }, []);
+
     const onCell = useCallback(
-        (action: Action, price: number) => void send(action, price),
-        [send],
+        (action: Action, price: number) => void (triggerModeRef.current ? placeTriggerAt(action, price) : send(action, price)),
+        [send, placeTriggerAt],
     );
+
+    // #216 梯形上的觸價單：點一下刪除，拖曳到別的價位改觸發價
+    const cancelMarks = useCallback(async (g: MarkGroup) => {
+        const editable = g.marks.filter(m => m.editable);
+        if (!editable.length) {
+            notify({ kind: 'info', title: '⚡ 觸價單', body: g.marks[0]?.title.split('\n')[0] ?? '請到條件單面板處理' });
+            return;
+        }
+        for (const m of editable) {
+            try {
+                await flashRemoveTrigger(m.id);
+            } catch (e) {
+                notify({ kind: 'err', title: '⚡ 觸價單刪除未確認', body: e instanceof Error ? e.message : String(e) });
+                return;
+            }
+        }
+        notify({ kind: 'info', title: '⚡ 已刪除觸價單', body: `${contractRef.current.code} @ ${fmtPrice(g.price)}・${markQty(editable)}` });
+    }, []);
+
+    const moveMarks = useCallback(async (g: MarkGroup, price: number) => {
+        if (!armedRef.current) {
+            notify({ kind: 'err', title: '⚡ 觸價單未改價', body: '先啟用閃電下單才能拖曳改價' });
+            return;
+        }
+        for (const m of g.marks) {
+            const problem = dragProblem(m, price, triggerPriceRef.current);
+            if (problem) { notify({ kind: 'err', title: '⚡ 觸價單未改價', body: problem }); return; }
+        }
+        if (Math.abs(price - g.price) < 1e-9) return;
+        for (const m of g.marks) {
+            try {
+                await flashModifyTrigger(m.id, { price });
+            } catch (e) {
+                notify({ kind: 'err', title: '⚡ 觸價單改價未完成', body: e instanceof Error ? e.message : String(e) });
+                return;
+            }
+        }
+        notify({ kind: 'ok', title: '⚡ 觸價單已改價', body: `${contractRef.current.code} ${fmtPrice(g.price)} → ${fmtPrice(price)}` });
+    }, []);
+
+    const [drag, setDrag] = useState<{ group: MarkGroup; over: number | null } | null>(null);
+    const dragCleanupRef = useRef<(() => void) | null>(null);
+    useEffect(() => () => dragCleanupRef.current?.(), []);
+    const onMarkDown = useCallback((g: MarkGroup, e: { button: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        dragCleanupRef.current?.();
+        const startY = e.clientY;
+        let moved = false;
+        const rowAt = (y: number): number | null => {
+            const el = bodyRef.current;
+            if (!el) return null;
+            const idx = Math.floor((y - el.getBoundingClientRect().top) / ROW_H);
+            return rowsRef.current[idx] ?? null;
+        };
+        const cleanup = () => {
+            window.removeEventListener('pointermove', move, true);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('keydown', esc, true);
+            dragCleanupRef.current = null;
+        };
+        const move = (ev: { clientY: number }) => {
+            if (!moved && Math.abs(ev.clientY - startY) < 4) return;
+            moved = true;
+            setDrag({ group: g, over: rowAt(ev.clientY) });
+        };
+        const up = (ev: { clientY: number }) => {
+            cleanup();
+            setDrag(null);
+            if (!moved) { void cancelMarks(g); return; }
+            const target = rowAt(ev.clientY);
+            if (target !== null) void moveMarks(g, target);
+        };
+        // Esc ends the drag only (the ladder stays armed)
+        const esc = (ev: KeyboardEvent) => {
+            if (ev.key !== 'Escape') return;
+            ev.preventDefault();
+            cleanup();
+            setDrag(null);
+        };
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('keydown', esc, true);
+        dragCleanupRef.current = cleanup;
+    }, [cancelMarks, moveMarks]);
 
     // 刪單送出前再確認：期間面板暫停或連動、商品變了就不送（不撤到上一檔的委託）
     const cancelGuard = useCallback(() => {
@@ -1268,6 +1569,8 @@ export function FlashOrder({
                             onCredit={next => { armedRef.current = false; setArmed(false); setPanelCredit(next); }}
                             onLot={next => { armedRef.current = false; setArmed(false); setPanelLot(next); }}
                             onOrder={next => { armedRef.current = false; setArmed(false); setPanelOrder(next); }}
+                            triggerSend={triggerSendSetting}
+                            onTriggerSend={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, triggerSend: next }); }}
                             onMore={() => openSettingsRef.current?.(menuTop)}
                             onClose={() => setMenuOpen(false)}
                         />
@@ -1331,13 +1634,34 @@ export function FlashOrder({
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
                     ) : armedView ? (
-                        <>
-                            <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
-                            點價即下單
-                        </>
+                        triggerMode ? (
+                            <>
+                                <Crosshair size={10} style={{ verticalAlign: '-1px' }} />{' '}
+                                點價即掛觸價
+                            </>
+                        ) : (
+                            <>
+                                <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
+                                點價即下單
+                            </>
+                        )
                     ) : (
                         '啟用閃電下單'
                     )}
+                </button>
+                <button
+                    type='button'
+                    className={styles.triggerBtn[triggerMode ? 'on' : 'off']}
+                    aria-pressed={triggerMode}
+                    data-testid='flash-trigger-mode'
+                    disabled={!!triggerBlock || !!paused}
+                    title={triggerBlock ?? (triggerMode
+                        ? '觸價模式：點買量／賣量在該價掛觸價單；再點一下回到限價'
+                        : `觸價模式：點價改為掛觸價單（觸發後${triggerSendText(triggerSendSetting, { market, odd, mktPriceType })}送出）；啟用閃電下單後才能掛`)}
+                    onClick={() => setTriggerMode(!triggerMode)}
+                >
+                    <Crosshair size={10} aria-hidden />
+                    觸價
                 </button>
                 <button
                     className={styles.followBtn[follow ? 'on' : 'off']}
@@ -1399,6 +1723,16 @@ export function FlashOrder({
                     全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}
                 </button>
             </div>
+            {!paused && (
+                <FlashProtectStrip
+                    protect={panelOrder.protect}
+                    block={protectBlock}
+                    protectedQty={ladder.protectedQty > 0 ? maskMoney(String(ladder.protectedQty), privMoney) : null}
+                    background={ladder.background}
+                    unit={market === 'F' ? '口' : odd ? '股' : '張'}
+                    onChange={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, protect: next }); }}
+                />
+            )}
             {pos && !paused && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
@@ -1441,16 +1775,22 @@ export function FlashOrder({
                     </span>
                 </div>
             )}
+            {triggerMode && (
+                <div className={styles.triggerBanner} data-testid='flash-trigger-banner'>
+                    <Crosshair size={10} aria-hidden />
+                    <span>觸價模式：點價＝掛觸價單（不是限價），觸發後{triggerSendText(triggerSendSetting, { market, odd, mktPriceType })}送出{protect.on && !protectBlock ? '，成交後附停損停利' : ''}</span>
+                </div>
+            )}
             <div className={styles.headRow}>
                 <span>買單</span>
-                <span>買量</span>
+                <span className={triggerMode ? styles.headTrigger : undefined}>{triggerMode ? '觸價買' : '買量'}</span>
                 <span>價格</span>
-                <span>賣量</span>
+                <span className={triggerMode ? styles.headTrigger : undefined}>{triggerMode ? '觸價賣' : '賣量'}</span>
                 <span>賣單</span>
             </div>
             <div
                 ref={bodyRef}
-                className={styles.ladderBody}
+                className={`${styles.ladderBody} ${triggerMode ? styles.ladderTrigger : ''}`}
                 onMouseEnter={() => {
                     hoverRef.current = true;
                 }}
@@ -1468,6 +1808,9 @@ export function FlashOrder({
                     const lv = book.get(key);
                     const mine = myOrders.get(key);
                     const fills = myFills.get(key);
+                    const lm = ladder.marks.get(key);
+                    const drop = drag && drag.over !== null && keyOf(drag.over) === key
+                        ? (drag.group.marks.some(m => dragProblem(m, price, triggerPriceRef.current)) ? 'bad' as const : 'ok' as const) : null;
                     return (
                         <FlashRow
                             key={key}
@@ -1498,6 +1841,12 @@ export function FlashOrder({
                             compact={odd}
                             onCell={onCell}
                             onCancelAt={onCancelAt}
+                            triggerMode={triggerMode}
+                            buyMarks={lm?.buy ?? NO_MARKS}
+                            sellMarks={lm?.sell ?? NO_MARKS}
+                            drop={drop}
+                            dragSide={drag && keyOf(drag.group.price) === key ? drag.group.side : null}
+                            onMarkDown={onMarkDown}
                         />
                     );
                 })}
@@ -1526,10 +1875,14 @@ export function FlashOrder({
             </div>
             )}
             <div className={styles.hint}>
-                {armedView
+                {armedView && triggerMode
+                    ? '點買量／賣量=在該價掛觸價單 · 點虛線標=刪除 · 拖曳=改觸發價 · Esc 鎖定'
+                    : armedView
                     ? odd
                         ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · 點單量=刪單 · Esc 鎖定`
                         : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買${orderSuffix}`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣${orderSuffix}`} · 點單量=刪單 · Esc 鎖定`
+                    : triggerMode
+                    ? '觸價模式 — 點「啟用閃電下單」後點價即掛觸價單 · 點虛線標=刪除'
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
             </div>
         </div>

@@ -4,6 +4,7 @@
 
 import { Check, Settings2 } from 'lucide-react';
 import type { FlashCond, FlashCredit, FlashLot, FlashOrderOpts } from '../lib/flash-account';
+import { TRIGGER_LIMIT_MAX_TICKS, type FlashTriggerSend } from '../lib/flash-trigger';
 import { FUTURES_OCTYPES, ORDER_TYPES, orderTypeDisabledReason } from '../lib/order-conditions';
 import * as styles from './flash-order.css';
 
@@ -43,7 +44,7 @@ function Seg<T extends string>({ label, items, value, disabled, onPick }: {
     );
 }
 
-export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, top, onCredit, onLot, onOrder, onMore, onClose }: {
+export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, top, onCredit, onLot, onOrder, onMore, onClose, triggerSend, onTriggerSend }: {
     market: 'S' | 'F';
     odd: boolean;
     lot: FlashLot;
@@ -58,6 +59,9 @@ export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, to
     onOrder: (o: FlashOrderOpts) => void;
     onMore: () => void;
     onClose: () => void;
+    /** #216 觸價單觸發後的送出方式 */
+    triggerSend?: FlashTriggerSend;
+    onTriggerSend?: (s: FlashTriggerSend) => void;
 }) {
     const pick = (fn: () => void) => () => { fn(); onClose(); };
     const oddOrderType = orderTypeDisabledReason('IOC', odd);
@@ -128,6 +132,31 @@ export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, to
                     </>
                 )}
                 <div className={styles.menuNote}>效期用於點價的限價單；市價鈕一律 IOC。</div>
+                {triggerSend && onTriggerSend && (
+                    <>
+                        <Seg
+                            label='觸價後'
+                            items={[
+                                { value: 'MKT', label: market === 'F' && order.futuresPriceType === 'MKP' ? '範圍市價' : '市價', disabled: odd },
+                                { value: 'LMT', label: '限價', disabled: odd, title: '觸發價往成交方向 N 檔的限價（買＋N、賣－N），ROD' },
+                            ] as const}
+                            value={triggerSend.type}
+                            disabled={odd ? '零股觸價單以漲跌停價限價送出' : null}
+                            onPick={type => onTriggerSend(type === 'LMT' ? { type: 'LMT', ticks: triggerSend.type === 'LMT' ? triggerSend.ticks : 2 } : { type: 'MKT' })}
+                        />
+                        {triggerSend.type === 'LMT' && !odd && (
+                            <div className={styles.menuSegRow} role='group' aria-label='觸價後限價檔數'>
+                                <span className={styles.menuSegLabel}>檔數</span>
+                                <button type='button' className={styles.menuSegBtn.off} aria-label='減一檔'
+                                    disabled={triggerSend.ticks <= 0} onClick={() => onTriggerSend({ type: 'LMT', ticks: Math.max(0, triggerSend.ticks - 1) })}>−</button>
+                                <span className={styles.menuDesc}>觸發價 ± {triggerSend.ticks} 檔</span>
+                                <button type='button' className={styles.menuSegBtn.off} aria-label='加一檔'
+                                    disabled={triggerSend.ticks >= TRIGGER_LIMIT_MAX_TICKS} onClick={() => onTriggerSend({ type: 'LMT', ticks: Math.min(TRIGGER_LIMIT_MAX_TICKS, triggerSend.ticks + 1) })}>＋</button>
+                            </div>
+                        )}
+                        <div className={styles.menuNote}>{odd ? '零股觸價單以漲跌停價限價送出。' : '觸價單（觸價模式）觸發後的送出方式。'}</div>
+                    </>
+                )}
                 {market === 'S' && (
                     <>
                         <div className={styles.menuSep} />

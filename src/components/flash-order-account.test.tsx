@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { expect, it, vi } from 'vitest';
+vi.mock('../hooks/use-flash-ladder', () => ({ useFlashLadder: () => ({ marks: new Map(), protectedQty: 0, background: false }) }));
 import type { Account } from '../lib/types/portfolio';
 import type { Trade } from '../lib/types/order';
 import type { ContractInfo } from '../lib/types/contract';

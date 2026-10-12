@@ -825,3 +825,220 @@ export const expiryTag = style({
     color: vars.color.danger,
     border: `1px solid ${vars.color.danger}`,
 });
+
+// ---- #216 觸價模式與梯形上的觸價單／停損停利 ----
+
+export const triggerBtn = styleVariants({
+    off: [
+        smallToggle,
+        {
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            color: vars.color.mutedForeground,
+            borderColor: vars.color.border,
+            background: 'transparent',
+            ':hover': { color: vars.color.foreground },
+            ':disabled': { opacity: 0.4, cursor: 'not-allowed' },
+        },
+    ],
+    on: [
+        smallToggle,
+        {
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            color: vars.color.amber,
+            borderColor: vars.color.amber,
+            borderStyle: 'dashed',
+            background: amberDim,
+            fontWeight: 700,
+        },
+    ],
+});
+
+// 觸價模式：欄名、梯形外框與可點的格子都改成琥珀色虛線，跟限價一眼可分
+export const headTrigger = style({
+    color: vars.color.amber,
+    fontWeight: 700,
+});
+
+export const ladderTrigger = style({
+    boxShadow: `inset 0 2px 0 ${vars.color.amber}, inset 2px 0 0 ${vars.color.amber}, inset -2px 0 0 ${vars.color.amber}`,
+});
+globalStyle(`${ladderTrigger} [data-side]:not([data-blocked]):hover`, {
+    background: amberDim,
+    outline: `1px dashed ${vars.color.amber}`,
+    outlineOffset: -2,
+});
+
+export const triggerBanner = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    padding: `2px ${vars.space.sm}`,
+    fontFamily: vars.font.body,
+    fontSize: '0.62rem',
+    lineHeight: 1.35,
+    color: vars.color.amber,
+    background: amberDim,
+    borderBottom: `1px dashed ${vars.color.amber}`,
+    flexShrink: 0,
+});
+
+// 標在買量／賣量格的外側邊緣（買：左、賣：右），不新增欄位
+const markSlot = style({
+    position: 'absolute',
+    top: 2,
+    bottom: 2,
+    zIndex: 2,
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: 2,
+});
+export const markSlotSide = styleVariants({
+    buy: [markSlot, { left: 2 }],
+    sell: [markSlot, { right: 2 }],
+});
+
+const markBase = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 2,
+    fontFamily: vars.font.mono,
+    fontSize: '0.6rem',
+    fontWeight: 700,
+    lineHeight: 1,
+    padding: '0 3px',
+    minWidth: '1.6rem',
+    justifyContent: 'center',
+    borderRadius: vars.radius.sm,
+    border: '1px solid',
+    whiteSpace: 'nowrap',
+    userSelect: 'none',
+    touchAction: 'none',
+});
+
+export const mark = styleVariants({
+    triggerBuy: [markBase, { color: vars.color.up, borderColor: vars.color.up, borderStyle: 'dashed', background: vars.color.panel, cursor: 'grab' }],
+    triggerSell: [markBase, { color: vars.color.down, borderColor: vars.color.down, borderStyle: 'dashed', background: vars.color.panel, cursor: 'grab' }],
+    stop: [markBase, { color: vars.color.amber, borderColor: vars.color.amber, background: amberDim, cursor: 'help' }],
+    take: [markBase, { color: vars.color.accent, borderColor: vars.color.accent, background: vars.color.accentDim, cursor: 'help' }],
+});
+
+export const markLocked = style({ cursor: 'help' });
+export const markPaused = style({ opacity: 0.45 });
+export const markPending = style({ background: amberDim, borderColor: vars.color.amber, color: vars.color.amber });
+export const markDragging = style({ opacity: 0.35 });
+
+// 拖曳中的目標列
+export const dropRow = styleVariants({
+    ok: { outline: `1px dashed ${vars.color.amber}`, outlineOffset: -1, background: amberDim },
+    bad: { outline: `1px dashed ${vars.color.danger}`, outlineOffset: -1 },
+});
+
+// ---- #216 自動停損停利 ----
+
+export const protectAnchor = style({
+    position: 'relative',
+    flexShrink: 0,
+    borderBottom: `1px solid ${vars.color.border}`,
+});
+
+const protectBase = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    width: '100%',
+    padding: `2px ${vars.space.sm}`,
+    fontFamily: vars.font.body,
+    fontSize: '0.62rem',
+    lineHeight: 1.35,
+    textAlign: 'left',
+    border: 'none',
+    cursor: 'pointer',
+    minWidth: 0,
+});
+
+export const protectStrip = styleVariants({
+    off: [protectBase, { color: vars.color.mutedForeground, background: 'transparent', ':hover': { color: vars.color.foreground } }],
+    on: [protectBase, { color: vars.color.success, background: 'rgba(34, 197, 94, 0.07)' }],
+    bad: [protectBase, { color: vars.color.danger, background: 'rgba(239, 68, 68, 0.08)' }],
+});
+
+export const protectLabel = style({ fontWeight: 700, whiteSpace: 'nowrap' });
+export const protectValue = style({ fontFamily: vars.font.mono, whiteSpace: 'nowrap' });
+export const protectMeta = style({ color: vars.color.mutedForeground, whiteSpace: 'nowrap' });
+export const protectWarn = style({ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 });
+export const protectChevron = style({ marginLeft: 'auto', flexShrink: 0 });
+
+export const protectMenu = style({
+    position: 'absolute',
+    top: 'calc(100% + 2px)',
+    left: 6,
+    right: 6,
+    zIndex: 41,
+    maxWidth: '20rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    padding: 6,
+    fontFamily: vars.font.body,
+    fontSize: '0.68rem',
+    color: vars.color.foreground,
+    background: vars.color.panelRaised,
+    border: `1px solid ${vars.color.borderBright}`,
+    borderRadius: vars.radius.md,
+    boxShadow: '0 12px 30px rgba(0, 0, 0, 0.35)',
+});
+
+export const protectHead = style({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    fontWeight: 700,
+    padding: '2px 4px 4px',
+    borderBottom: `1px solid ${vars.color.border}`,
+});
+
+export const protectRow = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '2px 4px',
+    whiteSpace: 'nowrap',
+});
+
+export const protectSub = style({
+    padding: '0 4px 2px 22px',
+    lineHeight: 1.8,
+    color: vars.color.mutedForeground,
+});
+
+export const protectInput = style({
+    width: '2.6rem',
+    fontFamily: vars.font.mono,
+    fontSize: '0.7rem',
+    textAlign: 'center',
+    color: vars.color.foreground,
+    background: vars.color.inset,
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    padding: '1px 3px',
+    outline: 'none',
+    ':focus': { borderColor: vars.color.accent },
+    ':disabled': { opacity: 0.4 },
+});
+
+export const protectError = style({
+    padding: '2px 4px',
+    fontSize: '0.62rem',
+    color: vars.color.danger,
+});
+
+export const protectActions = style({
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: 4,
+    padding: '4px 4px 0',
+});
