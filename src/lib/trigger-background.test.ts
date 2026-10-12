@@ -734,3 +734,26 @@ describe('#226 stocks in the background (step 5)', () => {
         expect(created()).toHaveLength(0);
     });
 });
+
+describe('#226 step 5 review', () => {
+    it('editing a stock 觸價 bracket keeps it a stock bracket; a 零股 time order shows shares', async () => {
+        const base = program({ entry: { type: 'touch', condition: 'above', price: 600, order: { priceType: 'MKT', timeInForce: 'IOC', stockCond: 'Cash', stockLot: 'Common' } },
+            exit: null, qty: 1, side: 'Buy' });
+        const binding = { ...base.binding, account: { ...base.binding.account, accountType: 'S' as const },
+            contract: { market: 'stock' as const, quoteCode: '2330', orderCode: '2330', securityType: 'STK' as const } };
+        const tier = { ...base.levels[0]!, id: 'T1', exit: { type: 'oco' as const, stop: null, take: null,
+            order: { priceType: 'MKT' as const, timeInForce: 'IOC' as const, stockCond: 'Cash' as const, stockLot: 'Common' as const } },
+            entry: { type: 'tier' as const, of: 'L1', offset: 0, index: 0 }, rules: { stopTicks: 3, takeTicks: 5 } };
+        const odd = { ...program({ entry: { type: 'time', at: Date.now() + 60_000, order: { priceType: 'MKT', timeInForce: 'ROD', stockLot: 'IntradayOdd', stockCond: 'Cash' } },
+            qty: 300 }), id: 'trg:odd', binding };
+        m.programs = [{ ...base, id: 'bkt-s', kind: 'bracket', opens: true, binding, levels: [base.levels[0]!, tier] }, odd];
+        m.ensure.mockImplementation(async () => ({ ...STK, exchange: 'TSE' }));
+        await boot();
+        await bg.refreshBackground();
+        const rows = engine.getDisplayTriggers();
+        expect(rows.find(r => r.id === 'bg:trg:odd:L1')).toMatchObject({ orderLot: 'IntradayOdd', quantity: 300 });
+        await engine.modifyTrigger('bg:bkt-s:L1', { price: 610 }).catch(() => undefined);
+        const req = calls('execution_replace_bracket')[0]![1] as { request: { binding: { contract: { securityType: string; market: string } } } };
+        expect(req.request.binding.contract).toMatchObject({ securityType: 'STK', market: 'stock' });
+    });
+});

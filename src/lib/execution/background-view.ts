@@ -232,6 +232,7 @@ function timeRow(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
         createdAt: p.createdAt,
         time: e.flatten ? { kind: 'flatten', at: e.at, scope: e.flatten } : { kind: 'send', at: e.at },
         ...(e.order.priceType === 'MKP' ? { send: { type: 'MKP' as const } } : {}),
+        ...(e.order.stockLot === 'IntradayOdd' ? { orderLot: 'IntradayOdd' as const } : {}),
         ...(p.opens ? { role: 'entry' as const } : {}),
         ...(p.status === 'paused' ? { paused: true } : {}),
         background: { programId: p.id, levelId: lv.id },

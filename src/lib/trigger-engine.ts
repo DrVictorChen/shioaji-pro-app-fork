@@ -1064,7 +1064,9 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
     // never armed already crossed: refused here (a crossing one waits for a
     // new crossing anyway), and the engine's first tick decides like a
     // restore (already past → 待確認)
-    const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[row.code] ?? lastPrices.get(row.code);
+    // the price this condition watches (a trade, or 零股 trades; 對手價 is left to the engine)
+    const key = priceKeyOf(next);
+    const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[key] ?? lastPrices.get(key);
     if (!next.cross && latest !== undefined && isPast(next, latest)) throw new Error(`新的觸發價已穿過目前價格（${latest}），沒有修改`);
     if (original.kind === 'bracket') {
         // a panel bracket whose 觸價 entry did not fire: the engine builds the new one
@@ -1072,7 +1074,7 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
         const plan = row.bracketPlan;
         if (!table || !plan) throw new Error('背景執行：跳動點級距尚未取得，無法修改括號單，請稍後再試');
         const request = panelBracketRequest({ env: row.env!, account: row.account!, quoteCode: row.code, orderCode: row.orderCode!,
-            securityType: contract.security_type === 'OPT' ? 'OPT' : 'FUT', action: row.action,
+            securityType: contract.security_type === 'OPT' ? 'OPT' : contract.security_type === 'STK' ? 'STK' : 'FUT', action: row.action,
             plan: { ...plan, tiers: patch.quantity !== undefined ? scaleTiers(plan.tiers, patch.quantity) : plan.tiers },
             tickTable: table, entry: { trigger: { condition: next.condition, price: next.price, send: next.send ?? { type: 'MKT' },
                 ...(next.validity ? { validity: next.validity } : {}) } } });
