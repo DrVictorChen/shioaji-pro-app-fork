@@ -487,10 +487,10 @@ describe('#226 conditional orders in the background (step 1: triggers)', () => {
         expect(created()).toHaveLength(1);
     });
 
-    it('OCO groups, time orders and brackets by trigger stay in this window', async () => {
+    it('a trigger that places a window bracket stays in this window (the panel sends background brackets itself)', async () => {
         m.enabled = true;
         await boot();
-        await engine.addTrigger(entry({ time: { kind: 'send', at: Date.now() + 60_000 } }), TXF1 as never);
+        await engine.addTrigger(entry({ bracketPlan: { tiers: [{ quantity: 1, takeTicks: 5 }], stopTicks: 4, trail: null, breakeven: null } }), TXF1 as never);
         expect(created()).toHaveLength(0);
         expect(engine.getTriggers()).toHaveLength(1);
     });
@@ -642,5 +642,36 @@ describe('#226 括號單 with a 觸價 entry in the background (step 3)', () => 
                 trail: { activateTicks: 5, distanceTicks: 3, stepTicks: 1 }, breakeven: null } });
         await engine.removeTrigger(row!.id);
         expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'bkt-x' }]);
+    });
+});
+
+describe('#226 時間條件 in the background (step 4)', () => {
+    it('指定時間送單 and 收盤前平倉 become time programs; rows show them as the window does', async () => {
+        m.enabled = true;
+        await boot();
+        const at = Date.now() + 3_600_000;
+        await engine.addTrigger({ code: 'TXFR1', condition: 'below', price: 0, action: 'Buy', quantity: 2, kind: 'stop', role: 'entry',
+            send: { type: 'MKP' }, time: { kind: 'send', at } }, TXF as never);
+        await engine.addTrigger({ code: 'TXFR1', condition: 'below', price: 0, action: 'Sell', quantity: 0, kind: 'stop',
+            time: { kind: 'flatten', at, scope: 'account' } }, TXF as never);
+        expect(engine.getTriggers()).toHaveLength(0);
+        const [send, flat] = calls('execution_create').map(([, a]) => (a as { program: OrderProgram }).program);
+        expect(send).toMatchObject({ opens: true, levels: [{ qty: 2, side: 'Buy', entry: { type: 'time', at, order: { priceType: 'MKP', timeInForce: 'IOC' } } }] });
+        expect(flat!.opens).toBeUndefined();
+        expect(flat!.levels[0]).toMatchObject({ qty: 1, entry: { type: 'time', at, flatten: 'account' } });
+        m.programs = [send!, flat!];
+        await bg.refreshBackground();
+        const rows = engine.getDisplayTriggers();
+        expect(rows.map(r => r.time)).toEqual([{ kind: 'send', at }, { kind: 'flatten', at, scope: 'account' }]);
+        expect(rows[1]!.quantity).toBe(0);
+    });
+
+    it('a time order sending a limit stays in this window (no price to step from)', async () => {
+        m.enabled = true;
+        await boot();
+        await engine.addTrigger({ code: 'TXFR1', condition: 'below', price: 0, action: 'Buy', quantity: 1, kind: 'stop', role: 'entry',
+            send: { type: 'LMT', ticks: 1 }, time: { kind: 'send', at: Date.now() + 60_000 } }, TXF as never);
+        expect(calls('execution_create')).toHaveLength(0);
+        expect(engine.getTriggers()).toHaveLength(1);
     });
 });

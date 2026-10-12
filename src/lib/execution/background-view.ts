@@ -39,7 +39,9 @@ export function backgroundRowId(programId: string, levelId: string): string {
 export function backgroundEligible(t: NewTrigger, contract: ContractBase | undefined, inGroup = false): boolean {
     if (t.kind !== 'stop' && t.kind !== 'take') return false;
     // #226 options the background engine does not have yet
-    if (t.time || t.bracketPlan) return false;
+    if (t.bracketPlan) return false;
+    // 時間條件: 指定時間送單 at market / range market, or 收盤前平倉 (futures)
+    if (t.time && (t.group || (t.time.kind === 'send' && t.send?.type === 'LMT'))) return false;
     // 二擇一 legs go together (backgroundGroupEligible)
     if (!inGroup && (t.group || t.ocoMode)) return false;
     if (t.bracketId || (t.orderLot && t.orderLot !== 'Common')) return false;
@@ -63,6 +65,22 @@ function sendOrder(base: OrderSpec, send: TriggerSend | undefined): OrderSpec {
     if (!send || send.type === 'MKT') return { priceType: 'MKT', timeInForce: 'IOC', ...octype };
     if (send.type === 'MKP') return { priceType: 'MKP', timeInForce: 'IOC', ...octype };
     return { priceType: 'LMT', timeInForce: 'ROD', ...octype };
+}
+
+/** #226 時間條件: 指定時間送單 (an opening order: risk checks) or 收盤前平倉
+ * (全平並取消 of the product / account, run by the engine at the time). */
+function programForTimeTrigger(t: TriggerOrder, contract: ContractBase): OrderProgram | null {
+    if (!t.time || (contract.security_type !== 'FUT' && contract.security_type !== 'OPT')) return null;
+    const flatten = t.time.kind === 'flatten';
+    // a flatten closes whatever is held: its own quantity is unused
+    const p = programsFromTriggers([{ ...t, quantity: flatten ? 1 : t.quantity }])[0];
+    const lv = p?.levels[0];
+    if (!p || !lv || p.levels.length !== 1) return null;
+    const order: OrderSpec = t.send?.type === 'MKP' ? { priceType: 'MKP', timeInForce: 'IOC' } : { priceType: 'MKT', timeInForce: 'IOC' };
+    const entry = { type: 'time' as const, at: t.time.at, order, ...(t.time.kind === 'flatten' ? { flatten: t.time.scope } : {}) };
+    const at = t.createdAt ?? Date.now();
+    return { ...p, binding: { ...p.binding, contract: { ...p.binding.contract, securityType: contract.security_type } },
+        levels: [{ ...lv, entry, recross: [] }], ...(t.role === 'entry' && !flatten ? { opens: true } : {}), createdAt: at, updatedAt: at };
 }
 
 /** #226 二擇一: both legs (same group, environment, account and contract,
@@ -100,6 +118,7 @@ export function programForNewGroup(legs: readonly TriggerOrder[], contract: Cont
 /** The program a new stop / take / entry trigger becomes (null: not
  * mappable — e.g. a limit in ticks without a tick table). */
 export function programForNewTrigger(t: TriggerOrder, contract: ContractBase, tickTable: TickBand[] | null = null): OrderProgram | null {
+    if (t.time) return programForTimeTrigger(t, contract);
     const p = programsFromTriggers([t])[0];
     if (!p || (contract.security_type !== 'FUT' && contract.security_type !== 'OPT')) return null;
     const lv = p.levels[0];
@@ -133,6 +152,7 @@ const kindOf = (condition: 'below' | 'above', action: 'Buy' | 'Sell'): 'stop' | 
     (condition === 'below') === (action === 'Sell') ? 'stop' : 'take';
 
 function row(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
+    if (lv.entry.type === 'time') return timeRow(p, lv);
     if (lv.entry.type !== 'touch') return null;
     const e = lv.entry;
     const b = p.binding;
@@ -167,6 +187,31 @@ function row(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
         // 二擇一: one group per program; a waiting side names the row it waits for
         ...(p.ocoLevels ? { group: p.id, ocoMode: p.ocoMode === 'fill' ? 'fill' as const : 'trigger' as const } : {}),
         ...(lv.ocoLock ? { ocoLock: backgroundRowId(p.id, lv.ocoLock) } : {}),
+        background: { programId: p.id, levelId: lv.id },
+    };
+}
+
+/** A background 時間條件 as the window shows it (armed only). */
+function timeRow(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
+    const e = lv.entry;
+    if (e.type !== 'time' || lv.phase !== 'idle') return null;
+    const b = p.binding;
+    return {
+        id: backgroundRowId(p.id, lv.id),
+        code: b.contract.quoteCode,
+        condition: 'below',
+        price: 0,
+        action: lv.side,
+        quantity: e.flatten ? 0 : lv.qty,
+        kind: 'stop',
+        env: envKeyOf(b),
+        account: accountRef(b.account),
+        orderCode: b.contract.orderCode,
+        createdAt: p.createdAt,
+        time: e.flatten ? { kind: 'flatten', at: e.at, scope: e.flatten } : { kind: 'send', at: e.at },
+        ...(e.order.priceType === 'MKP' ? { send: { type: 'MKP' as const } } : {}),
+        ...(p.opens ? { role: 'entry' as const } : {}),
+        ...(p.status === 'paused' ? { paused: true } : {}),
         background: { programId: p.id, levelId: lv.id },
     };
 }

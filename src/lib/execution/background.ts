@@ -426,7 +426,7 @@ const swept = new Map<string, number>(); // program id → version already tried
  * engine's change event refreshes the list). */
 function housekeeping() {
     for (const p of programs) {
-        if (p.kind !== 'trigger' || !programFinished(p) || removing.has(p.id) || swept.get(p.id) === p.version) continue;
+        if ((p.kind !== 'trigger' && p.kind !== 'flatten') || !programFinished(p) || removing.has(p.id) || swept.get(p.id) === p.version) continue;
         swept.set(p.id, p.version);
         // a failed request is tried again on the next refresh
         void invoke<CommandReply>('execution_remove', { programId: p.id }).catch(() => { swept.delete(p.id); });
@@ -475,7 +475,10 @@ const NOTICE_TEXT: Record<string, string> = {
     notSent: '背景觸價單未送出',
     unknown: '背景觸價單送出結果不明（不會自動重送）',
     'session.lapsed': '背景觸價單：盤別已結束',
-    expired: '背景條件單已到期，沒有送出',
+    expired: '背景條件單已到期或時間已過，沒有送出',
+    'flatten.started': '收盤前平倉：背景執行開始全平並取消',
+    'flatten.done': '收盤前平倉：背景執行全平並取消已完成',
+    'flatten.failed': '收盤前平倉：背景執行沒有完成，請手動處理',
     'ledger.failed': '背景執行資料無法寫入，已停止',
     'partition.failed': '背景執行資料無法寫入，已停止',
 };
@@ -487,7 +490,7 @@ const BRACKET_FIRED_TEXT: Record<string, string> = {
     unknown: '背景括號單出場送出結果不明（不會自動重送）',
 };
 
-const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'expired', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
+const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'expired', 'flatten.started', 'flatten.done', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
 
 let pendingInstalled = false;
 function onFirstStatus() {
@@ -495,6 +498,21 @@ function onFirstStatus() {
     if (!pendingInstalled) {
         pendingInstalled = true;
         installPendingConfirmBackend(createTauriPendingConfirmBackend());
+    }
+}
+
+/** The engine's 全平並取消 started (`detail`: its account and codes): this
+ * window's own conditional orders in that scope stop too (best effort; the
+ * engine's are stopped already). */
+async function stopWindowConditionals(detail: string): Promise<void> {
+    try {
+        const d = JSON.parse(detail) as { account: { accountType: 'F' | 'S'; brokerId: string; accountId: string }; codes: string[] | null };
+        const account = { account_type: d.account.accountType, broker_id: d.account.brokerId, account_id: d.account.accountId };
+        const { stopConditionalInScope } = await import('../conditional/runtime');
+        const r = await stopConditionalInScope(d.codes ? { type: 'code', codes: d.codes, account } : { type: 'account', account });
+        if (r.failed.length) notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有全部停止', body: r.failed.join('；') });
+    } catch (e) {
+        notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有停止', body: e instanceof Error ? e.message : String(e) });
     }
 }
 
@@ -561,6 +579,8 @@ export function startBackgroundExecution(): void {
         if (main) {
             void listen<Notice[]>('execution://notice', e => {
                 for (const n of e.payload ?? []) {
+                    // 收盤前平倉 run by the engine: this window stops its own conditional orders in scope
+                    if (n.code === 'flatten.started') { void stopWindowConditionals(n.detail); continue; }
                     const owner = programs.find(p => p.id === n.programId);
                     // a panel bracket's entry level (its 觸價 entry) is no exit
                     const entryLevel = !!owner && owner.levels.some(lv => lv.id === n.levelId && lv.exit === null);
