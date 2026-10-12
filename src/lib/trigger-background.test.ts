@@ -16,6 +16,7 @@ const SIM = 'http://sim.invalid|simulation';
 const m = vi.hoisted(() => ({
     tick: [] as ((t: { code: string; close: number; simtrade?: boolean }) => void)[],
     bidask: [] as ((b: { code: string; bid_price: string[]; ask_price: string[] }) => void)[],
+    pins: [] as string[],
     place: vi.fn(),
     notify: vi.fn(),
     ensure: vi.fn(),
@@ -43,7 +44,8 @@ vi.mock('./stream', () => ({
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: [S1, F1], selectedStock: S1, selectedFutures: F1 }) }));
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
-vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
+vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined,
+    pinQuote: (c: { code: string }, type: string) => { m.pins.push(`${c.code}|${type}`); return () => { m.pins = m.pins.filter(x => x !== `${c.code}|${type}`); }; } }));
 vi.mock('./trading-state', () => ({ refreshTradingState: m.refresh, getTradingState: () => m.trading }));
 vi.mock('./shioaji', () => ({ fetchTrades: async () => [] }));
 vi.mock('./protection-env', () => ({
@@ -104,6 +106,7 @@ beforeEach(() => {
     vi.stubGlobal('BroadcastChannel', undefined);
     m.tick = [];
     m.bidask = [];
+    m.pins = [];
     m.enabled = false;
     m.programs = [];
     for (const f of [m.place, m.notify, m.ensure, m.invoke]) f.mockReset();
@@ -441,6 +444,19 @@ describe('#226 conditional orders in the background (step 1: triggers)', () => {
         const [row] = engine.getDisplayTriggers();
         expect(engine.priceKeyOf(row!)).toBe('TXFR1#bid');
         expect(bg.getBackgroundPrices()['TXFR1#bid']).toBe(19795);
+    });
+
+    it('the main window keeps the book subscribed for a 對手價 condition (not only ticks)', async () => {
+        m.programs = [program({ entry: { type: 'touch', condition: 'below', price: 19800, feed: 'bid',
+            order: { priceType: 'MKT', timeInForce: 'IOC' } } })];
+        await boot();
+        await bg.refreshBackground();
+        await flush();
+        expect([...m.pins].sort()).toEqual(['TXFR1|BidAsk', 'TXFR1|Tick']);
+        m.programs = [program(), { ...program(), id: 'trg:p2' }]; // the 對手價 one is gone (a new revision)
+        await bg.refreshBackground();
+        await flush();
+        expect(m.pins).toEqual(['TXFR1|Tick']);
     });
 
     it('the rows show the options as the window shows them', async () => {

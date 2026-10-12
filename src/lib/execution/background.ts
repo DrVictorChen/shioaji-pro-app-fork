@@ -416,22 +416,31 @@ function housekeeping() {
 }
 
 const quoteHolds = new Map<string, { release?: () => void }>();
-/** Keep the tick feed of the current environment's background triggers
- * retained by this window (the engine subscribes it too). */
+/** Keep the feeds of the current environment's background triggers
+ * retained by this window (the engine subscribes them too): ticks, and the
+ * book of 對手價 conditions — closing the last chart or quote panel never
+ * unsubscribes what a background condition watches. */
 function syncQuotes() {
     const env = currentProtectionEnv();
-    const codes = new Set(programs.filter(p => p.status !== 'stopped' && envKeyOf(p.binding) === env)
-        .map(p => p.binding.contract.quoteCode));
-    for (const [code, hold] of quoteHolds) {
-        if (!codes.has(code)) { hold.release?.(); quoteHolds.delete(code); }
+    const wanted = new Map<string, { code: string; type: 'Tick' | 'BidAsk' }>();
+    for (const p of programs) {
+        if (p.status === 'stopped' || envKeyOf(p.binding) !== env) continue;
+        const code = p.binding.contract.quoteCode;
+        wanted.set(`${code}|Tick`, { code, type: 'Tick' });
+        if (p.levels.some(lv => lv.phase !== 'done' && lv.entry.type === 'touch' && lv.entry.feed)) {
+            wanted.set(`${code}|BidAsk`, { code, type: 'BidAsk' });
+        }
     }
-    for (const code of codes) {
-        if (quoteHolds.has(code)) continue;
+    for (const [key, hold] of quoteHolds) {
+        if (!wanted.has(key)) { hold.release?.(); quoteHolds.delete(key); }
+    }
+    for (const [key, { code, type }] of wanted) {
+        if (quoteHolds.has(key)) continue;
         const hold: { release?: () => void } = {};
-        quoteHolds.set(code, hold);
+        quoteHolds.set(key, hold);
         void ensureContract(code).then(contract => {
-            if (quoteHolds.get(code) === hold) hold.release = pinQuote(contract, 'Tick');
-        }).catch(() => { if (quoteHolds.get(code) === hold) quoteHolds.delete(code); });
+            if (quoteHolds.get(key) === hold) hold.release = pinQuote(contract, type);
+        }).catch(() => { if (quoteHolds.get(key) === hold) quoteHolds.delete(key); });
     }
 }
 
