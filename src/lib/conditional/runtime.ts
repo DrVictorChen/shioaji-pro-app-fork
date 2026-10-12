@@ -143,9 +143,11 @@ export async function pauseAll(pause: boolean): Promise<{ changed: number; faile
         if (pause && !pauseAllEligible(t, exitsToo)) continue;
         try { await setTriggerPaused(t.id, pause); changed += 1; } catch (e) { failed.push(`${t.code}：${e instanceof Error ? e.message : String(e)}`); }
     }
+    const done = new Set<string>(); // pause / resume act on the whole program (all its tiers)
     for (const v of bracketViews(getBackgroundPrograms())) {
         const can = pause ? v.actions.pause : v.actions.resume;
-        if (!can) continue;
+        if (!can || done.has(v.programId)) continue;
+        done.add(v.programId);
         try {
             await (pause ? pauseBackgroundProgram(v.programId) : resumeBackgroundProgram(v.programId));
             changed += 1;

@@ -561,7 +561,10 @@ export function startBackgroundExecution(): void {
         if (main) {
             void listen<Notice[]>('execution://notice', e => {
                 for (const n of e.payload ?? []) {
-                    const bracket = programs.find(p => p.id === n.programId)?.kind === 'bracket'
+                    const owner = programs.find(p => p.id === n.programId);
+                    // a panel bracket's entry level (its 觸價 entry) is no exit
+                    const entryLevel = !!owner && owner.levels.some(lv => lv.id === n.levelId && lv.exit === null);
+                    const bracket = (owner?.kind === 'bracket' && !entryLevel)
                         || n.code.startsWith('bracket.') || n.code === 'protectedAgain';
                     const title = bracket ? (BRACKET_NOTICE_TEXT[n.code] ?? BRACKET_FIRED_TEXT[n.code]) : NOTICE_TEXT[n.code];
                     if (title) notify({ kind: INFO_NOTICES.has(n.code) ? 'info' : 'err', title, body: n.detail });
