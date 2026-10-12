@@ -528,6 +528,12 @@ async function stopWindowConditionals(detail: string): Promise<void> {
         // an order that just went out may have armed new protection: stop again
         const again = drained ? await stopConditionalInScope(scope) : { stopped: 0, failed: [] as string[] };
         const failed = [...r.failed, ...again.failed];
+        // an exit whose outcome is unknown may still be live at the broker: the user decides first
+        const { getExits } = await import('../trigger-engine');
+        const { inScope } = await import('../conditional/flatten');
+        if (getExits().some(e => e.status === 'unknown' && !e.acknowledged && inScope(scope, e.account, e.orderCode))) {
+            failed.push('本視窗有觸價單送出結果不明，請先核對');
+        }
         ok = drained && failed.length === 0;
         why = failed.length ? failed.join('；') : drained ? '' : '本視窗有條件單仍在送單';
     } catch (e) {
@@ -549,7 +555,17 @@ export async function beginWindowFlatten(): Promise<boolean> {
     }
 }
 
+/** Keep the hold while the window's 全平並取消 runs (the engine only takes
+ * over a hold not renewed for two minutes: a closed window). */
+export const FLATTEN_RENEW_MS = 30_000;
+let renewTimer: ReturnType<typeof setInterval> | null = null;
+export function keepWindowFlatten(): void {
+    if (!isTauri || renewTimer) return;
+    renewTimer = setInterval(() => { void invoke<boolean>('execution_flatten_renew').catch(() => undefined); }, FLATTEN_RENEW_MS);
+}
+
 export async function endWindowFlatten(): Promise<void> {
+    if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
     if (!isTauri) return;
     await invoke<void>('execution_flatten_end').catch(() => undefined);
 }
