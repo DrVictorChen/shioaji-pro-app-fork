@@ -5,7 +5,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({ place: vi.fn(), register: vi.fn(), add: vi.fn(), create: vi.fn(), owner: 'background' as unknown,
-    notify: vi.fn() }));
+    notify: vi.fn(), risk: { enabled: false, maxDailyLoss: 0 } }));
+vi.mock('../risk', () => ({ getRiskSettings: () => m.risk }));
 vi.mock('../bracket', () => ({ ensureBracketHost: vi.fn(), registerBracket: m.register, registrationFailureText: (e: unknown) => String(e) }));
 vi.mock('../protection-env', () => ({ currentProtectionEnv: () => 'http://x|simulation' }));
 vi.mock('../trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
@@ -25,6 +26,7 @@ const plan = { tiers: [{ quantity: 1, takeTicks: 10 }, { quantity: 2, takeTicks:
 beforeEach(() => {
     for (const f of [m.place, m.register, m.add, m.create, m.notify]) f.mockReset();
     m.owner = 'background';
+    m.risk = { enabled: false, maxDailyLoss: 0 };
     m.create.mockResolvedValue('created');
     m.place.mockResolvedValue({ order: { id: 'E1', seqno: 'S1', ordno: '' }, contract: { code: 'TXFR1', target_code: 'TXFJ6' } });
 });
@@ -98,5 +100,18 @@ describe('panel bracket in the background', () => {
         expect(request).toMatchObject({ binding: { account: { accountType: 'S' }, contract: { market: 'stock', securityType: 'STK' } },
             trigger: { order: { priceType: 'MKT', timeInForce: 'IOC', stockCond: 'Cash', stockLot: 'Common' } } });
         expect(request.tickTable[4]).toEqual({ min: 500, max: 1000, tick: 1 });
+    });
+
+    it('stock: a sell bracket, or an immediate entry under a daily loss limit, sends nothing', async () => {
+        const STK = { code: '2330', security_type: 'STK', exchange: 'TSE' };
+        const SA = { ...A, account_type: 'S' };
+        const one = { ...plan, trail: null, breakeven: null, tiers: [{ quantity: 1, takeTicks: 10 }] };
+        const sell = await placePanelBracket({ contract: STK as never, account: SA as never, action: 'Sell', plan: one, refPrice: 600, entry: { type: 'MKT' } });
+        expect(sell).toEqual({ error: expect.stringContaining('股票賣出括號單') });
+        m.risk = { enabled: true, maxDailyLoss: 5000 };
+        const buy = await placePanelBracket({ contract: STK as never, account: SA as never, action: 'Buy', plan: one, refPrice: 600, entry: { type: 'MKT' } });
+        expect(buy).toEqual({ error: expect.stringContaining('股票帳戶的當日損益') });
+        expect(m.place).not.toHaveBeenCalled();
+        expect(m.create).not.toHaveBeenCalled();
     });
 });

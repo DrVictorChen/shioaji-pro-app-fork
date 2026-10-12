@@ -105,6 +105,17 @@ export async function placePanelBracket(r: PanelBracketRequest): Promise<'placed
 async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, env: string): Promise<'placed' | 'trigger' | { error: string }> {
     const c = r.contract as PanelBracketRequest['contract'] & { tick_rule?: string; tick?: number };
     const st = c.security_type === 'OPT' ? 'OPT' as const : c.security_type === 'STK' ? 'STK' as const : 'FUT' as const;
+    // a stock sell bracket's exits would buy back unchecked: not in the background
+    if (st === 'STK' && r.action === 'Sell') return { error: '背景執行：股票賣出括號單（出場為買進）目前不支援，請關閉背景持續執行改用本視窗' };
+    // a stock entry opens a position: with a daily loss limit set the stock
+    // account's day P&L is needed, which is not known here (as the engine refuses)
+    const stockLossLimit = async () => {
+        if (st !== 'STK') return false;
+        const { getRiskSettings } = await import('../risk');
+        const s = getRiskSettings();
+        return s.enabled && s.maxDailyLoss > 0;
+    };
+    const LOSS_LIMIT_TEXT = '設了當日虧損上限，但股票帳戶的當日損益無法取得，股票括號單的進場單不送出';
     const bands = c.tick_rule && st !== 'STK' ? await ensureTickBands(c.tick_rule, st) : undefined;
     const tickTable = tickTableOf(c, bands);
     if (!tickTable) return { error: '背景執行：跳動點級距尚未取得，無法依成交價計算停損停利，請稍後再試' };
@@ -119,12 +130,17 @@ async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, 
         return { error: 'refused' in created ? `背景執行：${created.refused}`
             : `背景執行：建立結果未確認（${created.unconfirmed}）；請先看清單是否已有這張，不要直接重掛` };
     }
+    if (await stockLossLimit()) return { error: LOSS_LIMIT_TEXT };
+    const { getRiskSettings } = st === 'STK' ? await import('../risk') : { getRiskSettings: null };
     let sentAt = Date.now();
     const trade = await placeQuickOrder(r.contract, r.action, r.entry.type === 'LMT' ? r.entry.price : null, qty, {
         source: 'manual', // 下單確認設定照常適用
         account: r.account,
         beforeSend: () => {
             if (currentProtectionEnv() !== env) throw new Error('伺服器或模擬／正式模式已切換，進場單未送出');
+            // the limit may have been set while the confirmation was open
+            const s = getRiskSettings?.();
+            if (s && s.enabled && s.maxDailyLoss > 0) throw new Error(LOSS_LIMIT_TEXT);
             // when it really leaves (after the order confirmation): its trading session
             sentAt = Date.now();
         },
