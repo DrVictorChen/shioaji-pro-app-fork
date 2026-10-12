@@ -5,7 +5,7 @@ import type { BackgroundTriggerOrder } from '../execution/background-view';
 import type { BracketView } from '../execution/bracket-contract';
 import { mockPendingConfirmItem } from '../execution/pending-confirm-mock';
 import type { EndedTrigger, ExitRecord, TriggerOrder } from '../trigger-engine';
-import { conditionText, projectRows, rowsForTab, type Sources } from './rows';
+import { conditionText, projectRows, rowRunner, rowsForTab, type Sources } from './rows';
 
 const ENV = 'http://sim.invalid|simulation';
 const F = { account_type: 'F' as const, broker_id: 'b', account_id: 'a1' };
@@ -140,4 +140,28 @@ describe('projectRows', () => {
         expect(odd.rows[0]).toMatchObject({ attention: true, status: { tone: 'err' } });
         expect(odd.rows[0]!.status.text).toContain('刪單成功後仍收到成交');
     });
+
+    it('an ended background bracket offers no pause / resume even when its program is paused (QA 10/12)', () => {
+        const v: BracketView = {
+            programId: 'bkt-9', levelId: 'l0', rearm: false, origin: 'entry', anomalous: 0, env: ENV, account: { accountType: 'F', brokerId: 'b', accountId: 'a1' },
+            quoteCode: 'TXFR1', orderCode: 'TXFJ6', side: 'Buy', quantity: 1, stop: 48000, take: null, state: 'done', paused: true,
+            held: null, entryFilled: 1, position: 0, unprotected: 0, exit: null, pendingLeg: null, attention: false,
+            actions: { markHandled: false, rearm: false, decide: false, pause: false, resume: true, remove: true },
+            detail: null, createdAt: NOW - 100, updatedAt: NOW - 50,
+        };
+        const row = projectRows(sources({ bgBrackets: [v] })).ended[0]!;
+        expect(row.actions).toMatchObject({ pause: false, resume: false, cancel: true });
+        expect(row.paused).toBe(false);
+        expect(rowRunner(row)).toBeNull();
+    });
+
+    it('rowRunner: background engine rows vs window rows', () => {
+        const live = projectRows(sources({ triggers: [
+            { id: 't-w', code: 'TXFR1', orderCode: 'TXFR1', condition: 'below', price: 1, action: 'Sell', quantity: 1, kind: 'stop', env: ENV, account: null, createdAt: 1 } as never,
+        ] }));
+        expect(rowRunner(live.rows[0]!)).toBe('window');
+        const bg = { ...live.rows[0]!, source: { type: 'trigger' as const, trigger: { ...(live.rows[0]!.source as { trigger: object }).trigger, background: { programId: 'p' } } as never } };
+        expect(rowRunner(bg)).toBe('background');
+    });
 });
+
