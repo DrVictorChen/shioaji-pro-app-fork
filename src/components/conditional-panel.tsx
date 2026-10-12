@@ -7,6 +7,8 @@
 // never shows which engine runs a row.
 
 import {
+    AppWindow,
+    ChevronRight,
     CircleAlert,
     CircleCheck,
     Crosshair,
@@ -17,6 +19,7 @@ import {
     Pencil,
     Play,
     Plus,
+    Server,
     TriangleAlert,
     X,
 } from 'lucide-react';
@@ -45,9 +48,9 @@ import {
     type HistoryEntry,
     type TriggerOrder,
 } from '../lib/trigger-engine';
-import { accountTag, bgBracketRows, KIND_LABEL, rowsForTab, TABS, type CondRow, type CondTab } from '../lib/conditional/rows';
+import { accountTag, bgBracketRows, KIND_LABEL, rowRunner, rowsForTab, TABS, type CondRow, type CondTab } from '../lib/conditional/rows';
 import { useConditionalView, useStreamStatus, type ConditionalView } from '../lib/conditional/use-conditional';
-import { useBackgroundPrograms } from '../lib/execution/background';
+import { useBackgroundPrograms, useBackgroundSetting } from '../lib/execution/background';
 import { bracketViews } from '../lib/execution/bracket-contract';
 import { fmtClock, fmtNum } from '../lib/conditional/session';
 import type { ContractInfo } from '../lib/types/contract';
@@ -56,6 +59,9 @@ import { BracketRearm } from './background-bracket-status';
 import { NewConditionalDialog, SendControl, sendOf, ValidityControl, validityOf, type SendState, type ValidityState } from './conditional-form';
 import { useLastPrice } from './conditional-ui';
 import * as styles from './conditional-panel.css';
+
+/** Window event: show (or open) the 條件單管理 panel. */
+export const OPEN_CONDITIONAL_PANEL_EVENT = 'sj:open-conditional-panel';
 
 /** Width below which the panel switches to cards (dock / narrow column). */
 export const NARROW_PX = 640;
@@ -160,6 +166,22 @@ function SideText({ side }: { side: CondRow['side'] }) {
 function AccountText({ row }: { row: CondRow }) {
     const priv = usePrivacyMode();
     return <span className={styles.muted}>{accountTag(row.account, id => maskAccountId(id, priv))}</span>;
+}
+
+/** Where a row keeps running — shown only while 「背景持續執行（實驗）」 is
+ * on (panel-created orders stay on the window engine on purpose). */
+export const RUNNER_TEXT = { background: '關閉視窗後仍執行', window: '只在視窗開著時執行' } as const;
+
+function RunnerTag({ row }: { row: CondRow }) {
+    const on = useBackgroundSetting() === true;
+    const runner = on ? rowRunner(row) : null;
+    if (!runner) return null;
+    const Icon = runner === 'background' ? Server : AppWindow;
+    return (
+        <span className={styles.runner[runner]} title={RUNNER_TEXT[runner]} aria-label={RUNNER_TEXT[runner]} role='img'>
+            <Icon size={11} aria-hidden />
+        </span>
+    );
 }
 
 // ---- actions ----
@@ -544,14 +566,14 @@ function TableRow({ row, expanded, onToggle }: { row: CondRow; expanded: boolean
         <>
             <tr className={cls || undefined}>
                 <td><ProductCell row={row} /></td>
-                <td>{KIND_LABEL[row.kind]}</td>
+                <td>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></td>
                 <td><SideText side={row.side} /></td>
                 <td className={styles.mono}>{row.condition}</td>
-                <td><PriceCell row={row} /></td>
+                <td className={styles.colPrice}><PriceCell row={row} /></td>
                 <td className={styles.tone[row.status.tone]}>{row.status.text}</td>
-                <td className={styles.muted}>{row.validity}</td>
-                <td><AccountText row={row} /></td>
-                <td><RowActions row={row} expanded={expanded} onToggle={onToggle} /></td>
+                <td className={`${styles.muted} ${styles.colValidity}`}>{row.validity}</td>
+                <td className={styles.colAccount}><AccountText row={row} /></td>
+                <td className={styles.opsCell}><RowActions row={row} expanded={expanded} onToggle={onToggle} /></td>
             </tr>
             {expanded && (
                 <tr className={styles.expand}>
@@ -574,8 +596,9 @@ function Table({ rows, ended, expanded, onToggle }: {
         <table className={styles.table}>
             <thead>
                 <tr>
-                    <th>商品</th><th>類型</th><th>方向／數量</th><th>條件</th><th>現價／距離</th>
-                    <th>狀態</th><th>{ended ? '結束時間' : '有效期'}</th><th>帳戶</th><th className={styles.thRight}>操作</th>
+                    <th>商品</th><th>類型</th><th>方向／數量</th><th>條件</th><th className={styles.colPrice}>現價／距離</th>
+                    <th>狀態</th><th className={styles.colValidity}>{ended ? '結束時間' : '有效期'}</th>
+                    <th className={styles.colAccount}>帳戶</th><th className={`${styles.thRight} ${styles.opsCell}`}>操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -602,7 +625,7 @@ function Card({ row, expanded, onToggle }: { row: CondRow; expanded: boolean; on
         <div className={row.attention ? styles.card.alert : expanded ? styles.card.selected : styles.card.plain}>
             <div className={styles.cardHead}>
                 <ProductCell row={row} />
-                <span>{KIND_LABEL[row.kind]}</span>
+                <span>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></span>
                 <SideText side={row.side} />
                 <span className={styles.grow} />
                 {!row.attention && <span className={styles.tone[row.status.tone]}>{row.status.text}</span>}
@@ -715,18 +738,31 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
 }
 
 /** Background brackets of one product as panel cards (under the order
- * ticket); the same rows and actions as the 條件單管理面板. */
+ * ticket's submit button); the same rows and actions as the 條件單管理面板.
+ * Ended ones collapse into a count with a way to the panel, so they never
+ * pile up in the ticket. */
 export function ConditionalBracketCards({ code }: { code: string }) {
     const programs = useBackgroundPrograms();
     const stream = useStreamStatus();
     const [expanded, setExpanded] = useState<string | null>(null);
-    const rows = useMemo(() => bgBracketRows(bracketViews(programs), stream === 'live')
-        .filter(r => (r.code === code || r.orderCode === code) && (!r.ended || r.actions.cancel)), [programs, stream, code]);
-    if (rows.length === 0) return null;
+    const all = useMemo(() => bgBracketRows(bracketViews(programs), stream === 'live')
+        .filter(r => r.code === code || r.orderCode === code), [programs, stream, code]);
+    if (all.length === 0) return null;
+    const rows = all.filter(r => !r.ended);
+    const ended = all.length - rows.length;
+    const main = isMainWindow();
     return (
         <div className={styles.cards} aria-label='括號單（條件單管理）'>
             {rows.map(r => <Card key={r.id} row={r} expanded={expanded === r.id} onToggle={() => setExpanded(e => e === r.id ? null : r.id)} />)}
-            <div className={styles.muted} style={{ padding: '0 8px' }}>完整清單請開「條件單管理」面板</div>
+            <div className={styles.cardsFoot}>
+                {ended > 0 && <span>已結束 {ended} 張</span>}
+                {main ? (
+                    <button type='button' className={styles.linkButton}
+                        onClick={() => window.dispatchEvent(new Event(OPEN_CONDITIONAL_PANEL_EVENT))}>
+                        {ended > 0 ? '在條件單管理查看' : '完整清單在條件單管理'}<ChevronRight size={12} aria-hidden />
+                    </button>
+                ) : <span>完整清單請開「條件單管理」面板</span>}
+            </div>
         </div>
     );
 }
