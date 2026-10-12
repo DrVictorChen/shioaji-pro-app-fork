@@ -88,6 +88,14 @@ async function futuresRootName(canonical: string): Promise<string | null> {
             bestLen = root.length;
         }
     }
+    if (!best) return null;
+    // 已到期下市的合約（例如 QEFG6）不在目前合約清單裡：照合約名稱慣例
+    // 「商品名稱＋兩位數月份」補上月份（TMFJ6 → 微型臺指期貨10）
+    const month = /^([A-L])\d$/.exec(canonical.slice(bestLen));
+    if (month) {
+        const mm = MONTH_CODES.indexOf(month[1] ?? "") + 1;
+        return `${best}${String(mm).padStart(2, '0')}`;
+    }
     return best;
 }
 
