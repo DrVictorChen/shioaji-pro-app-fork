@@ -64,14 +64,21 @@ describe('resolveRealizedName (#286)', () => {
         expect(api.resolveContract).not.toHaveBeenCalled();
     });
 
-    it('falls back to the futures root name when no contract matches', async () => {
-        await expect(resolveRealizedName('NSFJ6', 'F')).resolves.toBe('美國那斯達克100期貨');
+    it('falls back to the root name plus month for expired contracts not in the list', async () => {
+        // 已到期下市（例如 QEFG6、RVFG6）查不到合約：商品名稱＋兩位數月份
+        await expect(resolveRealizedName('NSFJ6', 'F')).resolves.toBe('美國那斯達克100期貨10');
+        await expect(resolveRealizedName('TXFG6', 'F')).resolves.toBe('臺股期貨07');
+    });
+
+    it('falls back to the bare root name when the tail is not month+year', async () => {
+        await expect(resolveRealizedName('TXF', 'F')).resolves.toBeNull();
+        await expect(resolveRealizedName('TXFX', 'F')).resolves.toBe('臺股期貨');
     });
 
     it('returns null for unknown stock rows, and retries roots after a failure', async () => {
         await expect(resolveRealizedName('9999', 'S')).resolves.toBeNull();
         api.fetchFuturesRoots.mockRejectedValueOnce(new Error('offline'));
         await expect(resolveRealizedName('NSFJ6', 'F')).resolves.toBeNull();
-        await expect(resolveRealizedName('NSFJ6', 'F')).resolves.toBe('美國那斯達克100期貨');
+        await expect(resolveRealizedName('NSFJ6', 'F')).resolves.toBe('美國那斯達克100期貨10');
     });
 });
