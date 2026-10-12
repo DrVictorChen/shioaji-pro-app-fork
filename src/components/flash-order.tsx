@@ -1,4 +1,5 @@
 import { canTrade } from '../lib/account-tradable';
+import { reconcileAfterUnknownOutcome, reportOrderError } from '../lib/order-outcome';
 import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // src/components/flash-order.tsx — 閃電下單 price ladder (DOM trader).
@@ -985,7 +986,7 @@ export function FlashOrder({
             onOrdersChangedRef.current?.();
         } catch (e) {
             if (accountChangedBeforeSend(e)) notifyAccountChangedBeforeSend();
-            else notify({ kind: 'err', title: '⚡ 閃電下單失敗', body: e instanceof Error ? e.message : String(e) });
+            else reportOrderError('⚡ 閃電下單', e, notify);
         } finally {
             inflightRef.current.delete(key);
             force();
@@ -1093,7 +1094,10 @@ export function FlashOrder({
             if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
             // 確定一筆都沒送出（例如確認期間伺服器模式變更）：照實說未送出
             else if ((error as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）', body: error instanceof Error ? error.message : String(error) });
-            else notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+            else {
+                notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+                reconcileAfterUnknownOutcome();
+            }
         } finally { inflightRef.current.delete(key); }
     }, [pos, stillPanelAccount, captureContext]);
 

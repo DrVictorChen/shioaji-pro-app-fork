@@ -4,6 +4,7 @@
 // moves so the ladder keeps its distance. Grid orders are tagged with
 // custom_field so only our own orders are touched.
 
+import { reportOrderError } from '../lib/order-outcome';
 import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from '../lib/server-info-store';
 import { canTrade } from '../lib/account-tradable';
 
@@ -342,11 +343,8 @@ export function GridTicket({
                 } });
                 ok += 1;
             } catch (e) {
-                notify({
-                    kind: 'err',
-                    title: `鋪單失敗 @${fmtPrice(price)}`,
-                    body: e instanceof Error ? e.message : String(e),
-                });
+                // 結果不確定就停止後續鋪單：先對帳，不在閘道異常時繼續送
+                if (reportOrderError(`鋪單 @${fmtPrice(price)} `, e, notify) === 'unknown') break;
                 if ((e as { tradingGateRejected?: boolean })?.tradingGateRejected) break;
             }
         }
