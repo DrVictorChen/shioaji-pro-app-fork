@@ -28,7 +28,9 @@ import { markStage } from './startup-timing';
 // marked with its own duration, so a slow `positions-loaded` shows whether
 // the broker/sidecar was slow or the page was. No-op without an active run;
 // accounts are named by type and order only (S1, F1), never by id.
-async function timedRead<T>(label: string, read: () => Promise<T>): Promise<T> {
+// A read dropped only because the first known mode arrived meanwhile is
+// reread at once (#287): it is marked `superseded`, never `failed`.
+async function timedRead<T>(label: string, read: () => Promise<T>, superseded?: () => boolean): Promise<T> {
     const start = Date.now();
     let ok = false;
     try {
@@ -36,7 +38,7 @@ async function timedRead<T>(label: string, read: () => Promise<T>): Promise<T> {
         ok = true;
         return value;
     } finally {
-        markStage('account-read', `${label} ${Date.now() - start}ms${ok ? '' : ' failed'}`);
+        markStage('account-read', `${label} ${Date.now() - start}ms${ok ? '' : superseded?.() ? ' superseded' : ' failed'}`);
     }
 }
 function accountLabel(account: Account, accounts: Account[]): string {
@@ -356,10 +358,20 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
     const readOrders = targets.includes('orders');
     const readAccount = targets.includes('account');
     let ordersRead = false;
+    let reread = false;
     const run: Promise<void> = inFlight = (async () => {
         if (resyncInFlight) await resyncInFlight;
         const query = createAccountQuery();
         const queryAccount = (account: Account) => query.account(account.account_type as 'S' | 'F', account);
+        // #287: the boot snapshot can start before the first /info answer
+        // (early stream). Learning the mode for the first time bumps the mode
+        // version and drops these reads in 0 ms; that is not a failed query.
+        // Record nothing and reread under the now-known mode instead. A change
+        // between two known modes still fails closed below.
+        const modeKnownAtStart = typeof knownServerInfo()?.simulation === 'boolean';
+        const superseded = () => !modeKnownAtStart && getServerModeVersion() !== query.version
+            && typeof knownServerInfo()?.simulation === 'boolean';
+        const timed = <T>(label: string, read: () => Promise<T>) => timedRead(label, read, superseded);
         const before = eventSequence;
         const connectionBefore = connectionEpoch;
         const clockBefore = reasonClock;
@@ -373,7 +385,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
         try {
             let subscribed = true;
             if (readPositions || readOrders) {
-                try { await timedRead('subscribe', () => subscribeTradeReports()); }
+                try { await timed('subscribe', () => subscribeTradeReports()); }
                 catch (e) {
                     subscribed = false;
                     const message = e instanceof Error ? e.message : String(e);
@@ -396,7 +408,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                     if (readPositions) try {
                         const positionStart = eventSequence;
                         const hadSnapshot = snapshotEnds.has(accountKey(account));
-                        const positions = await timedRead(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', queryAccount(account)));
+                        const positions = await timed(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', queryAccount(account)));
                         queryAccount(account);
                         if (positionStart === eventSequence || !hadSnapshot) {
                             snapshotEnds.set(accountKey(account), Date.now() / 1000);
@@ -415,7 +427,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                     if (readOrders) try {
                         // Initial/manual reconciliation stays authoritative:
                         // refresh:true runs update_status(account) (accounting quota).
-                        const trades = await timedRead(`${accountLabel(account, accounts)} orders`, () => fetchTrades(account.account_type as 'S' | 'F', queryAccount(account), { refresh: true }));
+                        const trades = await timed(`${accountLabel(account, accounts)} orders`, () => fetchTrades(account.account_type as 'S' | 'F', queryAccount(account), { refresh: true }));
                         queryAccount(account);
                         // A kept (not rebuilt) view resolves nothing.
                         if (!mergeOrders(account, trades, accounts, problems.orders)) { ordersOk = false; failed.add('orders'); }
@@ -432,8 +444,8 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         const previous = state.funds?.find(f => accountKey(f.account) === accountKey(account));
                         try {
                             const value = account.account_type === 'S'
-                                ? { balance: await timedRead(`${accountLabel(account, accounts)} balance`, () => fetchAccountBalance(queryAccount(account))) }
-                                : { margin: await timedRead(`${accountLabel(account, accounts)} margin`, () => fetchMargin(queryAccount(account))) };
+                                ? { balance: await timed(`${accountLabel(account, accounts)} balance`, () => fetchAccountBalance(queryAccount(account))) }
+                                : { margin: await timed(`${accountLabel(account, accounts)} margin`, () => fetchMargin(queryAccount(account))) };
                             queryAccount(account);
                             if (value.balance?.errmsg?.trim()) throw new Error('券商餘額查詢回報錯誤');
                             return { account, ...value, updatedAt: Date.now() };
@@ -460,6 +472,15 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
         } catch (e) {
             for (const key of targets) { failed.add(key); problems[key].push(['query-failed', e instanceof Error ? e.message : String(e)]); }
         }
+        // #287: reads dropped by the first mode discovery are reread right
+        // after this run (finally below); none of them is a failure, so no
+        // reason, timestamp or settled-with-error status is recorded here.
+        if (failed.size && superseded()) {
+            reread = true;
+            state = { ...state, loading: false };
+            publish();
+            return;
+        }
         if (queryOverflow && readOrders) problems.orders.push(['overflow', '更新期間回報過多，已保留即時資料；請稍後手動確認']);
         for (const key of targets) {
             if (connectionBefore !== connectionEpoch || getStreamStatus() !== 'live') problems[key].push(['disconnect', '串流曾中斷，資料可能不完整；請連線後手動確認']);
@@ -480,7 +501,13 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
         }
         state = { ...state, loading: false };
         publish();
-    })().finally(() => { queryEvents = null; for (const key of targets) nextRefreshAt[key] = Date.now() + 1500; inFlight = null; });
+    })().finally(() => {
+        queryEvents = null;
+        for (const key of targets) nextRefreshAt[key] = Date.now() + 1500;
+        inFlight = null;
+        // Joins boot's own mode-change reread when it already started one.
+        if (reread) void refreshTradingStateForModeChange();
+    });
     // Health is cache-only (no broker call): check it once after an explicit
     // orders reconciliation to surface what the server still cannot track.
     inFlightResult = scope === 'orders' ? run.then(() => { if (ordersRead) return checkTradeCacheHealth('manual'); }) : run;
