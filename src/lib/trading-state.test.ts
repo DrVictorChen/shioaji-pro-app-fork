@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
     positions: vi.fn(), trades: vi.fn(), balance: vi.fn(), margin: vi.fn(), subscribe: vi.fn(), health: vi.fn(),
     account: { account_type: 'S', broker_id: 'fixture', account_id: 'a', person_id: 'fixture', signed: true, username: 'fixture' },
 }));
-vi.mock('./account-store', () => ({ useAccounts: () => ({ accounts: [mocks.account, ...mocks.extraAccounts], selectedStock: mocks.account, selectedFutures: null }), getAccountState: () => ({ accounts: [mocks.account, ...mocks.extraAccounts] }), refreshAccounts: vi.fn() }));
+vi.mock('./account-store', () => ({ useAccounts: () => ({ accounts: [mocks.account, ...mocks.extraAccounts], selectedStock: mocks.account, selectedFutures: null }), getAccountState: () => ({ accounts: [mocks.account, ...mocks.extraAccounts] }), refreshAccounts: vi.fn(), subscribeAccounts: () => () => undefined }));
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://fixture.invalid' }));
 vi.mock('./boot', () => ({ subscribeTradeReports: mocks.subscribe }));
 vi.mock('./trade-observations', () => ({ onTradeResponse: (cb: typeof mocks.response) => { mocks.response = cb; return vi.fn(); } }));
@@ -169,6 +169,43 @@ it('#287 first mode discovery during the boot subscribe rereads instead of faili
     expect(reads.join(' ')).not.toContain('failed');
     expect(reads).toEqual(expect.arrayContaining(['S1 positions 0ms superseded', 'S1 positions 0ms']));
     timing.endTiming('ok');
+});
+
+it.each(['ok', 'reread-fails'] as const)('#287 cold boot: positions-loaded waits for the reread instead of settling failed (%s)', async outcome => {
+    // fresh module graph, no snapshot yet (updatedAt === null)
+    vi.resetModules();
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReset().mockReturnValueOnce(subscribed.promise).mockResolvedValue(undefined);
+    mocks.positions.mockClear();
+    if (outcome === 'reread-fails') mocks.positions.mockReset().mockRejectedValue(new Error('500 broker'));
+    const cold = await import('./trading-state');
+    const timing = await import('./startup-timing');
+    const ready = await import('./frontend-ready');
+    const info = await import('./server-info-store');
+    expect(cold.getTradingState().queries.positions.updatedAt).toBeNull();
+    timing.beginTiming('restart', { replace: true });
+    const runId = timing.peekActiveTiming()!.id;
+    const positionsSignal = ready.appReadySignals().find(s => s.stage === 'positions-loaded')!;
+    ready.watchFrontendReady(runId, [positionsSignal]);
+    let run!: Promise<void>;
+    await act(async () => { run = cold.refreshTradingState(); });
+    // boot's listener and trading-state's own reread must coalesce into one
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    const bootReread = cold.refreshTradingStateForModeChange();
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    await act(async () => { await bootReread; });
+    for (let i = 0; i < 5; i++) await flush();
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(mocks.positions).toHaveBeenCalledOnce();
+    const ended = timing.getTimingHistory()[0]!;
+    expect(ended.id).toBe(runId);
+    if (outcome === 'ok') expect(ended.outcome).toBe('ok');
+    else {
+        expect(ended.outcome).toBe('partial');
+        expect(ended.detail).toContain('failed: positions-loaded');
+    }
 });
 
 it('#287 a boot subscribe dropped by the first mode discovery is resubscribed, not 回報未訂閱', async () => {
