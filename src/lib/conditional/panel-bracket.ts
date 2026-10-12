@@ -118,11 +118,15 @@ async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, 
         return { error: 'refused' in created ? `背景執行：${created.refused}`
             : `背景執行：建立結果未確認（${created.unconfirmed}）；請先看清單是否已有這張，不要直接重掛` };
     }
-    const sentAt = Date.now();
+    let sentAt = Date.now();
     const trade = await placeQuickOrder(r.contract, r.action, r.entry.type === 'LMT' ? r.entry.price : null, qty, {
         source: 'manual', // 下單確認設定照常適用
         account: r.account,
-        beforeSend: () => { if (currentProtectionEnv() !== env) throw new Error('伺服器或模擬／正式模式已切換，進場單未送出'); },
+        beforeSend: () => {
+            if (currentProtectionEnv() !== env) throw new Error('伺服器或模擬／正式模式已切換，進場單未送出');
+            // when it really leaves (after the order confirmation): its trading session
+            sentAt = Date.now();
+        },
         ocType: 'Auto',
         ...(r.entry.type === 'LMT' ? { orderType: 'ROD' as const } : {}),
     });

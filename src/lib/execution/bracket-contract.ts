@@ -293,8 +293,9 @@ export function bracketViews(programs: readonly OrderProgram[]): BracketView[] {
         const finished = bracketFinished(p);
         const tiers = p.levels.filter(l => l.entry.type === 'tier').length;
         for (const lv of p.levels) {
-            // a panel bracket's entry level protects nothing itself
-            if (lv.exit === null) continue;
+            // a panel bracket's entry level protects nothing itself (it shows
+            // only lots it holds unprotected: a fill of another session)
+            if (lv.exit === null && lv.unprotected <= 0) continue;
             const exitSpec = lv.exit?.type === 'oco' ? lv.exit : null;
             const exits = lv.orders.filter(o => o.role === 'exit' && o.cycle === lv.cycles);
             const last = exits[exits.length - 1];

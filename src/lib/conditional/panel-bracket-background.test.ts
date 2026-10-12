@@ -57,6 +57,19 @@ describe('panel bracket in the background', () => {
         expect(request.trigger).toBeUndefined();
     });
 
+    it('the entry session is when it really leaves (after the order confirmation)', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1_000_000);
+        m.place.mockImplementation(async (_c: unknown, _a: unknown, _p: unknown, _q: unknown, opts: { beforeSend: () => void }) => {
+            vi.setSystemTime(9_000_000); // the user confirmed much later
+            opts.beforeSend();
+            return { order: { id: 'E1', seqno: 'S1', ordno: '' }, contract: { code: 'TXFR1', target_code: 'TXFJ6' } };
+        });
+        await placePanelBracket({ contract: TXF as never, account: A as never, action: 'Buy', plan, refPrice: 20000, entry: { type: 'MKT' } });
+        expect(m.create.mock.calls[0]![0].entry.sentAt).toBe(9_000_000);
+        vi.useRealTimers();
+    });
+
     it('refused by the engine after the entry went out: said so, never resent', async () => {
         m.create.mockResolvedValue({ refused: '這張進場單已有括號單保護' });
         const r = await placePanelBracket({ contract: TXF as never, account: A as never, action: 'Buy', plan, refPrice: 20000,
