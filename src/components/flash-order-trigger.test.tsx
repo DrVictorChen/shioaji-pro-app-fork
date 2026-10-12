@@ -204,6 +204,39 @@ it('自動停損停利: reducing is sent plainly, reversing is not sent, an unsu
     expect(m.place).toHaveBeenCalledTimes(1);
 });
 
+it('自動停損停利: a 新倉 order is protected even against a position; a reduce sent only if still a reduce after confirmation', async () => {
+    const r = await mount({ order: { ...PROTECT, octype: 'New' }, net: 2 });
+    await arm(r);
+    await click(r, 'sell', 101);
+    expect(m.place).not.toHaveBeenCalled();
+    expect(m.bracket.mock.calls[0]![0]).toMatchObject({ action: 'Sell', order: { octype: 'New' } });
+
+    // 自動 + reduce: the position goes away while the confirmation is open → refused
+    const view = await mount({ order: PROTECT, net: 1 });
+    m.place.mockImplementationOnce(async (...a: unknown[]) => {
+        await act(async () => {
+            view.update(createElement(FlashOrder, { contract: fut, trades: [], positions: [], orderOpts: PROTECT, onOrderOptsChange: vi.fn() }));
+        });
+        (a[4] as { beforeSend: () => void }).beforeSend();
+        return { order: { id: 'x' }, status: { status: 'Submitted' } };
+    });
+    await arm(view);
+    await click(view, 'sell', 101);
+    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', body: expect.stringContaining('持倉已變動') }));
+});
+
+it('a failed deletion is never announced as deleted', async () => {
+    const mark: LadderMark = { id: 'tg-9', side: 'buy', price: 105, quantity: 1, kind: 'trigger', protects: false, paused: false, pending: false,
+        editable: true, background: false, condition: 'above', title: '觸價單' };
+    m.marks = new Map([['105.00', { buy: [mark], sell: [] }]]);
+    m.remove.mockRejectedValue(new Error('主視窗沒有回應'));
+    const r = await mount();
+    const ev = { button: 0, clientY: 115, preventDefault() {}, stopPropagation() {} };
+    await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onPointerDown(ev); });
+    await act(async () => { fire('pointerup', ev); });
+    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', title: '⚡ 觸價單刪除未確認' }));
+});
+
 it('自動停損停利 + 觸價模式: a trigger entry that brackets its fill', async () => {
     m.bracket.mockResolvedValue('trigger');
     m.background = true;

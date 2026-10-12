@@ -150,8 +150,9 @@ export function triggerSendText(s: FlashTriggerSend, c: { market: FlashMarketKin
 }
 
 /** Entry or protective exit, and the futures position effect it goes out with.
- * Opposite and within the position: a protective exit (never blocked by the
- * risk limits; futures close only). Otherwise an entry (risk checks apply). */
+ * Futures opposite and within the position (自動) or 平倉: a protective exit
+ * sent as Cover (close only, never blocked by the risk limits). Everything
+ * else is an entry (risk checks apply when it fires). */
 export function triggerIntent(c: {
     market: FlashMarketKind;
     octype?: FuturesOCType;
@@ -165,7 +166,16 @@ export function triggerIntent(c: {
         if (oc === 'Auto' && c.effect === 'reduce' && c.exitSafe) return { role: 'exit', octype: 'Cover' };
         return { role: 'entry', ...(oc !== 'Auto' ? { octype: oc } : {}) };
     }
-    return { role: c.effect === 'reduce' && c.exitSafe ? 'exit' : 'entry' };
+    // stocks: always an entry (risk checks apply). The window engine does not
+    // re-check holdings or reserve them for a plain trigger, so a sell that
+    // looked like an exit could later open an unchecked short
+    return { role: 'entry' };
+}
+
+/** The position effect that decides 自動停損停利: a futures 新倉 order
+ * always opens (a separate position), whatever is held. */
+export function protectEffect(effect: PositionEffect, market: FlashMarketKind, octype?: FuturesOCType): PositionEffect {
+    return market === 'F' && octype === 'New' ? 'open' : effect;
 }
 
 // ---- ladder marks ----

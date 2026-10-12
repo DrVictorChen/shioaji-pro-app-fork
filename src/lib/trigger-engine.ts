@@ -1078,7 +1078,9 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
             securityType: contract.security_type === 'OPT' ? 'OPT' : contract.security_type === 'STK' ? 'STK' : 'FUT', action: row.action,
             plan: { ...plan, tiers: patch.quantity !== undefined ? scaleTiers(plan.tiers, patch.quantity) : plan.tiers },
             tickTable: table, entry: { trigger: { condition: next.condition, price: next.price, send: next.send ?? { type: 'MKT' },
-                ...(next.validity ? { validity: next.validity } : {}) } } });
+                ...(next.validity ? { validity: next.validity } : {}),
+                // keep a 新倉 entry new (#216)
+                ...(level.entry.order.octype === 'New' ? { octype: 'New' as const } : {}) } } });
         if (!request) throw new Error('背景執行：這張括號單無法修改，請取消後重新建立');
         const replaced = await replaceBackgroundBracket(programId, request);
         if (replaced === 'replaced') return;

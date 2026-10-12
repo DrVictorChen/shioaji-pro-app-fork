@@ -157,7 +157,8 @@ async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, 
         quoteCode: r.contract.code, securityType: st, action: r.action, plan: r.plan, tickTable } as const;
     if (r.entry.type === 'touch') {
         const request = panelBracketRequest({ ...base, orderCode: r.contract.target_code || r.contract.code,
-            entry: { trigger: { condition: r.entry.condition, price: r.entry.price, send: r.entry.send, validity: r.entry.validity } } });
+            entry: { trigger: { condition: r.entry.condition, price: r.entry.price, send: r.entry.send, validity: r.entry.validity,
+                ...(st !== 'STK' && r.order?.octype === 'New' ? { octype: 'New' as const } : {}) } } });
         if (!request) return { error: '背景執行：括號單缺少帳戶或伺服器資訊' };
         const created = await createBackgroundBracket(request);
         if (created === 'created') return 'trigger';

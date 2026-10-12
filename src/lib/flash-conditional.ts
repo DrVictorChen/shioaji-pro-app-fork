@@ -19,8 +19,9 @@ export async function flashModifyTrigger(id: string, patch: TriggerPatch): Promi
 }
 
 export async function flashRemoveTrigger(id: string): Promise<void> {
-    const { removeTrigger } = await import('./trigger-engine');
-    return removeTrigger(id);
+    // strict: a removal that is not confirmed throws (never announced as deleted)
+    const { removeTriggerStrict } = await import('./trigger-engine');
+    return removeTriggerStrict(id);
 }
 
 export async function flashPlaceBracket(r: PanelBracketRequest): ReturnType<typeof import('./conditional/panel-bracket').placePanelBracket> {

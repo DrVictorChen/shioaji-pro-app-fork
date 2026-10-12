@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     clickCondition, dragProblem, flashProtectProblem, flashProtectText, ladderMarks, normalizeFlashProtect, normalizeTriggerSend,
-    positionEffect, protectConditionProblem, protectedQuantity, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf,
+    positionEffect, protectConditionProblem, protectEffect, protectedQuantity, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf,
     type MarkScope, type ProtectionView,
 } from './flash-trigger';
 import { normalizeFlashOrderOpts } from './flash-account';
@@ -67,6 +67,13 @@ describe('what a click does', () => {
         expect(positionEffect(1.5, 'Sell', 2)).toBe('reverse');
     });
 
+    it('a futures 新倉 order always opens (it gets protection even against a position)', () => {
+        expect(protectEffect('reduce', 'F', 'New')).toBe('open');
+        expect(protectEffect('reverse', 'F', 'New')).toBe('open');
+        expect(protectEffect('reduce', 'F', 'Auto')).toBe('reduce');
+        expect(protectEffect('reduce', 'S')).toBe('reduce');
+    });
+
     it('direction comes from the traded price; the price itself and no price are refused', () => {
         expect(clickCondition(101, 100)).toBe('above');
         expect(clickCondition(99, 100)).toBe('below');
@@ -82,7 +89,8 @@ describe('what a click does', () => {
         expect(triggerIntent({ market: 'F', octype: 'Auto', effect: 'open', exitSafe: true })).toEqual({ role: 'entry' });
         expect(triggerIntent({ market: 'F', octype: 'New', effect: 'reduce', exitSafe: true })).toEqual({ role: 'entry', octype: 'New' });
         expect(triggerIntent({ market: 'F', octype: 'Cover', effect: 'open', exitSafe: true })).toEqual({ role: 'exit', octype: 'Cover' });
-        expect(triggerIntent({ market: 'S', effect: 'reduce', exitSafe: true })).toEqual({ role: 'exit' });
+        // stocks: always an entry (no holdings check or reservation for a plain trigger)
+        expect(triggerIntent({ market: 'S', effect: 'reduce', exitSafe: true })).toEqual({ role: 'entry' });
         expect(triggerIntent({ market: 'S', effect: 'reverse', exitSafe: true })).toEqual({ role: 'entry' });
     });
 

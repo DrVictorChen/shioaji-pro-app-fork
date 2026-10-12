@@ -23,7 +23,7 @@ import { useFlashLadder } from '../hooks/use-flash-ladder';
 import { dayEnd, sessionEnd } from '../lib/conditional/session';
 import { getConditionalSettings } from '../lib/conditional/settings';
 import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, flashProtectPlan, flashProtectText, positionEffect,
-    protectConditionProblem, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf, triggerSendText, type LadderMark } from '../lib/flash-trigger';
+    protectConditionProblem, protectEffect, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf, triggerSendText, type LadderMark } from '../lib/flash-trigger';
 import type { TriggerValidity } from '../lib/trigger-engine';
 import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger } from '../lib/flash-conditional';
 import { FlashProtectStrip } from './flash-protect';
@@ -575,7 +575,7 @@ export function FlashOrder({
     // #216 自動停損停利與觸價後送出方式也是面板的條件：一變就解除點價
     const protect = panelOrder.protect ?? DEFAULT_PROTECT;
     const triggerSendSetting = panelOrder.triggerSend ?? DEFAULT_TRIGGER_SEND;
-    const orderKey = `${clickOrderType}:${clickOctype ?? ''}:${mktPriceType}:${protect.on ? flashProtectText(protect) : 'off'}:${JSON.stringify(triggerSendSetting)}`;
+    const orderKey = `${clickOrderType}:${clickOctype ?? ''}:${mktPriceType}:${protect.on ? JSON.stringify(protect) : 'off'}:${JSON.stringify(triggerSendSetting)}`;
     // 自動停損停利開啟但目前條件不能附加：點價不送（不會改成無保護送出）
     const protectBlock = protect.on
         ? protectConditionProblem({ market, odd, creditCond: credit.cond, daytradeShort: credit.daytradeShort, octype: clickOctype })
@@ -1059,7 +1059,15 @@ export function FlashOrder({
             };
             // #216 自動停損停利：進場（開倉或加碼）附括號單；減倉照送不附；反手不送
             const prot = protectRef.current;
-            const effect = positionEffect(heldRef.current.held, action, q);
+            // a 新倉 order always opens (a separate position): it gets protection
+            const effectNow = () => protectEffect(positionEffect(heldRef.current.held, action, q), futures ? 'F' : 'S', clickOrder.octype);
+            const effect = effectNow();
+            // the position may change while the confirmation is open: with
+            // protection on, a click is sent only as what it was judged to be
+            const guarded = prot.protect.on ? () => {
+                beforeSend();
+                if (effectNow() !== effect) throw new Error('確認期間持倉已變動（進場／減倉判斷不同），這筆沒有送出，請重新確認');
+            } : beforeSend;
             if (prot.protect.on && effect !== 'reduce') {
                 if (prot.block) throw new Error(`${prot.block}（自動停損停利開啟中，這筆沒有送出）`);
                 if (effect === 'reverse') throw new Error(REVERSE_TEXT);
@@ -1076,7 +1084,7 @@ export function FlashOrder({
                     order: {
                         orderType: clickOrder.orderType,
                         ...(futures ? { octype: clickOrder.octype === 'New' ? 'New' as const : 'Auto' as const, futuresPriceType: clickOrder.priceType } : {}),
-                        beforeSend,
+                        beforeSend: guarded,
                         isAccountCurrent: stillPanelAccount(capturedAccount),
                         serverMode,
                         confirmNote: `附自動停損停利（${flashProtectText(prot.protect)}${background ? '・背景執行' : ''}）`,
@@ -1107,7 +1115,7 @@ export function FlashOrder({
                     // 確認之後重新查可否融資券（不用快取）：確認期間變成 0 就不送；
                     // 查詢失敗照樣不擋（由券商端決定）
                     ...(gate?.afterConfirm ? { afterConfirm: gate.afterConfirm } : {}),
-                    beforeSend,
+                    beforeSend: guarded,
                     ...(oddLot ? { orderLot: 'IntradayOdd' as const } : {}),
                     ...(creditOn ? { orderCond: clickCredit.cond, daytradeShort: clickCredit.daytradeShort } : {}),
                     // 委託條件：效期用於限價；期貨另帶倉別與市價鈕的價別
@@ -1168,9 +1176,10 @@ export function FlashOrder({
         force();
         try {
             const prot = protectRef.current;
-            if (prot.protect.on && intent.role === 'entry' && effect !== 'reduce') {
+            const pEffect = protectEffect(effect, futures ? 'F' : 'S', clickOrder.octype);
+            if (prot.protect.on && intent.role === 'entry' && pEffect !== 'reduce') {
                 if (prot.block) { fail(`${prot.block}（自動停損停利開啟中）`); return; }
-                if (effect === 'reverse') { fail(REVERSE_TEXT); return; }
+                if (pEffect === 'reverse') { fail(REVERSE_TEXT); return; }
                 const result = await flashPlaceBracket({
                     contract: capturedContract,
                     account: capturedAccount,

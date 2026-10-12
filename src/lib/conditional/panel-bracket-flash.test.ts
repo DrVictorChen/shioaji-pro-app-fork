@@ -94,6 +94,11 @@ describe('flash entry with 自動停損停利', () => {
         expect(await placePanelBracket({ contract: TXF as never, account: A as never, action: 'Buy', plan, refPrice: 48100,
             entry: { type: 'touch', condition: 'above', price: 48100, send: { type: 'MKP' }, validity } })).toBe('trigger');
         expect(m.create.mock.calls[0]![0]).toMatchObject({ trigger: { condition: 'above', price: 48100, order: { priceType: 'MKP', timeInForce: 'IOC' } } });
+        expect(m.create.mock.calls[0]![0].trigger.order.octype).toBeUndefined();
+        // 新倉 stays new in the engine's entry order too
+        await placePanelBracket({ contract: TXF as never, account: A as never, action: 'Buy', plan, refPrice: 48100,
+            entry: { type: 'touch', condition: 'above', price: 48100, send: { type: 'LMT', ticks: 1 }, validity }, order: { octype: 'New' } });
+        expect(m.create.mock.calls[1]![0].trigger.order).toEqual({ priceType: 'LMT', timeInForce: 'ROD', octype: 'New' });
         expect(m.place).not.toHaveBeenCalled();
     });
 });
