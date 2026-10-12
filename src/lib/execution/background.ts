@@ -546,27 +546,52 @@ async function stopWindowConditionals(detail: string): Promise<void> {
 /** A window's 全平並取消 holds the one shared with the engine's 收盤前平倉
  * (they never read the same holdings at once). Resolves false when the
  * engine's is running; true when held (or there is no engine to share with). */
+let sharedHold = false; // the engine granted it (else: no engine was running)
+let holdLost = false;
 export async function beginWindowFlatten(): Promise<boolean> {
+    sharedHold = false;
+    holdLost = false;
     if (!isTauri) return true;
+    let granted: boolean;
     try {
-        return await invoke<boolean>('execution_flatten_begin');
+        granted = await invoke<boolean>('execution_flatten_begin');
     } catch {
         return true; // the engine is not running: it runs none
     }
+    sharedHold = granted;
+    return granted;
 }
 
 /** Keep the hold while the window's 全平並取消 runs (the engine only takes
- * over a hold not renewed for two minutes: a closed window). */
+ * over a hold not renewed for two minutes). A renewal that fails or is
+ * refused loses it for good: this run sends nothing more. */
 export const FLATTEN_RENEW_MS = 30_000;
 let renewTimer: ReturnType<typeof setInterval> | null = null;
+async function renewHold(): Promise<boolean> {
+    if (!sharedHold || holdLost) return !holdLost;
+    try {
+        if (await invoke<boolean>('execution_flatten_renew') === true) return true;
+    } catch { /* unknown: not held */ }
+    holdLost = true;
+    return false;
+}
 export function keepWindowFlatten(): void {
     if (!isTauri || renewTimer) return;
-    renewTimer = setInterval(() => { void invoke<boolean>('execution_flatten_renew').catch(() => undefined); }, FLATTEN_RENEW_MS);
+    renewTimer = setInterval(() => { void renewHold(); }, FLATTEN_RENEW_MS);
+}
+
+/** Right before each cancel / close of the window's 全平並取消: still the
+ * holder (renewed now)? False: stop, send nothing more. */
+export async function stillHoldingFlatten(): Promise<boolean> {
+    if (!isTauri) return true;
+    return renewHold();
 }
 
 export async function endWindowFlatten(): Promise<void> {
     if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
-    if (!isTauri) return;
+    const held = sharedHold && !holdLost;
+    sharedHold = false;
+    if (!isTauri || !held) return;
     await invoke<void>('execution_flatten_end').catch(() => undefined);
 }
 

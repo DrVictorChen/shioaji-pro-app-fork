@@ -100,6 +100,9 @@ export interface FlattenHooks {
     waitInFlight?(): Promise<boolean>;
     /** tests: the wait before each read-back */
     sleep?(ms: number): Promise<void>;
+    /** right before each cancel / close: this run still holds 全平並取消
+     * (shared with the background engine); false stops it, nothing more is sent */
+    stillOwned?(): Promise<boolean>;
 }
 
 export interface FlattenResult {
@@ -206,6 +209,7 @@ export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): 
         const working = workingInScope(trades.map(t => ({ ...t, order: { ...t.order, account: t.order.account ?? account } })), scope);
         if (!working.length) continue;
         if (!sameServer()) return switched();
+        if (hooks.stillOwned && !(await hooks.stillOwned())) return lost(result);
         // each cancel targets the row just read (verified, not resolved by id from older state)
         const answers = await Promise.allSettled(working.map(t => cancelVerifiedOrder(t, account, {
             beforeSend: () => { if (!sameServer()) throw new Error('伺服器或模擬／正式模式已切換，未刪單'); },
@@ -241,6 +245,7 @@ export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): 
                 result.notSent.push(`${o.code}：刪單未確認，未平倉；請核對委託後再試`);
                 continue;
             }
+            if (hooks.stillOwned && !(await hooks.stillOwned())) return lost(result);
             try {
                 await sendClose(o, account, sameServer);
                 result.sent.push({ code: o.code, action: o.action, quantity: o.quantity, market: o.market, account: o.account });
@@ -261,6 +266,12 @@ export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): 
 }
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+/** The hold was lost (another 全平並取消 may run now): stop sending. */
+function lost(result: FlattenResult): FlattenResult {
+    result.notSent.push('全平並取消的執行權已失效（可能由背景執行接手），已停止，未再刪單或平倉；請核對委託與持倉');
+    return result;
+}
 
 async function readBack(sentFor: { account: Account; order: FlattenOrder }[], query: ReturnType<typeof createAccountQuery>,
     wait: (ms: number) => Promise<void>): Promise<RemainingOrder[]> {

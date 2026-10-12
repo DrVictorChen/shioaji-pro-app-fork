@@ -680,3 +680,24 @@ describe('#226 時間條件 in the background (step 4)', () => {
         expect(engine.getTriggers()).toHaveLength(1);
     });
 });
+
+describe('#226 window 全平並取消 and the engine share one hold', () => {
+    it('a failed or refused renewal loses the hold for good; every send re-checks it', async () => {
+        await boot();
+        const renew = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValue(true);
+        const orig = m.invoke.getMockImplementation()!;
+        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => cmd === 'execution_flatten_begin' ? true
+            : cmd === 'execution_flatten_renew' ? renew() : orig(cmd, args));
+        expect(await bg.beginWindowFlatten()).toBe(true);
+        expect(await bg.stillHoldingFlatten()).toBe(true);
+        expect(await bg.stillHoldingFlatten()).toBe(false); // the engine took it
+        expect(await bg.stillHoldingFlatten()).toBe(false); // never regained by itself
+        await bg.endWindowFlatten();
+        expect(calls('execution_flatten_end')).toHaveLength(0); // not ours to release
+        // an error renewing is a loss too
+        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => cmd === 'execution_flatten_begin' ? true
+            : cmd === 'execution_flatten_renew' ? Promise.reject(new Error('x')) : orig(cmd, args));
+        expect(await bg.beginWindowFlatten()).toBe(true);
+        expect(await bg.stillHoldingFlatten()).toBe(false);
+    });
+});

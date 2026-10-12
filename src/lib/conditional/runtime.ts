@@ -5,7 +5,7 @@
 
 import { dismissBracket, getBrackets } from '../bracket';
 import { isLive } from '../bracket-core';
-import { beginWindowFlatten, endWindowFlatten, getBackgroundPrograms, keepWindowFlatten, markBackgroundHandled, pauseBackgroundProgram,
+import { beginWindowFlatten, endWindowFlatten, getBackgroundPrograms, keepWindowFlatten, stillHoldingFlatten, markBackgroundHandled, pauseBackgroundProgram,
     resumeBackgroundProgram } from '../execution/background';
 import { bracketViews } from '../execution/bracket-contract';
 import { currentProtectionEnv } from '../protection-env';
@@ -119,7 +119,8 @@ export async function runFlatten(scope: FlattenScope): Promise<FlattenResult> {
         if (!(await beginWindowFlatten())) throw new Error('背景執行的收盤前平倉正在執行（或它的平倉單尚未結束），請等它完成');
         keepWindowFlatten();
         try {
-            return await executeFlatten(scope, { stopConditional: () => stopConditionalInScope(scope), waitInFlight: () => waitInFlight(scope) });
+            return await executeFlatten(scope, { stopConditional: () => stopConditionalInScope(scope), waitInFlight: () => waitInFlight(scope),
+                stillOwned: stillHoldingFlatten });
         } finally {
             await endWindowFlatten();
         }
