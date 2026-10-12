@@ -469,13 +469,31 @@ let lastRisk = '';
 /** The App's risk settings (kill switch / lock, per-order cap, daily loss
  * limit and the day's P&L, whether that P&L was read): on every change and
  * as a heartbeat (`force`). Main window only (the App refuses others). */
-export async function pushBackgroundRisk(force = false): Promise<void> {
-    if (!isTauri) return;
+let riskQueue: Promise<void> = Promise.resolve();
+export function pushBackgroundRisk(force = false): Promise<void> {
+    if (!isTauri) return Promise.resolve();
+    // one at a time, each reading the state when it runs: an older read can
+    // never land after a newer one
+    const run = riskQueue.then(() => pushRiskNow(force));
+    riskQueue = run.catch(() => undefined);
+    return run;
+}
+
+async function pushRiskNow(force: boolean): Promise<void> {
     // loaded on use: risk.ts reads window / localStorage when imported
-    const { getDailyPnl, getDailyPnlKnown, getRiskSettings } = await import('../risk');
+    const [{ getDailyPnl, getDailyPnlKnown, getRiskSettings }, { getTradingState }] = await Promise.all([
+        import('../risk'), import('../trading-state')]);
     const s = getRiskSettings();
+    const t = getTradingState();
+    // the P&L is trusted only as read: positions and margin in, nothing left to
+    // reconcile (a stream outage or a failed read raises one), the stream live
+    const pnlKnown = getDailyPnlKnown() && t.margin !== undefined && t.queries.positions.updatedAt !== null
+        && !t.queries.positions.needsReconcile && !t.queries.account.needsReconcile && getStreamStatus() === 'live';
+    // its settled part is the selected futures account's ("F:<broker>:<account>")
+    const [type, brokerId, accountId] = (t.marginAccount ?? '').split(':');
+    const pnlAccount = type === 'F' && brokerId && accountId ? { brokerId, accountId } : null;
     const risk = { enabled: s.enabled, maxQty: s.maxQty, maxDailyLoss: s.maxDailyLoss, locked: s.locked,
-        dailyPnl: getDailyPnl(), pnlKnown: getDailyPnlKnown() };
+        dailyPnl: getDailyPnl(), pnlKnown, pnlAccount };
     const key = JSON.stringify(risk);
     if (!force && key === lastRisk) return;
     await invoke<void>('execution_set_risk', { risk });
@@ -545,4 +563,5 @@ export function __setBackgroundInvokeForTest(fn: Invoke | null, opts: { desktop?
     swept.clear();
     epoch = 0;
     lastRisk = '';
+    riskQueue = Promise.resolve();
 }

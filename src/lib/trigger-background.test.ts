@@ -24,6 +24,8 @@ const m = vi.hoisted(() => ({
     settingUnreadable: false,
     create: null as null | ((a: { program: OrderProgram }) => Promise<unknown>),
     programs: [] as unknown[],
+    trading: { positions: [], queries: { positions: { updatedAt: null as number | null, needsReconcile: false, error: null },
+        account: { updatedAt: null, needsReconcile: false, error: null } }, margin: undefined as unknown, marginAccount: undefined as string | undefined },
 }));
 
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://sim.invalid' }));
@@ -40,8 +42,7 @@ vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: [S1, F1]
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
 vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
-vi.mock('./trading-state', () => ({ getTradingState: () => ({ positions: [],
-    queries: { positions: { updatedAt: null, needsReconcile: false, error: null } } }) }));
+vi.mock('./trading-state', () => ({ getTradingState: () => m.trading }));
 vi.mock('./shioaji', () => ({ fetchTrades: async () => [] }));
 vi.mock('./protection-env', () => ({
     currentProtectionEnv: () => SIM,
@@ -107,6 +108,8 @@ beforeEach(() => {
     m.place.mockImplementation(async () => ({ order: { id: 'exit-1' }, status: { status: 'PendingSubmit' } }));
     m.engineDown = false;
     m.settingUnreadable = false;
+    m.trading = { positions: [], queries: { positions: { updatedAt: null, needsReconcile: false, error: null },
+        account: { updatedAt: null, needsReconcile: false, error: null } }, margin: undefined, marginAccount: undefined };
     m.create = null;
     m.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'execution_create' && m.create) { const f = m.create; m.create = null; return f(args as { program: OrderProgram }); }
@@ -474,5 +477,22 @@ describe('#226 conditional orders in the background (step 1: triggers)', () => {
         setRiskSettings({ locked: true });
         await flush();
         expect(calls('execution_set_risk').map(([, a]) => (a as { risk: { locked: boolean } }).risk.locked).at(-1)).toBe(true);
+    });
+
+    it('the P&L is pushed as known only when read and reconciled, with the account it belongs to', async () => {
+        m.enabled = true;
+        vi.stubGlobal('window', new EventTarget());
+        await boot();
+        const { reportDailyPnl } = await import('./risk');
+        reportDailyPnl(-100, true);
+        m.trading = { ...m.trading, margin: {}, marginAccount: `F:${F1.broker_id}:${F1.account_id}`,
+            queries: { ...m.trading.queries, positions: { updatedAt: 5, needsReconcile: false, error: null } } };
+        await bg.pushBackgroundRisk(true);
+        const last = () => (calls('execution_set_risk').at(-1)![1] as { risk: Record<string, unknown> }).risk;
+        expect(last()).toMatchObject({ dailyPnl: -100, pnlKnown: true, pnlAccount: { brokerId: F1.broker_id, accountId: F1.account_id } });
+        // a stream outage / failed read leaves something to reconcile: not trusted until read again
+        m.trading = { ...m.trading, queries: { ...m.trading.queries, positions: { updatedAt: 5, needsReconcile: true, error: null } } };
+        await bg.pushBackgroundRisk(true);
+        expect(last()).toMatchObject({ pnlKnown: false });
     });
 });
