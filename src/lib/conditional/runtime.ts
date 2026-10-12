@@ -115,6 +115,8 @@ export async function runFlatten(scope: FlattenScope): Promise<FlattenResult> {
     const r = await exclusively(() => executeFlatten(scope, { stopConditional: () => stopConditionalInScope(scope), waitInFlight: () => waitInFlight(scope) }));
     // what is still held after the read-back goes to 需要你處理 (with 再平倉)
     if (r.sent.length || r.remaining.length) recordFlattenLeftovers(r.sent, r.remaining, env);
+    // the 委託／持倉 panels show what the broker has now (QA 10/12: stale rows after a flatten)
+    if (r.sent.length || r.cancelled) void import('../trading-state').then(m => m.refreshTradingState('all')).catch(() => undefined);
     const bad = r.cancelFailed.length + r.notSent.length + r.skipped.length + r.remaining.length > 0;
     notify({ kind: bad ? 'err' : 'ok', title: bad ? '全平並取消未完全完成' : '全平並取消已送出', body: flattenSummary(r) });
     return r;

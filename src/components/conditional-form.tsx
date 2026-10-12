@@ -63,8 +63,25 @@ function useTarget(initial: ContractInfo | null) {
         void ensureContract(c).then(() => { if (asked.current === c) setResolved(c); })
             .catch(() => { if (asked.current === c) setLookupError(`找不到商品 ${c}`); });
     };
-    return { code, setCode, resolve, resolved, contract, futures, accounts, account, setAccountId, lookupError };
+    // stocks: 整股 or 盤中零股 (the trigger engine's rules: 零股 1–999 股, 成交價
+    // only, sent as a limit at the price limit); always 現股 for now
+    const [lotRaw, setLot] = useState<StockLot>('Common');
+    const lot: StockLot = futures ? 'Common' : lotRaw;
+    return { code, setCode, resolve, resolved, contract, futures, accounts, account, setAccountId, lookupError, lot, setLot };
 }
+
+export type StockLot = 'Common' | 'IntradayOdd';
+/** The quantity unit of a target: 口 / 張 / 股. */
+export function unitOf(t: { futures: boolean; lot: StockLot }): string {
+    return t.futures ? '口' : t.lot === 'IntradayOdd' ? '股' : '張';
+}
+const ODD_MAX = 999;
+/** Rules the order ticket also applies to odd lots. */
+export function lotProblem(t: { futures: boolean; lot: StockLot }, quantities: number[]): string | null {
+    if (t.futures || t.lot !== 'IntradayOdd') return null;
+    return quantities.every(q => Number.isSafeInteger(q) && q >= 1 && q <= ODD_MAX) ? null : `零股數量須為 1～${ODD_MAX} 股`;
+}
+const lotFields = (t: { futures: boolean; lot: StockLot }) => (!t.futures && t.lot === 'IntradayOdd' ? { orderLot: 'IntradayOdd' as const } : {});
 
 type Target = ReturnType<typeof useTarget>;
 
@@ -99,6 +116,19 @@ function TargetRows({ target }: { target: Target }) {
                     </select>
                 )}
             </div>
+            {target.contract && !target.futures && (
+                <div className={styles.formRow}>
+                    <span className={styles.label}>單位</span>
+                    <Seg label='單位' value={target.lot} onChange={target.setLot}
+                        options={[{ id: 'Common', label: '整股' }, { id: 'IntradayOdd', label: '盤中零股' },
+                            { id: 'Odd' as StockLot, label: '盤後零股', disabled: true, title: '盤後零股收盤後一次撮合，無法即時觸價' }]} />
+                    <Seg label='信用' value={'Cash' as string} onChange={() => undefined}
+                        options={[{ id: 'Cash', label: '現股' },
+                            { id: 'MarginTrading', label: '融資', disabled: true, title: '條件單目前只送現股；融資融券請用下單面板' },
+                            { id: 'ShortSelling', label: '融券', disabled: true, title: '條件單目前只送現股；融資融券請用下單面板' }]} />
+                    {target.lot === 'IntradayOdd' && <span className={styles.muted}>零股以漲跌停價限價送出、只看成交價</span>}
+                </div>
+            )}
         </>
     );
 }
@@ -240,9 +270,9 @@ const APPROVAL = '按「建立」即核可這筆下單，條件成立時不會�
 
 /** 「賣出 1 口 限價 47,898」 */
 function orderWords(target: Target, action: 'Buy' | 'Sell', qty: number, send: TriggerSend | string, price: number | null): string {
-    const unit = target.futures ? '口' : '張';
-    const side = `${action === 'Buy' ? '買進' : '賣出'} ${qty || 0} ${unit}`;
+    const side = `${action === 'Buy' ? '買進' : '賣出'} ${qty || 0} ${unitOf(target)}`;
     if (typeof send === 'string') return side;
+    if (!target.futures && target.lot === 'IntradayOdd') return `${side}（零股，漲跌停價限價）`;
     if (send.type === 'MKP') return `${side} 範圍市價`;
     if (send.type === 'LMT' && price !== null && target.contract) {
         const p = send.ticks === 0 ? price : stepPrice(target.contract, price, send.ticks);
@@ -304,16 +334,17 @@ function TriggerForm({ target, onClose, defaults }: { target: Target; onClose: (
     const condition: 'below' | 'above' = op === 'below' || op === 'crossDown' ? 'below' : 'above';
     const cross = op === 'crossDown' || op === 'crossUp';
     const market: SessionMarket = target.futures ? 'futures' : 'stock';
-    const sendValue = sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
+    const odd = !target.futures && target.lot === 'IntradayOdd';
+    const sendValue = odd ? { type: 'MKT' as const } : sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
     const validityValue = validityOf(validity, market);
     const crossed = !cross && p !== null && last !== undefined && (condition === 'below' ? last <= p : last >= p);
     const problem = commonProblem(target) ?? priceProblem(target, p, '觸發價')
-        ?? (!Number.isSafeInteger(q) || q <= 0 ? '數量必須是正整數' : null)
+        ?? (!Number.isSafeInteger(q) || q <= 0 ? '數量必須是正整數' : null) ?? lotProblem(target, [q])
         ?? (typeof sendValue === 'string' ? sendValue : null) ?? (typeof validityValue === 'string' ? validityValue : null);
     const create = () => void submit(async () => {
         if (problem || !target.contract || !target.account || p === null || typeof sendValue === 'string' || typeof validityValue === 'string') return false;
         const made = await addTrigger({ code: target.contract.code, condition, price: p, action, quantity: q, kind: kindFor(condition, action),
-            role: 'entry', ...(cross ? { cross: true } : {}), ...(source === 'opposite' ? { source } : {}),
+            role: 'entry', ...lotFields(target), ...(cross ? { cross: true } : {}), ...(source === 'opposite' && !odd ? { source } : {}),
             ...(sendValue.type !== 'MKT' ? { send: sendValue } : {}), ...(validityValue ? { validity: validityValue } : {}) },
             target.contract, { account: target.account });
         if (made) onClose();
@@ -324,7 +355,8 @@ function TriggerForm({ target, onClose, defaults }: { target: Target; onClose: (
         <>
             <div className={styles.formRow}>
                 <span className={styles.label}>條件</span>
-                <select className={styles.select} aria-label='價格來源' value={source} onChange={e => setSource(e.target.value as 'last' | 'opposite')}>
+                <select className={styles.select} aria-label='價格來源' value={odd ? 'last' : source} disabled={odd}
+                    title={odd ? '零股觸價單只看成交價' : undefined} onChange={e => setSource(e.target.value as 'last' | 'opposite')}>
                     <option value='last'>成交價</option>
                     <option value='opposite'>對手價</option>
                 </select>
@@ -340,14 +372,14 @@ function TriggerForm({ target, onClose, defaults }: { target: Target; onClose: (
                 <span className={styles.label}>動作</span>
                 <Seg label='買賣' value={action} onChange={setAction} tone={id => id === 'Buy' ? 'buy' : 'sell'}
                     options={[{ id: 'Buy', label: '買進' }, { id: 'Sell', label: '賣出' }]} />
-                <QtyInput qty={qty} setQty={setQty} unit={target.futures ? '口' : '張'} quick={defaults.quickQty} />
+                <QtyInput qty={qty} setQty={setQty} unit={unitOf(target)} quick={defaults.quickQty} />
             </div>
-            <SendControl value={send} onChange={setSend} futures={target.futures} />
+            {!odd && <SendControl value={send} onChange={setSend} futures={target.futures} />}
             <ValidityControl value={validity} onChange={setValidity} market={market} />
             <Summary>
                 {p === null || !target.contract ? '填好條件後，這裡會用一句話說明這張單會做什麼。' : (
                     <>
-                        當 <b>{target.contract.code} {source === 'opposite' ? (action === 'Sell' ? '買價' : '賣價') : '成交價'} {opWord} {fmtNum(p)}</b> 時，送出
+                        當 <b>{target.contract.code} {source === 'opposite' && !odd ? (action === 'Sell' ? '買價' : '賣價') : '成交價'} {opWord} {fmtNum(p)}</b> 時，送出
                         <b className={action === 'Buy' ? styles.up : styles.down}> {orderWords(target, action, q, sendValue, p)}</b>
                         {typeof sendValue !== 'string' && sendValue.type === 'LMT' ? '（觸價後限價，未成交會留在委託中）' : ''}。
                         {validityValue && typeof validityValue !== 'string' ? `${fmtUntil(validityValue.until)} 前有效。` : ''}
@@ -377,18 +409,19 @@ function OcoForm({ target, onClose, defaults }: { target: Target; onClose: () =>
     const pd = parseNum(down.price);
     const qu = Number(up.qty);
     const qd = Number(down.qty);
-    const sendValue = sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
+    const odd = !target.futures && target.lot === 'IntradayOdd';
+    const sendValue = odd ? { type: 'MKT' as const } : sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
     const validityValue = validityOf(validity, market);
     const problem = commonProblem(target) ?? priceProblem(target, pu, '上方價') ?? priceProblem(target, pd, '下方價')
         ?? (pu !== null && pd !== null && pu <= pd ? '上方價必須高於下方價' : null)
-        ?? (![qu, qd].every(n => Number.isSafeInteger(n) && n > 0) ? '數量必須是正整數' : null)
+        ?? (![qu, qd].every(n => Number.isSafeInteger(n) && n > 0) ? '數量必須是正整數' : null) ?? lotProblem(target, [qu, qd])
         ?? (typeof sendValue === 'string' ? sendValue : null) ?? (typeof validityValue === 'string' ? validityValue : null);
     const outside = last !== undefined && pu !== null && pd !== null && (last >= pu || last <= pd);
-    const unit = target.futures ? '口' : '張';
+    const unit = unitOf(target);
     const create = () => void submit(async () => {
         if (problem || !target.contract || !target.account || pu === null || pd === null || typeof sendValue === 'string' || typeof validityValue === 'string') return false;
         const group = `oco:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 6)}`;
-        const base = { code: target.contract.code, role: 'entry' as const, group, ocoMode: mode, ...(validityValue ? { validity: validityValue } : {}),
+        const base = { code: target.contract.code, role: 'entry' as const, group, ocoMode: mode, ...lotFields(target), ...(validityValue ? { validity: validityValue } : {}),
             ...(sendValue.type !== 'MKT' ? { send: sendValue } : {}) };
         const made = await addTriggerGroup([
             { ...base, condition: 'above', price: pu, action: up.action, quantity: qu, kind: kindFor('above', up.action) },
@@ -413,7 +446,7 @@ function OcoForm({ target, onClose, defaults }: { target: Target; onClose: () =>
         <>
             {side('上方', '≥', up, setUp, up.action === 'Buy' ? '突破' : '停利')}
             {side('下方', '≤', down, setDown, down.action === 'Sell' ? '跌破' : '拉回')}
-            <SendControl value={send} onChange={setSend} futures={target.futures} />
+            {!odd && <SendControl value={send} onChange={setSend} futures={target.futures} />}
             <div className={styles.formRow}>
                 <span className={styles.label}>另一邊</span>
                 <Seg label='另一邊' value={mode} onChange={setMode}
@@ -497,6 +530,7 @@ function BracketForm({ target, onClose, defaults }: { target: Target; onClose: (
     const mult = c ? (target.futures ? Number((c as ContractInfo & { multiplier?: number }).multiplier) || 0 : 1000) : 0;
     const riskPerLot = c && ref !== null && Number.isFinite(st) && st > 0 && mult > 0 ? Math.abs(ref - stepPrice(c, ref, -dir * st)) * mult : null;
     const problem = commonProblem(target)
+        ?? (!target.futures && target.lot !== 'Common' ? '括號單目前只支援整股；零股請用觸價單或二擇一' : null)
         ?? (!Number.isSafeInteger(total) || total <= 0 ? '進場數量必須是正整數' : null)
         ?? (entryType !== 'MKT' ? priceProblem(target, p, entryType === 'LMT' ? '限價' : '觸發價') : last === undefined ? '市價進場需要現價' : null)
         ?? bracketPlanProblem(plan)
@@ -676,7 +710,8 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
     const [lead, setLead] = useState(target.futures ? '5' : '10');
     const [scope, setScope] = useState<'code' | 'account'>('code');
     const { busy, error, submit } = useSubmit();
-    const unit = target.futures ? '口' : '張';
+    const unit = unitOf(target);
+    const odd = !target.futures && target.lot === 'IntradayOdd';
     // expiry day (last trading day): futures close at 13:30, no night session
     const lastDay = (target.contract as { last_trading_date?: string } | undefined)?.last_trading_date;
     const today = (() => { const p = taipeiParts(Date.now()); return `${p.y}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`; })();
@@ -687,13 +722,14 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
     const leadN = Number(lead);
     const at = mode === 'send' ? taipeiTimeToday(time) : closeAt !== null && Number.isSafeInteger(leadN) && leadN >= 1 && leadN <= 60 ? closeAt - leadN * 60_000 : null;
     const q = Number(qty);
-    const sendValue = sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
+    const sendValue = odd ? { type: 'MKT' as const } : sendOf(send.type === 'MKP' && !target.futures ? { ...send, type: 'MKT' } : send);
     const code = target.contract?.target_code || target.contract?.code || '';
     const problem = commonProblem(target)
         ?? (mode === 'send' && at === null ? '請輸入時間（例：13:30）' : null)
         ?? (mode === 'flatten' && at === null ? '提前分鐘數須為 1～60' : null)
         ?? (at !== null && at <= Date.now() ? '時間已過；只能設定今天還沒到的時間' : null)
         ?? (mode === 'send' && (!Number.isSafeInteger(q) || q <= 0) ? '數量必須是正整數' : null)
+        ?? (mode === 'send' ? lotProblem(target, [q]) : null)
         ?? (mode === 'send' && send.type === 'LMT' ? '指定時間送單沒有觸發價，請選市價或範圍市價' : null)
         ?? (typeof sendValue === 'string' ? sendValue : null);
     const create = () => void submit(async () => {
@@ -702,7 +738,7 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
             code: target.contract.code, condition: 'above', price: 0, action: mode === 'send' ? action : 'Sell',
             quantity: mode === 'send' ? q : 0, kind: 'stop',
             time: mode === 'send' ? { kind: 'send', at } : { kind: 'flatten', at, scope },
-            ...(mode === 'send' ? { role: 'entry' as const } : {}),
+            ...(mode === 'send' ? { role: 'entry' as const, ...lotFields(target) } : {}),
             ...(mode === 'send' && sendValue.type !== 'MKT' ? { send: sendValue } : {}),
         }, target.contract, { account: target.account });
         if (made) onClose();
@@ -728,7 +764,7 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
                             options={[{ id: 'Buy', label: '買進' }, { id: 'Sell', label: '賣出' }]} />
                         <QtyInput qty={qty} setQty={setQty} unit={unit} quick={defaults.quickQty} />
                     </div>
-                    <SendControl value={send} onChange={setSend} futures={target.futures} label='送出方式' />
+                    {!odd && <SendControl value={send} onChange={setSend} futures={target.futures} label='送出方式' />}
                 </>
             ) : (
                 <>
@@ -749,7 +785,7 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
                     </div>
                     <div className={styles.formRow}>
                         <span className={styles.label}>做法</span>
-                        <span>先刪未成交委託與條件單，再以{target.futures ? '範圍市價' : '市價'}平掉剩餘部位</span>
+                        <span>先刪未成交委託與條件單，再以{target.futures ? '範圍市價' : '整股市價、零股限價'}平掉剩餘部位</span>
                     </div>
                 </>
             )}
@@ -758,7 +794,7 @@ function TimeForm({ target, onClose, defaults }: { target: Target; onClose: () =
                     <><b>{when}</b> 送出 <b className={action === 'Buy' ? styles.up : styles.down}>{orderWords(target, action, q, sendValue, null)}</b>（{code}）。
                         時間已過（例如 App 當時沒開）就不補送。{APPROVAL}</>
                 ) : (
-                    <><b>{when}</b> 先刪除{scope === 'code' ? ` ${code} ` : '此帳戶'}未成交的委託與條件單，再以{target.futures ? '範圍市價' : '市價'}平掉
+                    <><b>{when}</b> 先刪除{scope === 'code' ? ` ${code} ` : '此帳戶'}未成交的委託與條件單，再以{target.futures ? '範圍市價' : '整股市價、零股限價'}平掉
                         {scope === 'code' ? ` ${code} ` : '此帳戶'}剩餘部位。只在當日有效；到時若無部位就不送單，不會反手開倉。{APPROVAL}</>
                 )}
             </Summary>

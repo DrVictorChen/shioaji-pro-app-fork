@@ -26,6 +26,7 @@ const m = vi.hoisted(() => ({
     programs: [] as unknown[],
     trading: { positions: [], queries: { positions: { updatedAt: null as number | null, needsReconcile: false, error: null },
         account: { updatedAt: null, needsReconcile: false, error: null } }, margin: undefined as unknown, marginAccount: undefined as string | undefined },
+    refresh: vi.fn(async (_scope?: string) => undefined),
 }));
 
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://sim.invalid' }));
@@ -42,7 +43,7 @@ vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: [S1, F1]
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
 vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
-vi.mock('./trading-state', () => ({ getTradingState: () => m.trading }));
+vi.mock('./trading-state', () => ({ refreshTradingState: m.refresh, getTradingState: () => m.trading }));
 vi.mock('./shioaji', () => ({ fetchTrades: async () => [] }));
 vi.mock('./protection-env', () => ({
     currentProtectionEnv: () => SIM,
@@ -496,3 +497,33 @@ describe('#226 conditional orders in the background (step 1: triggers)', () => {
         expect(last()).toMatchObject({ pnlKnown: false });
     });
 });
+
+describe('background fills reach the window (QA 10/12: 持倉暫未套用, stale positions)', () => {
+    const slot = (orderId: string, filled: number) => ({ key: `k-${orderId}`, role: 'entry', cycle: 0, index: 0, status: filled ? 'filled' : 'working',
+        orderId, filled, fills: {}, fillTs: {}, qty: 1, cancel: null, detail: null, sentAt: 1 });
+    it('a new background fill reads positions / orders again; nothing on an unchanged count', async () => {
+        m.enabled = true;
+        m.programs = [program({ orders: [slot('T1', 0)] as never })];
+        await boot();
+        m.refresh.mockClear();
+        m.programs = [program({ orders: [slot('T1', 0)] as never }), { ...program({ orders: [slot('T2', 0)] as never }), id: 'trg:p2' }];
+        await bg.refreshBackground();
+        await flush();
+        expect(m.refresh).not.toHaveBeenCalled();
+        m.programs = [program({ orders: [slot('T1', 1)] as never }), { ...program({ orders: [slot('T2', 0)] as never }), id: 'trg:p2' },
+            { ...program(), id: 'trg:p3' }];
+        await bg.refreshBackground();
+        await flush();
+        expect(m.refresh).toHaveBeenCalledWith('all');
+    });
+
+    it('the report pipeline learns the order code of a trade the engine sent', async () => {
+        m.enabled = true;
+        m.programs = [program({ orders: [slot('T9', 0)] as never })];
+        await boot();
+        const { orderCodeHint } = await import('./order-code-hints');
+        expect(orderCodeHint('T9')).toBe('TXFJ6');
+        expect(orderCodeHint('nope')).toBeNull();
+    });
+});
+

@@ -13,6 +13,7 @@ import { fetchAccountBalance, fetchMargin, fetchPositions, fetchTradeCacheHealth
 import { ensureStream, getStreamStatus, isStreamOwner, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
 import { applyPositionFill, markPosition, positionFill, reportBody } from './portfolio-projection';
 import { projectOrderReport, projectTradeDeal } from './order-projection';
+import { orderCodeHint } from './order-code-hints';
 import { parseEventId, reportLedger } from './report-ledger';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { takeMutationIntent, type MutationIntent } from './mutation-intent';
@@ -887,7 +888,7 @@ function start() {
             const key = `${report.market}:${ref?.broker_id}:${ref?.account_id}:${report.id}`;
             if (report.ts && report.ts < (orderTimes.get(key) ?? 0)) return;
             if (queryEvents && queryEvents.length < 1000) queryEvents.push(report);
-            const trades = projectOrderReport(state.trades, report, getAccountState().accounts);
+            const trades = projectOrderReport(state.trades, report, getAccountState().accounts, orderCodeHint(report.id));
             if (trades) {
                 state = { ...state, trades };
                 if (report.ts) orderTimes.set(key, report.ts);
