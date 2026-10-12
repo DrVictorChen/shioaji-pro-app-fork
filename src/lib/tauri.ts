@@ -34,6 +34,13 @@ import {
     recoverHarnessOwnership,
 } from './sidecar-ownership';
 import { notify } from './trade';
+import {
+    type ForeignVerdict,
+    foreignServerVerdict,
+    hashPerson,
+    knownPersonHash,
+    recordOwnIdentity,
+} from './server-adoption';
 import { FAST_START_SCHEDULE, STOP_SCHEDULE, pollDelay, pollUntil, throttled } from './poll-until';
 import { serverHealthReady } from './server-health';
 import { serverIdentityVerified, setServerIdentityVerified } from './server-identity';
@@ -809,6 +816,58 @@ export async function caActive(
     }
 }
 
+// The person a server is logged into, hashed (#285) — null when it cannot
+// be read (still logging in, no accounts, not answering).
+export async function serverPersonHash(
+    port: number,
+    scheme: ApiScheme = getApiScheme(),
+): Promise<string | null> {
+    try {
+        const res = await probeFetch(`${scheme}://127.0.0.1:${port}/api/v1/auth/accounts`, 2000);
+        if (!res.ok) return null;
+        const accts = (await res.json()) as { person_id?: unknown }[];
+        const pid = Array.isArray(accts) ? accts[0]?.person_id : undefined;
+        return typeof pid === 'string' ? await hashPerson(pid) : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Is this server one this App started (its spawn record names the port)? */
+export function isOwnSpawn(status: ServerStatus | null | undefined): boolean {
+    return !!status?.port && getSpawnPort() === status.port;
+}
+
+/**
+ * #285: a server this App did not start is adopted only in the configured
+ * environment and on the account this App's own server logged into before.
+ * `null` = adoptable (or it is this App's own server).
+ */
+export async function foreignServerCheck(
+    status: ServerStatus,
+    settings: { apiKey: string; secretKey: string; production: boolean },
+): Promise<ForeignVerdict | null> {
+    if (!status.running || !status.port || isOwnSpawn(status)) return null;
+    const keyHash = await hashCredentials(settings.apiKey, settings.secretKey);
+    const known = knownPersonHash(keyHash);
+    // the account is only read when the environment already matches
+    const modeOk = status.simulation !== undefined && status.simulation !== settings.production;
+    const personHash = modeOk && known ? await serverPersonHash(status.port, status.scheme ?? 'http') : null;
+    return foreignServerVerdict(
+        { port: status.port, simulation: status.simulation, personHash },
+        { production: settings.production, knownPersonHash: known },
+    );
+}
+
+/** Remember the account this App's OWN server is logged into, under the
+ * keys it was started with — what a foreign server is compared against. */
+export async function learnOwnIdentity(status: ServerStatus): Promise<void> {
+    if (!status.port || !isOwnSpawn(status)) return;
+    const keyHash = getStoredSpawnKeyHash();
+    if (!keyHash) return;
+    recordOwnIdentity(keyHash, await serverPersonHash(status.port, status.scheme ?? 'http'));
+}
+
 // AbortSignal.timeout() cannot be cancelled after a request settles. With the
 // Tauri HTTP plugin, its later abort event attempts to close an already-freed
 // Rust resource and surfaces as an unhandled "resource id ... is invalid"
@@ -830,6 +889,10 @@ export interface StartResult extends SidecarResult {
     port: number;
     attached: boolean; // an existing shioaji server was reused
     portChanged: boolean; // the app's API base moved — caller should reload
+    /** the reused server was started by another program (checked, #285) */
+    attachedExternal?: boolean;
+    /** another program's server was found and NOT used (#285) */
+    foreign?: { port: number; simulation: boolean | undefined; text: string };
 }
 
 export async function serverStart(opts: {
@@ -932,6 +995,9 @@ export async function serverStart(opts: {
             };
         }
     }
+    // another program's server that is not used (#285): never stopped,
+    // never reclaimed — this App starts its own on a free port instead
+    let foreign: StartResult['foreign'];
     if (st?.running && st.port) {
         const stScheme: ApiScheme = st.scheme ?? 'http';
         const modeMismatch =
@@ -979,6 +1045,10 @@ export async function serverStart(opts: {
             !external &&
             shouldForceRespawn(getStoredSpawnKeyHash(), currentKeyHash);
         const caOk = !needsCa || (await caActive(st.port, stScheme));
+        // not started by this App: the environment and the account must
+        // match before it is used at all (#285)
+        const ownRecord = isOwnSpawn(st);
+        const foreignVerdict = ownRecord ? null : await foreignServerCheck(st, opts);
         if (
             st.healthy &&
             !modeMismatch &&
@@ -986,22 +1056,37 @@ export async function serverStart(opts: {
             caOk &&
             !versionMismatch &&
             !harnessMismatch &&
-            !keyMismatch
+            !keyMismatch &&
+            !foreignVerdict
         ) {
             // healthy, right mode, right version, CA live — just use it
             markStage('attach', `port=${st.port}`);
             const schemeChanged = setApiScheme(stScheme);
             return {
                 ok: true,
-                output: `伺服器已在運行（port ${st.port}）`,
+                output: ownRecord
+                    ? `伺服器已在運行（port ${st.port}）`
+                    : `已連上另一個程式啟動的${st.simulation ? '模擬' : '正式'}伺服器（port ${st.port}）`,
                 port: st.port,
                 attached: true,
+                attachedExternal: !ownRecord,
                 portChanged: setApiPort(st.port) || schemeChanged,
             };
         }
-        if (versionMismatch && external) {
-            // 使用者自己的 server 版本不符（例如 8080 上的舊 CLI）——
-            // 絕不動它，直接往下走：在別的 port 起自帶 binary
+        if (!ownRecord || (versionMismatch && external)) {
+            // 不是本 App 啟動的 server（另一個 App 的正式伺服器、使用者的
+            // CLI、版本不符的舊 server…）——絕不停止它，也不接上；往下走，
+            // 在別的 port 起本 App 自己的 server（#285）
+            const why = foreignVerdict?.text ?? `:${st.port} 上另一個程式啟動的伺服器（${
+                schemeMismatch ? `連線協定不符（server ${stScheme}，需 ${wantScheme}）`
+                    : versionMismatch ? `版本不符（server ${st.version}，需 ${EXPECTED_SERVER_VERSION}）`
+                    : !caOk ? 'CA 未啟用，正式環境無法下單'
+                    : harnessMismatch ? 'Agent Harness 金鑰不屬於此 App instance'
+                    : '狀態不健康'}），未連上`;
+            if (!ownRecord) {
+                foreign = { port: st.port, simulation: st.simulation, text: why };
+                markStage('attach', `foreign server not used, port=${st.port}`);
+            }
         } else {
             // unhealthy, wrong mode/version, or CA not active — stop it and
             // start fresh with the requested settings instead of attaching
@@ -1051,6 +1136,8 @@ export async function serverStart(opts: {
         // reclaim our own before picking a port; foreign listeners refuse
         // the ownership check and find_free_port dodges them below
         for (const p of new Set(getDevServerPort() ? [preferredPort] : [getApiPort(), DEFAULT_PORT])) {
+            if (foreign && p === foreign.port) continue; // another program's server
+
             await invoke('kill_shioaji', {
                 port: p,
                 pid: getServerPid(),
@@ -1071,7 +1158,7 @@ export async function serverStart(opts: {
             markStage('reclaim-port', `port freed after ${picked.elapsedMs} ms`);
         }
         if (getDevServerPort() && free !== preferredPort) {
-            return { ok: false, output: '隔離測試連接埠已被占用；不切換至其他伺服器', port: preferredPort, attached: false, portChanged: false };
+            return { ok: false, output: '隔離測試連接埠已被占用；不切換至其他伺服器', port: preferredPort, attached: false, portChanged: false, ...(foreign ? { foreign } : {}) };
         }
         if (free > 0) port = free;
     } catch {
@@ -1143,12 +1230,14 @@ export async function serverStart(opts: {
             : caFail[0].replace(/.*Failed to activate CA certificate:\s*/i, '');
         note += `\n⚠ CA 未啟用（${reason}）— 正式環境下單會被拒`;
     }
+    if (foreign) note = `\n${foreign.text}；本 App 的伺服器改在 port ${port}${note}`;
     return {
         ...res,
         output: `${res.output}${note}`,
         port,
         attached: false,
         portChanged,
+        ...(foreign ? { foreign } : {}),
     };
 }
 

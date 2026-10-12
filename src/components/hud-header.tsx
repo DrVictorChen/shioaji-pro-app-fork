@@ -21,6 +21,8 @@ import type { Profile, Workspace } from '../lib/workspace';
 import { LayoutLibrary } from './layout-library';
 import { MarketBar } from './market-bar';
 import { ServerManager } from './server-manager';
+import { ForeignServerChip } from './foreign-server-chip';
+import { externalServerLabel, useServerAttachment } from '../lib/server-adoption';
 import { SettingsDialog } from './settings-dialog';
 import { flashPopoutParams, reseedPopoutFlashAccounts } from '../lib/flash-account';
 import { mainFlashSelection } from '../lib/order-account';
@@ -209,6 +211,9 @@ export function HudHeader({
     const privMoney = usePrivacyMoney();
     const headerItems = useHeaderItems();
     const [simulation, setSimulation] = useState<boolean | null>(null);
+    const attachment = useServerAttachment();
+    // #285: a server another program started is labelled as such
+    const external = attachment.kind === 'external' ? attachment : null;
     const [appVer, setAppVer] = useState('');
     const [now, setNow] = useState(() => new Date());
     const [serverMgrOpen, setServerMgrOpen] = useState(false);
@@ -267,10 +272,15 @@ export function HudHeader({
 
             {simulation !== null &&
                 (simulation ? (
-                    <span className={styles.simBadge}>模擬環境</span>
+                    <span className={styles.simBadge} title={external ? externalServerLabel(external) : undefined}>
+                        模擬環境{external && <span className={styles.externalTag}>· 外部伺服器</span>}
+                    </span>
                 ) : (
-                    <span className={styles.prodBadge}>正式環境</span>
+                    <span className={styles.prodBadge} title={external ? externalServerLabel(external) : undefined}>
+                        正式環境{external && <span className={styles.externalTag}>· 外部伺服器</span>}
+                    </span>
                 ))}
+            <ForeignServerChip />
 
             <MarketBar />
 

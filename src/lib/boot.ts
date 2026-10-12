@@ -9,11 +9,14 @@ import { createAccountQuery } from './account-query';
 import { agentModule } from './features';
 import { describeOrderReport } from './order-report';
 import {
+    blockForeignServerPort,
     EXPECTED_SERVER_VERSION,
+    getApiPort,
     isTauri,
     setApiPort,
     setApiScheme,
 } from './runtime';
+import { setServerAttachment } from './server-adoption';
 import {
     fetchHealth,
     fetchInfo,
@@ -25,6 +28,9 @@ import {
     harnessOwnershipCompatible,
     caActive,
     consumeTrayReadyOnReload,
+    foreignServerCheck,
+    isOwnSpawn,
+    learnOwnIdentity,
     loadDesktopSettings,
     localTlsCertExists,
     markTrayReadyOnReload,
@@ -89,6 +95,26 @@ async function matchesServerIdentity(status: ServerStatus | null, settings: Desk
 async function serverCaReady(status: ServerStatus, settings: DesktopSettings): Promise<boolean> {
     return !settings.production || !settings.caPath ||
         (!!status.port && await caActive(status.port, status.scheme));
+}
+
+// #285: the server this window is about to use — label it when another
+// program started it; learn this App's own account from its own server
+function noteAdopted(status: ServerStatus) {
+    if (!status.port) return;
+    if (isOwnSpawn(status)) {
+        setServerAttachment({ kind: 'own', port: status.port });
+        void learnOwnIdentity(status);
+    } else {
+        setServerAttachment({ kind: 'external', port: status.port, simulation: status.simulation === true });
+    }
+}
+
+// #285: another program's server that is not used — say so, and keep this
+// page from reading it while it still points there
+function noteRefused(port: number, simulation: boolean | undefined, text: string,
+    reason: 'mode' | 'account' | 'unverified' = 'mode') {
+    setServerAttachment({ kind: 'refused', port, simulation, reason, text });
+    if (getApiPort() === port) blockForeignServerPort(port);
 }
 
 // Windows/WebView2 keyboard-focus self-heal. The native window can be
@@ -226,7 +252,10 @@ async function run() {
                 const statusProbeStarted = Date.now();
                 const status = await serverStatus();
                 markStage('probe', `status ${Date.now() - statusProbeStarted}ms`);
-                const matches = await matchesServerIdentity(status, settings);
+                // another program's server: also the same environment and
+                // account as this App's own server had (#285)
+                const foreign = status?.running ? await foreignServerCheck(status, settings) : null;
+                const matches = !foreign && await matchesServerIdentity(status, settings);
                 markStage('probe', 'identity checked');
                 // identity match: right mode, right listener scheme, right
                 // version — health is judged separately so a server that is
@@ -252,6 +281,7 @@ async function run() {
                             window.location.reload();
                             return;
                         }
+                        noteAdopted(status);
                         settleBootRun(coldStart ? 'attached' : 'ok');
                         setServerIdentityVerified(true);
                         releaseStream('server confirmed');
@@ -271,7 +301,13 @@ async function run() {
                 } else {
                     // not running, unhealthy, or wrong mode — serverStart
                     // stops a broken daemon and starts fresh
-                    if (status?.running) {
+                    if (status?.running && !isOwnSpawn(status)) {
+                        notify({
+                            kind: 'info',
+                            title: '🚀 自動啟動本 App 的 shioaji server…',
+                            body: `${foreign?.text ?? `:${status.port} 上另一個程式啟動的伺服器與本 App 設定不符，未連上`}；模式：${settings.production ? '⚠ 正式環境' : '模擬環境'}`,
+                        });
+                    } else if (status?.running) {
                         notify({
                             kind: 'info',
                             title: '♻️ 伺服器狀態異常，自動重啟…',
@@ -289,6 +325,16 @@ async function run() {
                     const res = await timedAutostart(() =>
                         serverStart({ ...settings, knownStatus: status }),
                     );
+                    if (res.foreign) {
+                        notify({
+                            kind: res.ok ? 'info' : 'err',
+                            title: '未使用另一個程式的伺服器',
+                            body: res.ok
+                                ? `${res.foreign.text}；本 App 的伺服器改在 port ${res.port} 啟動`
+                                : res.foreign.text,
+                        });
+                        if (!res.ok) noteRefused(res.foreign.port, res.foreign.simulation, res.foreign.text, foreign?.reason);
+                    }
                     if (!res.ok) {
                         notify({
                             kind: 'err',
@@ -329,8 +375,10 @@ async function run() {
                 // needs the configured mode, scheme, CA and ownership before
                 // it can authorize mutations. If absent, keep watching.
                 const status = await serverStatus();
-                if (status?.healthy && await matchesServerIdentity(status, settings) &&
+                const foreign = status?.running ? await foreignServerCheck(status, settings) : null;
+                if (status?.healthy && !foreign && await matchesServerIdentity(status, settings) &&
                     await serverCaReady(status, settings)) {
+                    noteAdopted(status);
                     const portMoved = status.port ? setApiPort(status.port) : false;
                     const schemeMoved = status.scheme ? setApiScheme(status.scheme) : false;
                     const moved = portMoved || schemeMoved;
@@ -340,6 +388,13 @@ async function run() {
                     releaseStream('server confirmed');
                     startTradingStateOnce();
                     return;
+                }
+                if (status?.running && status.port && !isOwnSpawn(status)) {
+                    // not started by this App and not usable: never adopted,
+                    // offered a server of its own (header) instead
+                    const text = foreign?.text ?? `:${status.port} 上另一個程式啟動的伺服器與本 App 設定不符，未連上`;
+                    noteRefused(status.port, status.simulation, text, foreign?.reason);
+                    notify({ kind: 'err', title: '未使用另一個程式的伺服器', body: `${text}。可在頁首「啟動本 App 的伺服器」改用自己的伺服器。` });
                 }
             }
         } catch {
@@ -389,6 +444,7 @@ async function run() {
             const st = isTauri
                 ? await serverStatus(expectedSettings
                     ? async (candidate) => candidate.healthy === true &&
+                        !(await foreignServerCheck(candidate, expectedSettings!)) &&
                         await matchesServerIdentity(candidate, expectedSettings!) &&
                         await serverCaReady(candidate, expectedSettings!)
                     : undefined)
@@ -396,6 +452,7 @@ async function run() {
             if (st) {
                 if (!st.running || !st.healthy) return;
                 if (expectedSettings && !(await matchesServerIdentity(st, expectedSettings))) return;
+                if (expectedSettings && await foreignServerCheck(st, expectedSettings)) return;
                 if (
                     EXPECTED_SERVER_VERSION !== '' &&
                     st.version !== undefined &&

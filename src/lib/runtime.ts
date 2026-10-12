@@ -131,6 +131,22 @@ export function setServerPid(pid: number | null) {
     }
 }
 
+// #285: another program's server answering on this window's port that this
+// App did not adopt (wrong environment / another account / unverified). Until
+// the App moves to its own server, nothing on this page talks to it — every
+// request goes to an unroutable address instead of showing its data.
+let blockedPort: number | null = null;
+
+export function blockForeignServerPort(port: number | null) {
+    const changed = blockedPort !== port;
+    blockedPort = port;
+    if (changed && typeof window !== 'undefined') window.dispatchEvent(new Event('sj-pro-api-base-changed'));
+}
+
+export function foreignServerPortBlocked(): number | null {
+    return blockedPort;
+}
+
 // In Tauri the frontend is served from tauri://localhost — API calls must
 // target the local shioaji server explicitly. The host stays 127.0.0.1;
 // with 本機 HTTPS enabled the mkcert certificate covers it alongside
@@ -141,7 +157,10 @@ export function getApiBase(): string {
         throw new Error('隔離 dev 服務與 VITE_API_BASE 不一致，拒絕連線');
     }
     if (env) return env;
-    return isTauri ? `${getApiScheme()}://127.0.0.1:${getApiPort()}` : '';
+    if (!isTauri) return '';
+    // port 0 is refused by every client: requests fail fast, nothing is read
+    const port = blockedPort !== null && getApiPort() === blockedPort ? 0 : getApiPort();
+    return `${getApiScheme()}://127.0.0.1:${port}`;
 }
 
 // Since shioaji 1.7.2 every event family rides ONE aggregate SSE

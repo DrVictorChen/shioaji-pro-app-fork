@@ -136,6 +136,72 @@ describe('serverStart start path', () => {
     });
 });
 
+// #285 — a server this App did not start (no spawn record for its port)
+describe('serverStart and another program\'s server', () => {
+    // 21322 answers as another App's server: environment and account per test
+    function foreignOn21322(info: { simulation: boolean }, personId?: string) {
+        listening.add(21322); bound.add(21322);
+        native.fetch.mockImplementation(async (url: string) => {
+            const port = Number(/:(\d+)\//.exec(url)![1]);
+            if (!listening.has(port) || url.startsWith('https')) throw new Error('connection refused');
+            if (url.endsWith('/info')) return new Response(JSON.stringify({ version: '1.7.7', simulation: port === 21322 ? info.simulation : true }));
+            if (url.endsWith('/auth/accounts')) return new Response(JSON.stringify(port === 21322 && personId ? [{ person_id: personId }] : []));
+            return new Response(JSON.stringify({ status: 'healthy' }));
+        });
+    }
+
+    it('another App\'s production server is neither used nor stopped: this App starts its own on a free port', async () => {
+        foreignOn21322({ simulation: false });
+        const res = await tauri.serverStart(settings); // simulation
+        expect(res).toMatchObject({ ok: true, attached: false, port: 21323,
+            foreign: { port: 21322, simulation: false, text: expect.stringContaining('正式伺服器與本 App 設定（模擬）不符') } });
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(false);
+        expect(calls('spawn_server')[0]).toMatchObject({ port: 21323 });
+    });
+
+    it('the same environment on an account that cannot be confirmed is not used either', async () => {
+        foreignOn21322({ simulation: true }, 'B987654321');
+        const res = await tauri.serverStart(settings);
+        expect(res.attached).toBe(false);
+        expect(res.foreign?.text).toContain('無法確認是同一個帳號');
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(false);
+    });
+
+    it('another account is not used', async () => {
+        const { hashCredentials } = await import('./spawn-keys');
+        const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
+        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        foreignOn21322({ simulation: true }, 'B987654321');
+        const res = await tauri.serverStart(settings);
+        expect(res.attached).toBe(false);
+        expect(res.foreign?.text).toContain('登入的是另一個帳號');
+    });
+
+    it('the same environment and the account this App\'s own server had: used, and said so', async () => {
+        const { hashCredentials } = await import('./spawn-keys');
+        const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
+        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        foreignOn21322({ simulation: true }, 'A123456789');
+        const res = await tauri.serverStart(settings);
+        expect(res.foreign).toBeUndefined();
+        expect(res).toMatchObject({ ok: true, attached: true, attachedExternal: true, port: 21322 });
+        expect(res.output).toContain('另一個程式啟動的模擬伺服器');
+        expect(calls('spawn_server')).toHaveLength(0);
+    });
+
+    it('this App\'s own server in the wrong mode is still stopped and replaced', async () => {
+        storage.set('sj-pro-server-port', '21322');
+        foreignOn21322({ simulation: false });
+        const invoke = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+            if (cmd === 'kill_shioaji' && args.port === 21322) { listening.delete(21322); bound.delete(21322); return true; }
+            return invoke(cmd, args);
+        });
+        await tauri.serverStart(settings);
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(true);
+    });
+});
+
 describe('page-start reads', () => {
     it('uses the already-working webview for local HTTP even if native probes stall', async () => {
         listening.add(21322);

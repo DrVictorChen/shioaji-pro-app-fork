@@ -35,6 +35,10 @@ vi.mock('./tauri', () => ({
     nativeOwnsHarnessSidecar: vi.fn(async () => false),
     caActive: vi.fn(async () => false),
     harnessOwnershipCompatible: () => true,
+    // #285: by default the server is this App's own spawn
+    foreignServerCheck: vi.fn(async () => null),
+    isOwnSpawn: vi.fn(() => true),
+    learnOwnIdentity: vi.fn(async () => undefined),
     consumeTrayReadyOnReload: () => false,
     markTrayReadyOnReload: vi.fn(),
     setTrayStatus: vi.fn(),
@@ -244,5 +248,89 @@ describe('early stream at bootstrap', () => {
         await vi.waitFor(() => expect(tauri.caActive).toHaveBeenCalledWith(21322, 'http'));
         expect(tauri.serverStart).not.toHaveBeenCalled();
         expect(m.startTrading).not.toHaveBeenCalled();
+    });
+
+    // #285 — another program's server is used only in the right environment
+    // and on the same account; otherwise never adopted, never read
+    const prodElsewhere = { running: true, healthy: true, port: 21322, simulation: false, version: '1.7.7', scheme: 'http' as const };
+    const refusal = { reason: 'mode' as const, text: ':21322 上另一個程式啟動的正式伺服器與本 App 設定（模擬）不符，未連上' };
+
+    it('autostart: another App\'s production server is not adopted; this App starts its own elsewhere', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: false,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
+            vi.mocked(tauri.isOwnSpawn).mockReturnValueOnce(false);
+            vi.mocked(tauri.foreignServerCheck).mockResolvedValueOnce(refusal);
+            vi.mocked(tauri.serverStart).mockReset().mockResolvedValueOnce({
+                ok: true, output: '', port: 21323, attached: false, portChanged: true,
+                foreign: { port: 21322, simulation: false, text: refusal.text },
+            });
+        });
+        const tauri = await import('./tauri');
+        const trade = await import('./trade');
+        await vi.waitFor(() => expect(tauri.serverStart).toHaveBeenCalledTimes(1));
+        expect(vi.mocked(tauri.serverStart).mock.calls[0]![0]).toMatchObject({ knownStatus: prodElsewhere });
+        await vi.waitFor(() => expect(trade.notify).toHaveBeenCalledWith(expect.objectContaining({
+            title: '未使用另一個程式的伺服器', body: expect.stringContaining('port 21323') })));
+        expect(m.startTrading).not.toHaveBeenCalled();
+        expect(tauri.learnOwnIdentity).not.toHaveBeenCalled();
+    });
+
+    it('autostart off: a refused foreign server is never read and the header offers this App\'s own', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: false, apiKey: 'k', secretKey: 's', production: false,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
+            vi.mocked(tauri.isOwnSpawn).mockReturnValueOnce(false);
+            vi.mocked(tauri.foreignServerCheck).mockResolvedValueOnce(refusal);
+        });
+        const adoption = await import('./server-adoption');
+        const runtime = await import('./runtime');
+        await vi.waitFor(() => expect(adoption.getServerAttachment()).toMatchObject({ kind: 'refused', port: 21322, simulation: false }));
+        expect(runtime.foreignServerPortBlocked()).toBe(21322);
+        const tauri = await import('./tauri');
+        expect(tauri.serverStart).not.toHaveBeenCalled(); // offered, not forced
+        expect(m.startTrading).not.toHaveBeenCalled();
+        expect(window.location.reload).not.toHaveBeenCalled();
+    });
+
+    it('a server another program started, checked and adopted, is labelled as such', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: true,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
+            vi.mocked(tauri.isOwnSpawn).mockReturnValueOnce(false);
+        });
+        await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
+        const adoption = await import('./server-adoption');
+        expect(adoption.getServerAttachment()).toEqual({ kind: 'external', port: 21322, simulation: false });
+        const tauri = await import('./tauri');
+        expect(tauri.learnOwnIdentity).not.toHaveBeenCalled();
+    });
+
+    it('this App\'s own server: its account is learned for later comparisons', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: true,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
+        });
+        await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
+        const adoption = await import('./server-adoption');
+        expect(adoption.getServerAttachment()).toEqual({ kind: 'own', port: 21322 });
+        const tauri = await import('./tauri');
+        expect(tauri.learnOwnIdentity).toHaveBeenCalledWith(prodElsewhere);
     });
 });

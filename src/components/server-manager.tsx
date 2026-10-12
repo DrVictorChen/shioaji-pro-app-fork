@@ -392,11 +392,14 @@ export function ServerManager({
                 kind: res.ok ? 'ok' : 'err',
                 title: res.ok
                     ? res.attached
-                        ? '🔗 已連接既有伺服器'
+                        ? res.attachedExternal
+                            ? '🔗 已連上另一個程式啟動的伺服器'
+                            : '🔗 已連接既有伺服器'
                         : '🟢 伺服器啟動指令已送出'
                     : '伺服器啟動失敗',
                 body: res.ok
-                    ? `port ${res.port} · 模式：${cfg.production ? '⚠ 正式環境' : '模擬環境'}`
+                    ? `port ${res.port} · 模式：${cfg.production ? '⚠ 正式環境' : '模擬環境'}${
+                        res.foreign ? `（${res.foreign.text}，未使用）` : ''}`
                     : diagnoseOutput(res.output) ||
                       errorLines(res.output) ||
                       res.output.slice(-120),
