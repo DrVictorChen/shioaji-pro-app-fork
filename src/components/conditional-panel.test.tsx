@@ -19,6 +19,8 @@ const m = vi.hoisted(() => ({
     pauseAll: vi.fn(async () => ({ changed: 1, failed: [] as string[] })),
     group: vi.fn(async () => undefined),
     priv: true,
+    bgOn: false as boolean | null,
+    views: [] as unknown[],
 }));
 
 vi.mock('../lib/conditional/use-conditional', async () => {
@@ -51,8 +53,12 @@ vi.mock('../lib/contracts-cache', () => ({ useContract: () => undefined, ensureC
 vi.mock('../lib/stream', () => ({ getQuote: () => ({ tick: { close: 48212 } }), subscribeQuoteStore: () => () => undefined,
     subscribeStatusStore: () => () => undefined, getStreamStatus: () => 'live' }));
 vi.mock('../lib/execution/background', () => ({
-    useBackgroundPrograms: () => [], markBackgroundHandled: vi.fn(), pauseBackgroundProgram: vi.fn(), removeBackgroundBracket: vi.fn(),
+    useBackgroundPrograms: () => [], useBackgroundSetting: () => m.bgOn, markBackgroundHandled: vi.fn(), pauseBackgroundProgram: vi.fn(), removeBackgroundBracket: vi.fn(),
     resolveBackgroundTrigger: vi.fn(), resumeBackgroundProgram: vi.fn(),
+}));
+vi.mock('../lib/execution/bracket-contract', async (orig) => ({
+    ...(await orig<typeof import('../lib/execution/bracket-contract')>()),
+    bracketViews: () => m.views,
 }));
 vi.mock('./background-bracket-status', () => ({ BracketRearm: () => null }));
 vi.mock('./pending-confirm', () => ({ PendingConfirmItemCard: () => null }));
@@ -68,7 +74,8 @@ vi.mock('./conditional-dialogs', () => ({ ConditionalSettingsDialog: () => creat
 vi.mock('../lib/conditional/panel-bracket', () => ({ placePanelBracket: vi.fn() }));
 vi.mock('../lib/account-store', () => ({ useAccounts: () => ({ accounts: [], selectedFutures: null, selectedStock: null }) }));
 
-const { ConditionalPanel } = await import('./conditional-panel');
+const { ConditionalPanel, ConditionalBracketCards, OPEN_CONDITIONAL_PANEL_EVENT, RUNNER_TEXT } = await import('./conditional-panel');
+const styles = await import('./conditional-panel.css');
 
 const trig = (over: Partial<TriggerOrder> = {}): TriggerOrder => ({
     id: 'tg-1', code: 'TXFJ6', orderCode: 'TXFJ6', condition: 'below', price: 47900, action: 'Sell', quantity: 1, kind: 'stop',
@@ -205,4 +212,68 @@ describe('ConditionalPanel', () => {
         expect(m.group).toHaveBeenCalledWith(['u', 'd'], 'remove');
         expect(m.remove).not.toHaveBeenCalled();
     });
+
+    it('the 操作 column stays pinned right; 帳戶／有效期／現價 give way first (QA 10/12 overflow)', () => {
+        m.sources = sources({ triggers: [trig()] });
+        const r = render();
+        const cells = r.root.findAll(n => n.type === 'td' && n.parent?.type === 'tr').filter(n => n.parent!.findAll(c => c.type === 'td').length === 9);
+        const last = cells.at(-1)!;
+        expect(last.props.className).toContain(styles.opsCell);
+        expect(last.findAll(n => n.type === 'button' && n.props['aria-label'] === '取消')).toHaveLength(1);
+        const ths = r.root.findAll(n => n.type === 'th');
+        expect(ths.at(-1)!.props.className).toContain(styles.opsCell);
+        const cls = (label: string) => String(ths.find(t => text(t).includes(label))!.props.className);
+        expect(cls('帳戶')).toContain(styles.colAccount);
+        expect(cls('有效期')).toContain(styles.colValidity);
+        expect(cls('現價')).toContain(styles.colPrice);
+        // the identifying columns never collapse
+        for (const label of ['商品', '類型', '方向', '條件', '狀態']) expect(ths.find(t => text(t).includes(label))!.props.className ?? '').toBe('');
+    });
+
+    it('背景持續執行 on: each row says where it runs; off: no label', () => {
+        m.sources = sources({ triggers: [trig()] });
+        m.bgOn = false;
+        expect(render().root.findAll(n => n.props.role === 'img')).toHaveLength(0);
+        m.bgOn = true;
+        const tags = render().root.findAll(n => n.type === 'span' && n.props.role === 'img');
+        expect(tags.map(t => t.props.title)).toEqual([RUNNER_TEXT.window]);
+        m.bgOn = false;
+    });
 });
+
+describe('ConditionalBracketCards (order ticket)', () => {
+    const view = (over: Record<string, unknown> = {}) => ({
+        programId: 'bkt-1', levelId: 'l0', rearm: false, origin: 'entry', anomalous: 0, env: ENV, account: { accountType: 'F', brokerId: 'b', accountId: 'a1' },
+        quoteCode: 'TXFR1', orderCode: 'TXFJ6', side: 'Buy', quantity: 1, stop: 48000, take: null, state: 'protected', paused: false,
+        held: null, entryFilled: 1, position: 1, unprotected: 0, exit: null, pendingLeg: null, attention: false,
+        actions: { markHandled: true, rearm: false, decide: false, pause: true, resume: false, remove: false },
+        detail: null, createdAt: 1, updatedAt: 2, ...over,
+    });
+    afterEach(() => { m.views = []; vi.unstubAllGlobals(); });
+
+    it('ended ones collapse into a count with a way to the panel; live ones stay cards', () => {
+        m.views = [view(), view({ programId: 'bkt-2', state: 'done', actions: { markHandled: false, rearm: false, decide: false, pause: false, resume: true, remove: true } }),
+            view({ programId: 'bkt-3', state: 'handled', actions: { markHandled: false, rearm: false, decide: false, pause: false, resume: false, remove: true } })];
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+        const dispatch = vi.fn();
+        vi.stubGlobal('window', { dispatchEvent: dispatch, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+        let r!: ReactTestRenderer;
+        act(() => { r = create(createElement(ConditionalBracketCards, { code: 'TXFR1' })); });
+        const all = text(r.root);
+        expect(all).toContain('已結束 2 張');
+        expect(all).not.toContain('已改由你自行處理');
+        expect(byLabel(r, '恢復')).toHaveLength(0);
+        expect(byLabel(r, '暫停')).toHaveLength(1); // the live one
+        act(() => { button(r, '在條件單管理查看').props.onClick(); });
+        expect(dispatch.mock.calls[0]![0].type).toBe(OPEN_CONDITIONAL_PANEL_EVENT);
+    });
+
+    it('nothing for the product: nothing rendered', () => {
+        m.views = [view({ quoteCode: 'MXFR1', orderCode: 'MXFJ6' })];
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+        let r!: ReactTestRenderer;
+        act(() => { r = create(createElement(ConditionalBracketCards, { code: 'TXFR1' })); });
+        expect(r.toJSON()).toBeNull();
+    });
+});
+

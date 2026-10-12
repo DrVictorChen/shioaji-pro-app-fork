@@ -509,3 +509,67 @@ export const statusCell = style({});
 globalStyle(`${table} td.${statusCell}`, { whiteSpace: 'normal', minWidth: '140px', maxWidth: '260px' });
 /** a number with its words: never split across lines */
 export const group = style({ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' });
+
+// ---- column priority (TXF QA 2026-10-12: at ~800px the 操作 column
+// scrolled out of view) ----
+// 操作 stays pinned to the right edge; 帳戶, 有效期 and 現價／距離 give way
+// first as the panel narrows (cards take over below 640px).
+
+export const opsCell = style({});
+globalStyle(`${table} ${opsCell}`, {
+    position: 'sticky',
+    right: 0,
+    zIndex: 1,
+    background: vars.color.panel,
+    boxShadow: `inset 1px 0 0 ${vars.color.border}`,
+});
+globalStyle(`${table} th${opsCell}`, { zIndex: 2 });
+const alertTint = `color-mix(in srgb, ${vars.color.danger} 8%, transparent)`;
+globalStyle(`${rowAlert} td${opsCell}`, {
+    background: `linear-gradient(${alertTint}, ${alertTint}), ${vars.color.panel}`,
+});
+globalStyle(`${rowSelected} td${opsCell}`, { background: vars.color.inset });
+
+export const colAccount = style({
+    '@container': { 'condpanel (max-width: 959px)': { display: 'none' } },
+});
+export const colValidity = style({
+    '@container': { 'condpanel (max-width: 859px)': { display: 'none' } },
+});
+export const colPrice = style({
+    '@container': { 'condpanel (max-width: 739px)': { display: 'none' } },
+});
+
+// ---- runner tag (shown while 背景持續執行 is on) ----
+const runnerBase = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    marginLeft: '4px',
+    verticalAlign: 'middle',
+    cursor: 'help',
+});
+export const runner = styleVariants({
+    background: [runnerBase, { color: vars.color.success }],
+    window: [runnerBase, { color: vars.color.mutedForeground }],
+});
+
+// ---- order-ticket cards footer ----
+export const cardsFoot = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '0 8px',
+    color: vars.color.mutedForeground,
+});
+export const linkButton = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '2px',
+    padding: 0,
+    border: 'none',
+    background: 'none',
+    color: vars.color.accent,
+    font: 'inherit',
+    cursor: 'pointer',
+    selectors: { '&:hover': { textDecoration: 'underline' } },
+});
