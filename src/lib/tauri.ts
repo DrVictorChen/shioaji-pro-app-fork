@@ -833,9 +833,12 @@ export async function serverPersonHash(
     }
 }
 
-/** Is this server one this App started (its spawn record names the port)? */
+/** Is this server one this App started (its spawn record names the port)?
+ * The isolated dev port (VITE_DEV_SERVER_PORT) counts as this App's: the
+ * developer chose exactly that server for this dev App. */
 export function isOwnSpawn(status: ServerStatus | null | undefined): boolean {
-    return !!status?.port && getSpawnPort() === status.port;
+    if (!status?.port) return false;
+    return getSpawnPort() === status.port || getDevServerPort() === status.port;
 }
 
 /**
