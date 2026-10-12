@@ -93,7 +93,7 @@ async function futuresRootName(canonical: string): Promise<string | null> {
     // 「商品名稱＋兩位數月份」補上月份（TMFJ6 → 微型臺指期貨10）
     const month = /^([A-L])\d$/.exec(canonical.slice(bestLen));
     if (month) {
-        const mm = MONTH_CODES.indexOf(month[1]) + 1;
+        const mm = MONTH_CODES.indexOf(month[1] ?? "") + 1;
         return `${best}${String(mm).padStart(2, '0')}`;
     }
     return best;
