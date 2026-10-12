@@ -178,6 +178,10 @@ export interface OrderSlot {
     closed?: boolean;
     /** Background engine: final in a complete listing with every fill. */
     listed?: boolean;
+    /** Background engine: fill prices, and the lots a bracket's tiers never
+     * protect (after the order was reported closed / of another session). */
+    fillPx?: Record<string, number>;
+    excluded?: number;
 }
 
 export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'resume' | 'unknownNotSent';
@@ -235,7 +239,7 @@ export interface Level {
      * the 移動停損 state, 保本 flags. */
     rules?: TierRules;
     base?: number;
-    trail?: { active: boolean; anchor: number | null };
+    trail?: { active: boolean };
     beArmed?: boolean;
     beDone?: boolean;
 }
