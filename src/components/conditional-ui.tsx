@@ -8,11 +8,12 @@ import { getQuote, subscribeQuoteStore } from '../lib/stream';
 import { conditionalDemoActive, DEMO_PRICES } from '../lib/conditional/demo';
 import * as styles from './conditional-panel.css';
 
-/** Latest trade price of a code from the shared quote store (no request). */
-export function useLastPrice(code: string): number | undefined {
+/** Latest trade price of a code from the shared quote store (no request);
+ * `oddLot`: the 盤中零股 feed (what an odd-lot trigger watches). */
+export function useLastPrice(code: string, oddLot = false): number | undefined {
     const close = useSyncExternalStore(
-        l => subscribeQuoteStore(code, l),
-        () => getQuote(code)?.tick?.close,
+        l => subscribeQuoteStore(code, l, oddLot),
+        () => getQuote(code, oddLot)?.tick?.close,
     );
     if (conditionalDemoActive() && DEMO_PRICES[code] !== undefined) return DEMO_PRICES[code];
     const n = Number(close);
