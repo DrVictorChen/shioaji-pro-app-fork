@@ -1307,10 +1307,11 @@ export function FlashOrder({
     }, [cancelMarks, moveMarks]);
 
     // #216 平倉／全刪 的停損停利範圍：這個面板的帳戶＋商品＋單位
-    const protectionScopeOf = (a: Account) => {
+    // （股票平倉同時平整股與零股：兩種單位的保護都要取消，allUnits）
+    const protectionScopeOf = (a: Account, allUnits = false) => {
         const c = contractRef.current;
         return { account: { account_type: a.account_type, broker_id: a.broker_id, account_id: a.account_id },
-            codes: [c.code, c.target_code].filter((x): x is string => !!x), odd: oddRef.current };
+            codes: [c.code, c.target_code].filter((x): x is string => !!x), odd: allUnits && c.security_type === 'STK' ? null : oddRef.current };
     };
 
     // 刪單送出前再確認：期間面板暫停或連動、商品變了就不送（不撤到上一檔的委託）
@@ -1356,6 +1357,8 @@ export function FlashOrder({
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
+        // the context is fixed at the click: a product switched meanwhile cancels nothing of it
+        const guard = cancelGuard();
         // #216 全刪 also ends this product's 停損停利 (never while an exit is out)
         const stop = await flashStopProtections(protectionScopeOf(capturedAccount));
         const protectNote = stop.blocked.length
@@ -1373,7 +1376,7 @@ export function FlashOrder({
             if (!protectNote) notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
-        const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
+        const results = await cancelOrders(targets.map((t) => t.order.id), undefined, guard);
         const summary = cancellationSummary(results);
         notify({
             kind: summary.kind,
@@ -1406,7 +1409,7 @@ export function FlashOrder({
         try {
             // #216 停損停利 first: ended before the close goes out, so no exit can
             // fire on top of it; an exit that is out or unknown blocks the close
-            const stop = await flashStopProtections(protectionScopeOf(account));
+            const stop = await flashStopProtections(protectionScopeOf(account, true));
             if (stop.blocked.length || stop.failed.length) {
                 notify({ kind: 'err', title: '⚡ 平倉未送出', body: stop.blocked.length
                     ? `${stop.blocked.join('；')}。為避免重複出場，這筆沒有送出；請到條件單面板處理後再平倉`

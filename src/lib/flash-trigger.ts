@@ -336,12 +336,16 @@ export interface ProtectionScope {
     account: { account_type: string; broker_id: string; account_id: string };
     /** quote and order codes of the panel's product (TXFR1, TXFJ6) */
     codes: string[];
-    odd: boolean;
+    /** stocks: the unit (null: both — a stock 平倉 closes whole and odd lots) */
+    odd: boolean | null;
+    /** protection environment; only this server / mode */
+    env: string;
 }
 
 /** What the selector needs of a window bracket plan. */
 export interface WindowPlanLike {
     id: string;
+    env: string;
     account: { account_type: string; broker_id: string; account_id: string };
     quoteCode: string;
     orderCode: string;
@@ -362,6 +366,9 @@ export interface ExitLike {
 
 export interface BackgroundViewLike {
     programId: string;
+    env: string;
+    /** its last exit order is still leaving or working */
+    exitBusy: boolean;
     levelId: string;
     account: { accountType: string; brokerId: string; accountId: string };
     quoteCode: string;
@@ -389,8 +396,8 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
     const out: ProtectionTargets = { window: [], background: [], blocked: [] };
     const inCodes = (...cs: string[]) => cs.some(c => s.codes.includes(c));
     for (const p of plans) {
-        if (p.dismissed || !p.live || !sameAccount(p.account, s) || !inCodes(p.quoteCode, p.orderCode)) continue;
-        if (p.securityType === 'STK' && isOddLot(p.orderLot) !== s.odd) continue;
+        if (p.dismissed || !p.live || p.env !== s.env || !sameAccount(p.account, s) || !inCodes(p.quoteCode, p.orderCode)) continue;
+        if (p.securityType === 'STK' && s.odd !== null && isOddLot(p.orderLot) !== s.odd) continue;
         const legOut = exits.some(e => e.bracketId === p.id && exitOut(e.status, e.acknowledged));
         if ((p.exit && exitOut(p.exit.status, p.exit.acknowledged)) || legOut) {
             out.blocked.push(`${p.quoteCode} 停損停利的出場單${p.exit?.status === 'unknown' || exits.some(e => e.bracketId === p.id && e.status === 'unknown') ? '結果未知' : '正在送出或等待成交'}`);
@@ -398,12 +405,14 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
         }
         out.window.push(p.id);
     }
-    if (!s.odd) {
+    // background brackets are whole lots / contracts only
+    if (s.odd !== true) {
         for (const v of views) {
             const account = { account_type: v.account.accountType, broker_id: v.account.brokerId, account_id: v.account.accountId };
-            if (!sameAccount(account, s) || !inCodes(v.quoteCode, v.orderCode)) continue;
+            if (v.env !== s.env || !sameAccount(account, s) || !inCodes(v.quoteCode, v.orderCode)) continue;
             if (v.state === 'done' || v.state === 'handled' || v.state === 'rearmed') continue;
-            if (v.state === 'exiting' || v.state === 'unknown' || !v.canEnd) {
+            // the exit order itself, not the display state (unprotected lots outrank 出場中)
+            if (v.exitBusy || v.state === 'exiting' || v.state === 'unknown' || !v.canEnd) {
                 out.blocked.push(`${v.quoteCode} 停損停利（背景執行）${v.state === 'unknown' ? '的出場單結果未知' : '的出場單正在送出或等待成交'}`);
                 continue;
             }

@@ -33,13 +33,22 @@ export async function flashPlaceBracket(r: PanelBracketRequest): ReturnType<type
 /** #216 平倉／全刪: end this panel's protections (window and background
  * brackets of the account + product + unit). Nothing is ended while any
  * exit is out or unknown (`blocked`); `failed`: an end that was not confirmed. */
-export async function flashStopProtections(scope: ProtectionScope): Promise<{ stopped: number; blocked: string[]; failed: string[] }> {
-    const [{ getBrackets, dismissBracket }, { isLive }, { getExits }, { getBackgroundPrograms, markBackgroundHandled }, { bracketViews }] = await Promise.all([
-        import('./bracket'), import('./bracket-core'), import('./trigger-engine'), import('./execution/background'), import('./execution/bracket-contract')]);
-    const t = protectionTargets(scope,
+export async function flashStopProtections(scope: Omit<ProtectionScope, 'env'>): Promise<{ stopped: number; blocked: string[]; failed: string[] }> {
+    const [{ getBrackets, dismissBracket, bracketSnapshotStale }, { isLive }, { getExits }, bg, { bracketViews }, { currentProtectionEnv }] = await Promise.all([
+        import('./bracket'), import('./bracket-core'), import('./trigger-engine'), import('./execution/background'), import('./execution/bracket-contract'),
+        import('./protection-env')]);
+    const env = currentProtectionEnv();
+    if (!env) return { stopped: 0, blocked: ['伺服器模式（模擬／正式）尚未確認，無法確認停損停利'], failed: [] };
+    // never "nothing to stop" from a list that may be out of date
+    if (bracketSnapshotStale()) return { stopped: 0, blocked: ['主視窗的停損停利狀態未更新（主視窗可能已關閉或重新載入）'], failed: [] };
+    if (bg.backgroundSupported() && bg.getBackgroundHealth() === null) return { stopped: 0, blocked: ['背景執行的狀態尚未取得'], failed: [] };
+    const full: ProtectionScope = { ...scope, env };
+    const read = () => protectionTargets(full,
         getBrackets().map(p => ({ ...p, live: isLive(p) })),
         getExits(),
-        bracketViews(getBackgroundPrograms()).map(v => ({ ...v, canEnd: v.actions.markHandled })));
+        bracketViews(bg.getBackgroundPrograms()).map(v => ({ ...v, canEnd: v.actions.markHandled,
+            exitBusy: !!v.exit && (v.exit.status === 'pendingSubmit' || v.exit.status === 'working') })));
+    const t = read();
     if (t.blocked.length) return { stopped: 0, blocked: t.blocked, failed: [] };
     let stopped = 0;
     const failed: string[] = [];
@@ -47,7 +56,15 @@ export async function flashStopProtections(scope: ProtectionScope): Promise<{ st
         try { await dismissBracket(id); stopped += 1; } catch (e) { failed.push(e instanceof Error ? e.message : String(e)); }
     }
     for (const b of t.background) {
-        try { await markBackgroundHandled(b.programId, b.levelId); stopped += 1; } catch (e) { failed.push(`背景執行：${e instanceof Error ? e.message : String(e)}`); }
+        try { await bg.markBackgroundHandled(b.programId, b.levelId); stopped += 1; } catch (e) { failed.push(`背景執行：${e instanceof Error ? e.message : String(e)}`); }
     }
-    return { stopped, blocked: [], failed };
+    // read back: a protection may have fired while it was being ended — its
+    // exit is then out (never close on top of it), or it is still tracked
+    const ids = new Set(t.window);
+    const exitAfter = getExits().some(e => !!e.bracketId && ids.has(e.bracketId)
+        && (e.status === 'sending' || e.status === 'working' || (e.status === 'unknown' && !e.acknowledged)));
+    const again = read();
+    const blocked = [...again.blocked, ...(exitAfter ? ['取消期間停損停利已觸發，出場單正在送出或結果未知'] : [])];
+    if (!failed.length && (again.window.length || again.background.length)) failed.push('停損停利仍在執行中，取消未確認');
+    return { stopped, blocked, failed };
 }
