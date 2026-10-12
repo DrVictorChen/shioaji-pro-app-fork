@@ -135,6 +135,44 @@ it('a cancelled confirmation sends nothing and records nothing', async () => {
     expect(feedback()).toContain('已取消下單');
 });
 
+// the background engine's session_of (src-tauri execution/sidecar.rs):
+// Taipei time, the night session runs 14:30 → 05:00 the next day
+const HOUR = 3_600_000;
+function sessionOf(ms: number): string {
+    const local = ms + 8 * HOUR;
+    const day = Math.floor(local / (24 * HOUR));
+    const tod = local - day * 24 * HOUR;
+    if (tod < 5 * HOUR) return `${day - 1}/night`;
+    if (tod < 14.5 * HOUR) return `${day}/day`;
+    return `${day}/night`;
+}
+
+async function sendAcross(opened: number, confirmed: number, dispatched: number) {
+    m.owner.mockResolvedValue('background');
+    h.confirmManualOrders = true;
+    let now = opened;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    h.confirm.mockImplementation(async () => { now = confirmed; return true; });
+    m.future.mockImplementation(async (_c: unknown, _o: unknown, _a: unknown, opts: { beforeDispatch: () => void }) => {
+        now = dispatched;
+        opts.beforeDispatch(); // the request goes out here
+        now = dispatched + 2_000; // the answer comes later
+        return { status: { status: 'Submitted' }, order: { id: 'T-entry', seqno: 'S1', ordno: '' },
+            contract: { code: 'TXFJ6', target_code: 'TXFJ6' } };
+    });
+    await sendBracket();
+    return m.create.mock.calls[0]![0].entry.sentAt as number;
+}
+
+it('an entry confirmed after 05:00 is filed under the day session, not the night it was opened in', async () => {
+    const opened = Date.UTC(2026, 9, 12, 20, 59, 50); // 04:59:50 +08:00 on 10/13
+    const dispatched = Date.UTC(2026, 9, 12, 21, 0, 3); // 05:00:03
+    const sentAt = await sendAcross(opened, Date.UTC(2026, 9, 12, 21, 0, 1), dispatched);
+    expect(sentAt).toBe(dispatched);
+    expect(sessionOf(opened)).not.toBe(sessionOf(sentAt));
+    expect(sessionOf(sentAt)).toBe(sessionOf(Date.UTC(2026, 9, 13, 1, 0, 0))); // 09:00 on 10/13: the day session
+});
+
 it('the send time is the dispatch after the confirmation, across the day-session cut', async () => {
     m.owner.mockResolvedValue('background');
     h.confirmManualOrders = true;
@@ -161,4 +199,6 @@ it('the send time is the dispatch after the confirmation, across the day-session
     expect(sentAt).toBe(dispatched);
     // never the time the confirmation opened (still the day session)
     expect(sentAt).toBeGreaterThanOrEqual(dayCut);
+    expect(sessionOf(opened)).toMatch(/day$/);
+    expect(sessionOf(sentAt)).toMatch(/night$/);
 });
