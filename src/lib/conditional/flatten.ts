@@ -21,6 +21,8 @@ import type { AccountedPosition, Account } from '../types/portfolio';
 import type { Trade } from '../types/order';
 import { remainingWorkingOrderQuantity } from '../working-order-quantity';
 
+export { closeHowText, quantityText } from './flatten-text';
+
 export type FlattenScope =
     | { type: 'code'; codes: string[]; account: AccountRef | null }
     | { type: 'account'; account: AccountRef }
@@ -96,16 +98,58 @@ export interface FlattenHooks {
     stopConditional(): Promise<{ stopped: number; failed: string[] }>;
     /** wait until no conditional order in scope is still sending; false: still sending */
     waitInFlight?(): Promise<boolean>;
+    /** tests: the wait before each read-back */
+    sleep?(ms: number): Promise<void>;
 }
 
 export interface FlattenResult {
     stopped: number;
     cancelled: number;
     cancelFailed: string[];
-    sent: { code: string; action: 'Buy' | 'Sell'; quantity: number; market: 'stock' | 'futures' }[];
+    sent: { code: string; action: 'Buy' | 'Sell'; quantity: number; market: 'stock' | 'futures'; account: AccountRef }[];
     notSent: string[];
     skipped: string[];
+    /** Read back after sending: what is still held of a product a close was
+     * sent for (an IOC market order may fill only partly). */
+    remaining: RemainingOrder[];
 }
+
+/** `unconfirmed`: the read-back failed — treat as still held until checked. */
+export type RemainingOrder = FlattenOrder & { unconfirmed?: boolean };
+
+export interface FlattenPreviewData {
+    positions: AccountedPosition[];
+    trades: Trade[];
+    /** accounts whose query failed (their part falls back to nothing) */
+    failed: string[];
+}
+
+/** The 全平並取消 preview's data, read fresh from the broker for every
+ * account in scope (the window's positions may be stale: QA 10/12 showed
+ * 2 lots held when the account held 1). Execution reads again anyway. */
+export async function loadFlattenPreview(scope: FlattenScope): Promise<FlattenPreviewData> {
+    const out: FlattenPreviewData = { positions: [], trades: [], failed: [] };
+    const query = createAccountQuery();
+    await Promise.all(accountsFor(scope).map(async account => {
+        const type = account.account_type as 'S' | 'F';
+        const label = type === 'F' ? '期貨' : '證券';
+        try {
+            const [rows, trades] = await Promise.all([
+                query.read(type, account, current => fetchPositions(type, current)),
+                query.read(type, account, current => fetchTrades(type, current, { refresh: true })),
+            ]);
+            out.positions.push(...rows.map(r => ({ ...r, account })));
+            out.trades.push(...trades.map(t => ({ ...t, order: { ...t.order, account: t.order.account ?? account } })));
+        } catch (e) {
+            out.failed.push(`${label}帳戶查詢失敗：${e instanceof Error ? e.message : String(e)}`);
+        }
+    }));
+    return out;
+}
+
+/** After sending: wait for the broker to settle the closes (an IOC market
+ * order ends within moments), then read the positions again. */
+export const READBACK_DELAYS_MS = [1500, 2500, 4000];
 
 function accountsFor(scope: FlattenScope): Account[] {
     const all = getAccountState().accounts.filter(a => canTrade(a) && (a.account_type === 'S' || a.account_type === 'F'));
@@ -117,7 +161,7 @@ function accountsFor(scope: FlattenScope): Account[] {
 /** Runs the three steps. Every request is authoritative (refresh); nothing
  * is retried automatically. */
 export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): Promise<FlattenResult> {
-    const result: FlattenResult = { stopped: 0, cancelled: 0, cancelFailed: [], sent: [], notSent: [], skipped: [] };
+    const result: FlattenResult = { stopped: 0, cancelled: 0, cancelFailed: [], sent: [], notSent: [], skipped: [], remaining: [] };
     // bound to the server / mode it started on: any switch stops it before the next request
     const sameServer = captureServerMode();
     const switched = () => {
@@ -178,6 +222,7 @@ export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): 
     }
     // 3. read positions again and close exactly what is held
     if (!sameServer()) return switched();
+    const sentFor: { account: Account; order: FlattenOrder }[] = [];
     for (const account of accounts) {
         const type = account.account_type as 'S' | 'F';
         if (blocked.has(`${type}:${account.account_id}:*`)) continue;
@@ -198,14 +243,44 @@ export async function executeFlatten(scope: FlattenScope, hooks: FlattenHooks): 
             }
             try {
                 await sendClose(o, account, sameServer);
-                result.sent.push({ code: o.code, action: o.action, quantity: o.quantity, market: o.market });
+                result.sent.push({ code: o.code, action: o.action, quantity: o.quantity, market: o.market, account: o.account });
+                sentFor.push({ account, order: o });
             } catch (e) {
                 const notStarted = (e as { mutationNotStarted?: boolean })?.mutationNotStarted;
                 result.notSent.push(`${o.code}：${notStarted ? '未送出' : '結果不明，請核對委託，勿直接重送'}（${e instanceof Error ? e.message : String(e)}）`);
             }
         }
     }
+    // 4. read back: what of each product sent for is still held
+    if (sentFor.length) result.remaining = await readBack(sentFor, query, hooks.sleep ?? sleep);
     return result;
+}
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+async function readBack(sentFor: { account: Account; order: FlattenOrder }[], query: ReturnType<typeof createAccountQuery>,
+    wait: (ms: number) => Promise<void>): Promise<RemainingOrder[]> {
+    const byAccount = new Map<Account, FlattenOrder[]>();
+    for (const s of sentFor) byAccount.set(s.account, [...(byAccount.get(s.account) ?? []), s.order]);
+    let left: RemainingOrder[] = [];
+    for (const delay of READBACK_DELAYS_MS) {
+        await wait(delay);
+        left = [];
+        for (const [account, orders] of byAccount) {
+            const type = account.account_type as 'S' | 'F';
+            try {
+                const raw = await query.read(type, account, current => fetchPositions(type, current));
+                const codes = orders.map(o => o.code);
+                const plan = planFlatten(raw.map(r => ({ ...r, account })), { type: 'code', codes, account: account as AccountRef });
+                left.push(...plan.orders);
+            } catch {
+                // unknown: everything sent for this account stays to be checked
+                left.push(...orders.map(o => ({ ...o, unconfirmed: true })));
+            }
+        }
+        if (!left.length) break;
+    }
+    return left;
 }
 
 async function sendClose(o: FlattenOrder, account: Account, serverMode: ServerModeGuard) {

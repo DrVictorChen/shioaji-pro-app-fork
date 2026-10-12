@@ -54,7 +54,10 @@ import { accountTag, bgBracketRows, KIND_LABEL, rowRunner, rowsForTab, TABS, typ
 import { useConditionalView, useStreamStatus, type ConditionalView } from '../lib/conditional/use-conditional';
 import { useConditionalSettings } from '../lib/conditional/settings';
 import { useBracketPolicy } from '../lib/conditional/bracket-policy';
-import { pauseAll, pauseAllEligible } from '../lib/conditional/runtime';
+import { flattenSummary, pauseAll, pauseAllEligible, runFlatten } from '../lib/conditional/runtime';
+import { dismissFlattenLeftover } from '../lib/conditional/flatten-leftovers';
+import { currentProtectionEnv } from '../lib/protection-env';
+import { pauseAllButton } from '../lib/conditional/pause-all';
 import { useBackgroundPrograms, useBackgroundSetting } from '../lib/execution/background';
 import { bracketViews } from '../lib/execution/bracket-contract';
 import { fmtClock, fmtNum } from '../lib/conditional/session';
@@ -192,7 +195,7 @@ function RunnerTag({ row }: { row: CondRow }) {
 
 // ---- actions ----
 
-type Step = 'cancel' | 'send' | 'handled';
+type Step = 'cancel' | 'send' | 'handled' | 'retry';
 
 function RowActions({ row, expanded, onToggle, compact }: {
     row: CondRow;
@@ -257,6 +260,18 @@ function RowActions({ row, expanded, onToggle, compact }: {
         confirm.arm(null);
         void run(() => resolvePendingTrigger(pendingId, 'send', { allowUnpast }));
     };
+    const retry = () => {
+        if (src.type !== 'leftover') return;
+        if (confirm.step !== 'retry') { confirm.arm('retry'); return; }
+        if (!confirm.settled()) return;
+        confirm.arm(null);
+        const o = src.leftover.order;
+        void run(async () => {
+            if (currentProtectionEnv() !== src.leftover.env) throw new Error('伺服器或模擬／正式模式與全平時不同，未送出');
+            const r = await runFlatten({ type: 'code', codes: [o.code], account: o.account });
+            if (r.remaining.length || r.notSent.length || r.cancelFailed.length) throw new Error(flattenSummary(r));
+        }, '已再次平倉');
+    };
     const cancelLabel = src.type === 'bracket' ? '再按一次：移除並撤銷保護' : src.type === 'bgBracket' ? '再按一次：移除' : '再按一次：取消';
     return (
         <div className={compact ? styles.cardActions : styles.actions}>
@@ -297,6 +312,13 @@ function RowActions({ row, expanded, onToggle, compact }: {
                     {confirm.step === 'handled' ? '再按一次：確認我已自行處理' : '我已自行處理'}
                 </button>
             )}
+            {a.retry && (
+                <button type='button' className={confirm.step === 'retry' ? styles.button.danger : styles.button.primary} disabled={busy}
+                    title='重新查詢委託與持倉，刪除此商品未成交委託後再平倉剩餘部位'
+                    onClick={retry}>
+                    {confirm.step === 'retry' ? '再按一次：確認再平倉' : '再平倉剩餘部位'}
+                </button>
+            )}
             {a.reconcile && row.attention && src.type === 'bracket' && (
                 <button type='button' className={styles.button.plain} disabled={busy}
                     title='向券商更新此帳戶委託（會使用查詢額度）'
@@ -307,8 +329,9 @@ function RowActions({ row, expanded, onToggle, compact }: {
             {a.acknowledge && (
                 <button type='button' className={styles.button.plain} disabled={busy}
                     title='已在委託與持倉確認結果；不會送出任何委託'
-                    onClick={() => void run(() => src.type === 'bracket' ? acknowledgeBracketExit(src.plan.id)
-                        : src.type === 'exit' ? acknowledgeExit(src.exit.id) : Promise.resolve())}>
+                    onClick={() => void run(async () => src.type === 'bracket' ? acknowledgeBracketExit(src.plan.id)
+                        : src.type === 'exit' ? acknowledgeExit(src.exit.id)
+                            : src.type === 'leftover' ? dismissFlattenLeftover(src.leftover.id) : undefined)}>
                     我已核對
                 </button>
             )}
@@ -689,7 +712,7 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
         : legsOf(r).some(t => !t.paused && !t.pending && pauseAllEligible(t, settings.pauseStopsExits)));
     const anyPaused = view.rows.some(r => r.paused || legsOf(r).some(t => t.paused) || (r.source.type === 'bgBracket' && r.actions.resume));
     const anyRunning = eligible.length > 0;
-    const pausable = anyRunning || anyPaused ? [true] : [];
+    const pauseButton = pauseAllButton(anyRunning, anyPaused);
     const pa = useRun();
     const rows = useMemo(() => rowsForTab(view, tab), [view, tab]);
     const toggle = (id: string) => setExpanded(e => e === id ? null : id);
@@ -725,14 +748,14 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
                     <button type='button' className={styles.button.plain} onClick={() => setDialog('settings')}>
                         <Settings2 size={13} aria-hidden />設定
                     </button>
-                    <button type='button' className={styles.button.plain} disabled={pa.busy || pausable.length === 0}
+                    <button type='button' className={styles.button.plain} disabled={pa.busy || pauseButton.disabled}
                         title={settings.pauseStopsExits ? '暫停全部條件單（含停損停利；暫停前已觸發、正在送出的平倉單照常送出）'
                             : '暫停新進場的條件單；停損停利保護繼續執行（可在設定修改）'}
                         onClick={() => void pa.run(async () => {
-                            const r = await pauseAll(anyRunning);
+                            const r = await pauseAll(pauseButton.mode === 'pause');
                             if (r.failed.length) throw new Error(r.failed.join('；'));
                         })}>
-                        {anyRunning ? <><Pause size={13} aria-hidden />全部暫停</> : <><Play size={13} aria-hidden />全部恢復</>}
+                        {pauseButton.mode === 'pause' ? <><Pause size={13} aria-hidden />全部暫停</> : <><Play size={13} aria-hidden />全部恢復</>}
                     </button>
                     <button type='button' className={styles.button.danger} onClick={() => setDialog('flatten')}>
                         <OctagonX size={13} aria-hidden />全平並取消

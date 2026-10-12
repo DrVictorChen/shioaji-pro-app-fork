@@ -20,6 +20,7 @@ const m = vi.hoisted(() => ({
     group: vi.fn(async () => undefined),
     priv: true,
     bgOn: false as boolean | null,
+    flatten: vi.fn(async (_scope: unknown) => ({ remaining: [], notSent: [], cancelFailed: [] })),
     views: [] as unknown[],
 }));
 
@@ -67,7 +68,8 @@ vi.mock('./conditional-form', async () => ({
     NewConditionalDialog: () => createElement('div', { id: 'new-dialog' }),
 }));
 vi.mock('../lib/conditional/bracket-policy', () => ({ useBracketPolicy: () => null }));
-vi.mock('../lib/conditional/runtime', () => ({ pauseAll: m.pauseAll,
+vi.mock('../lib/protection-env', () => ({ currentProtectionEnv: () => ENV }));
+vi.mock('../lib/conditional/runtime', () => ({ pauseAll: m.pauseAll, runFlatten: m.flatten, flattenSummary: () => '摘要',
     pauseAllEligible: (t: { role?: string; bracketId?: string }) => t.role === 'entry' && !t.bracketId }));
 vi.mock('./conditional-dialogs', () => ({ ConditionalSettingsDialog: () => createElement('div', { id: 'settings-dialog' }),
     FlattenDialog: () => createElement('div', { id: 'flatten-dialog' }) }));
@@ -200,6 +202,30 @@ describe('ConditionalPanel', () => {
         expect(r.root.findAll(n => n.props.id === 'settings-dialog')).toHaveLength(1);
         await click(button(r, '全平並取消'));
         expect(r.root.findAll(n => n.props.id === 'flatten-dialog')).toHaveLength(1);
+    });
+
+    it('nothing left after a cancel: a disabled 全部暫停, never 全部恢復 (QA 10/12)', () => {
+        m.sources = sources({ ended: [{ id: 'x', trigger: trig({ id: 'x', role: 'entry' }), reason: 'cancelled', at: Date.now() }] });
+        const r = render();
+        expect(button(r, '全部暫停').props.disabled).toBe(true);
+        expect(r.root.findAllByType('button').some(b => text(b).includes('全部恢復'))).toBe(false);
+    });
+
+    it('a 全平 leftover: 再平倉剩餘部位 (deliberate second click) runs 全平並取消 for that product', async () => {
+        const acct = { account_type: 'S' as const, broker_id: 'b', account_id: 's1' };
+        m.sources = sources({ leftovers: [{ id: 'l1', at: 1, env: ENV, order: { account: acct, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' } }] });
+        const r = render();
+        await click(button(r, '再平倉剩餘部位'));
+        expect(m.flatten).not.toHaveBeenCalled();
+        await click(button(r, '再按一次：確認再平倉'));
+        expect(m.flatten).toHaveBeenCalledWith({ type: 'code', codes: ['2330'], account: acct });
+    });
+
+    it('only paused ones left: 全部恢復 resumes', async () => {
+        m.sources = sources({ triggers: [trig({ role: 'entry', paused: true })] });
+        const r = render();
+        await click(button(r, '全部恢復'));
+        expect(m.pauseAll).toHaveBeenCalledWith(false);
     });
 
     it('a 二擇一 is paused / cancelled as one group (one command, no tick between legs)', async () => {

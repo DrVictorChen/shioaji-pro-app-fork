@@ -10,7 +10,8 @@ import { bracketViews } from '../execution/bracket-contract';
 import { currentProtectionEnv } from '../protection-env';
 import { notify } from '../trade';
 import { getDisplayTriggers, getExits, onTimedFlatten, removeTriggerStrict, setTriggerGroup, setTriggerPaused, type TriggerOrder } from '../trigger-engine';
-import { executeFlatten, inScope, type FlattenResult, type FlattenScope } from './flatten';
+import { executeFlatten, inScope, quantityText, type FlattenResult, type FlattenScope } from './flatten';
+import { recordFlattenLeftovers } from './flatten-leftovers';
 import { getConditionalSettings } from './settings';
 
 const codesOf = (t: Pick<TriggerOrder, 'code' | 'orderCode'>) => [t.code, t.orderCode].filter((c): c is string => !!c);
@@ -52,10 +53,19 @@ export function flattenSummary(r: FlattenResult): string {
     const parts = [
         `停止條件單 ${r.stopped} 張`,
         `刪除委託 ${r.cancelled} 筆`,
-        r.sent.length ? `送出平倉 ${r.sent.map(s => `${s.code} ${s.action === 'Buy' ? '買' : '賣'} ${s.quantity}${s.market === 'stock' ? ' 股' : ' 口'}`).join('、')}` : '沒有需要平倉的部位',
+        r.sent.length ? `送出平倉 ${r.sent.map(s => `${s.code} ${s.action === 'Buy' ? '買' : '賣'} ${quantityText(s.market, s.quantity)}`).join('、')}` : '沒有需要平倉的部位',
     ];
-    const problems = [...r.cancelFailed, ...r.notSent, ...r.skipped];
+    const problems = [
+        ...remainingText(r),
+        ...r.cancelFailed, ...r.notSent, ...r.skipped];
     return `${parts.join('；')}${problems.length ? `。需要你處理：${problems.join('；')}` : ''}`;
+}
+
+/** 「2330 仍有 7 張未平倉」 per product read back after sending. */
+export function remainingText(r: Pick<FlattenResult, 'remaining'>): string[] {
+    return (r.remaining ?? []).map(o => o.unconfirmed
+        ? `${o.code} 平倉結果未能確認，請到持倉核對`
+        : `${o.code} 仍有 ${o.action === 'Sell' ? '多單' : '空單'} ${quantityText(o.market, o.quantity)} 未平倉`);
 }
 
 export const IN_FLIGHT_WAIT_MS = 10_000;
@@ -101,8 +111,11 @@ async function exclusively<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export async function runFlatten(scope: FlattenScope): Promise<FlattenResult> {
+    const env = currentProtectionEnv();
     const r = await exclusively(() => executeFlatten(scope, { stopConditional: () => stopConditionalInScope(scope), waitInFlight: () => waitInFlight(scope) }));
-    const bad = r.cancelFailed.length + r.notSent.length + r.skipped.length > 0;
+    // what is still held after the read-back goes to 需要你處理 (with 再平倉)
+    if (r.sent.length || r.remaining.length) recordFlattenLeftovers(r.sent, r.remaining, env);
+    const bad = r.cancelFailed.length + r.notSent.length + r.skipped.length + r.remaining.length > 0;
     notify({ kind: bad ? 'err' : 'ok', title: bad ? '全平並取消未完全完成' : '全平並取消已送出', body: flattenSummary(r) });
     return r;
 }

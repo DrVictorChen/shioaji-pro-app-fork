@@ -27,6 +27,7 @@ vi.mock('../trade', () => ({ notify: vi.fn() }));
 vi.mock('./settings', () => ({ getConditionalSettings: () => ({ pauseStopsExits: m.pauseStopsExits }) }));
 
 const { pauseAll, stopConditionalInScope, waitInFlight } = await import('./runtime');
+const { pauseAllButton } = await import('./pause-all');
 
 const t = (over: Partial<TriggerOrder>): TriggerOrder => ({ id: 'x', code: 'TXFR1', orderCode: 'TXFJ6', condition: 'below', price: 1,
     action: 'Sell', quantity: 1, kind: 'stop', env: 'e', account: F, ...over });
@@ -103,5 +104,37 @@ describe('waitInFlight', () => {
         expect(await p).toBe(false);
         m.programs = [];
         vi.useRealTimers();
+    });
+});
+
+describe('pauseAllButton', () => {
+    it('pause while anything runs; resume only when only paused ones are left; otherwise a disabled pause', () => {
+        expect(pauseAllButton(true, true)).toEqual({ mode: 'pause', disabled: false });
+        expect(pauseAllButton(false, true)).toEqual({ mode: 'resume', disabled: false });
+        expect(pauseAllButton(false, false)).toEqual({ mode: 'pause', disabled: true });
+    });
+});
+
+describe('flattenSummary / leftovers (2330 QA 10/12)', () => {
+    it('the summary says 張＋股 and what is still held', async () => {
+        const { flattenSummary } = await import('./runtime');
+        const acct = { account_type: 'S' as const, broker_id: 'b', account_id: 's' };
+        const text = flattenSummary({ stopped: 0, cancelled: 0, cancelFailed: [], notSent: [], skipped: [],
+            sent: [{ code: '2330', action: 'Sell', quantity: 8006, market: 'stock', account: acct }],
+            remaining: [{ code: '2330', action: 'Sell', quantity: 7000, market: 'stock', account: acct }] });
+        expect(text).toContain('送出平倉 2330 賣 8 張＋6 股');
+        expect(text).not.toContain('8006');
+        expect(text).toContain('需要你處理：2330 仍有 多單 7 張 未平倉');
+    });
+
+    it('leftovers: a product fully closed later clears its entry; others stay', async () => {
+        const { recordFlattenLeftovers, getFlattenLeftovers, __resetFlattenLeftoversForTest } = await import('./flatten-leftovers');
+        __resetFlattenLeftoversForTest();
+        const acct = { account_type: 'S' as const, broker_id: 'b', account_id: 's' };
+        const o = (code: string, quantity: number) => ({ account: acct, code, action: 'Sell' as const, quantity, market: 'stock' as const });
+        recordFlattenLeftovers([o('2330', 8006), o('2317', 1000)], [o('2330', 7000), o('2317', 1000)], 'env', 1);
+        expect(getFlattenLeftovers().map(l => [l.order.code, l.order.quantity])).toEqual([['2330', 7000], ['2317', 1000]]);
+        recordFlattenLeftovers([o('2330', 7000)], [], 'env', 2);
+        expect(getFlattenLeftovers().map(l => l.order.code)).toEqual(['2317']);
     });
 });

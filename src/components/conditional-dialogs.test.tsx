@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const F = { account_type: 'F', broker_id: 'b', account_id: '9804567', person_id: '', signed: true, username: '' };
 const TXF = { code: 'TXFJ6', target_code: 'TXFJ6', security_type: 'FUT', exchange: 'TAIFEX' };
-const m = vi.hoisted(() => ({ run: vi.fn(), desktop: false, reachable: true, getPolicy: vi.fn(), setPolicy: vi.fn(), setLocal: vi.fn() }));
+const m = vi.hoisted(() => ({ run: vi.fn(), preview: vi.fn(), desktop: false, reachable: true, getPolicy: vi.fn(), setPolicy: vi.fn(), setLocal: vi.fn() }));
 
 vi.mock('../lib/account-store', () => ({ useAccounts: () => ({ accounts: [F], selectedFutures: F, selectedStock: null }) }));
 vi.mock('../lib/trading-state', () => ({ useTradingState: () => ({
@@ -15,7 +15,11 @@ vi.mock('../lib/trading-state', () => ({ useTradingState: () => ({
     trades: [{ contract: { code: 'TXFJ6', target_code: 'TXFJ6' }, order: { id: 'w1', account: F, quantity: 1 },
         status: { status: 'Submitted', deal_quantity: 0, cancel_quantity: 0, deals: [] } }],
 }) }));
-vi.mock('../lib/conditional/runtime', () => ({ runFlatten: m.run, flattenSummary: () => '完成摘要' }));
+vi.mock('../lib/conditional/runtime', () => ({ runFlatten: m.run, flattenSummary: () => '完成摘要',
+    remainingText: (r: { remaining: { code: string; quantity: number }[] }) => r.remaining.map(o => `${o.code} 仍有 ${o.quantity}`) }));
+vi.mock('../lib/conditional/flatten', async (orig) => ({ ...(await orig<typeof import('../lib/conditional/flatten')>()), loadFlattenPreview: m.preview }));
+vi.mock('../lib/shioaji', () => ({}));
+vi.mock('../lib/trade', () => ({}));
 vi.mock('../lib/execution/background', () => ({ backgroundSupported: () => m.desktop, useBackgroundHealth: () => (m.desktop && m.reachable ? {} : null),
     getBracketPolicy: m.getPolicy, setBracketPolicy: m.setPolicy }));
 vi.mock('../lib/main-window-commands', () => ({ isMainWindow: () => true }));
@@ -42,16 +46,28 @@ function render() {
 const text = (n: ReactTestInstance): string => n.children.map(c => typeof c === 'string' ? c : text(c)).join('');
 const button = (r: ReactTestRenderer, label: string) => r.root.findAllByType('button').find(b => text(b) === label)!;
 
-beforeEach(() => { vi.useFakeTimers(); m.run.mockReset().mockResolvedValue({ stopped: 1, cancelled: 1, cancelFailed: [], sent: [], notSent: [], skipped: [] }); });
+// the broker's answer when the dialog opens: 1 lot (the window still shows 2)
+const FRESH = { positions: [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1, price: 1, last_price: 1, pnl: 0, account: F }],
+    trades: [{ contract: { code: 'TXFJ6', target_code: 'TXFJ6' }, order: { id: 'w1', account: F, quantity: 1 },
+        status: { status: 'Submitted', deal_quantity: 0, cancel_quantity: 0, deals: [] } }], failed: [] as string[] };
+beforeEach(() => {
+    vi.useFakeTimers();
+    m.run.mockReset().mockResolvedValue({ stopped: 1, cancelled: 1, cancelFailed: [], sent: [], notSent: [], skipped: [], remaining: [] });
+    m.preview.mockReset().mockResolvedValue(FRESH);
+});
+async function settle() { await act(async () => { await Promise.resolve(); }); }
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('FlattenDialog', () => {
     it('shows what it will do for this product and needs a second, deliberate click', async () => {
         const r = render();
+        await settle();
         const all = text(r.root);
+        expect(all).toContain('預覽');
         expect(all).toContain('暫停並取消 1 張條件單（觸價 1）');
         expect(all).toContain('刪除 1 張未成交委託');
-        expect(all).toContain('TXFJ6 多單 2 口');
+        expect(all).toContain('TXFJ6 多單 1 口');
+        expect(all).toContain('範圍市價');
         expect(all).toContain('不會反手開倉');
         await act(async () => { button(r, '確認全平').props.onClick(); });
         expect(m.run).not.toHaveBeenCalled();
@@ -63,8 +79,53 @@ describe('FlattenDialog', () => {
         expect(text(r.root)).toContain('完成摘要');
     });
 
+    it('opening reads positions fresh: loading first, confirm disabled until the answer (QA 10/12 stale counts)', async () => {
+        let answer!: (v: typeof FRESH) => void;
+        m.preview.mockReturnValue(new Promise(r => { answer = r; }));
+        const r = render();
+        expect(m.preview).toHaveBeenCalledWith({ type: 'code', codes: ['TXFJ6'], account: null });
+        expect(text(r.root)).toContain('查詢最新委託與持倉中');
+        expect(button(r, '確認全平').props.disabled).toBe(true);
+        await act(async () => { answer(FRESH); });
+        expect(text(r.root)).toContain('TXFJ6 多單 1 口');
+        expect(text(r.root)).not.toContain('多單 2 口');
+        expect(button(r, '確認全平').props.disabled).toBe(false);
+    });
+
+    it('a failed query says so and falls back to what the window shows', async () => {
+        m.preview.mockResolvedValue({ positions: [], trades: [], failed: ['期貨帳戶查詢失敗：timeout'] });
+        const r = render();
+        await settle();
+        expect(text(r.root)).toContain('部分查詢失敗');
+        expect(text(r.root)).toContain('TXFJ6 多單 2 口');
+    });
+
+    it('stocks: 8 張＋6 股 shown as 整股市價、零股限價', async () => {
+        m.preview.mockResolvedValue({ positions: [{ id: 1, code: '2330', direction: 'Buy', quantity: 8006, cond: 'Cash', price: 1, last_price: 1, pnl: 0,
+            account: { ...F, account_type: 'S' } }], trades: [], failed: [] });
+        const r = render();
+        await act(async () => { button(r, '全部帳戶').props.onClick(); });
+        await settle();
+        expect(text(r.root)).toContain('2330 多單 8 張＋6 股（整股市價、零股限價）');
+    });
+
+    it('what is still held after sending is shown, with 再平倉剩餘部位', async () => {
+        const acct = { account_type: 'S', broker_id: 'b', account_id: '9804567' };
+        m.run.mockResolvedValueOnce({ stopped: 0, cancelled: 0, cancelFailed: [], sent: [{ code: '2330', action: 'Sell', quantity: 8006, market: 'stock', account: acct }],
+            notSent: [], skipped: [], remaining: [{ account: acct, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' }] });
+        const r = render();
+        await settle();
+        await act(async () => { button(r, '確認全平').props.onClick(); });
+        vi.advanceTimersByTime(500);
+        await act(async () => { button(r, '再按一次：確認全平').props.onClick(); });
+        expect(text(r.root)).toContain('2330 仍有 7000');
+        await act(async () => { button(r, '再平倉剩餘部位').props.onClick(); });
+        expect(m.run).toHaveBeenLastCalledWith({ type: 'code', codes: ['2330'], account: acct });
+    });
+
     it('scope 全部帳戶 runs for every account', async () => {
         const r = render();
+        await settle();
         await act(async () => { button(r, '全部帳戶').props.onClick(); });
         await act(async () => { button(r, '確認全平').props.onClick(); });
         vi.advanceTimersByTime(500);

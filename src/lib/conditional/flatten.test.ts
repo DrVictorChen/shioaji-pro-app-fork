@@ -28,7 +28,8 @@ vi.mock('../shioaji', () => ({
 }));
 vi.mock('../trade', () => ({ placeQuickOrder: (...a: unknown[]) => { m.order.push(`place:${(a[0] as { code: string }).code}`); return m.place(...a); } }));
 
-const { planFlatten, executeFlatten } = await import('./flatten');
+const { planFlatten, executeFlatten, loadFlattenPreview, quantityText, closeHowText } = await import('./flatten');
+const noWait = async () => undefined;
 
 const pos = (over: Partial<AccountedPosition> & Record<string, unknown>): AccountedPosition =>
     ({ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2, price: 1, last_price: 1, pnl: 0, account: F, ...over }) as AccountedPosition;
@@ -77,7 +78,7 @@ describe('executeFlatten', () => {
         m.cancel.mockResolvedValue([{ status: 'fulfilled', value: { status: { status: 'Cancelled' } } }]);
         // the cancel raced a fill: 3 lots now, not the 2 shown before
         m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 3 }] : []);
-        const r = await executeFlatten({ type: 'code', codes: ['TXFJ6'], account: null }, { stopConditional });
+        const r = await executeFlatten({ type: 'code', codes: ['TXFJ6'], account: null }, { sleep: noWait, stopConditional });
         expect(stopConditional).toHaveBeenCalledTimes(1);
         expect(m.order.indexOf('cancel:w1')).toBeLessThan(m.order.indexOf('positions:f1'));
         expect(m.place).toHaveBeenCalledTimes(1);
@@ -90,30 +91,30 @@ describe('executeFlatten', () => {
         m.trades.mockImplementation(async (a: Account) => a === F ? [working('w1', 'TXFJ6', F)] : []);
         m.cancel.mockResolvedValue([{ status: 'rejected', reason: new Error('CANCEL_UNCONFIRMED') }]);
         m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2 }] : []);
-        const r = await executeFlatten({ type: 'all' }, { stopConditional });
+        const r = await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional });
         expect(m.place).not.toHaveBeenCalled();
         expect(r.notSent.join()).toContain('刪單未確認，未平倉');
     });
 
     it('a failed position read sends nothing for that account; flat accounts send nothing', async () => {
         m.positions.mockImplementation(async (a: Account) => { if (a === F) throw new Error('timeout'); return []; });
-        const r = await executeFlatten({ type: 'all' }, { stopConditional });
+        const r = await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional });
         expect(m.place).not.toHaveBeenCalled();
         expect(r.notSent.join()).toContain('持倉查詢失敗');
     });
 
     it('stocks: whole lots at market, the odd remainder as an odd-lot limit at the price limit', async () => {
         m.positions.mockImplementation(async (a: Account) => a === S ? [{ id: 1, code: '2330', direction: 'Buy', quantity: 2300, cond: 'Cash' }] : []);
-        await executeFlatten({ type: 'account', account: { account_type: 'S', broker_id: 'bs', account_id: 's1' } }, { stopConditional });
+        await executeFlatten({ type: 'account', account: { account_type: 'S', broker_id: 'bs', account_id: 's1' } }, { sleep: noWait, stopConditional });
         expect(m.place.mock.calls.map(c => [c[1], c[2], c[3], (c[4] as { orderLot?: string }).orderLot])).toEqual([
             ['Sell', null, 2, undefined], ['Sell', 900, 300, 'IntradayOdd']]);
     });
 
     it('a conditional order that could not be stopped, or one still sending, blocks everything', async () => {
         m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2 }] : []);
-        const r1 = await executeFlatten({ type: 'all' }, { stopConditional: async () => ({ stopped: 0, failed: ['TXFJ6 觸價單：沒有回應'] }) });
+        const r1 = await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional: async () => ({ stopped: 0, failed: ['TXFJ6 觸價單：沒有回應'] }) });
         expect(r1.notSent.join()).toContain('沒有全部停止');
-        const r2 = await executeFlatten({ type: 'all' }, { stopConditional, waitInFlight: async () => false });
+        const r2 = await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional, waitInFlight: async () => false });
         expect(r2.notSent.join()).toContain('送出中');
         expect(m.cancel).not.toHaveBeenCalled();
         expect(m.place).not.toHaveBeenCalled();
@@ -123,7 +124,7 @@ describe('executeFlatten', () => {
         const stops = vi.fn(async () => ({ stopped: 1, failed: [] as string[] }));
         m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2 }] : []);
         m.trades.mockImplementation(async () => { m.same = false; return []; }); // the mode changes meanwhile
-        const r = await executeFlatten({ type: 'all' }, { stopConditional: stops, waitInFlight: async () => true });
+        const r = await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional: stops, waitInFlight: async () => true });
         expect(stops).toHaveBeenCalledTimes(2);
         expect(m.place).not.toHaveBeenCalled();
         expect(r.notSent.join()).toContain('已切換');
@@ -131,7 +132,7 @@ describe('executeFlatten', () => {
 
     it('every close carries the same server-mode guard', async () => {
         m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Sell', quantity: 1 }] : []);
-        await executeFlatten({ type: 'all' }, { stopConditional });
+        await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional });
         expect(typeof (m.place.mock.calls[0]![4] as { serverMode: unknown }).serverMode).toBe('function');
         expect(m.place.mock.calls[0]![1]).toBe('Buy');
     });
@@ -139,9 +140,76 @@ describe('executeFlatten', () => {
     it('a switch while the conditional orders are being stopped: nothing is cancelled or closed', async () => {
         m.trades.mockImplementation(async (a: Account) => a === F ? [working('w1', 'TXFJ6', F)] : []);
         m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 2 }] : []);
-        const r = await executeFlatten({ type: 'all' }, { stopConditional: async () => { m.same = false; return { stopped: 0, failed: [] }; } });
+        const r = await executeFlatten({ type: 'all' }, { sleep: noWait, stopConditional: async () => { m.same = false; return { stopped: 0, failed: [] }; } });
         expect(m.cancel).not.toHaveBeenCalled();
         expect(m.place).not.toHaveBeenCalled();
         expect(r.notSent.join()).toContain('已切換');
     });
 });
+
+describe('read-back after sending (2330 QA 10/12)', () => {
+    const stopConditional = vi.fn(async () => ({ stopped: 0, failed: [] as string[] }));
+
+    it('an IOC market sell that filled only partly: the rest is reported per product, in 張＋股', async () => {
+        let reads = 0;
+        // before: 8 張 + 6 股; after the sends: 7 張 still held (IOC cancelled the rest)
+        m.positions.mockImplementation(async (a: Account) => a !== S ? []
+            : [{ id: 1, code: '2330', direction: 'Buy', quantity: reads++ === 0 ? 8006 : 7000, cond: 'Cash' }]);
+        const waits: number[] = [];
+        const r = await executeFlatten({ type: 'account', account: { account_type: 'S', broker_id: 'bs', account_id: 's1' } },
+            { stopConditional, sleep: async ms => { waits.push(ms); } });
+        expect(r.sent).toMatchObject([{ code: '2330', quantity: 8006, market: 'stock' }]);
+        expect(r.remaining).toEqual([{ account: { account_type: 'S', broker_id: 'bs', account_id: 's1' }, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' }]);
+        expect(waits.length).toBe(3); // kept checking, then reported
+    });
+
+    it('everything closed: nothing remaining after the first read-back', async () => {
+        let reads = 0;
+        m.positions.mockImplementation(async (a: Account) => a === F && reads++ === 0 ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1 }] : []);
+        const waits: number[] = [];
+        const r = await executeFlatten({ type: 'all' }, { stopConditional, sleep: async ms => { waits.push(ms); } });
+        expect(r.remaining).toEqual([]);
+        expect(waits.length).toBe(1);
+    });
+
+    it('a failed read-back stays to be checked (unconfirmed), never reported as closed', async () => {
+        let reads = 0;
+        m.positions.mockImplementation(async (a: Account) => {
+            if (a !== F) return [];
+            if (reads++ === 0) return [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1 }];
+            throw new Error('timeout');
+        });
+        const r = await executeFlatten({ type: 'all' }, { stopConditional, sleep: noWait });
+        expect(r.remaining).toMatchObject([{ code: 'TXFJ6', quantity: 1, unconfirmed: true }]);
+    });
+
+    it('wording: 張＋股 and 整股市價、零股限價', () => {
+        expect(quantityText('stock', 8006)).toBe('8 張＋6 股');
+        expect(quantityText('stock', 300)).toBe('300 股');
+        expect(quantityText('futures', 2)).toBe('2 口');
+        expect(closeHowText('stock', 8006)).toBe('整股市價、零股限價');
+        expect(closeHowText('stock', 2000)).toBe('整股市價');
+        expect(closeHowText('stock', 6)).toBe('零股限價');
+        expect(closeHowText('futures', 1)).toBe('範圍市價');
+    });
+});
+
+describe('loadFlattenPreview (QA 10/12: preview showed 2 lots when 1 was held)', () => {
+    it('reads positions and orders fresh for every account in scope', async () => {
+        m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1 }] : []);
+        m.trades.mockImplementation(async (a: Account) => a === F ? [working('w1', 'TXFJ6', F)] : []);
+        const d = await loadFlattenPreview({ type: 'all' });
+        expect(m.order.filter(o => o.startsWith('positions:')).sort()).toEqual(['positions:f1', 'positions:s1']);
+        expect(planFlatten(d.positions, { type: 'all' }).orders).toMatchObject([{ code: 'TXFJ6', quantity: 1 }]);
+        expect(d.trades).toHaveLength(1);
+        expect(d.failed).toEqual([]);
+    });
+
+    it('a failed account is reported, the others still load', async () => {
+        m.positions.mockImplementation(async (a: Account) => { if (a === S) throw new Error('timeout'); return [{ id: 1, code: 'TXFJ6', direction: 'Sell', quantity: 1 }]; });
+        const d = await loadFlattenPreview({ type: 'all' });
+        expect(d.failed.join()).toContain('證券帳戶查詢失敗');
+        expect(d.positions).toHaveLength(1);
+    });
+});
+

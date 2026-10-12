@@ -7,8 +7,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAccounts } from '../lib/account-store';
 import type { AccountRef } from '../lib/bracket-core';
 import { accountTag, type CondRow } from '../lib/conditional/rows';
-import { planFlatten, workingInScope, inScope, type FlattenResult, type FlattenScope } from '../lib/conditional/flatten';
-import { flattenSummary, runFlatten } from '../lib/conditional/runtime';
+import { closeHowText, loadFlattenPreview, planFlatten, quantityText, workingInScope, inScope, type FlattenPreviewData, type FlattenResult, type FlattenScope } from '../lib/conditional/flatten';
+import { flattenSummary, remainingText, runFlatten } from '../lib/conditional/runtime';
 import { setConditionalSettings, useConditionalSettings } from '../lib/conditional/settings';
 import { useBracketPolicy } from '../lib/conditional/bracket-policy';
 import { BRACKET_POLICY_TEXT, DEFAULT_BRACKET_POLICY } from '../lib/execution/bracket-contract';
@@ -132,6 +132,21 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
     const [error, setError] = useState<string | null>(null);
     const scope = scopeOf(kind, contract, account);
     useEffect(() => { setArmed(false); }, [kind]);
+    // the preview reads positions / orders fresh from the broker when the
+    // dialog opens or the scope changes (the window's may be stale)
+    const scopeKey = scope ? JSON.stringify(scope) : '';
+    const [fresh, setFresh] = useState<{ key: string; data: FlattenPreviewData | null; error: string | null } | null>(null);
+    useEffect(() => {
+        if (!scope || demo) return;
+        let alive = true;
+        setFresh(null);
+        loadFlattenPreview(scope).then(
+            data => { if (alive) setFresh({ key: scopeKey, data, error: data.failed.length ? data.failed.join('；') : null }); },
+            e => { if (alive) setFresh({ key: scopeKey, data: null, error: e instanceof Error ? e.message : String(e) }); });
+        return () => { alive = false; };
+    }, [scopeKey, demo === null]);
+    const loading = !demo && !!scope && fresh?.key !== scopeKey;
+    const source = demo ? trading : fresh?.data && !fresh.error ? fresh.data : trading;
     useEffect(() => {
         if (!armed) return;
         const t = setTimeout(() => setArmed(false), 10_000);
@@ -143,10 +158,10 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
             .filter(r => [r.code, r.orderCode].some(c => inScope(scope, r.account, c)));
         const byKind = new Map<string, number>();
         for (const r of conditional) byKind.set(r.kind, (byKind.get(r.kind) ?? 0) + 1);
-        const working = workingInScope(trading.trades, scope);
-        const plan = planFlatten(trading.positions, scope);
+        const working = workingInScope(source.trades, scope);
+        const plan = planFlatten(source.positions, scope);
         return { conditional, byKind, working, plan };
-    }, [scope, rows, trading.trades, trading.positions]);
+    }, [scope, rows, source.trades, source.positions]);
     const go = () => {
         if (!scope) return;
         if (!armed) { armedAt.current = Date.now(); setArmed(true); return; }
@@ -162,18 +177,34 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
         { id: 'account' as const, label: '此帳戶', disabled: !account, title: account ? accountTag(account, id => maskAccountId(id, priv)) : '沒有選擇帳戶' },
         { id: 'all' as const, label: '全部帳戶' },
     ];
-    const positionsText = preview?.plan.orders.length
-        ? preview.plan.orders.map(o => `${o.code} ${o.action === 'Sell' ? '多單' : '空單'} ${o.market === 'stock' ? `${o.quantity} 股` : `${o.quantity} 口`}`).join('、')
-        : '目前沒有部位';
+    const closes = preview?.plan.orders ?? [];
+    const retryRemaining = () => {
+        if (!result?.remaining.length) return;
+        const first = result.remaining[0]!.account;
+        const sameAcct = result.remaining.every(o => o.account.account_id === first.account_id && o.account.account_type === first.account_type);
+        const next: FlattenScope = sameAcct ? { type: 'code', codes: [...new Set(result.remaining.map(o => o.code))], account: first } : { type: 'all' };
+        setBusy(true);
+        setError(null);
+        void runFlatten(next).then(setResult, e => setError(e instanceof Error ? e.message : String(e))).finally(() => setBusy(false));
+    };
     return (
         <Dialog title='全平並取消' tone='danger' icon={<OctagonX size={14} aria-hidden />} onClose={onClose} narrow
             footer={result ? (
-                <><span className={styles.grow} /><button type='button' className={styles.button.plain} onClick={onClose}>關閉</button></>
+                <>
+                    <span className={styles.grow} />
+                    {result.remaining.length > 0 && (
+                        <button type='button' className={styles.button.dangerSolid} disabled={busy} onClick={retryRemaining}
+                            title='重新查詢委託與持倉後，平倉剩餘部位'>
+                            {busy ? '處理中…' : '再平倉剩餘部位'}
+                        </button>
+                    )}
+                    <button type='button' className={styles.button.plain} onClick={onClose}>關閉</button>
+                </>
             ) : (
                 <>
                     <span className={styles.grow} />
                     <button type='button' className={styles.button.plain} onClick={onClose}>取消</button>
-                    <button type='button' className={styles.button.dangerSolid} disabled={busy || !scope} onClick={go}>
+                    <button type='button' className={styles.button.dangerSolid} disabled={busy || !scope || loading} onClick={go}>
                         {busy ? '處理中…' : armed ? '再按一次：確認全平' : '確認全平'}
                     </button>
                 </>
@@ -183,15 +214,26 @@ export function FlattenDialog({ contract: given, rows, onClose }: { contract: Co
                 <Seg label='範圍' value={kind} onChange={setKind} options={scopeOptions} />
             </div>
             {result ? (
-                <div className={styles.summary} role='status'><Info size={13} aria-hidden style={{ flex: 'none', marginTop: 4 }} /><span>{flattenSummary(result)}</span></div>
+                <div className={styles.summary} role='status'>
+                    <Info size={13} aria-hidden style={{ flex: 'none', marginTop: 4 }} />
+                    <span>
+                        {flattenSummary(result)}
+                        {result.remaining.length > 0 && <><br /><b className={styles.tone.err}>{remainingText(result).join('；')}</b>（已列入需要你處理）</>}
+                    </span>
+                </div>
+            ) : loading ? (
+                <div className={styles.summary} role='status' style={{ marginTop: 4 }}><span className={styles.muted}>查詢最新委託與持倉中…</span></div>
             ) : preview && (
                 <div className={styles.summary} style={{ marginTop: 4, lineHeight: 1.9 }}>
                     <span>
-                        將會：<br />
+                        預覽（依剛查詢的委託與持倉；按下確認後會再查詢一次，依當時的持倉平倉）：<br />
+                        {fresh?.error && <><span className={styles.tone.warn}>部分查詢失敗，以下依畫面上的資料：{fresh.error}</span><br /></>}
                         ① 暫停並取消 <b>{preview.conditional.length}</b> 張條件單
                         {preview.byKind.size > 0 && `（${[...preview.byKind].map(([k, n]) => `${KIND_WORD[k] ?? k} ${n}`).join('、')}）`}<br />
                         ② 刪除 <b>{preview.working.length}</b> 張未成交委託<br />
-                        ③ 以<b>{futures || kind !== 'code' ? '範圍市價' : '市價'}</b>平倉 <b className={styles.up}>{positionsText}</b>（依成交回報重算，不會反手開倉）
+                        ③ 平倉 {closes.length ? closes.map((o, i) => (
+                            <span key={`${o.account.account_id}:${o.code}`}>{i > 0 && '、'}<b className={styles.up}>{o.code} {o.action === 'Sell' ? '多單' : '空單'} {quantityText(o.market, o.quantity)}</b>（{closeHowText(o.market, o.quantity)}）</span>
+                        )) : <b>目前沒有部位</b>}（只平掉持有的口數，不會反手開倉）
                         {preview.plan.skipped.length > 0 && <><br /><span className={styles.tone.warn}>不會平倉：{preview.plan.skipped.map(s => `${s.code}（${s.reason}）`).join('、')}</span></>}
                     </span>
                 </div>
