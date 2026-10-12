@@ -68,7 +68,7 @@ import { isOddLot, ODD_LOT_MAX_SHARES, oddLotMarketablePrice, SHARES_PER_LOT, sh
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
 import type { Action, FuturesOCType, StockOrderLot, Trade } from './types/order';
-import { orderStatusLabel } from './order-status-label';
+import { orderStatusLabel, orderStatusWithNumber } from './order-status-label';
 
 /** Why protection resumed with a first-tick check (#144). */
 export type RestoreReason = 'restart' | 'disconnect' | 'env';
@@ -708,7 +708,7 @@ function exitSent(t: TriggerOrder, rec: ExitRecord, trade: Trade, lastPrice: num
     for (const report of recentReportsFor(envBase(rec.env), orderId)) applyExitReport(report, envBase(rec.env));
     if (!odd) scheduleIocCheck(rec.id);
     notify({ kind: 'ok', title: t.kind === 'stop' ? '停損觸發' : '停利觸發',
-        body: `${t.code} @${lastPrice} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)}（${orderStatusLabel(trade.status.status)}）` });
+        body: `${t.code} @${lastPrice} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)}（${orderStatusWithNumber(trade)}）` });
 }
 
 function exitUnknown(t: TriggerOrder, rec: ExitRecord, message: string) {

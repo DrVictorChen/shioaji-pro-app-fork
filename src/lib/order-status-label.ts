@@ -23,15 +23,17 @@ export function orderStatusLabel(status: string | null | undefined): string {
     return Object.hasOwn(LABELS, status) ? LABELS[status as OrderStatusName] : `狀態 ${status}`;
 }
 
-/** 委託編號：優先委託序號，沒有時用 trade id 前 8 碼。 */
-export function orderNumber(trade: { order: { seqno?: string | null; id: string } }): string {
-    return trade.order.seqno || trade.order.id.slice(0, 8);
+/** 委託編號：優先委託序號，沒有時用 trade id 前 8 碼；都沒有回空字串。 */
+export function orderNumber(trade: { order?: { seqno?: string | null; id?: string | null } | null }): string {
+    return trade.order?.seqno || (trade.order?.id ?? '').slice(0, 8);
 }
 
-/** 「已委託 #003627」：送單回饋與通知用。 */
+/** 「已委託 #003627」：送單回饋與通知用（沒有編號時只顯示狀態）。 */
 export function orderStatusWithNumber(trade: {
-    status: { status: string };
-    order: { seqno?: string | null; id: string };
+    status?: { status?: string | null } | null;
+    order?: { seqno?: string | null; id?: string | null } | null;
 }): string {
-    return `${orderStatusLabel(trade.status.status)} #${orderNumber(trade)}`;
+    const no = orderNumber(trade);
+    const label = orderStatusLabel(trade.status?.status);
+    return no ? `${label} #${no}` : label;
 }

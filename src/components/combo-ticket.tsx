@@ -561,7 +561,7 @@ export function ComboTicket() {
                 notify({
                     kind: 'ok',
                     title: `🎯 到價觸發第 ${attempts + 1} 次`,
-                    body: `${action === 'Buy' ? '買進' : '賣出'}組合（${dirSummary}）${qty} @ ${target}（${orderStatusLabel(trade.status.status)}）— 請確認成交，避免重複下單`,
+                    body: `${action === 'Buy' ? '買進' : '賣出'}組合（${dirSummary}）${qty} @ ${target}（${orderStatusWithNumber(trade)}）— 請確認成交，避免重複下單`,
                 });
                 // Active reports update normal orders; combo state can be reconciled manually.
             } catch (e) {

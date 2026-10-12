@@ -18,3 +18,8 @@ it('an unknown status is shown as such, never guessed', () => {
     expect(orderStatusLabel(undefined)).toBe('狀態未知');
     expect(orderStatusLabel('constructor')).toBe('狀態 constructor');
 });
+
+it('an answer without an order number shows the status alone', () => {
+    expect(orderStatusWithNumber({ status: { status: 'Submitted' } })).toBe('已委託');
+    expect(orderStatusWithNumber({})).toBe('狀態未知');
+});
