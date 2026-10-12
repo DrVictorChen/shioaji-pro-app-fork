@@ -428,6 +428,9 @@ export interface ReconciledOrder {
     status: 'working' | 'filled' | 'ended';
     qty: number;
     deals: { seq: string; qty: number; price: number; ts?: number }[];
+    /** Background engine: the final status is the engine's own, the row
+     * still lists it working (not evidence that every fill is in). */
+    assumed?: boolean;
 }
 export interface ReconcileEvent {
     type: 'reconcile'; ts: number;

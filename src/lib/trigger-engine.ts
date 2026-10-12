@@ -715,8 +715,14 @@ export async function modifyTriggerGroup(patches: { id: string; patch: TriggerPa
     const table = await backgroundTickTable(contract);
     if (legs.some(l => l.send?.type === 'LMT' && l.send.ticks !== 0) && !table) throw new Error('背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試');
     const group = `${legs[0]!.id}`;
-    const made = programForNewGroup(legs.map(l => ({ ...l, group })), contract, table);
-    if (!made) throw new Error('背景執行：這組二擇一無法修改，請取消後重新建立');
+    const built = programForNewGroup(legs.map(l => ({ ...l, group })), contract, table);
+    if (!built) throw new Error('背景執行：這組二擇一無法修改，請取消後重新建立');
+    // keep each leg's position effect (rows do not carry it)
+    const made = { ...built, levels: built.levels.map((lv, i) => {
+        const was = original.levels.find(o => o.id === rows[i]!.background.levelId);
+        const octype = was?.entry.type === 'touch' ? was.entry.order.octype : undefined;
+        return lv.entry.type === 'touch' && octype ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, octype } } } : lv;
+    }) };
     const result = await replaceBackgroundTrigger(programId, made);
     if (result === 'replaced') return;
     throw new Error('refused' in result

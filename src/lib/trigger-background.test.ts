@@ -605,7 +605,9 @@ describe('#226 二擇一 in the background (step 2)', () => {
     });
 
     it('pause / remove / modify act on the one program (modify in one engine step)', async () => {
-        m.programs = [groupProgram()];
+        const gp = groupProgram();
+        gp.levels = gp.levels.map(lv => lv.entry.type === 'touch' ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, octype: 'New' as const } } } : lv);
+        m.programs = [gp];
         await boot();
         await bg.refreshBackground();
         const ids = engine.getDisplayTriggers().map(r => r.id);
@@ -616,6 +618,7 @@ describe('#226 二擇一 in the background (step 2)', () => {
         const [, args] = calls('execution_replace')[0]! as [string, { programId: string; program: OrderProgram }];
         expect(args.programId).toBe('grp:g:1');
         expect(args.program.levels.map(l => [l.entry.type === 'touch' && l.entry.price, l.qty])).toEqual([[20200, 3], [19900, 2]]);
+        expect(args.program.levels.map(l => l.entry.type === 'touch' && l.entry.order.octype)).toEqual(['New', 'New']);
         await expect(engine.modifyTriggerGroup([{ id: ids[0]!, patch: { price: 19800 } }])).rejects.toThrow('上方價格必須高於下方價格');
         await engine.setTriggerGroup(ids, 'remove');
         expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'grp:g:1' }]);
