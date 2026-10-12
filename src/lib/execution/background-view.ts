@@ -35,11 +35,13 @@ export function backgroundRowId(programId: string, levelId: string): string {
  * App's risk checks, 上穿／下穿, 對手價, 市價／範圍市價／觸價後限價, 有效期),
  * with the contract known. Not yet: OCO groups, time orders, a trigger
  * that places a bracket, odd lots, alerts, bracket legs. */
-export function backgroundEligible(t: NewTrigger, contract: ContractBase | undefined): boolean {
+export function backgroundEligible(t: NewTrigger, contract: ContractBase | undefined, inGroup = false): boolean {
     if (t.kind !== 'stop' && t.kind !== 'take') return false;
     // #226 options the background engine does not have yet
-    if (t.time || t.bracketPlan || t.ocoMode) return false;
-    if (t.group || t.bracketId || (t.orderLot && t.orderLot !== 'Common')) return false;
+    if (t.time || t.bracketPlan) return false;
+    // 二擇一 legs go together (backgroundGroupEligible)
+    if (!inGroup && (t.group || t.ocoMode)) return false;
+    if (t.bracketId || (t.orderLot && t.orderLot !== 'Common')) return false;
     if (t.account?.account_type !== 'F' || !t.env || !t.orderCode) return false;
     return contract?.security_type === 'FUT' || contract?.security_type === 'OPT';
 }
@@ -60,6 +62,38 @@ function sendOrder(base: OrderSpec, send: TriggerSend | undefined): OrderSpec {
     if (!send || send.type === 'MKT') return { priceType: 'MKT', timeInForce: 'IOC', ...octype };
     if (send.type === 'MKP') return { priceType: 'MKP', timeInForce: 'IOC', ...octype };
     return { priceType: 'LMT', timeInForce: 'ROD', ...octype };
+}
+
+/** #226 二擇一: both legs (same group, environment, account and contract,
+ * a known mode) run in the background, or neither. */
+export function backgroundGroupEligible(legs: readonly NewTrigger[], contract: ContractBase | undefined): boolean {
+    const [first] = legs;
+    if (!first?.group || legs.length < 2) return false;
+    const mode = first.ocoMode ?? 'trigger';
+    if (mode !== 'trigger' && mode !== 'fill') return false;
+    return legs.every(l => l.group === first.group && (l.ocoMode ?? 'trigger') === mode && l.env === first.env
+        && l.orderCode === first.orderCode && l.account?.account_id === first.account?.account_id
+        && l.account?.broker_id === first.account?.broker_id && backgroundEligible(l, contract, true));
+}
+
+/** The one program a 二擇一 becomes: one level per leg; the first leg that
+ * fires decides (`trigger`: ends the others; `fill`: they wait for its final
+ * fills and lose exactly that — a limit goes out IOC so the order ends by
+ * itself). Null: a leg is not mappable. */
+export function programForNewGroup(legs: readonly TriggerOrder[], contract: ContractBase, tickTable: TickBand[] | null = null): OrderProgram | null {
+    const first = legs[0];
+    const made = legs.map(l => programForNewTrigger(l, contract, tickTable));
+    if (!first?.group || made.some(p => !p)) return null;
+    const programs = made as OrderProgram[];
+    const fill = (first.ocoMode ?? 'trigger') === 'fill';
+    const levels = programs.map(p => {
+        const lv = p.levels[0]!;
+        if (!fill || lv.entry.type !== 'touch' || lv.entry.order.priceType !== 'LMT') return lv;
+        return { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, timeInForce: 'IOC' as const } } };
+    });
+    return { ...programs[0]!, id: `grp:${first.group}:${first.id}`, levels, ocoLevels: true,
+        ...(fill ? { ocoMode: 'fill' as const } : {}),
+        ...(programs.some(p => p.opens) ? { opens: true } : {}) };
 }
 
 /** The program a new stop / take / entry trigger becomes (null: not
@@ -129,6 +163,9 @@ function row(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
         ...(e.feed ? { source: 'opposite' as const } : {}),
         ...(send ? { send } : {}),
         ...(e.validity ? { validity: { type: e.validity.type, until: e.validity.until } } : {}),
+        // 二擇一: one group per program; a waiting side names the row it waits for
+        ...(p.ocoLevels ? { group: p.id, ocoMode: p.ocoMode === 'fill' ? 'fill' as const : 'trigger' as const } : {}),
+        ...(lv.ocoLock ? { ocoLock: backgroundRowId(p.id, lv.ocoLock) } : {}),
         background: { programId: p.id, levelId: lv.id },
     };
 }

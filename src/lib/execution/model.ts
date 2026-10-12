@@ -165,6 +165,8 @@ export interface OrderSlot {
      * Cancel order report, or a final status in a refreshed listing) —
      * never a cancel request's answer. A later fill is unexpected data. */
     closed?: boolean;
+    /** Background engine: final in a complete listing with every fill. */
+    listed?: boolean;
 }
 
 export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'resume' | 'unknownNotSent';
@@ -213,6 +215,11 @@ export interface Level {
      * order was reported closed — anomalies, notified only, never protected
      * by itself. */
     anomalous?: number;
+    /** #226 二擇一 成交後刪對應口數 (background): the level whose order this
+     * one waits for (not watched meanwhile)... */
+    ocoLock?: string;
+    /** ...and that order's fills already taken off this level's quantity. */
+    ocoApplied?: { level: string; filled: number };
 }
 
 // ---- generators & policies (parameters; levels are materialised) ----
@@ -326,6 +333,10 @@ export interface OrderProgram {
     opens?: boolean;
     /** The contract's tick-size table (prices computed in ticks). */
     tickTable?: TickBand[];
+    /** #226 二擇一 (with `ocoLevels`, background): 'fill' — the other legs wait
+     * for the fired order's final fills and lose exactly what filled;
+     * absent = the first leg that fires ends the others. */
+    ocoMode?: 'trigger' | 'fill';
 }
 
 /** Bracket (括號單) options, background engine (#201 ②). All off by default:

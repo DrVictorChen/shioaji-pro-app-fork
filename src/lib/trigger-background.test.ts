@@ -558,3 +558,66 @@ describe('background fills reach the window (QA 10/12: 持倉暫未套用, stale
     });
 });
 
+
+describe('#226 二擇一 in the background (step 2)', () => {
+    const TXF1 = { ...TXF, tick: 1 };
+    const legs = (mode: 'trigger' | 'fill', over: Record<string, unknown> = {}) => [
+        { code: 'TXFR1', condition: 'above' as const, price: 20100, action: 'Buy' as const, quantity: 3, kind: 'stop' as const,
+            role: 'entry' as const, group: 'g', ocoMode: mode, ...over },
+        { code: 'TXFR1', condition: 'below' as const, price: 19900, action: 'Sell' as const, quantity: 3, kind: 'stop' as const,
+            role: 'entry' as const, group: 'g', ocoMode: mode, ...over },
+    ];
+    function groupProgram(mode?: 'fill'): OrderProgram {
+        const base = program();
+        const lv = base.levels[0]!;
+        return { ...base, id: 'grp:g:1', ocoLevels: true, ...(mode ? { ocoMode: mode } : {}), opens: true, levels: [
+            { ...lv, id: 'U', side: 'Buy', qty: 3, entry: { type: 'touch', condition: 'above', price: 20100, order: { priceType: 'MKT', timeInForce: 'IOC' } } },
+            { ...lv, id: 'D', side: 'Sell', qty: 3, entry: { type: 'touch', condition: 'below', price: 19900, order: { priceType: 'MKT', timeInForce: 'IOC' } } },
+        ] };
+    }
+
+    it('both legs become one background program; 成交後刪對應口數 sends limits IOC', async () => {
+        m.enabled = true;
+        await boot();
+        await engine.addTriggerGroup(legs('fill', { send: { type: 'LMT', ticks: -1 } }), TXF1 as never);
+        expect(engine.getTriggers()).toHaveLength(0);
+        const created = calls('execution_create').map(([, a]) => (a as { program: OrderProgram }).program);
+        expect(created).toHaveLength(1);
+        expect(created[0]).toMatchObject({ ocoLevels: true, ocoMode: 'fill', opens: true, tickTable: [{ min: 0, max: null, tick: 1 }] });
+        expect(created[0]!.levels.map(l => [l.side, l.qty, l.entry.type === 'touch' && l.entry.order.timeInForce])).toEqual([
+            ['Buy', 3, 'IOC'], ['Sell', 3, 'IOC']]);
+        await engine.addTriggerGroup(legs('trigger'), TXF1 as never);
+        const second = calls('execution_create').at(-1)![1] as { program: OrderProgram };
+        expect(second.program.ocoLevels).toBe(true);
+        expect(second.program.ocoMode).toBeUndefined();
+    });
+
+    it('rows carry the group, the mode and which side a waiting leg waits for', async () => {
+        const p = groupProgram('fill');
+        p.levels[0] = { ...p.levels[0]!, ocoLock: 'D' };
+        p.levels[1] = { ...p.levels[1]!, phase: 'working' };
+        m.programs = [p];
+        await boot();
+        await bg.refreshBackground();
+        const rows = engine.getDisplayTriggers();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ group: 'grp:g:1', ocoMode: 'fill', ocoLock: 'bg:grp:g:1:D', quantity: 3 });
+    });
+
+    it('pause / remove / modify act on the one program (modify in one engine step)', async () => {
+        m.programs = [groupProgram()];
+        await boot();
+        await bg.refreshBackground();
+        const ids = engine.getDisplayTriggers().map(r => r.id);
+        expect(ids).toEqual(['bg:grp:g:1:U', 'bg:grp:g:1:D']);
+        await engine.setTriggerGroup(ids, 'pause');
+        expect(calls('execution_pause').map(([, a]) => a)).toEqual([{ programId: 'grp:g:1' }]);
+        await engine.modifyTriggerGroup([{ id: ids[0]!, patch: { price: 20200 } }, { id: ids[1]!, patch: { quantity: 2 } }]);
+        const [, args] = calls('execution_replace')[0]! as [string, { programId: string; program: OrderProgram }];
+        expect(args.programId).toBe('grp:g:1');
+        expect(args.program.levels.map(l => [l.entry.type === 'touch' && l.entry.price, l.qty])).toEqual([[20200, 3], [19900, 2]]);
+        await expect(engine.modifyTriggerGroup([{ id: ids[0]!, patch: { price: 19800 } }])).rejects.toThrow('上方價格必須高於下方價格');
+        await engine.setTriggerGroup(ids, 'remove');
+        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'grp:g:1' }]);
+    });
+});
