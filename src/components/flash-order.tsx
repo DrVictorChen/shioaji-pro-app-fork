@@ -25,7 +25,7 @@ import { getConditionalSettings } from '../lib/conditional/settings';
 import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, flashProtectPlan, flashProtectText, positionEffect,
     protectConditionProblem, protectEffect, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf, triggerSendText, type LadderMark } from '../lib/flash-trigger';
 import type { TriggerValidity } from '../lib/trigger-engine';
-import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger } from '../lib/flash-conditional';
+import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger, flashStopProtections } from '../lib/flash-conditional';
 import { FlashProtectStrip } from './flash-protect';
 import {
     type ReactNode,
@@ -1306,6 +1306,13 @@ export function FlashOrder({
         dragCleanupRef.current = cleanup;
     }, [cancelMarks, moveMarks]);
 
+    // #216 平倉／全刪 的停損停利範圍：這個面板的帳戶＋商品＋單位
+    const protectionScopeOf = (a: Account) => {
+        const c = contractRef.current;
+        return { account: { account_type: a.account_type, broker_id: a.broker_id, account_id: a.account_id },
+            codes: [c.code, c.target_code].filter((x): x is string => !!x), odd: oddRef.current };
+    };
+
     // 刪單送出前再確認：期間面板暫停或連動、商品變了就不送（不撤到上一檔的委託）
     const cancelGuard = useCallback(() => {
         const isContextCurrent = captureContext();
@@ -1349,6 +1356,12 @@ export function FlashOrder({
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
+        // #216 全刪 also ends this product's 停損停利 (never while an exit is out)
+        const stop = await flashStopProtections(protectionScopeOf(capturedAccount));
+        const protectNote = stop.blocked.length
+            ? `停損停利未取消：${stop.blocked.join('；')}，請到條件單面板處理`
+            : stop.failed.length ? `停損停利取消未確認：${stop.failed.join('；')}` : stop.stopped ? `已取消停損停利 ${stop.stopped} 張` : '';
+        if (protectNote) notify({ kind: stop.blocked.length || stop.failed.length ? 'err' : 'info', title: '⚡ 全刪・停損停利', body: `${code}：${protectNote}` });
         const targets = tradesRef.current.filter(
             (t) =>
                 accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, capturedAccount) &&
@@ -1357,7 +1370,7 @@ export function FlashOrder({
                     getAliasFor(t.contract.code) === code),
         );
         if (targets.length === 0) {
-            notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
+            if (!protectNote) notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
         const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
@@ -1391,12 +1404,21 @@ export function FlashOrder({
         };
         const action = pos.net > 0 ? 'Sell' : 'Buy';
         try {
+            // #216 停損停利 first: ended before the close goes out, so no exit can
+            // fire on top of it; an exit that is out or unknown blocks the close
+            const stop = await flashStopProtections(protectionScopeOf(account));
+            if (stop.blocked.length || stop.failed.length) {
+                notify({ kind: 'err', title: '⚡ 平倉未送出', body: stop.blocked.length
+                    ? `${stop.blocked.join('；')}。為避免重複出場，這筆沒有送出；請到條件單面板處理後再平倉`
+                    : `停損停利取消未確認（${stop.failed.join('；')}）。為避免重複出場，這筆沒有送出` });
+                return;
+            }
             if (account.account_type === 'S') {
                 await placeStockExitByShares(contract, action, Math.abs(pos.net), account, { isAccountCurrent: stillPanelAccount(account), beforeSend });
             } else {
                 await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account), beforeSend });
             }
-            notify({ kind: 'info', title: '⚡ 平倉已送出', body: '請以委託與成交回報確認結果' });
+            notify({ kind: 'info', title: '⚡ 平倉已送出', body: `${stop.stopped ? `已先取消停損停利 ${stop.stopped} 張；` : ''}請以委託與成交回報確認結果` });
             onOrdersChangedRef.current?.();
         } catch (error) {
             if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
@@ -1726,7 +1748,8 @@ export function FlashOrder({
                 )}
                 <button
                     className={styles.cancelAllBtn}
-                    disabled={!!paused || (workingCount === 0 && otherLotOrders === 0)}
+                    disabled={!!paused || (workingCount === 0 && otherLotOrders === 0 && ladder.protectedQty === 0)}
+                    title={ladder.protectedQty > 0 ? '刪除這個商品的委託，並取消這個面板的停損停利' : undefined}
                     onClick={() => void cancelSymbol()}
                 >
                     全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}

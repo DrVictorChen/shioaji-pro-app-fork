@@ -328,3 +328,87 @@ export function dragProblem(m: Pick<LadderMark, 'editable' | 'condition' | 'pric
     if (cond !== m.condition) return '不能拖過目前成交價（會立刻觸發）；請刪除後重新設定';
     return null;
 }
+
+// ---- 平倉／全刪 also end this product's protection (#216, 2026-10-13) ----
+
+/** The panel's account + product (+ unit for stocks). */
+export interface ProtectionScope {
+    account: { account_type: string; broker_id: string; account_id: string };
+    /** quote and order codes of the panel's product (TXFR1, TXFJ6) */
+    codes: string[];
+    odd: boolean;
+}
+
+/** What the selector needs of a window bracket plan. */
+export interface WindowPlanLike {
+    id: string;
+    account: { account_type: string; broker_id: string; account_id: string };
+    quoteCode: string;
+    orderCode: string;
+    orderLot?: string;
+    securityType: string;
+    dismissed?: boolean;
+    live: boolean;
+    exit: { status: string; acknowledged?: boolean } | null;
+}
+
+export interface ExitLike {
+    bracketId?: string;
+    account: { account_type: string; broker_id: string; account_id: string };
+    orderCode: string;
+    status: string;
+    acknowledged?: boolean;
+}
+
+export interface BackgroundViewLike {
+    programId: string;
+    levelId: string;
+    account: { accountType: string; brokerId: string; accountId: string };
+    quoteCode: string;
+    orderCode: string;
+    state: string;
+    canEnd: boolean;
+}
+
+export interface ProtectionTargets {
+    window: string[];
+    background: { programId: string; levelId: string }[];
+    /** why the protection cannot be ended now (an exit is out or its outcome unknown) */
+    blocked: string[];
+}
+
+const sameAccount = (a: { account_type: string; broker_id: string; account_id: string }, s: ProtectionScope) =>
+    a.account_type === s.account.account_type && a.broker_id === s.account.broker_id && a.account_id === s.account.account_id;
+const exitOut = (status: string, acknowledged?: boolean) =>
+    status === 'sending' || status === 'working' || (status === 'unknown' && !acknowledged);
+
+/** The protections 平倉／全刪 end for this panel, and what stops them.
+ * An exit in flight or of unknown outcome is never raced: it blocks. */
+export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlanLike[], exits: readonly ExitLike[],
+    views: readonly BackgroundViewLike[]): ProtectionTargets {
+    const out: ProtectionTargets = { window: [], background: [], blocked: [] };
+    const inCodes = (...cs: string[]) => cs.some(c => s.codes.includes(c));
+    for (const p of plans) {
+        if (p.dismissed || !p.live || !sameAccount(p.account, s) || !inCodes(p.quoteCode, p.orderCode)) continue;
+        if (p.securityType === 'STK' && isOddLot(p.orderLot) !== s.odd) continue;
+        const legOut = exits.some(e => e.bracketId === p.id && exitOut(e.status, e.acknowledged));
+        if ((p.exit && exitOut(p.exit.status, p.exit.acknowledged)) || legOut) {
+            out.blocked.push(`${p.quoteCode} 停損停利的出場單${p.exit?.status === 'unknown' || exits.some(e => e.bracketId === p.id && e.status === 'unknown') ? '結果未知' : '正在送出或等待成交'}`);
+            continue;
+        }
+        out.window.push(p.id);
+    }
+    if (!s.odd) {
+        for (const v of views) {
+            const account = { account_type: v.account.accountType, broker_id: v.account.brokerId, account_id: v.account.accountId };
+            if (!sameAccount(account, s) || !inCodes(v.quoteCode, v.orderCode)) continue;
+            if (v.state === 'done' || v.state === 'handled' || v.state === 'rearmed') continue;
+            if (v.state === 'exiting' || v.state === 'unknown' || !v.canEnd) {
+                out.blocked.push(`${v.quoteCode} 停損停利（背景執行）${v.state === 'unknown' ? '的出場單結果未知' : '的出場單正在送出或等待成交'}`);
+                continue;
+            }
+            out.background.push({ programId: v.programId, levelId: v.levelId });
+        }
+    }
+    return out;
+}

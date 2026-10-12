@@ -117,7 +117,7 @@ function ProtectMenu({ protect, background, onClose, onSave }: { protect: FlashP
                 )}
                 <div className={styles.menuNote}>
                     每筆閃電進場（點價、市價、觸價進場）成交後，依實際成交價計算停損停利，只保護該筆成交的數量；觸發後市價平倉。
-                    減倉不附加；反手（數量大於持倉）不送。平倉鈕與全刪不會取消保護，請用條件單面板處理。
+                    減倉不附加；反手（數量大於持倉）不送。按平倉或全刪會先取消這個商品的停損停利（出場單送出中或結果未知時不平倉）。
                 </div>
                 <div className={styles.menuNote}>{background ? '背景持續執行開啟：保護由背景執行。' : '保護由本視窗（主視窗）執行。'}</div>
                 {problem && <div className={styles.protectError} role='alert'>{problem}</div>}
