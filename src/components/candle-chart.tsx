@@ -1,4 +1,5 @@
 import { canTrade } from '../lib/account-tradable';
+import { reportOrderError } from '../lib/order-outcome';
 import { RefreshButton } from './refresh-button';
 import { fetchChartHistory, nextChartHistoryRevision } from '../lib/chart-history';
 // src/components/candle-chart.tsx — K-bar candlestick + volume chart
@@ -391,7 +392,7 @@ export function CandleChart({
                 body: `${c.code} ${qty}${odd ? ' 股（零股）' : ''} @ ${fmtPrice(price)}${conditions ? ` · ${conditions}` : ''}（${orderStatusWithNumber(trade)}）`,
             });
         } catch (e) {
-            notify({ kind: 'err', title: '圖表下單失敗', body: e instanceof Error ? e.message : String(e) });
+            reportOrderError('圖表下單', e, notify);
         }
     };
     const sendPointOrderRef = useRef(sendPointOrder);

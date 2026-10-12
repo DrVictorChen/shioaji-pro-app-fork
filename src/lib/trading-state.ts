@@ -514,6 +514,20 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
     return inFlightResult;
 }
 
+/** One orders reconciliation that really reads orders (#249: after an unknown
+ *  order outcome). refreshTradingState('orders') alone may return another
+ *  scope's in-flight read or skip during the cooldown; wait both out first.
+ *  Never sends or resends anything. */
+export async function reconcileOrdersOnce(): Promise<void> {
+    if (isMirror) { channel?.postMessage({ kind: 'refresh', scope: 'orders' }); return; }
+    for (let i = 0; i < 20; i += 1) {
+        if (inFlight) { await inFlight.catch(() => {}); continue; }
+        const wait = nextRefreshAt.orders - Date.now();
+        if (wait > 0) { await new Promise(resolve => setTimeout(resolve, wait + 10)); continue; }
+        return refreshTradingState('orders');
+    }
+}
+
 // ---- Shioaji 1.7.6 trade cache health (event-driven only) ----
 export type HealthTrigger = 'reconnect' | 'gap' | 'manual';
 let healthInFlight: Promise<void> | null = null;
