@@ -423,6 +423,11 @@ describe('background fills reach the window (QA 10/12: 持倉暫未套用, stale
         await bg.refreshBackground();
         await flush();
         expect(m.refresh).toHaveBeenCalledWith('all');
+        // and once more after the trading store's cooldown (a read in flight would swallow the first)
+        m.refresh.mockClear();
+        await vi.advanceTimersByTimeAsync(bg.FILL_REFRESH_TRAIL_MS);
+        await flush();
+        expect(m.refresh).toHaveBeenCalledWith('all');
     });
 
     it('the report pipeline learns the order code of a trade the engine sent', async () => {
