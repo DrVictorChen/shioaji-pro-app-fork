@@ -185,5 +185,17 @@ describe('NewConditionalDialog', () => {
             expect(button(r, '建立').props.disabled).toBe(false);
         } finally { vi.useRealTimers(); }
     });
+
+    it('stocks 二擇一 成交後刪對應口數 in 盤中零股: the summary says ROD and that the other side waits (engine rule)', async () => {
+        const r = render(STK);
+        await click(r, '二擇一');
+        await click(r, '盤中零股');
+        await click(r, '成交後刪對應口數');
+        await type(r, '上方價', '1100');
+        await type(r, '下方價', '900');
+        const all = text(r.root);
+        expect(all).toContain('零股以漲跌停價限價（ROD）送出');
+        expect(all).not.toContain('IOC');
+    });
 });
 
