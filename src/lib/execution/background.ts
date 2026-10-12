@@ -508,19 +508,47 @@ function onFirstStatus() {
     }
 }
 
-/** The engine's 全平並取消 started (`detail`: its account and codes): this
- * window's own conditional orders in that scope stop too (best effort; the
- * engine's are stopped already). */
+/** The engine's 全平並取消 started (`detail`: its account, codes and time
+ * order): this window stops its own conditional orders in that scope, waits
+ * until none of them is sending, and answers — the engine cancels and
+ * closes nothing before that answer (or gives up after a while). */
 async function stopWindowConditionals(detail: string): Promise<void> {
+    let programId = '';
+    let ok = false;
+    let why = '';
     try {
-        const d = JSON.parse(detail) as { account: { accountType: 'F' | 'S'; brokerId: string; accountId: string }; codes: string[] | null };
+        const d = JSON.parse(detail) as { programId: string;
+            account: { accountType: 'F' | 'S'; brokerId: string; accountId: string }; codes: string[] | null };
+        programId = d.programId;
         const account = { account_type: d.account.accountType, broker_id: d.account.brokerId, account_id: d.account.accountId };
-        const { stopConditionalInScope } = await import('../conditional/runtime');
-        const r = await stopConditionalInScope(d.codes ? { type: 'code', codes: d.codes, account } : { type: 'account', account });
-        if (r.failed.length) notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有全部停止', body: r.failed.join('；') });
+        const { stopConditionalInScope, waitInFlight } = await import('../conditional/runtime');
+        const scope = d.codes ? { type: 'code' as const, codes: d.codes, account } : { type: 'account' as const, account };
+        const r = await stopConditionalInScope(scope);
+        const drained = r.failed.length === 0 && await waitInFlight(scope);
+        ok = drained;
+        why = r.failed.length ? r.failed.join('；') : drained ? '' : '本視窗有條件單仍在送單';
     } catch (e) {
-        notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有停止', body: e instanceof Error ? e.message : String(e) });
+        why = e instanceof Error ? e.message : String(e);
     }
+    if (programId) await invoke<void>('execution_flatten_ack', { programId, ok, detail: why }).catch(() => undefined);
+    if (!ok) notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有全部停止', body: why || '請手動處理' });
+}
+
+/** A window's 全平並取消 holds the one shared with the engine's 收盤前平倉
+ * (they never read the same holdings at once). Resolves false when the
+ * engine's is running; true when held (or there is no engine to share with). */
+export async function beginWindowFlatten(): Promise<boolean> {
+    if (!isTauri) return true;
+    try {
+        return await invoke<boolean>('execution_flatten_begin');
+    } catch {
+        return true; // the engine is not running: it runs none
+    }
+}
+
+export async function endWindowFlatten(): Promise<void> {
+    if (!isTauri) return;
+    await invoke<void>('execution_flatten_end').catch(() => undefined);
 }
 
 // ---- risk settings for opening entries (#226) ----
