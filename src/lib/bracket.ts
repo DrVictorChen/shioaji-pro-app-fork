@@ -33,6 +33,8 @@ import {
     protectionQuantity,
     tradeMatchesPlan,
     unprotectedQuantity,
+    lateFillQuantity,
+    listingRowFinality,
     workingEntryAfterExit,
     type AccountRef,
     type BracketPlan,
@@ -314,7 +316,8 @@ function syncProtection(before: BracketPlan | undefined, p: BracketPlan) {
             body: `${p.quoteCode} 已成交 ${Math.min(p.filled, p.quantity)}/${p.quantity} → OCO${describeProtection(p)} 保護 ${qty}` });
     }
     const late = unprotectedQuantity(p) - (before ? unprotectedQuantity(before) : 0);
-    const afterClose = (p.lateFilled ?? 0) - (before?.lateFilled ?? 0);
+    // per entry order once (the tiers of one entry share its late fills)
+    const afterClose = lateFillQuantity(p) - (before ? lateFillQuantity(before) : 0);
     if (afterClose > 0) {
         // #177: the entry was already over — never protected, never resent
         notify({ kind: 'err', title: '括號單進場單結束後又成交',
@@ -403,6 +406,13 @@ function plansFor(account: AccountRef, env: string) {
     return plans.filter(p => p.env === env && accountRefKey(p.account) === accountRefKey(account) && isLive(p));
 }
 
+/** Plans whose entry is over and no longer live: a listing still shows the
+ * fills they missed (an anomaly after the close, #177) — nothing else. */
+function closedPlansFor(account: AccountRef, env: string) {
+    return plans.filter(p => p.env === env && accountRefKey(p.account) === accountRefKey(account)
+        && !isLive(p) && p.entryClosed && !p.dismissed);
+}
+
 function applyHealth(account: AccountRef, env: string, health: TradeCacheHealth, now: number) {
     const codes = health.reasons.map(r => `${r.event_type}:${r.reason}`).join('、');
     for (const p of plansFor(account, env)) {
@@ -460,6 +470,10 @@ function lookup(account: AccountRef, env: string, restore = false): Promise<void
                     if (trade) update(p.id, x => applyEntryTrade(x, trade, now, 'cache'));
                     else update(p.id, x => addIssue(x, 'lookup-failed', '伺服器委託快取找不到此進場單（可能伺服器重啟）；請對帳', now));
                 }
+                for (const p of closedPlansFor(account, env)) {
+                    const trade = trades.find(t => tradeMatchesPlan(t, p));
+                    if (trade) update(p.id, x => applyEntryTrade(x, trade, now, 'cache'));
+                }
             });
         } catch (e) {
             for (const p of plansFor(account, env)) {
@@ -498,6 +512,10 @@ async function reconcile(id: string): Promise<{ health: TradeCacheHealth['state'
         const trades = await query.read(plan.account.account_type, plan.account, current => fetchTrades(plan.account.account_type, current, { refresh: true }));
         query.assertCurrent();
         const now = Date.now();
+        for (const p of closedPlansFor(plan.account, env)) {
+            const trade = trades.find(t => tradeMatchesPlan(t, p));
+            if (trade) update(p.id, x => applyEntryTrade(x, trade, now, 'refreshed'));
+        }
         for (const p of plansFor(plan.account, env)) {
             const trade = trades.find(t => tradeMatchesPlan(t, p));
             if (trade) update(p.id, x => {
@@ -517,7 +535,10 @@ async function reconcile(id: string): Promise<{ health: TradeCacheHealth['state'
         }
         if (health.state === 'Healthy') {
             for (const p of plansFor(plan.account, env)) {
-                if (trades.some(t => tradeMatchesPlan(t, p))) {
+                const row = trades.find(t => tradeMatchesPlan(t, p));
+                // a row whose counts contradict each other proves nothing: its warning stays
+                if (row && listingRowFinality(row) === 'inconsistent') continue;
+                if (row) {
                     // what the listing cannot undo stays: an overfill, a fill after the close
                     update(p.id, x => ({ ...x, updatedAt: now, issues: x.issues.filter(i => i.code === 'overfill' || i.code === 'fill-after-close') }));
                 } else {
@@ -698,15 +719,25 @@ async function cancelEntry(id: string): Promise<'cancelled' | 'unconfirmed'> {
     update(id, p => ({ ...p, entryCancel: 'sending', updatedAt: Date.now() }));
     try {
         const trade = await cancelOrder(plan.orderId);
-        const confirmed = trade?.order?.id === plan.orderId && trade.status?.status === 'Cancelled';
-        update(id, p => {
-            if (!confirmed) return { ...p, entryCancel: 'unconfirmed', updatedAt: Date.now() };
-            // the read-back-confirmed cancel closes it: its fills first, so a
-            // fill seen only now is still counted before the close
-            const next = applyEntryTrade({ ...p, entryCancel: undefined }, trade, Date.now(), 'cache');
-            return { ...next, entryClosed: true };
-        });
-        return confirmed ? 'cancelled' : 'unconfirmed';
+        // the read-back-confirmed cancel (#129) closes the entry only when its
+        // row is final by the background engine's rule (#177): every lot
+        // accounted for, every fill listed
+        const final = trade?.order?.id === plan.orderId && trade.status?.status === 'Cancelled'
+            && ['ended', 'filled'].includes(listingRowFinality(trade));
+        if (!final) {
+            update(id, p => ({ ...p, entryCancel: 'unconfirmed', updatedAt: Date.now() }));
+        } else {
+            // every plan of this entry order (the tiers) is over, its fills first
+            const siblings = plans.filter(p => p.orderId === plan.orderId && p.env === plan.env
+                && accountRefKey(p.account) === accountRefKey(plan.account));
+            for (const sib of siblings) {
+                update(sib.id, p => {
+                    const next = applyEntryTrade({ ...p, entryCancel: undefined }, trade, Date.now(), 'cache');
+                    return { ...next, entryClosed: true };
+                });
+            }
+        }
+        return final ? 'cancelled' : 'unconfirmed';
     } catch (error) {
         if ((error as { mutationNotStarted?: boolean })?.mutationNotStarted) {
             update(id, p => ({ ...p, entryCancel: undefined, updatedAt: Date.now() }));

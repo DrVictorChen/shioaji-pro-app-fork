@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     allocatedFill,
+    averageFillPrice,
     applyEntryFill,
     applyEntryOrderReport,
     applyEntryTrade,
@@ -87,9 +88,18 @@ describe('when the entry is over', () => {
         expect(p.issues.map(i => i.code)).toContain('report-mismatch');
     });
 
-    it('a failed cancel report does not close it', () => {
+    it('only an explicitly successful cancel report closes it', () => {
         expect(applyEntryOrderReport(plan(), cancelReport('88'), 1).entryClosed).toBe(false);
+        expect(applyEntryOrderReport(plan(), cancelReport(''), 1).entryClosed).toBe(false); // no code: no evidence
         expect(applyEntryOrderReport(plan(), cancelReport('00'), 1).entryClosed).toBe(true);
+    });
+
+    it('fills listed with whole-number string quantities count, as the engine reads them', () => {
+        const t = row('Filled', [], 0);
+        (t.status as { deals: unknown[] }).deals = [{ seq: '000001', quantity: '2', price: 100, ts: 1 }];
+        (t.status as { deal_quantity: unknown }).deal_quantity = 2;
+        const p = applyEntryTrade(plan(), t, 1, 'refreshed');
+        expect([p.filled, p.entryClosed, protectionQuantity(p)]).toEqual([2, true, 2]);
     });
 });
 
@@ -118,6 +128,13 @@ describe('a fill after the entry is over', () => {
         expect(protectionQuantity(p)).toBe(1); // never grows after the close
         expect(unprotectedQuantity(p)).toBe(1);
         expect(p.issues.map(i => i.code)).toContain('fill-after-close');
+    });
+
+    it('a late fill never prices the protection', () => {
+        let p = applyEntryFill(plan(), { orderId: 'fixture-f1', key: 'fixture-f1:000001', quantity: 1 }, 1); // no price
+        p = applyEntryOrderReport(p, cancelOk, 2);
+        p = applyEntryFill(p, { orderId: 'fixture-f1', key: 'fixture-f1:000002', quantity: 1, price: 120 }, 3);
+        expect(averageFillPrice(p)).toBeNull();
     });
 
     it('tiers of one entry: never protected by any tier, reported once', () => {

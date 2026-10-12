@@ -95,6 +95,8 @@ export interface BracketPlan {
      * anomaly: shown 未受保護, never protected (same rule as the background
      * engine's fillAfterClose) */
     lateFilled?: number;
+    /** fill identities of those late fills — never part of the cost basis */
+    lateKeys?: string[];
     entryClosed: boolean;
     entryCancel?: 'sending' | 'unconfirmed'; // user-requested cancel of the working rest
     exit: BracketExit | null;
@@ -149,10 +151,11 @@ export function lateFillQuantity(p: Pick<BracketPlan, 'lateFilled' | 'tier'>): n
 }
 
 /** Volume-weighted entry fill price (null when no fill carries a price). */
-export function averageFillPrice(p: Pick<BracketPlan, 'fills' | 'fillPx'>): number | null {
+export function averageFillPrice(p: Pick<BracketPlan, 'fills' | 'fillPx' | 'lateKeys'>): number | null {
     let q = 0;
     let v = 0;
     for (const [key, qty] of Object.entries(p.fills)) {
+        if (p.lateKeys?.includes(key)) continue; // after the close: never priced from (#177)
         const px = p.fillPx?.[key];
         if (px === undefined || !(px > 0)) continue;
         q += qty;
@@ -281,8 +284,10 @@ export function matchDeal(report: OrderEventReport, orderId: string, account: Ac
 /** Fills recorded on a Trade from `/order/trades` (cache-only or refreshed). */
 export function fillsFromTrade(trade: Trade): FillEvidence[] {
     return (trade.status.deals ?? [])
-        .filter(d => typeof d.seq === 'string' && d.seq && Number.isSafeInteger(d.quantity) && d.quantity > 0)
-        .map(d => ({ orderId: trade.order.id, key: `${trade.order.id}:${d.seq}`, quantity: d.quantity,
+        // quantities as the background engine reads them (an integer, or a whole-number string)
+        .map(d => ({ d, qty: exactQuantity(d.quantity as unknown, true) }))
+        .filter(({ d, qty }) => typeof d.seq === 'string' && d.seq && qty !== null)
+        .map(({ d, qty }) => ({ orderId: trade.order.id, key: `${trade.order.id}:${d.seq}`, quantity: qty!,
             ts: typeof d.ts === 'number' && Number.isFinite(d.ts) ? d.ts : undefined,
             ...(typeof d.price === 'number' && d.price > 0 ? { price: d.price } : {}) }));
 }
@@ -341,6 +346,7 @@ export function applyEntryFill(p: BracketPlan, fill: FillEvidence, now: number):
         // the entry was reported closed (cancel succeeded / final in a
         // refreshed listing): this fill is an anomaly — never protected
         next.lateFilled = (p.lateFilled ?? 0) + merged.added;
+        next.lateKeys = [...(p.lateKeys ?? []), fill.key];
         next = addIssue(next, 'fill-after-close',
             '委託已結束後仍收到成交（資料異常），已記為未受保護，不會自動補保護；請到委託與持倉核對', now);
     }
@@ -358,7 +364,9 @@ export function applyEntryFill(p: BracketPlan, fill: FillEvidence, now: number):
 export function applyEntryOrderReport(p: BracketPlan, report: OrderEventReport, now: number): BracketPlan {
     if (report.kind !== 'order' || report.id !== p.orderId || report.market !== p.market) return p;
     if (reportAccountMatches(report, p.account) === false) return p;
-    if ((report.opType === 'New' && report.failed) || (report.opType === 'Cancel' && !report.failed)) {
+    // a Cancel closes it only when it explicitly succeeded (op_code 00): a
+    // report without a code is no evidence (#177)
+    if ((report.opType === 'New' && report.failed) || (report.opType === 'Cancel' && report.opCode === '00')) {
         return p.entryClosed ? p : { ...p, entryClosed: true, entryCancel: undefined, updatedAt: now };
     }
     return p;

@@ -465,6 +465,79 @@
         }
       },
       "expect": "filled"
+    },
+    {
+      "name": "Filled while a lot is still open is no evidence",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Filled",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "Submitted whose counts show every lot filled is filled",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "cancel_quantity": 0,
+          "deal_quantity": 2,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 2
+            }
+          ]
+        }
+      },
+      "expect": "filled"
+    },
+    {
+      "name": "a negative cancel quantity",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Submitted",
+          "cancel_quantity": -1
+        }
+      },
+      "expect": "inconsistent"
+    },
+    {
+      "name": "Failed even with fills is ended",
+      "row": {
+        "order": {
+          "quantity": 2
+        },
+        "status": {
+          "status": "Failed",
+          "cancel_quantity": 0,
+          "deal_quantity": 1,
+          "deals": [
+            {
+              "seq": "1",
+              "quantity": 1
+            }
+          ]
+        }
+      },
+      "expect": "ended"
     }
   ]
 }
