@@ -15,6 +15,7 @@ const SIM = 'http://sim.invalid|simulation';
 
 const m = vi.hoisted(() => ({
     tick: [] as ((t: { code: string; close: number; simtrade?: boolean }) => void)[],
+    bidask: [] as ((b: { code: string; bid_price: string[]; ask_price: string[] }) => void)[],
     place: vi.fn(),
     notify: vi.fn(),
     ensure: vi.fn(),
@@ -36,7 +37,7 @@ vi.mock('./stream', () => ({
     onOrderEvent: () => () => undefined,
     onAnyTick: (cb: (typeof m.tick)[number]) => { m.tick.push(cb); return () => undefined; },
     onOddLotTick: () => () => undefined,
-    onAnyBidAsk: () => () => undefined,
+    onAnyBidAsk: (cb: (typeof m.bidask)[number]) => { m.bidask.push(cb); return () => undefined; },
     onStreamEvent: () => () => undefined,
 }));
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: [S1, F1], selectedStock: S1, selectedFutures: F1 }) }));
@@ -102,6 +103,7 @@ beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal('BroadcastChannel', undefined);
     m.tick = [];
+    m.bidask = [];
     m.enabled = false;
     m.programs = [];
     for (const f of [m.place, m.notify, m.ensure, m.invoke]) f.mockReset();
@@ -429,6 +431,18 @@ describe('#226 conditional orders in the background (step 1: triggers)', () => {
         expect(q.levels[0]!.entry).toMatchObject({ feed: 'bid', order: { priceType: 'MKP', timeInForce: 'IOC' } });
     });
 
+    it('a 待確認 對手價 row shows (and arms 送出 with) its side of the book', async () => {
+        m.programs = [program({ entry: { type: 'touch', condition: 'below', price: 19800, feed: 'bid',
+            order: { priceType: 'MKT', timeInForce: 'IOC' } }, phase: 'needsConfirm', pending: { leg: 'entry', price: 19790, ts: 5, reason: 'resume' } })];
+        await boot();
+        await bg.refreshBackground();
+        for (const cb of m.bidask) cb({ code: 'TXFR1', bid_price: ['19795'], ask_price: ['19797'] });
+        await flush();
+        const [row] = engine.getDisplayTriggers();
+        expect(engine.priceKeyOf(row!)).toBe('TXFR1#bid');
+        expect(bg.getBackgroundPrices()['TXFR1#bid']).toBe(19795);
+    });
+
     it('the rows show the options as the window shows them', async () => {
         m.programs = [{ ...program({ entry: { type: 'touch', condition: 'below', price: 19800, cross: true, feed: 'bid', limitTicks: -1,
             validity: { type: 'today', until: 99 }, order: { priceType: 'LMT', timeInForce: 'ROD' } }, recross: ['entry'] }), opens: true }];
@@ -484,13 +498,14 @@ describe('#226 conditional orders in the background (step 1: triggers)', () => {
         m.enabled = true;
         vi.stubGlobal('window', new EventTarget());
         await boot();
-        const { reportDailyPnl } = await import('./risk');
-        reportDailyPnl(-100, true);
-        m.trading = { ...m.trading, margin: {}, marginAccount: `F:${F1.broker_id}:${F1.account_id}`,
+        // the selected futures account F1: −1,500 unrealized, settled −100; another account's gain never offsets it
+        const F2 = { ...F1, account_id: 'fixture-account-F2' };
+        m.trading = { ...m.trading, margin: { future_settle_profitloss: -100 }, marginAccount: `F:${F1.broker_id}:${F1.account_id}`,
+            positions: [{ account: F1, pnl: -1500 }, { account: F2, pnl: 2000 }, { account: S1, pnl: 900 }] as never,
             queries: { ...m.trading.queries, positions: { updatedAt: 5, needsReconcile: false, error: null } } };
         await bg.pushBackgroundRisk(true);
         const last = () => (calls('execution_set_risk').at(-1)![1] as { risk: Record<string, unknown> }).risk;
-        expect(last()).toMatchObject({ dailyPnl: -100, pnlKnown: true, pnlAccount: { brokerId: F1.broker_id, accountId: F1.account_id } });
+        expect(last()).toMatchObject({ dailyPnl: -1600, pnlKnown: true, pnlAccount: { brokerId: F1.broker_id, accountId: F1.account_id } });
         // a stream outage / failed read leaves something to reconcile: not trusted until read again
         m.trading = { ...m.trading, queries: { ...m.trading.queries, positions: { updatedAt: 5, needsReconcile: true, error: null } } };
         await bg.pushBackgroundRisk(true);

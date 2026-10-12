@@ -23,7 +23,7 @@ import { ensureContract } from '../contracts-cache';
 import { isMainWindow } from '../main-window-commands';
 import { currentProtectionEnv, onProtectionEnvChange } from '../protection-env';
 import { pinQuote } from '../quote-ownership';
-import { getStreamStatus, onAnyTick, subscribeStatusStore } from '../stream';
+import { getStreamStatus, onAnyBidAsk, onAnyTick, subscribeStatusStore } from '../stream';
 import { notify } from '../trade';
 import { envKeyOf } from './adapter';
 import { programFinished } from './background-view';
@@ -492,19 +492,22 @@ export function pushBackgroundRisk(force = false): Promise<void> {
 
 async function pushRiskNow(force: boolean): Promise<void> {
     // loaded on use: risk.ts reads window / localStorage when imported
-    const [{ getDailyPnl, getDailyPnlKnown, getRiskSettings }, { getTradingState }] = await Promise.all([
-        import('../risk'), import('../trading-state')]);
+    const [{ getRiskSettings }, { getTradingState }] = await Promise.all([import('../risk'), import('../trading-state')]);
     const s = getRiskSettings();
     const t = getTradingState();
-    // the P&L is trusted only as read: positions and margin in, nothing left to
-    // reconcile (a stream outage or a failed read raises one), the stream live
-    const pnlKnown = getDailyPnlKnown() && t.margin !== undefined && t.queries.positions.updatedAt !== null
-        && !t.queries.positions.needsReconcile && !t.queries.account.needsReconcile && getStreamStatus() === 'live';
-    // its settled part is the selected futures account's ("F:<broker>:<account>")
+    // one account's P&L: the futures account whose margin was read ("F:<broker>:<account>"),
+    // its settled P&L plus the unrealized P&L of its own positions only
     const [type, brokerId, accountId] = (t.marginAccount ?? '').split(':');
     const pnlAccount = type === 'F' && brokerId && accountId ? { brokerId, accountId } : null;
+    const own = (t.positions ?? []).filter(p => p.account && p.account.account_type === 'F'
+        && p.account.broker_id === brokerId && p.account.account_id === accountId);
+    const dailyPnl = own.reduce((sum, p) => sum + (Number(p.pnl) || 0), 0) + (Number(t.margin?.future_settle_profitloss) || 0);
+    // trusted only as read: positions and margin in, nothing left to reconcile
+    // (a stream outage or a failed read raises one), the stream live
+    const pnlKnown = pnlAccount !== null && t.margin !== undefined && t.queries.positions.updatedAt !== null
+        && !t.queries.positions.needsReconcile && !t.queries.account.needsReconcile && getStreamStatus() === 'live';
     const risk = { enabled: s.enabled, maxQty: s.maxQty, maxDailyLoss: s.maxDailyLoss, locked: s.locked,
-        dailyPnl: getDailyPnl(), pnlKnown, pnlAccount };
+        dailyPnl, pnlKnown, pnlAccount };
     const key = JSON.stringify(risk);
     if (!force && key === lastRisk) return;
     await invoke<void>('execution_set_risk', { risk });
@@ -557,6 +560,20 @@ export function startBackgroundExecution(): void {
                 prices = { ...prices, [tick.code]: price };
                 emit();
             }
+        });
+        // 對手價 rows: their side of the book, under the same keys as this
+        // window's triggers (`<code>#bid` / `<code>#ask`)
+        onAnyBidAsk(ba => {
+            if (ba.simtrade || ba.intraday_odd || !programs.some(p => p.binding.contract.quoteCode === ba.code
+                && p.levels.some(lv => lv.phase === 'needsConfirm' && lv.entry.type === 'touch' && lv.entry.feed))) return;
+            const next = { ...prices };
+            let changed = false;
+            for (const [feed, raw] of [['bid', ba.bid_price?.[0]], ['ask', ba.ask_price?.[0]]] as const) {
+                const price = Number(raw);
+                const key = `${ba.code}#${feed}`;
+                if (Number.isFinite(price) && price > 0 && next[key] !== price) { next[key] = price; changed = true; }
+            }
+            if (changed) { prices = next; emit(); }
         });
     }
     void refreshBackground();

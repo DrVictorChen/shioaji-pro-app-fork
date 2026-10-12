@@ -1085,7 +1085,10 @@ function pendingPricesNow(): Record<string, number> {
     const rows = backgroundRows();
     if (pricesCache.ts !== ts || pricesCache.bg !== bg || pricesCache.rows !== rows) {
         const extra: Record<string, number> = {};
-        for (const r of rows) if (r.pending && bg[r.code] !== undefined) extra[r.code] = bg[r.code]!;
+        for (const r of rows) {
+            const key = priceKeyOf(r); // 對手價 rows read their side of the book
+            if (r.pending && bg[key] !== undefined) extra[key] = bg[key]!;
+        }
         pricesCache = { ts, bg, rows, all: Object.keys(extra).length ? { ...ts, ...extra } : ts };
     }
     return pricesCache.all;
