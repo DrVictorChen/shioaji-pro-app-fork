@@ -45,6 +45,7 @@ import {
     timedStop,
     type ServerActionDeps,
 } from '../lib/server-actions';
+import { freshDiagnostics } from '../lib/diagnostics-snapshot';
 import {
     fetchAccounts,
     fetchCaExpire,
@@ -242,10 +243,12 @@ export function ServerManager({
         useCallback(() => serverStatus(), []),
         8000,
     );
+    const polledStatus = status;
     const { data: health } = usePoll<Health | null>(
         useCallback(() => fetchHealth().catch(() => null), []),
         15000,
     );
+    const polledHealth = health ?? undefined;
 
     useEffect(() => {
         loadDesktopSettings().then(value => { setSettings(value); setSettingsLoaded(true); }).catch(() => setSettingsLoadError('無法讀取本機設定，請重新開啟 App 後重試。'));
@@ -278,6 +281,15 @@ export function ServerManager({
         } catch {
             // older shell without the command
         }
+        // #287: read now — the polled values can still be the busy boot
+        // window's (healthy=false, health: —) right after a restart
+        const fresh = await freshDiagnostics(
+            () => serverStatus(),
+            signal => fetchHealth({ signal }),
+            { status: polledStatus, health: polledHealth },
+        );
+        const status = fresh.status;
+        const health = fresh.health ?? null;
         const lines = [
             `Shioaji Pro ${ver || '?'} · ${host}`,
             status?.running
