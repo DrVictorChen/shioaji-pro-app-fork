@@ -54,6 +54,7 @@ import * as css from './combo-ticket.css';
 import { DepthLadder } from './depth-ladder';
 import * as styles from './order-ticket.css';
 import * as panel from './panel.css';
+import { orderStatusLabel, orderStatusWithNumber } from '../lib/order-status-label';
 
 interface LegState {
     input: string;
@@ -560,7 +561,7 @@ export function ComboTicket() {
                 notify({
                     kind: 'ok',
                     title: `🎯 到價觸發第 ${attempts + 1} 次`,
-                    body: `${action === 'Buy' ? '買進' : '賣出'}組合（${dirSummary}）${qty} @ ${target}（${trade.status.status}）— 請確認成交，避免重複下單`,
+                    body: `${action === 'Buy' ? '買進' : '賣出'}組合（${dirSummary}）${qty} @ ${target}（${orderStatusWithNumber(trade)}）— 請確認成交，避免重複下單`,
                 });
                 // Active reports update normal orders; combo state can be reconciled manually.
             } catch (e) {
@@ -624,7 +625,7 @@ export function ComboTicket() {
             notify({
                 kind: 'ok',
                 title: '🧩 組合單已送出',
-                body: `${trade.status.status} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,
+                body: orderStatusWithNumber(trade),
             });
             // Active reports update normal orders; combo state can be reconciled manually.
         } catch (e) {
@@ -1000,7 +1001,7 @@ export function ComboTicket() {
                                 )
                                 .join(' ')}{' '}
                             {t.order.quantity} @ {fmtPrice(t.order.price)}（
-                            {t.status.status}）{' '}
+                            {orderStatusLabel(t.status.status)}）{' '}
                             <button
                                 className={dock.cancelBtn}
                                 onClick={() => void doCancel(t)}

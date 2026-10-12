@@ -87,6 +87,7 @@ import { isOddLot, ODD_LOT_MAX_SHARES, oddLotMarketablePrice, SHARES_PER_LOT, sh
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
 import type { Action, FuturesOCType, StockOrderLot, Trade } from './types/order';
+import { orderStatusLabel, orderStatusWithNumber } from './order-status-label';
 
 /** Why protection resumed with a first-tick check (#144). */
 /** `rearm`: a background trigger turned back on in a new session (#201). */
@@ -815,7 +816,7 @@ function exitSent(t: TriggerOrder, rec: ExitRecord, trade: Trade, lastPrice: num
     for (const report of recentReportsFor(envBase(rec.env), orderId)) applyExitReport(report, envBase(rec.env));
     if (!odd) scheduleIocCheck(rec.id);
     notify({ kind: 'ok', title: t.kind === 'stop' ? '停損觸發' : '停利觸發',
-        body: `${t.code} @${lastPrice} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)} (${trade.status.status})` });
+        body: `${t.code} @${lastPrice} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)}（${orderStatusWithNumber(trade)}）` });
 }
 
 function exitUnknown(t: TriggerOrder, rec: ExitRecord, message: string) {
@@ -995,7 +996,7 @@ export function applyExitTrade(trade: Trade, opts: { settle?: boolean } = {}) {
                 || (opts.settle && trade.status.status === 'PartFilled');
             if (next.status === 'working' && ended) {
                 next = { ...next, status: 'incomplete', at: Date.now(),
-                    detail: `出場委託 ${trade.status.status}，剩餘 ${next.quantity - next.filled} 待確認；請按「對帳」確認` };
+                    detail: `出場委託${orderStatusLabel(trade.status.status)}，剩餘 ${next.quantity - next.filled} 待確認；請按「對帳」確認` };
             }
             return next;
         });

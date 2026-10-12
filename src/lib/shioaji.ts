@@ -804,7 +804,7 @@ function ensureAccepted<
 >(t: T): T {
     if (t.status?.status === 'Failed') {
         throw Object.assign(
-            new Error(t.status.msg || '委託被拒絕（Failed）'),
+            new Error(t.status.msg || '委託被拒絕（券商未說明原因）'),
             { mutationNotStarted: true as const },
         );
     }

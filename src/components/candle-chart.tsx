@@ -141,6 +141,7 @@ import { ChartDrawingOverlays, ChartDrawingTools, ChartObjectList } from './char
 import { toolDef } from '../lib/chart-drawings';
 import { AsyncStatus } from './async-status';
 import * as panel from './panel.css';
+import { orderStatusWithNumber } from '../lib/order-status-label';
 
 // NOTE: the kbars API only serves 1-minute bars, so 1D aggregates a huge
 // payload (a year of TXF ≈ 280k bars / 18MB) — keep the range tight enough
@@ -387,7 +388,7 @@ export function CandleChart({
             notify({
                 kind: 'ok',
                 title: `📈 圖表${label}${action === 'Buy' ? '買進' : '賣出'}已送出`,
-                body: `${c.code} ${qty}${odd ? ' 股（零股）' : ''} @ ${fmtPrice(price)}${conditions ? ` · ${conditions}` : ''} (${trade.status.status})`,
+                body: `${c.code} ${qty}${odd ? ' 股（零股）' : ''} @ ${fmtPrice(price)}${conditions ? ` · ${conditions}` : ''}（${orderStatusWithNumber(trade)}）`,
             });
         } catch (e) {
             notify({ kind: 'err', title: '圖表下單失敗', body: e instanceof Error ? e.message : String(e) });
