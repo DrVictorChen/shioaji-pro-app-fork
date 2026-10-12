@@ -250,6 +250,15 @@ const REJECT_TEXT: Record<string, string> = {
     'rejected.inFlight': '委託送出中，請稍候再按',
     'rejected.notRunning': '這張單目前不是執行中',
     'rejected.notPaused': '這張單目前沒有暫停',
+    'rejected.expired': '有效期已過',
+    'rejected.notReplaceable': '這張單已觸發、待確認或狀態已變，沒有修改；請看清單與委託',
+    'rejected.invalidReplace': '修改內容與原本的單不符',
+    'rejected.noTickTable': '跳動點級距尚未取得，無法計算限價',
+    'rejected.invalidFeed': '對手價設定不正確',
+    'rejected.invalidLimit': '限價檔數不正確',
+    'rejected.invalidOrder': '送出方式不正確',
+    'rejected.invalidValidity': '有效期不正確',
+    'rejected.invalidPrice': '觸發價不正確',
     'partition.failed': '背景執行資料無法寫入，這個環境已停止，請重新啟動 App',
 };
 
@@ -280,6 +289,24 @@ export async function createBackgroundTrigger(program: OrderProgram): Promise<'c
         if (e instanceof BackgroundRefusal) return { refused: why };
         await settled();
         return programs.some(p => p.id === program.id) ? 'created' : { unconfirmed: why };
+    }
+}
+
+/** #226 修改: the untouched trigger `programId` becomes `program` in one
+ * engine step (never both armed). `replaced`, `refused` (nothing changed)
+ * or `unconfirmed` (the answer was lost: check the list, do not retry). */
+export async function replaceBackgroundTrigger(programId: string, program: OrderProgram): Promise<'replaced' | { refused: string } | { unconfirmed: string }> {
+    try {
+        await command('execution_replace', { programId, program });
+        return 'replaced';
+    } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        if (e instanceof BackgroundRefusal) return { refused: why };
+        // the App's own error text, or a lost answer: what it holds now decides
+        await settled();
+        if (programs.some(p => p.id === program.id)) return 'replaced';
+        if (programs.some(p => p.id === programId)) return { refused: why };
+        return { unconfirmed: why };
     }
 }
 
@@ -410,6 +437,7 @@ const NOTICE_TEXT: Record<string, string> = {
     notSent: '背景觸價單未送出',
     unknown: '背景觸價單送出結果不明（不會自動重送）',
     'session.lapsed': '背景觸價單：盤別已結束',
+    expired: '背景條件單已到期，沒有送出',
     'ledger.failed': '背景執行資料無法寫入，已停止',
     'partition.failed': '背景執行資料無法寫入，已停止',
 };
@@ -421,7 +449,7 @@ const BRACKET_FIRED_TEXT: Record<string, string> = {
     unknown: '背景括號單出場送出結果不明（不會自動重送）',
 };
 
-const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
+const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'expired', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
 
 let pendingInstalled = false;
 function onFirstStatus() {
@@ -430,6 +458,33 @@ function onFirstStatus() {
         pendingInstalled = true;
         installPendingConfirmBackend(createTauriPendingConfirmBackend());
     }
+}
+
+// ---- risk settings for opening entries (#226) ----
+
+/** Push at least this often while the engine may send an opening entry:
+ * the App stops trusting settings it has not heard for 10 s. */
+export const RISK_PUSH_MS = 2000;
+let lastRisk = '';
+/** The App's risk settings (kill switch / lock, per-order cap, daily loss
+ * limit and the day's P&L, whether that P&L was read): on every change and
+ * as a heartbeat (`force`). Main window only (the App refuses others). */
+export async function pushBackgroundRisk(force = false): Promise<void> {
+    if (!isTauri) return;
+    // loaded on use: risk.ts reads window / localStorage when imported
+    const { getDailyPnl, getDailyPnlKnown, getRiskSettings } = await import('../risk');
+    const s = getRiskSettings();
+    const risk = { enabled: s.enabled, maxQty: s.maxQty, maxDailyLoss: s.maxDailyLoss, locked: s.locked,
+        dailyPnl: getDailyPnl(), pnlKnown: getDailyPnlKnown() };
+    const key = JSON.stringify(risk);
+    if (!force && key === lastRisk) return;
+    await invoke<void>('execution_set_risk', { risk });
+    lastRisk = key;
+}
+
+/** The engine may send an opening entry: the setting is on, or one exists. */
+function riskWanted(): boolean {
+    return setting === true || programs.some(p => p.opens && p.status !== 'stopped');
 }
 
 let started = false;
@@ -455,6 +510,11 @@ export function startBackgroundExecution(): void {
         }
     }).catch(() => undefined);
     if (main) {
+        // opening entries: the settings on change, and every 2 s as a heartbeat
+        void import('../risk').then(({ subscribeRiskSettings }) => subscribeRiskSettings(() => {
+            if (riskWanted()) void pushBackgroundRisk().catch(() => undefined);
+        })).catch(() => undefined);
+        setInterval(() => { if (riskWanted()) void pushBackgroundRisk(true).catch(() => undefined); }, RISK_PUSH_MS);
         // window-feed prices belong to one environment and a live stream
         const dropPrices = () => { if (Object.keys(prices).length) { prices = {}; emit(); } };
         onProtectionEnvChange(() => { dropPrices(); syncQuotes(); });
@@ -484,4 +544,5 @@ export function __setBackgroundInvokeForTest(fn: Invoke | null, opts: { desktop?
     pendingInstalled = false;
     swept.clear();
     epoch = 0;
+    lastRisk = '';
 }

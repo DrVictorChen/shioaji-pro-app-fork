@@ -332,41 +332,36 @@ describe('background rows', () => {
         expect(m.place).not.toHaveBeenCalled();
     });
 
-    it('#226 modify: paused, re-created with the same order (Cover kept, first tick decides), then removed; a crossed price is refused', async () => {
+    it('#226 modify: one engine step (execution_replace) with the same order (Cover kept); a crossed price is refused', async () => {
         m.programs = [program({ entry: { type: 'touch', condition: 'below', price: 19800, order: { priceType: 'MKT', timeInForce: 'IOC', octype: 'Cover' } } })];
         await boot();
         await bg.refreshBackground();
         await expect(engine.modifyTrigger('bg:trg:p1:L1', { price: 20100 })).rejects.toThrow('已穿過目前價格');
-        expect(calls('execution_pause')).toHaveLength(0);
-        m.create = async ({ program: p }) => { m.programs = [...m.programs, p]; return { accepted: true, notices: [], revision: 10 }; };
-        const orig = m.invoke.getMockImplementation()!;
-        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
-            if (cmd === 'execution_pause') m.programs = (m.programs as OrderProgram[]).map(p => ({ ...p, status: 'paused' as const }));
-            return orig(cmd, args);
-        });
-        await engine.modifyTrigger('bg:trg:p1:L1', { price: 19700, quantity: 2 });
-        expect(calls('execution_pause').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
-        const created = calls('execution_create')[0]![1] as { program: OrderProgram };
-        const lv = created.program.levels[0]!;
-        expect(lv.check).toBe('resume');
+        expect(calls('execution_replace')).toHaveLength(0);
+        await engine.modifyTrigger('bg:trg:p1:L1', { price: 19700, quantity: 2, send: { type: 'MKP' },
+            validity: { type: 'today', until: Date.now() + 3_600_000 } });
+        const args = calls('execution_replace')[0]![1] as { programId: string; program: OrderProgram };
+        expect(args.programId).toBe('trg:p1');
+        const lv = args.program.levels[0]!;
         expect(lv.qty).toBe(2);
-        expect(lv.entry).toMatchObject({ type: 'touch', price: 19700, order: { octype: 'Cover' } });
-        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
+        expect(lv.entry).toMatchObject({ type: 'touch', price: 19700, order: { priceType: 'MKP', timeInForce: 'IOC', octype: 'Cover' },
+            validity: { type: 'today' } });
+        expect(args.program.id).not.toBe('trg:p1');
+        // never the old pause / create / remove dance
+        for (const cmd of ['execution_pause', 'execution_create', 'execution_remove']) expect(calls(cmd)).toHaveLength(0);
         expect(m.place).not.toHaveBeenCalled();
     });
 
-    it('#226 modify: when the trigger fired while pausing, nothing is replaced and it is resumed as it was', async () => {
+    it('#226 modify: the engine refuses (it fired meanwhile): nothing changed, said so', async () => {
         m.programs = [program()];
         await boot();
         await bg.refreshBackground();
         const orig = m.invoke.getMockImplementation()!;
-        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
-            if (cmd === 'execution_pause') m.programs = [program({ phase: 'working', orders: [{ key: 'k' } as never] }), { ...program(), id: 'trg:other' }];
-            return orig(cmd, args);
-        });
+        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => cmd === 'execution_replace'
+            ? { accepted: false, notices: [{ code: 'rejected.notReplaceable', programId: 'trg:p1', levelId: null, detail: '' }], revision: 9 }
+            : orig(cmd, args));
         await expect(engine.modifyTrigger('bg:trg:p1:L1', { price: 19700 })).rejects.toThrow('已觸發');
         expect(calls('execution_create')).toHaveLength(0);
-        expect(calls('execution_resume').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
     });
 
     it('a trigger turned back on in a new session that is already past says so', async () => {
@@ -403,5 +398,81 @@ describe('background rows', () => {
         await bg.refreshBackground();
         await flush();
         expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
+    });
+});
+
+describe('#226 conditional orders in the background (step 1: triggers)', () => {
+    const TXF1 = { ...TXF, tick: 1 };
+    const created = () => calls('execution_create').map(([, a]) => (a as { program: OrderProgram }).program);
+    const entry = (over: Record<string, unknown> = {}) => ({ code: 'TXFR1', condition: 'above' as const, price: 20100,
+        action: 'Buy' as const, quantity: 1, kind: 'stop' as const, role: 'entry' as const, ...over });
+
+    it('an entry with 上穿, 對手價, 觸價後限價 and 有效期 runs in the background with the App risk checks', async () => {
+        m.enabled = true;
+        await boot();
+        const until = Date.now() + 3_600_000;
+        await engine.addTrigger(entry({ cross: true, source: 'opposite', send: { type: 'LMT', ticks: 2 },
+            validity: { type: 'session', until } }), TXF1 as never);
+        expect(engine.getTriggers()).toHaveLength(0);
+        const [p] = created();
+        expect(p).toMatchObject({ opens: true, tickTable: [{ min: 0, max: null, tick: 1 }],
+            levels: [{ side: 'Buy', entry: { type: 'touch', condition: 'above', price: 20100, cross: true, feed: 'ask',
+                limitTicks: 2, validity: { type: 'session', until }, order: { priceType: 'LMT', timeInForce: 'ROD' } } }] });
+        // a sell watches the bid; a protective stop does not open
+        await engine.addTrigger(stop({ source: 'opposite', send: { type: 'MKP' } }), TXF1 as never);
+        const q = created()[1]!;
+        expect(q.opens).toBeUndefined();
+        expect(q.levels[0]!.entry).toMatchObject({ feed: 'bid', order: { priceType: 'MKP', timeInForce: 'IOC' } });
+    });
+
+    it('the rows show the options as the window shows them', async () => {
+        m.programs = [{ ...program({ entry: { type: 'touch', condition: 'below', price: 19800, cross: true, feed: 'bid', limitTicks: -1,
+            validity: { type: 'today', until: 99 }, order: { priceType: 'LMT', timeInForce: 'ROD' } }, recross: ['entry'] }), opens: true }];
+        await boot();
+        await bg.refreshBackground();
+        const [row] = engine.getDisplayTriggers();
+        expect(row).toMatchObject({ role: 'entry', cross: true, source: 'opposite', send: { type: 'LMT', ticks: -1 },
+            validity: { type: 'today', until: 99 }, awaitingRecross: true });
+    });
+
+    it('the same option checks as this window: a past validity is refused, nothing created', async () => {
+        m.enabled = true;
+        await boot();
+        expect(await engine.addTrigger(entry({ validity: { type: 'date', until: Date.now() - 1 } }), TXF1 as never)).toBeNull();
+        expect(created()).toHaveLength(0);
+        expect(m.notify.mock.calls.some(([n]) => (n as { body: string }).body.includes('有效期已過'))).toBe(true);
+    });
+
+    it('a limit in ticks without a tick table is never created (no guessed price)', async () => {
+        m.enabled = true;
+        await boot();
+        expect(await engine.addTrigger(entry({ send: { type: 'LMT', ticks: -2 } }), TXF as never)).toBeNull();
+        expect(created()).toHaveLength(0);
+        // 0 ticks needs no table
+        await engine.addTrigger(entry({ send: { type: 'LMT', ticks: 0 } }), TXF as never);
+        expect(created()).toHaveLength(1);
+    });
+
+    it('OCO groups, time orders and brackets by trigger stay in this window', async () => {
+        m.enabled = true;
+        await boot();
+        await engine.addTrigger(entry({ time: { kind: 'send', at: Date.now() + 60_000 } }), TXF1 as never);
+        expect(created()).toHaveLength(0);
+        expect(engine.getTriggers()).toHaveLength(1);
+    });
+
+    it('the main window pushes the risk settings (with whether the P&L is known) on change and every 2 s', async () => {
+        m.enabled = true;
+        vi.stubGlobal('window', new EventTarget()); // risk.ts listens for other windows' changes
+        await boot();
+        await bg.refreshBackground();
+        await vi.advanceTimersByTimeAsync(bg.RISK_PUSH_MS + 10);
+        const pushed = calls('execution_set_risk').map(([, a]) => (a as { risk: Record<string, unknown> }).risk);
+        expect(pushed.length).toBeGreaterThan(0);
+        expect(pushed.at(-1)).toMatchObject({ enabled: false, locked: false, pnlKnown: false });
+        const { setRiskSettings } = await import('./risk');
+        setRiskSettings({ locked: true });
+        await flush();
+        expect(calls('execution_set_risk').map(([, a]) => (a as { risk: { locked: boolean } }).risk.locked).at(-1)).toBe(true);
     });
 });
