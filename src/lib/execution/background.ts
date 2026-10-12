@@ -357,6 +357,24 @@ export async function createBackgroundBracket(request: CreateBracketRequest): Pr
     }
 }
 
+/** #226 修改 a bracket whose 觸價 entry did not fire yet: the engine builds
+ * the new one from `request` and replaces it in one step. */
+export async function replaceBackgroundBracket(programId: string, request: CreateBracketRequest): Promise<'replaced' | { refused: string } | { unconfirmed: string }> {
+    if (!isTauri) return { refused: '背景持續執行僅限桌面版' };
+    try {
+        const reply = await invoke<CommandReply>(BRACKET_COMMAND.replace, { programId, request });
+        await refreshBackground();
+        if (!reply.accepted) return { refused: rejection(reply) };
+        return 'replaced';
+    } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        await settled();
+        if (programs.some(p => p.id === request.id)) return 'replaced';
+        if (programs.some(p => p.id === programId)) return { refused: why };
+        return { unconfirmed: why };
+    }
+}
+
 /** 「我已自行處理」: the engine stops tracking; nothing is sent or cancelled. */
 export async function markBackgroundHandled(programId: string, levelId?: string): Promise<void> {
     await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null });

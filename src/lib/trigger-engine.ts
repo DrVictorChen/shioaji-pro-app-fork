@@ -65,6 +65,7 @@ import {
     getBackgroundPrograms,
     pauseBackgroundProgram,
     refreshBackground,
+    replaceBackgroundBracket,
     replaceBackgroundTrigger,
     resumeBackgroundProgram,
     removeBackgroundTrigger,
@@ -83,6 +84,7 @@ import {
     type BackgroundTriggerOrder,
 } from './execution/background-view';
 import { retainQuote } from './quote-ownership';
+import { panelBracketRequest } from './execution/background-bracket';
 import { sameTradingDay } from './conditional/session';
 import { trailStep, type TrailState } from './conditional/trailing';
 import { getConditionalSettings } from './conditional/settings';
@@ -1064,6 +1066,22 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
     // restore (already past → 待確認)
     const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[row.code] ?? lastPrices.get(row.code);
     if (!next.cross && latest !== undefined && isPast(next, latest)) throw new Error(`新的觸發價已穿過目前價格（${latest}），沒有修改`);
+    if (original.kind === 'bracket') {
+        // a panel bracket whose 觸價 entry did not fire: the engine builds the new one
+        const table = await backgroundTickTable(contract);
+        const plan = row.bracketPlan;
+        if (!table || !plan) throw new Error('背景執行：跳動點級距尚未取得，無法修改括號單，請稍後再試');
+        const request = panelBracketRequest({ env: row.env!, account: row.account!, quoteCode: row.code, orderCode: row.orderCode!,
+            securityType: contract.security_type === 'OPT' ? 'OPT' : 'FUT', action: row.action,
+            plan: { ...plan, tiers: patch.quantity !== undefined ? scaleTiers(plan.tiers, patch.quantity) : plan.tiers },
+            tickTable: table, entry: { trigger: { condition: next.condition, price: next.price, send: next.send ?? { type: 'MKT' },
+                ...(next.validity ? { validity: next.validity } : {}) } } });
+        if (!request) throw new Error('背景執行：這張括號單無法修改，請取消後重新建立');
+        const replaced = await replaceBackgroundBracket(programId, request);
+        if (replaced === 'replaced') return;
+        throw new Error('refused' in replaced ? `修改未完成：${replaced.refused}`
+            : `修改結果未確認：${replaced.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+    }
     const made = await backgroundProgram(next, contract);
     if (typeof made === 'string') throw new Error(made);
     // keep the original position effect (e.g. a closing-only Cover stays Cover)
@@ -1076,6 +1094,14 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
     throw new Error('refused' in result
         ? `修改未完成：${result.refused}`
         : `修改結果未確認：${result.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+}
+
+/** A bracket's tiers for a new total: only a single tier can change size
+ * (several tiers keep their split — change them by re-creating). */
+function scaleTiers(tiers: { quantity: number; takeTicks: number | null }[], total: number) {
+    if (tiers.length === 1) return [{ ...tiers[0]!, quantity: total }];
+    if (tiers.reduce((n, t) => n + t.quantity, 0) !== total) throw new Error('分批停利的括號單請取消後重新建立以改數量');
+    return tiers;
 }
 
 /** Remove a trigger and throw when that is not confirmed (全平並取消). */

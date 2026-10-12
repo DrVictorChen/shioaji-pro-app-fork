@@ -375,7 +375,13 @@ function bracketRow(p: BracketPlan, legs: TriggerOrder[], s: Sources): CondRow {
 }
 
 function bgBracketRow(v: BracketView, s: Sources): CondRow {
-    const parts = [v.stop !== null ? `停損 ${fmtNum(v.stop)}` : null, v.take !== null ? `停利 ${fmtNum(v.take)}` : null];
+    // a panel bracket's tier: rules in ticks until its first fill prices it (as bracketRow)
+    const waitingRules = !!v.rules && !v.priced;
+    const parts = waitingRules
+        ? [`停損 成交價${v.side === 'Buy' ? '−' : '+'}${v.rules!.stopTicks} 檔`,
+            v.rules!.takeTicks !== null ? `停利 ${v.side === 'Buy' ? '+' : '−'}${v.rules!.takeTicks} 檔` : null]
+        : [v.stop !== null ? `停損 ${fmtNum(v.stop)}${v.trailActive ? '（移動中）' : ''}` : null, v.take !== null ? `停利 ${fmtNum(v.take)}` : null];
+    if (v.rules?.trail && !parts.some(x => x?.includes('移動'))) parts.push('移動停損');
     const ended = v.state === 'done' || v.state === 'handled' || v.state === 'rearmed';
     let status: { text: string; tone: Tone } = { text: BRACKET_STATE_TEXT[v.state], tone: v.attention ? 'err' : ended ? 'muted' : 'ok' };
     if (v.state === 'protected' || v.state === 'exiting') status = { text: `${BRACKET_STATE_TEXT[v.state]} · 成交 ${Math.min(v.entryFilled, v.quantity)}/${v.quantity}`, tone: 'ok' };
@@ -393,7 +399,7 @@ function bgBracketRow(v: BracketView, s: Sources): CondRow {
         kind: 'bracket',
         code: v.quoteCode,
         orderCode: v.orderCode,
-        side: { text: sideText(v.side, v.quantity, '口'), dir: v.side },
+        side: { text: `${sideText(v.side, v.quantity, '口')}${v.tier && v.tier.count > 1 ? `（第 ${v.tier.index + 1}/${v.tier.count} 層）` : ''}`, dir: v.side },
         condition: parts.filter(Boolean).join(' · '),
         level: null,
         status,
