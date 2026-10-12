@@ -18,7 +18,9 @@ tool schema remains authoritative for required fields and supported values.
 ## Shared JavaScript Runtime
 
 Indicator and strategy source is strict JavaScript evaluated in a sandbox. Do not
-import packages. The following values are available directly:
+import packages. Custom indicators and Signal DSL strategies run once over the
+whole history, and the following values are available directly (stateful and
+target-portfolio strategies differ; see [Stateful Strategy Runtime](#stateful-strategy-runtime)):
 
 | Name | Meaning |
 | --- | --- |
@@ -145,6 +147,56 @@ weights and quantities are distinct and `targetPosition` is unsupported.
 Signal DSL cannot read simulated position state. All assets must be named in
 the static universe; `asset(symbol)` reads named bars and availability.
 These research calls never grant broker order authority.
+
+## Stateful Strategy Runtime
+
+`authoring_style: stateful` and `target-portfolio` run bar by bar against the
+simulated portfolio instead of once over the whole history:
+
+- The top level of the source runs once, at the first bar (setup). Register the
+  per-bar logic with `onBar((ctx) => { ... })` during setup; the callback runs
+  at every bar's close, and top-level `let` variables keep their values across
+  bars (counters, running peaks, trailing stops, recursive state).
+- `open`, `high`, `low`, `close`, `volume`, `time`, `hl2`, `hlc3`, and `ohlc4`
+  are the current bar's numbers (or `null` when the primary asset has no bar),
+  not series. `ctx.close` and the other `ctx` fields hold the same values.
+- `ctx.series(symbol)` returns that asset's read-only history up to and
+  including the current bar: `time`, `open`, `high`, `low`, `close`, `volume`,
+  `hl2`, `hlc3`, `ohlc4`, and `availability`. An omitted symbol selects the
+  primary asset. Each asset keeps its own clock; a missing or unavailable row
+  has `null` prices and `availability` `false`. Later bars are never included,
+  so indicators computed from it cannot look ahead. Pass these arrays to `ta.*`; the current bar is the last
+  element (`const i = s.close.length - 1`).
+- `asset(symbol)` returns the current bar of a named asset (`available`,
+  OHLCV); `currentPosition(symbol)` returns the filled simulated position.
+- Collectors (`longEntry` and the others) are unavailable; trade with
+  `enterLong`, `enterShort`, `reducePosition`, and `closePosition`, or the
+  target functions in target-portfolio style. An omitted or `null` symbol
+  selects the primary asset.
+- A source that does not call `onBar` during setup runs in full at every bar
+  with fresh variables; keep such scripts to current-bar logic.
+
+Example, EMA crossover with a running entry count:
+
+```js
+let entries = 0
+onBar((ctx) => {
+  const s = ctx.series()
+  const i = s.close.length - 1
+  const up = ta.crossover(ta.ema(s.close, p.fast), ta.ema(s.close, p.slow))
+  const dn = ta.crossunder(ta.ema(s.close, p.fast), ta.ema(s.close, p.slow))
+  if (up[i] && currentPosition().isFlat && entries < p.maxEntries) {
+    enterLong(null, position.quantity(1))
+    entries++
+  } else if (dn[i] && currentPosition().isLong) {
+    closePosition()
+  }
+})
+```
+
+Each bar recomputes indicators over the history so far, so a stateful run costs
+more than the same Signal DSL strategy; prefer Signal DSL when the rules do not
+need position state.
 
 A value greater than zero or `true` means the signal is confirmed at that bar's
 close. Signals must use only the current and earlier bars: reading `close[i + 1]`,
