@@ -219,3 +219,15 @@ it('preserves original futures quantity across native UPD/UPL/CXL order field ch
     expect(remainingWorkingOrderQuantity(rows[0]!)).toBe(0);
     expect(projectOrderReport(rows,reports[3]!,[account])).toBe(rows);
 });
+
+it('a background-engine futures New without full_code is projected with the engine\'s order code (QA 10/12 持倉暫未套用)', () => {
+    const report = order(future, 'New', {}, {}, { full_code: undefined });
+    expect(projectOrderReport([], report, [future])).toBeNull();
+    const rows = projectOrderReport([], report, [future], 'TXFJ6')!;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.contract.code).toBe('TXFJ6');
+    // only for a New: a later report of an unknown order is still refused
+    expect(projectOrderReport([], order(future, 'Cancel', {}, {}, { full_code: undefined }), [future], 'TXFJ6')).toBeNull();
+    // a full_code on the wire always wins over the hint
+    expect(projectOrderReport([], order(future, 'New'), [future], 'MXFJ6')![0]!.contract.code).toBe('TXFI6');
+});
