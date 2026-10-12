@@ -66,6 +66,13 @@ afterEach(() => {
 });
 
 it('keeps the mutation gate closed after Harness failure, then reloads when the same server becomes healthy', async () => {
+    // the server on 21322 is this App's own spawn, still running (#285)
+    data.set('sj-pro-server-port', '21322');
+    data.set('sj-pro-server-pid', '4242');
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'process_alive') return true;
+        throw new Error('harness command failed');
+    });
     await expect(setAgentHarnessEnabled(true)).rejects.toThrow('harness command failed');
     expect(data.get('sj-pro-server-identity-verified')).not.toBe('1');
     await vi.advanceTimersByTimeAsync(500);
@@ -75,4 +82,15 @@ it('keeps the mutation gate closed after Harness failure, then reloads when the 
     await vi.advanceTimersByTimeAsync(1000);
     expect(mocks.reload).toHaveBeenCalledTimes(1);
     expect(data.get('sj-pro-server-identity-verified')).not.toBe('1');
+});
+
+it('#285: never reloads onto another program\'s server whose account cannot be confirmed', async () => {
+    await expect(setAgentHarnessEnabled(true)).rejects.toThrow('harness command failed');
+    mocks.healthy = true;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mocks.reload).not.toHaveBeenCalled();
+    // end the watch (identity proven elsewhere) before the globals go away
+    const { setServerIdentityVerified } = await import('./server-identity');
+    setServerIdentityVerified(true);
+    await vi.advanceTimersByTimeAsync(5000);
 });

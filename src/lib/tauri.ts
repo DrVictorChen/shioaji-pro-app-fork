@@ -7,6 +7,8 @@ import {
     DEFAULT_PORT,
     EXPECTED_SERVER_VERSION,
     LEGACY_PORT,
+    blockForeignServerPort,
+    foreignServerPortBlocked,
     getApiBase,
     getDevServerPort,
     getApiPort,
@@ -337,6 +339,8 @@ function reloadIfConfiguredServerHealthy(): void {
                     : scheme !== 'http') return false;
                 if (!harnessOwnershipCompatible(settings.agentHarnessEnabled,
                     !!candidate.port && await nativeOwnsHarnessSidecar(candidate.port))) return false;
+                // another program's server: the same environment and account only (#285)
+                if (await foreignServerCheck(candidate, settings)) return false;
                 return !settings.production || !settings.caPath ||
                     (!!candidate.port && await caActive(candidate.port, scheme));
             });
@@ -833,12 +837,27 @@ export async function serverPersonHash(
     }
 }
 
-/** Is this server one this App started (its spawn record names the port)?
- * The isolated dev port (VITE_DEV_SERVER_PORT) counts as this App's: the
- * developer chose exactly that server for this dev App. */
-export function isOwnSpawn(status: ServerStatus | null | undefined): boolean {
+/**
+ * Is this server one this App started? Its spawn record must name the port
+ * AND the spawned process must still be alive (or the native shell owns it
+ * in this App process) — a record left behind by a sidecar that exited
+ * proves nothing about whoever listens on that port now (#285). The isolated
+ * dev port (VITE_DEV_SERVER_PORT, dev builds only) counts as this App's: the
+ * developer chose exactly that server for this dev App.
+ */
+export async function ownsServer(status: ServerStatus | null | undefined): Promise<boolean> {
     if (!status?.port) return false;
-    return getSpawnPort() === status.port || getDevServerPort() === status.port;
+    if (getDevServerPort() === status.port) return true;
+    if (getSpawnPort() !== status.port) return false;
+    if (await nativeOwnsHarnessSidecar(status.port)) return true;
+    const pid = getServerPid();
+    if (!pid) return false;
+    try {
+        const { invoke } = await core();
+        return await invoke<boolean>('process_alive', { pid });
+    } catch {
+        return false; // unknown is not ours
+    }
 }
 
 /**
@@ -850,7 +869,7 @@ export async function foreignServerCheck(
     status: ServerStatus,
     settings: { apiKey: string; secretKey: string; production: boolean },
 ): Promise<ForeignVerdict | null> {
-    if (!status.running || !status.port || isOwnSpawn(status)) return null;
+    if (!status.running || !status.port || await ownsServer(status)) return null;
     const keyHash = await hashCredentials(settings.apiKey, settings.secretKey);
     const known = knownPersonHash(keyHash);
     // the account is only read when the environment already matches
@@ -865,7 +884,7 @@ export async function foreignServerCheck(
 /** Remember the account this App's OWN server is logged into, under the
  * keys it was started with — what a foreign server is compared against. */
 export async function learnOwnIdentity(status: ServerStatus): Promise<void> {
-    if (!status.port || !isOwnSpawn(status)) return;
+    if (!status.port || !(await ownsServer(status))) return;
     const keyHash = getStoredSpawnKeyHash();
     if (!keyHash) return;
     recordOwnIdentity(keyHash, await serverPersonHash(status.port, status.scheme ?? 'http'));
@@ -1050,7 +1069,7 @@ export async function serverStart(opts: {
         const caOk = !needsCa || (await caActive(st.port, stScheme));
         // not started by this App: the environment and the account must
         // match before it is used at all (#285)
-        const ownRecord = isOwnSpawn(st);
+        const ownRecord = await ownsServer(st);
         const foreignVerdict = ownRecord ? null : await foreignServerCheck(st, opts);
         if (
             st.healthy &&
@@ -1064,6 +1083,7 @@ export async function serverStart(opts: {
         ) {
             // healthy, right mode, right version, CA live — just use it
             markStage('attach', `port=${st.port}`);
+            if (foreignServerPortBlocked() === st.port) blockForeignServerPort(null);
             const schemeChanged = setApiScheme(stScheme);
             return {
                 ok: true,
@@ -1140,10 +1160,12 @@ export async function serverStart(opts: {
         // the ownership check and find_free_port dodges them below
         for (const p of new Set(getDevServerPort() ? [preferredPort] : [getApiPort(), DEFAULT_PORT])) {
             if (foreign && p === foreign.port) continue; // another program's server
-
+            // a server that answers is never a zombie: it is someone's (#285)
+            if (await probeInfoEither(p)) continue;
             await invoke('kill_shioaji', {
                 port: p,
-                pid: getServerPid(),
+                // our remembered pid only for the port it was spawned on
+                pid: getSpawnPort() === p ? getServerPid() : null,
             }).catch(() => undefined);
         }
         setServerPid(null);
@@ -1212,6 +1234,8 @@ export async function serverStart(opts: {
     }
     const schemeChanged = res.ok ? setApiScheme(wantScheme) : false;
     const portChanged = (res.ok ? setApiPort(port) : false) || schemeChanged;
+    // this App's own server now answers here: nothing of it is blocked
+    if (res.ok && foreignServerPortBlocked() === port) blockForeignServerPort(null);
     // the server starts even when CA activation fails (login still works) —
     // catch that warning from the log so the user knows production orders
     // will 400 (e.g. expired certificate) instead of finding out at order time
@@ -1276,6 +1300,15 @@ export async function serverStop(opts?: {
         catch (e) { return { ok: false, output: `無法停止 Agent：${String(e)}` }; }
     }
     const st = await serverStatus();
+    // #285: never stop a server this App did not start — another App's
+    // (same binary included: the native check would call it ours) or the
+    // user's own CLI daemon
+    if (st?.running && st.port && !(await ownsServer(st))) {
+        return {
+            ok: false,
+            output: `:${st.port} 上的伺服器不是本 App 啟動的，本 App 不會停止它；請在啟動它的程式中停止`,
+        };
+    }
     let killNote = '';
     const pid = getServerPid();
     // resolve the victim by port (survives lost pid records from older app

@@ -1,6 +1,7 @@
 // src/lib/api.ts
 
 import { getApiBase, isTauri } from './runtime';
+import { serverReadsHeld } from './server-read-gate';
 import { isAgentHarnessEnabled } from './agent-harness-state';
 import { serverIdentityVerified } from './server-identity';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
@@ -11,6 +12,19 @@ import { getServerModeVersion } from './server-info-store';
 // module-load-time capture kept every request on the dead old port
 // (the stuck-at-載入交易終端 bug)
 const base = () => getApiBase();
+
+/** The same request against the API base as it is now (a request built
+ * before boot's decision is sent where boot decided — or nowhere). */
+function rebase(url: string): string {
+    try {
+        const u = new URL(url);
+        const now = new URL(base());
+        if (u.host === now.host && u.protocol === now.protocol) return url;
+        return `${now.origin}${u.pathname}${u.search}`;
+    } catch {
+        return url;
+    }
+}
 
 const AGENT_HARNESS_MUTATIONS = new Set([
     '/api/v1/order/place_order',
@@ -111,6 +125,13 @@ async function withWebviewInfoSlot<T>(origin: string, signal: AbortSignal | unde
 }
 
 async function doFetch(url: string, init?: RequestInit, beforeDispatch?: () => void): Promise<Response> {
+    // #285: an App launch reads nothing until boot has checked the server
+    const held = serverReadsHeld();
+    if (held) {
+        await held;
+        // the decision may have moved or blocked the server meanwhile
+        url = rebase(url);
+    }
     if (isTauri) {
         // Info is read-only and frequently requested in parallel by watchlists.
         // The WebView can reach the loopback sidecar directly, avoiding the

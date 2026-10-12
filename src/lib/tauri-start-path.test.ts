@@ -189,6 +189,29 @@ describe('serverStart and another program\'s server', () => {
         expect(calls('spawn_server')).toHaveLength(0);
     });
 
+    it('a spawn record left by a sidecar that exited does not make another App\'s server ours', async () => {
+        storage.set('sj-pro-server-port', '21322');
+        storage.set('sj-pro-server-pid', '4242'); // gone (process_alive → false)
+        foreignOn21322({ simulation: false });
+        const owned = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) =>
+            cmd === 'agent_harness_sidecar_owned' ? false : owned(cmd, args));
+        const res = await tauri.serverStart(settings);
+        expect(res.attached).toBe(false);
+        expect(res.foreign?.port).toBe(21322);
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(false);
+        expect(calls('spawn_server')[0]).toMatchObject({ port: 21323 });
+    });
+
+    it('reclaim never kills a server that answers, on any of its ports', async () => {
+        storage.set('sj-pro-api-port', '21323'); // last port: another program's server answers there too
+        foreignOn21322({ simulation: false });
+        listening.add(21323); bound.add(21323);
+        const res = await tauri.serverStart(settings);
+        expect(calls('kill_shioaji').filter(k => k.port === 21322 || k.port === 21323)).toEqual([]);
+        expect(res.port).toBe(21324);
+    });
+
     it('this App\'s own server in the wrong mode is still stopped and replaced', async () => {
         storage.set('sj-pro-server-port', '21322');
         foreignOn21322({ simulation: false });

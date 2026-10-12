@@ -37,7 +37,7 @@ vi.mock('./tauri', () => ({
     harnessOwnershipCompatible: () => true,
     // #285: by default the server is this App's own spawn
     foreignServerCheck: vi.fn(async () => null),
-    isOwnSpawn: vi.fn(() => true),
+    ownsServer: vi.fn(async () => true),
     learnOwnIdentity: vi.fn(async () => undefined),
     consumeTrayReadyOnReload: () => false,
     markTrayReadyOnReload: vi.fn(),
@@ -263,7 +263,7 @@ describe('early stream at bootstrap', () => {
                 autoStart: true, apiKey: 'k', secretKey: 's', production: false,
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
-            vi.mocked(tauri.isOwnSpawn).mockReturnValueOnce(false);
+            vi.mocked(tauri.ownsServer).mockResolvedValueOnce(false);
             vi.mocked(tauri.foreignServerCheck).mockResolvedValueOnce(refusal);
             vi.mocked(tauri.serverStart).mockReset().mockResolvedValueOnce({
                 ok: true, output: '', port: 21323, attached: false, portChanged: true,
@@ -288,7 +288,7 @@ describe('early stream at bootstrap', () => {
                 autoStart: false, apiKey: 'k', secretKey: 's', production: false,
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
-            vi.mocked(tauri.isOwnSpawn).mockReturnValueOnce(false);
+            vi.mocked(tauri.ownsServer).mockResolvedValueOnce(false);
             vi.mocked(tauri.foreignServerCheck).mockResolvedValueOnce(refusal);
         });
         const adoption = await import('./server-adoption');
@@ -309,7 +309,7 @@ describe('early stream at bootstrap', () => {
                 autoStart: true, apiKey: 'k', secretKey: 's', production: true,
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
-            vi.mocked(tauri.isOwnSpawn).mockReturnValueOnce(false);
+            vi.mocked(tauri.ownsServer).mockResolvedValueOnce(false);
         });
         await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
         const adoption = await import('./server-adoption');

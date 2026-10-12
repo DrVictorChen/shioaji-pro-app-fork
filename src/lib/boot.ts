@@ -11,12 +11,14 @@ import { describeOrderReport } from './order-report';
 import {
     blockForeignServerPort,
     EXPECTED_SERVER_VERSION,
+    foreignServerPortBlocked,
     getApiPort,
     isTauri,
     setApiPort,
     setApiScheme,
 } from './runtime';
 import { setServerAttachment } from './server-adoption';
+import { holdServerReads, releaseServerReads } from './server-read-gate';
 import {
     fetchHealth,
     fetchInfo,
@@ -29,8 +31,8 @@ import {
     caActive,
     consumeTrayReadyOnReload,
     foreignServerCheck,
-    isOwnSpawn,
     learnOwnIdentity,
+    ownsServer,
     loadDesktopSettings,
     localTlsCertExists,
     markTrayReadyOnReload,
@@ -99,9 +101,10 @@ async function serverCaReady(status: ServerStatus, settings: DesktopSettings): P
 
 // #285: the server this window is about to use — label it when another
 // program started it; learn this App's own account from its own server
-function noteAdopted(status: ServerStatus) {
+function noteAdopted(status: ServerStatus, own: boolean) {
     if (!status.port) return;
-    if (isOwnSpawn(status)) {
+    if (foreignServerPortBlocked() === status.port) blockForeignServerPort(null);
+    if (own) {
         setServerAttachment({ kind: 'own', port: status.port });
         void learnOwnIdentity(status);
     } else {
@@ -202,7 +205,10 @@ export function bootstrap() {
     // stream to a server that may not be up (released on every path that
     // keeps this page; expires on its own after 30 s)
     else if (isTauri && !isChildWindow() && !pageWasReloaded()) holdStream();
-    void run();
+    // #285: the main window reads nothing until boot has checked the server
+    // on its port (not on the reload right after this App's own check)
+    if (isTauri && !isChildWindow() && !shouldOpenStreamEarly()) holdServerReads();
+    void run().finally(releaseServerReads);
 }
 
 // only the main window, only on a reload that a timing run marked as
@@ -256,6 +262,13 @@ async function run() {
                 // account as this App's own server had (#285)
                 const foreign = status?.running ? await foreignServerCheck(status, settings) : null;
                 const matches = !foreign && await matchesServerIdentity(status, settings);
+                const own = await ownsServer(status);
+                // another program's server that is not used: nothing on this
+                // page reads it, from now on (#285)
+                if (status?.running && status.port && !own && !matches && getApiPort() === status.port) {
+                    blockForeignServerPort(status.port);
+                }
+                releaseServerReads();
                 markStage('probe', 'identity checked');
                 // identity match: right mode, right listener scheme, right
                 // version — health is judged separately so a server that is
@@ -281,7 +294,7 @@ async function run() {
                             window.location.reload();
                             return;
                         }
-                        noteAdopted(status);
+                        noteAdopted(status, own);
                         settleBootRun(coldStart ? 'attached' : 'ok');
                         setServerIdentityVerified(true);
                         releaseStream('server confirmed');
@@ -301,7 +314,7 @@ async function run() {
                 } else {
                     // not running, unhealthy, or wrong mode — serverStart
                     // stops a broken daemon and starts fresh
-                    if (status?.running && !isOwnSpawn(status)) {
+                    if (status?.running && !own) {
                         notify({
                             kind: 'info',
                             title: '🚀 自動啟動本 App 的 shioaji server…',
@@ -376,9 +389,11 @@ async function run() {
                 // it can authorize mutations. If absent, keep watching.
                 const status = await serverStatus();
                 const foreign = status?.running ? await foreignServerCheck(status, settings) : null;
+                const own = await ownsServer(status);
                 if (status?.healthy && !foreign && await matchesServerIdentity(status, settings) &&
                     await serverCaReady(status, settings)) {
-                    noteAdopted(status);
+                    noteAdopted(status, own);
+                    releaseServerReads();
                     const portMoved = status.port ? setApiPort(status.port) : false;
                     const schemeMoved = status.scheme ? setApiScheme(status.scheme) : false;
                     const moved = portMoved || schemeMoved;
@@ -389,7 +404,7 @@ async function run() {
                     startTradingStateOnce();
                     return;
                 }
-                if (status?.running && status.port && !isOwnSpawn(status)) {
+                if (status?.running && status.port && !own) {
                     // not started by this App and not usable: never adopted,
                     // offered a server of its own (header) instead
                     const text = foreign?.text ?? `:${status.port} 上另一個程式啟動的伺服器與本 App 設定不符，未連上`;
