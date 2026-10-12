@@ -38,6 +38,7 @@ import {
     type MarketFilter,
     type ViewMode,
 } from './bottom-dock-shared';
+import { orderStatusLabel } from '../lib/order-status-label';
 
 type StatusFilter = 'active' | 'filled' | 'dead' | 'all';
 const STATUS_FILTERS = ['active', 'filled', 'dead', 'all'] as const;
@@ -516,7 +517,7 @@ export function OrdersPane({
                                         styles.statusChip[statusKind(st)]
                                     }
                                 >
-                                    {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : st}
+                                    {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : orderStatusLabel(st)}
                                 </span>
                             </td>
                             {size === 'wide' && (
@@ -577,7 +578,7 @@ export function OrdersPane({
                                 title={`券商原始狀態 ${st}；原始量 ${t.order.quantity}；成交 ${t.status.deal_quantity}；取消 ${t.status.cancel_quantity}`}
                                 className={styles.statusChip[statusKind(st)]}
                             >
-                                {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : st}
+                                {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : orderStatusLabel(st)}
                             </span>
                         </div>
                         <div className={styles.cardLine}>

@@ -63,6 +63,7 @@ import { fmtPrice } from '../lib/utils/format';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import * as panel from './panel.css';
 import * as styles from './order-ticket.css';
+import { orderStatusWithNumber } from '../lib/order-status-label';
 
 const acctKey = (a: Account) => `${a.broker_id}-${a.account_id}`;
 
@@ -384,7 +385,7 @@ export function OrderTicket({
                   }, orderAccount, dispatch);
             setFeedback({
                 kind: 'ok',
-                text: `▸ ${trade.status.status} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,
+                text: `▸ ${orderStatusWithNumber(trade)}`,
             });
             if (bracketOn && entryAccount && bracketEnv) {
                 try {

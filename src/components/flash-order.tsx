@@ -51,6 +51,7 @@ import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
 import { expiryTime, isStockFuture, lotsPerContract, spreadOf } from '../lib/flash-link';
 import * as styles from './flash-order.css';
+import { orderStatusLabel } from '../lib/order-status-label';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
 const EDGE = 2; // auto-recenter when last price gets this close to the edge
@@ -979,7 +980,7 @@ export function FlashOrder({
                 title: `⚡ ${oddLot ? '零股' : ''}${label ?? ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
                 body: `${capturedContract.code} ${q}${oddLot ? ' 股' : ''} @ ${
                     price === null ? '市價' : fmtPrice(price)
-                }${conditions ? ` · ${conditions}` : ''} (${trade.status.status})`,
+                }${conditions ? ` · ${conditions}` : ''}（${orderStatusLabel(trade.status.status)}）`,
             });
             onOrdersChangedRef.current?.();
         } catch (e) {
