@@ -98,6 +98,9 @@ function MarkChips({ side, price, marks, dragging, onMarkDown, inline = false }:
     const triggers = marks.filter(m => m.kind === 'trigger');
     const stops = marks.filter(m => m.kind === 'stop');
     const takes = marks.filter(m => m.kind === 'take');
+    // the narrow 觸價 column with several kinds at one price: short labels
+    // (quantities stay in the title), so every control stays reachable
+    const crowded = inline && [triggers, stops, takes].filter(x => x.length > 0).length > 1;
     const trig = triggers.length > 0 && (
         <button
             type='button'
@@ -109,19 +112,19 @@ function MarkChips({ side, price, marks, dragging, onMarkDown, inline = false }:
             onPointerDown={e => onMarkDown({ side, price, marks: triggers }, e)}
             onClick={e => e.stopPropagation()}
         >
-            {triggers.some(m => m.protects) ? <ShieldCheck size={8} aria-hidden /> : <Crosshair size={8} aria-hidden />}
+            {!crowded && (triggers.some(m => m.protects) ? <ShieldCheck size={8} aria-hidden /> : <Crosshair size={8} aria-hidden />)}
             {markQty(triggers)}
         </button>
     );
     const prot = (ms: LadderMark[], kind: 'stop' | 'take') => ms.length > 0 && (
         <span key={kind} data-testid={`flash-${kind}-mark`} className={`${styles.mark[kind]} ${ms.some(m => m.pending) ? styles.markPending : ''}`}
             title={ms.map(m => m.title).join('\n')} onClick={e => e.stopPropagation()}>
-            {kind === 'stop' ? '損' : '利'}{markQty(ms)}
+            {kind === 'stop' ? '損' : '利'}{crowded ? '' : markQty(ms)}
         </span>
     );
     // the trigger sits on the outer edge (buy: left, sell: right)
     const items = side === 'buy' ? [trig, prot(stops, 'stop'), prot(takes, 'take')] : [prot(stops, 'stop'), prot(takes, 'take'), trig];
-    return <span className={inline ? styles.markSlotInline : styles.markSlotSide[side]}>{items}</span>;
+    return <span className={inline ? `${styles.markSlotInline} ${crowded ? styles.markCrowded : ''}` : styles.markSlotSide[side]}>{items}</span>;
 }
 
 function accountChangedBeforeSend(error: unknown): boolean {
@@ -606,7 +609,7 @@ export function FlashOrder({
     // #216 自動停損停利與觸價後送出方式也是面板的條件：一變就解除點價
     const protect = panelOrder.protect ?? DEFAULT_PROTECT;
     const triggerSendSetting = panelOrder.triggerSend ?? DEFAULT_TRIGGER_SEND;
-    const orderKey = `${clickOrderType}:${clickOctype ?? ''}:${mktPriceType}:${protect.on ? JSON.stringify(protect) : 'off'}:${JSON.stringify(triggerSendSetting)}`;
+    const orderKey = `${clickOrderType}:${clickOctype ?? ''}:${mktPriceType}:${protect.on ? JSON.stringify(protect) : 'off'}:${JSON.stringify(triggerSendSetting)}:${panelOrder.triggerLayout ?? 'columns'}`;
     // 自動停損停利開啟但目前條件不能附加：點價不送（不會改成無保護送出）
     const protectBlock = protect.on
         ? protectConditionProblem({ market, odd, creditCond: credit.cond, daytradeShort: credit.daytradeShort, octype: clickOctype })
@@ -1636,7 +1639,7 @@ export function FlashOrder({
                             triggerSend={triggerSendSetting}
                             onTriggerSend={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, triggerSend: next }); }}
                             triggerLayout={triggerLayout}
-                            onTriggerLayout={next => setPanelOrder({ ...panelOrder, triggerLayout: next })}
+                            onTriggerLayout={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, triggerLayout: next }); }}
                             onProtect={() => openProtectRef.current?.()}
                             onMore={() => openSettingsRef.current?.(menuTop)}
                             onClose={() => setMenuOpen(false)}

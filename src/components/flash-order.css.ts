@@ -1091,3 +1091,7 @@ export const protectChip = styleVariants({
     bad: [protectChipBase, { color: vars.color.danger, borderColor: vars.color.danger, background: 'rgba(239, 68, 68, 0.08)' }],
 });
 export const protectChipAnchor = style({ position: 'static', display: 'inline-flex' });
+
+// several marks in one 觸價 cell: no minimum width, tight padding
+export const markCrowded = style({ gap: 1 });
+globalStyle(`${markCrowded} > *`, { minWidth: 0, padding: '0 2px' });

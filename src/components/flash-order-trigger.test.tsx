@@ -360,3 +360,29 @@ it('the gear holds the settings: 觸價點法 is saved on the panel; the protect
     await act(async () => { item('自動停損停利').props.onClick(); });
     expect(r.root.findAll(n => n.props.role === 'dialog' && n.props['aria-label'] === '自動停損停利設定')).toHaveLength(1);
 });
+
+it('changing 觸價點法 locks the ladder (an Alt-click must not become a limit order)', async () => {
+    const onChange = vi.fn();
+    let r!: ReactTestRenderer;
+    await act(async () => {
+        r = create(createElement(FlashOrder, { contract: fut, trades: [], positions: [], orderOpts: { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT', triggerLayout: 'modifier' }, onOrderOptsChange: onChange }),
+            { createNodeMock: () => ({ getBoundingClientRect: () => ({ top: 0 }), clientHeight: 462, addEventListener() {}, removeEventListener() {} }) });
+    });
+    roots.push(r);
+    await arm(r);
+    await act(async () => { byTestId(r, 'flash-settings')[0]!.props.onClick(); });
+    await act(async () => { r.root.findAll(n => n.type === 'button' && text(n).startsWith('觸價欄'))[0]!.props.onClick(); });
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ triggerLayout: 'columns' }));
+    expect(button(r, '啟用閃電下單')).toBeDefined();
+});
+
+it('a crowded 觸價 cell keeps every mark with short labels', async () => {
+    const base = { protects: false, paused: false, pending: false, background: false, title: 't' };
+    m.marks = new Map([['103.00', { buy: [], sell: [
+        { ...base, id: 'a', side: 'sell', price: 103, quantity: 1, kind: 'trigger', editable: true, condition: 'above' },
+        { ...base, id: 'b', side: 'sell', price: 103, quantity: 2, kind: 'take', editable: false },
+    ] as LadderMark[] }]]);
+    const r = await mount();
+    expect(text(byTestId(r, 'flash-trigger-mark')[0]!)).toBe('1');
+    expect(text(byTestId(r, 'flash-take-mark')[0]!)).toBe('利');
+});
