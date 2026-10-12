@@ -462,7 +462,7 @@ function OcoForm({ target, onClose, defaults }: { target: Target; onClose: () =>
                         <b className={down.action === 'Buy' ? styles.up : styles.down}>跌到 {fmtNum(pd)} {orderWords(target, down.action, qd, sendValue, pd)}</b>；
                         {mode === 'trigger' ? '任一邊觸發，另一邊立刻刪除。' : odd
                             ? '任一邊成交多少，另一邊就扣掉多少股；零股以漲跌停價限價（ROD）送出，這筆委託結束前另一邊暫停盯價。'
-                            : `任一邊成交多少，另一邊就扣掉多少${unit === '張' ? '張' : '口'}，其餘繼續盯價（限價以 IOC 送出）。`}
+                            : `任一邊成交多少，另一邊就扣掉多少${unit === '張' ? '張' : '口數'}，其餘繼續盯價（限價以 IOC 送出）。`}
                         {APPROVAL}
                         {outside && <span className={styles.tone.err}> 目前價不在兩個價格之間，建立後下一筆成交就會觸發一邊。</span>}
                     </>
