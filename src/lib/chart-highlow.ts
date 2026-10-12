@@ -34,25 +34,30 @@ export interface HighLowHit {
  * 同價取最新的一根（離現在最近、最常被關注）。少於 2 根不標。
  */
 export function visibleHighLow(
-    bars: readonly HighLowBar[],
+    barAt: (logical: number) => HighLowBar | null | undefined,
     from: number,
     to: number,
 ): { high: HighLowHit; low: HighLowHit } | null {
-    if (bars.length === 0 || !Number.isFinite(from) || !Number.isFinite(to)) return null;
-    const start = Math.max(0, Math.ceil(Math.min(from, to)));
-    const end = Math.min(bars.length - 1, Math.floor(Math.max(from, to)));
-    if (end - start < 1) return null;
-    let hi = -1;
-    let lo = -1;
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+    // 與 lightweight-charts 一致：邊緣只露出一部分的 K 棒也算看得到
+    const start = Math.max(0, Math.floor(Math.min(from, to)));
+    const end = Math.ceil(Math.max(from, to));
+    let hi: HighLowHit | null = null;
+    let lo: HighLowHit | null = null;
+    let count = 0;
     for (let i = start; i <= end; i += 1) {
-        const b = bars[i];
+        const b = barAt(i);
         if (!b || !Number.isFinite(b.high) || !Number.isFinite(b.low)) continue;
-        if (hi < 0 || b.high >= bars[hi]!.high) hi = i;
-        if (lo < 0 || b.low <= bars[lo]!.low) lo = i;
+        count += 1;
+        if (!hi || b.high >= hi.price) hi = { index: i, price: b.high };
+        if (!lo || b.low <= lo.price) lo = { index: i, price: b.low };
     }
-    if (hi < 0 || lo < 0) return null;
-    return { high: { index: hi, price: bars[hi]!.high }, low: { index: lo, price: bars[lo]!.low } };
+    if (count < 2 || !hi || !lo) return null;
+    return { high: hi, low: lo };
 }
+
+/** 陣列版（測試與純資料使用）：logical index = 陣列位置 */
+export const barsAt = (bars: readonly HighLowBar[]) => (i: number) => bars[i];
 
 // 版面常數（CSS px）
 export const MARK_LEADER_PX = 10; // 影線端點到標籤的引線長度
@@ -136,6 +141,19 @@ interface MarkSpec {
     labelY: number;
 }
 
+/** 兩個標籤框（版面已夾回 pane 之後）若重疊，把最低往下、放不下就把最高往上 */
+export function resolveOverlap(high: MarkLayout, low: MarkLayout, paneHeight: number): void {
+    const xOverlap = high.boxX < low.boxX + low.boxW && low.boxX < high.boxX + high.boxW;
+    if (!xOverlap) return;
+    const gap = 2;
+    if (low.boxY >= high.boxY + high.boxH + gap) return;
+    const maxY = paneHeight - MARK_EDGE_PX - low.boxH;
+    low.boxY = Math.min(high.boxY + high.boxH + gap, maxY);
+    if (low.boxY < high.boxY + high.boxH + gap) {
+        high.boxY = Math.max(MARK_EDGE_PX, low.boxY - gap - high.boxH);
+    }
+}
+
 /** 最高、最低標籤中心：兩者距離不到一個標籤高就上下錯開 */
 export function separateLabels(highY: number, lowY: number): { high: number; low: number } {
     const need = MARK_LABEL_H + 2;
@@ -153,20 +171,30 @@ class HighLowRenderer implements IPrimitivePaneRenderer {
         target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
             ctx.save();
             ctx.textBaseline = 'middle';
-            for (const m of marks) {
-                ctx.font = FONT_WORD;
-                const wordW = ctx.measureText(m.word).width;
+            const gap = 4;
+            const avail = mediaSize.width - MARK_EDGE_PX * 2 - MARK_PAD_X * 2;
+            const planned = marks.map((m) => {
                 ctx.font = FONT_VALUE;
                 const valueW = ctx.measureText(m.value).width;
-                const gap = 4;
-                const l = layoutMark(m.x, m.y, wordW + gap + valueW, mediaSize, m.labelY);
+                ctx.font = FONT_WORD;
+                // 窄面板放不下「最高」字樣就只留數值；連數值都放不下就不標
+                const wordW = valueW + gap + ctx.measureText(m.word).width <= avail ? ctx.measureText(m.word).width : 0;
+                if (valueW > avail) return null;
+                const total = wordW ? wordW + gap + valueW : valueW;
+                return { m, wordW, total, l: layoutMark(m.x, m.y, total, mediaSize, m.labelY) };
+            });
+            const [a, b] = planned;
+            if (a && b) resolveOverlap(a.l, b.l, mediaSize.height);
+            for (const p of planned) {
+                if (!p) continue;
+                const { m, l, wordW } = p;
+                const midY = l.boxY + l.boxH / 2;
                 // 引線：影線端點 → 標籤
                 ctx.strokeStyle = m.color;
                 ctx.lineWidth = 1;
                 ctx.beginPath();
                 ctx.moveTo(Math.round(l.leaderFrom) + 0.5, Math.round(l.tipY) + 0.5);
                 const edgeX = l.side === 'right' ? l.boxX : l.boxX + l.boxW;
-                const midY = l.boxY + l.boxH / 2;
                 ctx.lineTo(Math.round(edgeX) + 0.5, Math.round(midY) + 0.5);
                 ctx.stroke();
                 // 端點小圓點：看得出標的是哪一根的影線
@@ -184,10 +212,12 @@ class HighLowRenderer implements IPrimitivePaneRenderer {
                 ctx.stroke();
                 // 文字：字樣用次要色、數值用標記色
                 let tx = l.boxX + MARK_PAD_X;
-                ctx.font = FONT_WORD;
-                ctx.fillStyle = style.mutedText;
-                ctx.fillText(m.word, tx, midY + 0.5);
-                tx += wordW + gap;
+                if (wordW) {
+                    ctx.font = FONT_WORD;
+                    ctx.fillStyle = style.mutedText;
+                    ctx.fillText(m.word, tx, midY + 0.5);
+                    tx += wordW + gap;
+                }
                 ctx.font = FONT_VALUE;
                 ctx.fillStyle = m.color;
                 ctx.fillText(m.value, tx, midY + 0.5);
@@ -261,13 +291,17 @@ export class HighLowLayer implements ISeriesPrimitive<Time> {
         if (!this.style.visible || !series || !chart) return [];
         const range = chart.timeScale().getVisibleLogicalRange();
         if (!range) return [];
-        const data = series.data() as readonly Partial<HighLowBar & { time: Time }>[];
-        const bars = data as readonly HighLowBar[];
-        const hit = visibleHighLow(bars, range.from, range.to);
+        // dataByIndex 以 logical index 取值（空白資料、與其他序列時間軸不同時
+        // 陣列位置不等於 logical index），只走可見範圍，不必每幀複製整段歷史
+        const at = (i: number) => {
+            const d = series.dataByIndex(i) as (Partial<HighLowBar> & { time: Time }) | null;
+            return d && typeof d.high === 'number' && typeof d.low === 'number' ? (d as HighLowBar & { time: Time }) : null;
+        };
+        const hit = visibleHighLow(at, range.from, range.to);
         if (!hit) return [];
         const out: MarkSpec[] = [];
         const push = (h: HighLowHit, word: string, color: string) => {
-            const time = data[h.index]?.time;
+            const time = at(h.index)?.time;
             if (time === undefined) return;
             const x = chart.timeScale().timeToCoordinate(time);
             const y = series.priceToCoordinate(h.price);
