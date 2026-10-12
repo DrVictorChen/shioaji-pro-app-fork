@@ -193,8 +193,11 @@ describe('setting on (#201 ①-3)', () => {
         expect(calls('execution_create')).toHaveLength(0);
         const bodies = m.notify.mock.calls.map(([n]) => (n as { body: string }).body);
         expect(bodies).toContain('背景執行目前無法使用，請稍後再試或關閉背景持續執行改用本視窗');
-        // a stock trigger is not the engine's: unaffected
-        await engine.addTrigger({ ...stop(), code: '2330', price: 900 }, STK as never);
+        // a stock trigger is the engine's too now (#226 step 5): refused the same way
+        expect(await engine.addTrigger({ ...stop(), code: '2330', price: 900 }, STK as never)).toBeNull();
+        expect(engine.getTriggers()).toHaveLength(0);
+        // an alert never was: unaffected
+        await engine.addTrigger({ ...stop(), kind: 'alert', quantity: 0 });
         expect(engine.getTriggers()).toHaveLength(1);
     });
 
@@ -261,14 +264,13 @@ describe('setting on (#201 ①-3)', () => {
         expect(bg.getBackgroundSetting()).toBe(true);
     });
 
-    it('stocks, alerts and OCO groups stay in this window', async () => {
+    it('alerts and a lone OCO leg stay in this window', async () => {
         m.enabled = true;
         await boot();
-        await engine.addTrigger({ ...stop(), code: '2330', price: 900 }, STK as never);
         await engine.addTrigger({ ...stop(), kind: 'alert', quantity: 0 });
         await engine.addTrigger({ ...stop(), group: 'g1' }, TXF as never);
         expect(calls('execution_create')).toHaveLength(0);
-        expect(engine.getTriggers()).toHaveLength(3);
+        expect(engine.getTriggers()).toHaveLength(2);
     });
 
     it('a trigger created before the setting was turned on keeps running here', async () => {
@@ -699,5 +701,36 @@ describe('#226 window 全平並取消 and the engine share one hold', () => {
             : cmd === 'execution_flatten_renew' ? Promise.reject(new Error('x')) : orig(cmd, args));
         expect(await bg.beginWindowFlatten()).toBe(true);
         expect(await bg.stillHoldingFlatten()).toBe(false);
+    });
+});
+
+describe('#226 stocks in the background (step 5)', () => {
+    const STK1 = { ...STK, exchange: 'TSE', limit_up: 990, limit_down: 810 };
+    const created = () => calls('execution_create').map(([, a]) => (a as { program: OrderProgram }).program);
+
+    it('整股 and 盤中零股 triggers become stock programs (cash, the stock tick table, 零股 watching odd trades)', async () => {
+        m.enabled = true;
+        await boot();
+        await engine.addTrigger({ ...stop(), code: '2330', price: 900, role: 'entry', send: { type: 'LMT', ticks: -1 } }, STK1 as never);
+        await engine.addTrigger({ ...stop(), code: '2330', price: 900, quantity: 300, orderLot: 'IntradayOdd' }, STK1 as never);
+        expect(engine.getTriggers()).toHaveLength(0);
+        const [lot, odd] = created();
+        expect(lot).toMatchObject({ opens: true, binding: { account: { accountType: 'S' }, contract: { market: 'stock', securityType: 'STK' } },
+            levels: [{ entry: { limitTicks: -1, order: { priceType: 'LMT', timeInForce: 'ROD', stockCond: 'Cash', stockLot: 'Common' } } }] });
+        expect(lot!.tickTable![4]).toEqual({ min: 500, max: 1000, tick: 1 });
+        expect(odd).toMatchObject({ levels: [{ qty: 300, entry: { feed: 'odd', order: { priceType: 'MKT', timeInForce: 'ROD', stockLot: 'IntradayOdd' } } }] });
+        m.programs = [lot!, odd!];
+        await bg.refreshBackground();
+        const rows = engine.getDisplayTriggers();
+        expect(rows[1]).toMatchObject({ orderLot: 'IntradayOdd', quantity: 300 });
+        expect(rows[1]!.source).toBeUndefined();
+    });
+
+    it('a 零股 trigger with another send style is refused like in this window', async () => {
+        m.enabled = true;
+        await boot();
+        expect(await engine.addTrigger({ ...stop(), code: '2330', price: 900, quantity: 300, orderLot: 'IntradayOdd', send: { type: 'LMT', ticks: 1 } },
+            STK1 as never)).toBeNull();
+        expect(created()).toHaveLength(0);
     });
 });

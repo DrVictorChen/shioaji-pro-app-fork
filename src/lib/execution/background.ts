@@ -23,7 +23,7 @@ import { ensureContract } from '../contracts-cache';
 import { isMainWindow } from '../main-window-commands';
 import { currentProtectionEnv, onProtectionEnvChange } from '../protection-env';
 import { pinQuote } from '../quote-ownership';
-import { getStreamStatus, onAnyBidAsk, onAnyTick, subscribeStatusStore } from '../stream';
+import { getStreamStatus, onAnyBidAsk, onAnyTick, onOddLotTick, subscribeStatusStore } from '../stream';
 import { notify } from '../trade';
 import { envKeyOf } from './adapter';
 import { programFinished } from './background-view';
@@ -447,24 +447,26 @@ const quoteHolds = new Map<string, { release?: () => void }>();
  * unsubscribes what a background condition watches. */
 function syncQuotes() {
     const env = currentProtectionEnv();
-    const wanted = new Map<string, { code: string; type: 'Tick' | 'BidAsk' }>();
+    const wanted = new Map<string, { code: string; type: 'Tick' | 'BidAsk'; odd?: boolean }>();
     for (const p of programs) {
         if (p.status === 'stopped' || envKeyOf(p.binding) !== env) continue;
         const code = p.binding.contract.quoteCode;
         wanted.set(`${code}|Tick`, { code, type: 'Tick' });
-        if (p.levels.some(lv => lv.phase !== 'done' && lv.entry.type === 'touch' && lv.entry.feed)) {
-            wanted.set(`${code}|BidAsk`, { code, type: 'BidAsk' });
-        }
+        const feeds = p.levels.filter(lv => lv.phase !== 'done' && lv.entry.type === 'touch')
+            .map(lv => lv.entry.type === 'touch' ? lv.entry.feed : undefined);
+        if (feeds.some(f => f === 'bid' || f === 'ask')) wanted.set(`${code}|BidAsk`, { code, type: 'BidAsk' });
+        // 零股 conditions: the 盤中零股 trades
+        if (feeds.includes('odd')) wanted.set(`${code}|TickOdd`, { code, type: 'Tick', odd: true });
     }
     for (const [key, hold] of quoteHolds) {
         if (!wanted.has(key)) { hold.release?.(); quoteHolds.delete(key); }
     }
-    for (const [key, { code, type }] of wanted) {
+    for (const [key, { code, type, odd }] of wanted) {
         if (quoteHolds.has(key)) continue;
         const hold: { release?: () => void } = {};
         quoteHolds.set(key, hold);
         void ensureContract(code).then(contract => {
-            if (quoteHolds.get(key) === hold) hold.release = pinQuote(contract, type);
+            if (quoteHolds.get(key) === hold) hold.release = pinQuote(contract, type, odd ? { oddLot: true } : undefined);
         }).catch(() => { if (quoteHolds.get(key) === hold) quoteHolds.delete(key); });
     }
 }
@@ -689,6 +691,14 @@ export function startBackgroundExecution(): void {
                 prices = { ...prices, [tick.code]: price };
                 emit();
             }
+        });
+        // 零股 rows: the 盤中零股 trades (`<code>#odd`)
+        onOddLotTick(tick => {
+            if (tick.simtrade || !programs.some(p => p.binding.contract.quoteCode === tick.code
+                && p.levels.some(lv => lv.phase === 'needsConfirm' && lv.entry.type === 'touch' && lv.entry.feed === 'odd'))) return;
+            const price = Number(tick.close);
+            const key = `${tick.code}#odd`;
+            if (Number.isFinite(price) && price > 0 && prices[key] !== price) { prices = { ...prices, [key]: price }; emit(); }
         });
         // 對手價 rows: their side of the book, under the same keys as this
         // window's triggers (`<code>#bid` / `<code>#ask`)

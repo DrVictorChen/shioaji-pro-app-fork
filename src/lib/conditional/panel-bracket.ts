@@ -54,7 +54,8 @@ export async function placePanelBracket(r: PanelBracketRequest): Promise<'placed
     const qty = r.plan.tiers.reduce((s, t) => s + t.quantity, 0);
     // #226: with 「背景持續執行」 on, a futures / options bracket runs in the
     // background (one owner, decided before anything is sent)
-    if (futures && backgroundSupported()) {
+    // (stocks too: 現股 整股 — the panel's brackets are whole lots in cash)
+    if ((futures || r.contract.security_type === 'STK') && backgroundSupported()) {
         const env = currentProtectionEnv();
         if (!env) return { error: '伺服器模式（模擬／正式）尚未確認，括號單未送出' };
         const owner = await backgroundOwnerForNew({ liveOn: env });
@@ -103,11 +104,11 @@ export async function placePanelBracket(r: PanelBracketRequest): Promise<'placed
  * order confirmation setting applies), then handed over with its trade id. */
 async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, env: string): Promise<'placed' | 'trigger' | { error: string }> {
     const c = r.contract as PanelBracketRequest['contract'] & { tick_rule?: string; tick?: number };
-    const st = c.security_type === 'OPT' ? 'OPT' : 'FUT';
-    const bands = c.tick_rule ? await ensureTickBands(c.tick_rule, st) : undefined;
+    const st = c.security_type === 'OPT' ? 'OPT' as const : c.security_type === 'STK' ? 'STK' as const : 'FUT' as const;
+    const bands = c.tick_rule && st !== 'STK' ? await ensureTickBands(c.tick_rule, st) : undefined;
     const tickTable = tickTableOf(c, bands);
     if (!tickTable) return { error: '背景執行：跳動點級距尚未取得，無法依成交價計算停損停利，請稍後再試' };
-    const base = { env, account: { account_type: 'F' as const, broker_id: r.account.broker_id, account_id: r.account.account_id },
+    const base = { env, account: { account_type: st === 'STK' ? 'S' as const : 'F' as const, broker_id: r.account.broker_id, account_id: r.account.account_id },
         quoteCode: r.contract.code, securityType: st, action: r.action, plan: r.plan, tickTable } as const;
     if (r.entry.type === 'touch') {
         const request = panelBracketRequest({ ...base, orderCode: r.contract.target_code || r.contract.code,
@@ -127,7 +128,7 @@ async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, 
             // when it really leaves (after the order confirmation): its trading session
             sentAt = Date.now();
         },
-        ocType: 'Auto',
+        ...(st === 'STK' ? {} : { ocType: 'Auto' as const }),
         ...(r.entry.type === 'LMT' ? { orderType: 'ROD' as const } : {}),
     });
     const request = panelBracketRequest({ ...base, orderCode: trade.contract?.target_code || trade.contract?.code || r.contract.target_code || r.contract.code,

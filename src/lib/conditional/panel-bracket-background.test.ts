@@ -87,4 +87,16 @@ describe('panel bracket in the background', () => {
         expect(m.place).not.toHaveBeenCalled();
         expect(m.register).not.toHaveBeenCalled();
     });
+
+    it('a stock bracket (現股 整股) goes to the engine on a securities account with the stock tick table', async () => {
+        const STK = { code: '2330', security_type: 'STK', exchange: 'TSE' };
+        const SA = { ...A, account_type: 'S' };
+        expect(await placePanelBracket({ contract: STK as never, account: SA as never, action: 'Buy', plan: { ...plan, trail: null, breakeven: null,
+            tiers: [{ quantity: 1, takeTicks: 10 }] }, refPrice: 600,
+            entry: { type: 'touch', condition: 'above', price: 600, send: { type: 'MKT' }, validity: { type: 'today', until: Date.now() + 60_000 } } })).toBe('trigger');
+        const [request] = m.create.mock.calls[0]!;
+        expect(request).toMatchObject({ binding: { account: { accountType: 'S' }, contract: { market: 'stock', securityType: 'STK' } },
+            trigger: { order: { priceType: 'MKT', timeInForce: 'IOC', stockCond: 'Cash', stockLot: 'Common' } } });
+        expect(request.tickTable[4]).toEqual({ min: 500, max: 1000, tick: 1 });
+    });
 });
