@@ -3,7 +3,7 @@
 // 移動停損。設定屬於這個面板（FlashOrderOpts.protect），換設定解除點價。
 
 import { ChevronDown, ShieldCheck, ShieldOff, ShieldAlert } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type MutableRefObject } from 'react';
 import { DEFAULT_PROTECT, flashProtectProblem, flashProtectText, PROTECT_MAX_TICKS, type FlashProtect } from '../lib/flash-trigger';
 import * as styles from './flash-order.css';
 
@@ -27,7 +27,11 @@ export function draftProtect(d: { on: boolean; stop: string; take: string; trail
     return flashProtectProblem(p) ?? p;
 }
 
-export function FlashProtectStrip({ protect, block, protectedQty, background, unit, onChange }: {
+export function FlashProtectStrip({ protect, block, protectedQty, background, unit, onChange, compact = false, openRef }: {
+    /** a small chip in the action bar (開／關＋保護中 N) instead of a row */
+    compact?: boolean;
+    /** lets the panel's settings open this editor */
+    openRef?: MutableRefObject<(() => void) | null>;
     protect: FlashProtect | undefined;
     /** why the panel's current conditions cannot carry it (shown while on) */
     block: string | null;
@@ -41,6 +45,29 @@ export function FlashProtectStrip({ protect, block, protectedQty, background, un
     const [open, setOpen] = useState(false);
     const tone = !p.on ? 'off' : block ? 'bad' : 'on';
     const Icon = !p.on ? ShieldOff : block ? ShieldAlert : ShieldCheck;
+    if (openRef) openRef.current = () => setOpen(true);
+    const menu = open && <ProtectMenu protect={p} background={background} onClose={() => setOpen(false)} onSave={next => { onChange(next); setOpen(false); }} />;
+    if (compact) {
+        return (
+            <span className={styles.protectChipAnchor}>
+                <button
+                    type='button'
+                    className={styles.protectChip[tone]}
+                    data-testid='flash-protect'
+                    aria-haspopup='dialog'
+                    aria-expanded={open}
+                    title={p.on
+                        ? `自動停損停利：${flashProtectText(p)}${block ? `\n${block}` : ''}${protectedQty ? `\n保護中 ${protectedQty} ${unit}` : ''}${background ? '\n由背景執行' : ''}\n點一下修改`
+                        : '自動停損停利：關（點一下設定）'}
+                    onClick={() => setOpen(!open)}
+                >
+                    <Icon size={11} aria-hidden />
+                    停損停利{p.on ? (block ? '・不符' : protectedQty ? `・保護 ${protectedQty}` : '・開') : '・關'}
+                </button>
+                {menu}
+            </span>
+        );
+    }
     return (
         <div className={styles.protectAnchor}>
             <button
@@ -60,7 +87,7 @@ export function FlashProtectStrip({ protect, block, protectedQty, background, un
                 {p.on && !block && background && <span className={styles.protectMeta}>背景執行</span>}
                 <ChevronDown size={9} aria-hidden className={styles.protectChevron} />
             </button>
-            {open && <ProtectMenu protect={p} background={background} onClose={() => setOpen(false)} onSave={next => { onChange(next); setOpen(false); }} />}
+            {menu}
         </div>
     );
 }

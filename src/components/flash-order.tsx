@@ -18,7 +18,7 @@ import { creditEnquireCond, creditSideBlocks, creditStatus, prepareCreditOrder, 
 import { getApiBase } from '../lib/runtime';
 import { captureServerMode } from '../lib/server-info-store';
 import { collectFills, fifoPosition, hasTwoWayFills, tradingDayStart } from '../lib/futures-fifo';
-import { Ban, ChevronDown, Crosshair, ShieldCheck, Zap } from 'lucide-react';
+import { Ban, ChevronDown, Crosshair, Locate, LocateFixed, Settings, ShieldCheck, Zap } from 'lucide-react';
 import { useFlashLadder } from '../hooks/use-flash-ladder';
 import { dayEnd, sessionEnd } from '../lib/conditional/session';
 import { getConditionalSettings } from '../lib/conditional/settings';
@@ -86,7 +86,9 @@ interface MarkGroup {
 
 const markQty = (ms: LadderMark[]) => ms.reduce((n, m) => n + m.quantity, 0);
 
-function MarkChips({ side, price, marks, dragging, onMarkDown }: {
+function MarkChips({ side, price, marks, dragging, onMarkDown, inline = false }: {
+    /** in the 觸價 column (centred) instead of on the volume cell's edge */
+    inline?: boolean;
     side: 'buy' | 'sell';
     price: number;
     marks: LadderMark[];
@@ -119,7 +121,7 @@ function MarkChips({ side, price, marks, dragging, onMarkDown }: {
     );
     // the trigger sits on the outer edge (buy: left, sell: right)
     const items = side === 'buy' ? [trig, prot(stops, 'stop'), prot(takes, 'take')] : [prot(stops, 'stop'), prot(takes, 'take'), trig];
-    return <span className={styles.markSlotSide[side]}>{items}</span>;
+    return <span className={inline ? styles.markSlotInline : styles.markSlotSide[side]}>{items}</span>;
 }
 
 function accountChangedBeforeSend(error: unknown): boolean {
@@ -173,10 +175,17 @@ interface RowProps {
     credit: { buy: string; sell: string };
     /** odd-lot book: volumes in shares, shown compactly (exact in tooltip) */
     compact: boolean;
-    onCell: (action: Action, price: number) => void;
+    /** trigger: place a 觸價單 at this price instead of a limit order */
+    onCell: (action: Action, price: number, trigger: boolean) => void;
     onCancelAt: (action: Action, price: number) => void;
-    /** #216 觸價模式：點價＝掛觸價單 */
-    triggerMode: boolean;
+    /** #216 觸價單: outer 觸買／觸賣 columns (default) or Alt＋點 on the volume cells */
+    layout: 'columns' | 'modifier';
+    /** why triggers cannot be placed now (credit conditions), else null */
+    trigBlock: string | null;
+    /** which way a trigger at this price fires (from the traded price); null: unknown */
+    trigDir: 'above' | 'below' | null;
+    /** 「市價」「市價・附停損停利」: what a fired trigger sends */
+    trigNote: string;
     buyMarks: LadderMark[];
     sellMarks: LadderMark[];
     /** this row is where a dragged trigger would go */
@@ -207,7 +216,10 @@ const FlashRow = memo(function FlashRow({
     compact,
     onCell,
     onCancelAt,
-    triggerMode,
+    layout,
+    trigBlock,
+    trigDir,
+    trigNote,
     buyMarks,
     sellMarks,
     drop,
@@ -216,8 +228,26 @@ const FlashRow = memo(function FlashRow({
 }: RowProps) {
     const vol = compact ? fmtCompactInt : fmtInt;
     const exact = (v: number | undefined) => (compact && v !== undefined && v >= 10_000 ? `${fmtInt(v)} 股` : undefined);
+    const columns = layout === 'columns';
+    const op = trigDir === 'above' ? '≥' : '≤';
+    const trigTitle = (side: 'buy' | 'sell') => !armed ? '先啟用閃電下單'
+        : trigBlock ?? (trigDir === null ? '尚未收到成交價，或此價等於成交價（會立刻觸發），不能掛觸價'
+            : `觸價${side === 'buy' ? '買' : '賣'}：成交價 ${op} ${text} 時${trigNote}${side === 'buy' ? '買進' : '賣出'}（不是限價）`);
+    const trigCell = (side: 'buy' | 'sell', marks: LadderMark[]) => (
+        <div
+            className={`${styles.trigCell} ${armed && !trigBlock && trigDir !== null ? '' : styles.disabledCell}`}
+            data-trigger={side}
+            data-preview={armed && !trigBlock && trigDir !== null ? `觸${op}` : ''}
+            title={trigTitle(side)}
+            onClick={() => onCell(side === 'buy' ? 'Buy' : 'Sell', price, true)}
+        >
+            {marks.length > 0 && <MarkChips inline side={side} price={price} marks={marks} dragging={dragSide === side} onMarkDown={onMarkDown} />}
+        </div>
+    );
+    const altHint = (side: 'buy' | 'sell') => (!columns && armed && !trigBlock ? `\nAlt＋點＝觸價${side === 'buy' ? '買' : '賣'}（成交價 ${op} ${text}）` : '');
     return (
-        <div className={`${styles.row[isLast ? 'last' : 'normal']} ${drop ? styles.dropRow[drop] : ''}`}>
+        <div className={`${styles.row[isLast ? 'last' : 'normal']} ${columns ? styles.cols7 : ''} ${drop ? styles.dropRow[drop] : ''}`}>
+            {columns && trigCell('buy', buyMarks)}
             <div className={styles.chipCell}>
                 {buyFill > 0 && (
                     <span
@@ -239,10 +269,10 @@ const FlashRow = memo(function FlashRow({
             </div>
             <div
                 className={`${styles.buyCell} ${armed && !buyBlock ? '' : styles.disabledCell} ${buyBlock ? styles.blockedSide : ''}`}
-                title={buyBlock ?? (!armed ? '先啟用閃電下單' : triggerMode ? `觸價買 ${text}：成交價漲到（或跌到）${text} 時送出買單` : `${credit.buy}限價買 ${text}`)}
+                title={buyBlock ?? (!armed ? '先啟用閃電下單' : `${credit.buy}限價買 ${text}${altHint('buy')}`)}
                 data-side='buy'
                 data-blocked={buyBlock ? true : undefined}
-                onClick={() => onCell('Buy', price)}
+                onClick={e => onCell('Buy', price, !columns && e.altKey)}
             >
                 {bid !== undefined && (
                     <div
@@ -253,7 +283,7 @@ const FlashRow = memo(function FlashRow({
                 <span className={styles.cellText} title={exact(bid)}>
                     {bid !== undefined ? vol(bid) : ''}
                 </span>
-                {buyMarks.length > 0 && <MarkChips side='buy' price={price} marks={buyMarks} dragging={dragSide === 'buy'} onMarkDown={onMarkDown} />}
+                {!columns && buyMarks.length > 0 && <MarkChips side='buy' price={price} marks={buyMarks} dragging={dragSide === 'buy'} onMarkDown={onMarkDown} />}
             </div>
             <div
                 className={`${styles.priceCell} ${
@@ -278,10 +308,10 @@ const FlashRow = memo(function FlashRow({
             </div>
             <div
                 className={`${styles.sellCell} ${armed && !sellBlock ? '' : styles.disabledCell} ${sellBlock ? styles.blockedSide : ''}`}
-                title={sellBlock ?? (!armed ? '先啟用閃電下單' : triggerMode ? `觸價賣 ${text}：成交價跌到（或漲到）${text} 時送出賣單` : `${credit.sell}限價賣 ${text}`)}
+                title={sellBlock ?? (!armed ? '先啟用閃電下單' : `${credit.sell}限價賣 ${text}${altHint('sell')}`)}
                 data-side='sell'
                 data-blocked={sellBlock ? true : undefined}
-                onClick={() => onCell('Sell', price)}
+                onClick={e => onCell('Sell', price, !columns && e.altKey)}
             >
                 {ask !== undefined && (
                     <div
@@ -292,7 +322,7 @@ const FlashRow = memo(function FlashRow({
                 <span className={styles.cellText} title={exact(ask)}>
                     {ask !== undefined ? vol(ask) : ''}
                 </span>
-                {sellMarks.length > 0 && <MarkChips side='sell' price={price} marks={sellMarks} dragging={dragSide === 'sell'} onMarkDown={onMarkDown} />}
+                {!columns && sellMarks.length > 0 && <MarkChips side='sell' price={price} marks={sellMarks} dragging={dragSide === 'sell'} onMarkDown={onMarkDown} />}
             </div>
             <div className={styles.chipCell}>
                 {mySell > 0 && (
@@ -313,6 +343,7 @@ const FlashRow = memo(function FlashRow({
                     </span>
                 )}
             </div>
+            {columns && trigCell('sell', sellMarks)}
         </div>
     );
 });
@@ -615,16 +646,9 @@ export function FlashOrder({
     // 零股約每 5 秒撮合一次 — 顯示最近一次撮合（零股成交）時間
     const oddMatchTime = odd ? fmtClock(oddQuote?.tick?.time) : '';
     const [armed, setArmed] = useState(false);
-    // #216 觸價模式：點價＝掛觸價單。鎖定（含 Esc、換商品／帳戶／條件）時一起關閉
-    const [triggerModeState, setTriggerMode] = useState(false);
-    const triggerMode = triggerModeState && !triggerBlock && !paused;
-    const triggerModeRef = useRef(triggerMode);
-    triggerModeRef.current = triggerMode;
     const triggerRef = useRef({ setting: triggerSendSetting, block: triggerBlock });
     triggerRef.current = { setting: triggerSendSetting, block: triggerBlock };
-    useEffect(() => {
-        if (!armed) setTriggerMode(false);
-    }, [armed]);
+
     const [anchor, setAnchor] = useState<number | null>(null);
     const [follow, setFollow] = useState(true);
     const [rowCount, setRowCount] = useState(21);
@@ -997,6 +1021,12 @@ export function FlashOrder({
     const triggerPriceRef = useRef<number | null>(null);
     triggerPriceRef.current = odd ? (oddQuote?.tick ? Number(oddQuote.tick.close) : null) : tradedLast;
     const ladder = useFlashLadder({ code: contract.code, odd, account: activeAccount }, market === 'F');
+    // #216 觸價單與限價同時可點：外側觸買／觸賣欄（預設）或 Alt＋點買量／賣量
+    const triggerLayout = panelOrder.triggerLayout ?? 'columns';
+    const trigRef = triggerPriceRef.current;
+    const trigNote = `${triggerSendText(triggerSendSetting, { market, odd, mktPriceType })}${protect.on && !protectBlock ? '（附停損停利）' : ''}`;
+    const trigWord = triggerBlock ? '觸價停用（信用條件）' : triggerLayout === 'columns' ? '點觸買／觸賣=觸價單' : 'Alt＋點=觸價單';
+    const openProtectRef = useRef<(() => void) | null>(null);
     const ladderBackgroundRef = useRef(ladder.background);
     ladderBackgroundRef.current = ladder.background;
 
@@ -1153,7 +1183,7 @@ export function FlashOrder({
     // 觸價單（觸發時套用風控）；自動停損停利開啟的進場附括號單
     const placeTriggerAt = useCallback(async (action: Action, price: number) => {
         const capturedAccount = accountRef.current;
-        if (!armedRef.current || !triggerModeRef.current || !capturedAccount) return;
+        if (!armedRef.current || !capturedAccount) return;
         const capturedContract = contractRef.current;
         const fail = (body: string) => notify({ kind: 'err', title: '⚡ 觸價單未建立', body });
         if (pausedRef.current) return;
@@ -1216,7 +1246,7 @@ export function FlashOrder({
     }, []);
 
     const onCell = useCallback(
-        (action: Action, price: number) => void (triggerModeRef.current ? placeTriggerAt(action, price) : send(action, price)),
+        (action: Action, price: number, trigger: boolean) => void (trigger ? placeTriggerAt(action, price) : send(action, price)),
         [send, placeTriggerAt],
     );
 
@@ -1573,13 +1603,15 @@ export function FlashOrder({
                 <span className={styles.unitAnchor}>
                     <button
                         type='button'
-                        className={styles.unitBtn[menuShown ? 'open' : 'closed']}
+                        className={styles.gearBtn[menuShown ? 'open' : 'closed']}
                         aria-label='單位與委託條件'
                         aria-haspopup='menu'
                         aria-expanded={menuShown}
-                        title={market === 'F'
-                            ? `單位：口${orderTags.length ? `\n委託條件：${orderTags.join('・')}` : ''}`
-                            : `單位：${odd ? '盤中零股（股）' : '整股（張）'}${creditApplies ? `\n信用：${creditTag || '現股'}` : '\n零股只能現股'}`}
+                        data-testid='flash-settings'
+                        data-unit={`${market === 'F' ? '口' : odd ? '股' : '張'}${unitTag ? `·${unitTag}` : ''}`}
+                        title={`閃電下單設定：單位、信用、委託條件、觸價、停損停利、記住數量、連動\n${market === 'F'
+                            ? `單位：口${orderTags.length ? `・${orderTags.join('・')}` : ''}`
+                            : `單位：${odd ? '盤中零股（股）' : '整股（張）'}${creditApplies ? `・信用：${creditTag || '現股'}` : '・零股只能現股'}`}`}
                         ref={unitBtnRef}
                         onClick={() => {
                             const b = unitBtnRef.current;
@@ -1587,9 +1619,7 @@ export function FlashOrder({
                             setMenuOpen(!menuOpen);
                         }}
                     >
-                        {market === 'F' ? '口' : odd ? '股' : '張'}
-                        {unitTag && <>·<b className={styles.unitCredit}>{unitTag}</b></>}
-                        <ChevronDown size={9} aria-hidden />
+                        <Settings size={12} aria-hidden />
                     </button>
                     {menuShown && (
                         <FlashQuickMenu
@@ -1605,6 +1635,9 @@ export function FlashOrder({
                             onOrder={next => { armedRef.current = false; setArmed(false); setPanelOrder(next); }}
                             triggerSend={triggerSendSetting}
                             onTriggerSend={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, triggerSend: next }); }}
+                            triggerLayout={triggerLayout}
+                            onTriggerLayout={next => setPanelOrder({ ...panelOrder, triggerLayout: next })}
+                            onProtect={() => openProtectRef.current?.()}
                             onMore={() => openSettingsRef.current?.(menuTop)}
                             onClose={() => setMenuOpen(false)}
                         />
@@ -1668,51 +1701,13 @@ export function FlashOrder({
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
                     ) : armedView ? (
-                        triggerMode ? (
-                            <>
-                                <Crosshair size={10} style={{ verticalAlign: '-1px' }} />{' '}
-                                點價即掛觸價
-                            </>
-                        ) : (
-                            <>
-                                <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
-                                點價即下單
-                            </>
-                        )
+                        <>
+                            <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
+                            點價即下單
+                        </>
                     ) : (
                         '啟用閃電下單'
                     )}
-                </button>
-                <button
-                    type='button'
-                    className={styles.triggerBtn[triggerMode ? 'on' : 'off']}
-                    aria-pressed={triggerMode}
-                    data-testid='flash-trigger-mode'
-                    disabled={!!triggerBlock || !!paused}
-                    title={triggerBlock ?? (triggerMode
-                        ? '觸價模式：點買量／賣量在該價掛觸價單；再點一下回到限價'
-                        : `觸價模式：點價改為掛觸價單（觸發後${triggerSendText(triggerSendSetting, { market, odd, mktPriceType })}送出）；啟用閃電下單後才能掛`)}
-                    onClick={() => setTriggerMode(!triggerMode)}
-                >
-                    <Crosshair size={10} aria-hidden />
-                    觸價
-                </button>
-                <button
-                    className={styles.followBtn[follow ? 'on' : 'off']}
-                    title={follow ? '自動跟隨現價中 — 點擊固定' : '已固定 — 點擊恢復跟隨'}
-                    onClick={() => {
-                        if (follow) setFollow(false);
-                        else recenter();
-                    }}
-                >
-                    {follow ? '跟隨' : '固定'}
-                </button>
-                <button
-                    className={styles.recenterBtn}
-                    title='現價置中並恢復跟隨'
-                    onClick={recenter}
-                >
-                    置中
                 </button>
             </div>
             <div className={styles.actionBar}>
@@ -1757,17 +1752,19 @@ export function FlashOrder({
                 >
                     全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}
                 </button>
+                {!paused && (
+                    <FlashProtectStrip
+                        compact
+                        openRef={openProtectRef}
+                        protect={panelOrder.protect}
+                        block={protectBlock}
+                        protectedQty={ladder.protectedQty > 0 ? maskMoney(String(ladder.protectedQty), privMoney) : null}
+                        background={ladder.background}
+                        unit={market === 'F' ? '口' : odd ? '股' : '張'}
+                        onChange={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, protect: next }); }}
+                    />
+                )}
             </div>
-            {!paused && (
-                <FlashProtectStrip
-                    protect={panelOrder.protect}
-                    block={protectBlock}
-                    protectedQty={ladder.protectedQty > 0 ? maskMoney(String(ladder.protectedQty), privMoney) : null}
-                    background={ladder.background}
-                    unit={market === 'F' ? '口' : odd ? '股' : '張'}
-                    onChange={next => { armedRef.current = false; setArmed(false); setPanelOrder({ ...panelOrder, protect: next }); }}
-                />
-            )}
             {pos && !paused && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
@@ -1810,22 +1807,25 @@ export function FlashOrder({
                     </span>
                 </div>
             )}
-            {triggerMode && (
-                <div className={styles.triggerBanner} data-testid='flash-trigger-banner'>
-                    <Crosshair size={10} aria-hidden />
-                    <span>觸價模式：點價＝掛觸價單（不是限價），觸發後{triggerSendText(triggerSendSetting, { market, odd, mktPriceType })}送出{protect.on && !protectBlock ? '，成交後附停損停利' : ''}</span>
-                </div>
-            )}
-            <div className={styles.headRow}>
+            <div className={`${styles.headRow} ${triggerLayout === 'columns' ? styles.cols7 : ''}`}>
+                {triggerLayout === 'columns' && <span className={styles.headTrigger} title='點這一欄＝在該價掛觸價買單'>觸買</span>}
                 <span>買單</span>
-                <span className={triggerMode ? styles.headTrigger : undefined}>{triggerMode ? '觸價買' : '買量'}</span>
-                <span>價格</span>
-                <span className={triggerMode ? styles.headTrigger : undefined}>{triggerMode ? '觸價賣' : '賣量'}</span>
+                <span>買量</span>
+                <button
+                    type='button'
+                    className={styles.headPrice[follow ? 'on' : 'off']}
+                    title={follow ? '自動跟隨現價中 — 點擊固定' : '已固定 — 點擊恢復跟隨'}
+                    onClick={() => { if (follow) setFollow(false); else recenter(); }}
+                >
+                    {follow ? <LocateFixed size={10} aria-hidden /> : <Locate size={10} aria-hidden />}價格
+                </button>
+                <span>賣量</span>
                 <span>賣單</span>
+                {triggerLayout === 'columns' && <span className={styles.headTrigger} title='點這一欄＝在該價掛觸價賣單'>觸賣</span>}
             </div>
             <div
                 ref={bodyRef}
-                className={`${styles.ladderBody} ${triggerMode ? styles.ladderTrigger : ''}`}
+                className={styles.ladderBody}
                 onMouseEnter={() => {
                     hoverRef.current = true;
                 }}
@@ -1876,7 +1876,10 @@ export function FlashOrder({
                             compact={odd}
                             onCell={onCell}
                             onCancelAt={onCancelAt}
-                            triggerMode={triggerMode}
+                            layout={triggerLayout}
+                            trigBlock={triggerBlock}
+                            trigDir={trigRef === null ? null : price > trigRef + 1e-9 ? 'above' : price < trigRef - 1e-9 ? 'below' : null}
+                            trigNote={trigNote}
                             buyMarks={lm?.buy ?? NO_MARKS}
                             sellMarks={lm?.sell ?? NO_MARKS}
                             drop={drop}
@@ -1910,15 +1913,11 @@ export function FlashOrder({
             </div>
             )}
             <div className={styles.hint}>
-                {armedView && triggerMode
-                    ? '點買量／賣量=在該價掛觸價單 · 點虛線標=刪除 · 拖曳=改觸發價 · Esc 鎖定'
-                    : armedView
+                {armedView
                     ? odd
-                        ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · 點單量=刪單 · Esc 鎖定`
+                        ? `點買量=零股限價買 ${qty} 股 · 點賣量=零股限價賣 · ${trigWord} · 點單量=刪單 · Esc 鎖定`
                         : `點買量=${buyBlock ? '停用' : `${buyCredit}限價買${orderSuffix}`} · 點賣量=${sellBlock ? '停用' : `${sellCredit}限價賣${orderSuffix}`}${
-                            protect.on ? (protectBlock ? ' · 自動停損停利條件不符，進場不送' : ' · 進場附停損停利') : ''} · 點單量=刪單 · Esc 鎖定`
-                    : triggerMode
-                    ? '觸價模式 — 點「啟用閃電下單」後點價即掛觸價單 · 點虛線標=刪除'
+                            protect.on ? (protectBlock ? ' · 自動停損停利條件不符，進場不送' : ' · 進場附停損停利') : ''} · ${trigWord} · 點單量=刪單 · Esc 鎖定`
                     : '安全鎖定中 — 點「啟用閃電下單」解鎖 · 滾輪捲動 · 雙擊置中'}
             </div>
         </div>

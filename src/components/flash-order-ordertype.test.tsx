@@ -115,7 +115,7 @@ const choose = async (r: ReactTestRenderer, label: string, rerender?: () => Prom
 it('defaults look exactly like today: no tags, ROD limit clicks, IOC market, 自動', async () => {
     const r = await mount(fut);
     expect(tags(r)).toEqual([]);
-    expect(text(unitBtn(r)!)).toBe('口');
+    expect(unitBtn(r)!.props['data-unit']).toBe('口');
     await arm(r);
     await act(async () => { cell(r, 'buy').props.onClick(); });
     await act(async () => { button(r, '市價賣')!.props.onClick(); });
@@ -133,7 +133,7 @@ it('futures: 效期 IOC, 倉別 新倉 and 範圍市價 are saved on the panel, 
     await choose(r, '範圍市價', () => show(r, fut, owner.extra()));
     expect(owner.state.order).toEqual({ orderType: 'IOC', octype: 'New', futuresPriceType: 'MKP' });
     expect(tags(r)).toEqual(['IOC', '新倉', '範圍市價']);
-    expect(text(unitBtn(r)!)).toBe('口·新倉');
+    expect(unitBtn(r)!.props['data-unit']).toBe('口·新倉');
     expect(button(r, '範圍市價買')).toBeDefined();
     await arm(r);
     await act(async () => { cell(r, 'sell').props.onClick(); });

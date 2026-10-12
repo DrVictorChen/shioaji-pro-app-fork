@@ -25,9 +25,9 @@ const long2 = [{ account, id: 1, code: 'TXFR1', direction: 'Buy' as const, quant
 const protectOn: FlashOrderOpts = { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT',
     protect: { on: true, stopTicks: 4, takeTicks: 12, trail: { activateTicks: 8, distanceTicks: 4, stepTicks: 1 } } };
 
-function Panel({ title, order }: { title: string; order: FlashOrderOpts }) {
+function Panel({ title, order, width = 300 }: { title: string; order: FlashOrderOpts; width?: number }) {
     return (
-        <section style={{ width: 300, height: 820, display: 'flex', flexDirection: 'column', border: '1px solid var(--demo-border, rgba(127,127,127,.35))', borderRadius: 6, overflow: 'hidden' }}>
+        <section style={{ width, height: 820, display: 'flex', flexDirection: 'column', border: '1px solid var(--demo-border, rgba(127,127,127,.35))', borderRadius: 6, overflow: 'hidden' }}>
             <div style={{ fontSize: 11, padding: '4px 8px', opacity: 0.7 }}>{title}</div>
             <div style={{ flex: 1, minHeight: 0 }}>
                 <FlashOrder contract={txf} positions={long2} trades={[]} orderOpts={order} onOrderOptsChange={() => undefined} />
@@ -39,9 +39,9 @@ function Panel({ title, order }: { title: string; order: FlashOrderOpts }) {
 createRoot(document.getElementById('root')!).render(
     <StrictMode>
         <div style={{ display: 'flex', gap: 16, padding: 16, alignItems: 'flex-start', background: 'var(--sj-bg, transparent)' }} data-demo-root>
-            <Panel title='自動停損停利・梯形上的保護與觸價單' order={protectOn} />
-            <Panel title='觸價模式' order={protectOn} />
-            <Panel title='自動停損停利設定' order={protectOn} />
+            <Panel title='A 觸價欄（推薦）：觸買｜買單｜買量｜價格｜賣量｜賣單｜觸賣' order={protectOn} />
+            <Panel title='A 觸價欄・齒輪設定' order={protectOn} />
+            <Panel title='B Alt＋點（不加欄，窄面板）' order={{ ...protectOn, triggerLayout: 'modifier' }} width={260} />
         </div>
     </StrictMode>,
 );

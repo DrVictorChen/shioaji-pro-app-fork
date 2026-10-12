@@ -47,8 +47,11 @@ const mount = async (opts: { order?: FlashOrderOpts; net?: number } = {}) => {
     return r;
 };
 const arm = async (r: ReactTestRenderer) => { await act(async () => { button(r, '啟用閃電下單')!.props.onClick(); }); };
-const triggerMode = async (r: ReactTestRenderer) => { await act(async () => { byTestId(r, 'flash-trigger-mode')[0]!.props.onClick(); }); };
-const click = async (r: ReactTestRenderer, side: 'buy' | 'sell', price: number) => { await act(async () => { await cell(r, side, price).props.onClick(); }); };
+// the outer 觸買／觸賣 columns, top to bottom like the cells
+const trig = async (r: ReactTestRenderer, side: 'buy' | 'sell', price: number) => {
+    await act(async () => { await r.root.findAll(n => n.type === 'div' && n.props['data-trigger'] === side)[110 - price]!.props.onClick(); });
+};
+const click = async (r: ReactTestRenderer, side: 'buy' | 'sell', price: number) => { await act(async () => { await cell(r, side, price).props.onClick({ altKey: false }); }); };
 const PROTECT: FlashOrderOpts = { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT', protect: { on: true, stopTicks: 8, takeTicks: 16, trail: null } };
 
 beforeEach(() => {
@@ -73,14 +76,16 @@ beforeEach(() => {
 });
 afterEach(async () => { for (const r of roots.splice(0)) await act(async () => r.unmount()); vi.unstubAllGlobals(); });
 
-it('觸價模式: a click above the traded price places a buy stop entry there, not a limit order', async () => {
+it('both at once: the 觸買 column places a buy stop entry, the 買量 cell next to it a limit order', async () => {
     const r = await mount();
     await arm(r);
-    await triggerMode(r);
-    expect(byTestId(r, 'flash-trigger-banner')).toHaveLength(1);
-    expect(text(r.root)).toContain('觸價買');
-    expect(text(r.root)).toContain('點價即掛觸價');
-    await click(r, 'buy', 105);
+    expect(text(r.root)).toContain('觸買');
+    expect(text(r.root)).toContain('觸賣');
+    // hover preview / title says exactly what goes out
+    const col = r.root.findAll(n => n.type === 'div' && n.props['data-trigger'] === 'buy')[5]!;
+    expect(col.props['data-preview']).toBe('觸≥');
+    expect(col.props.title).toBe('觸價買：成交價 ≥ 105.00 時市價買進（不是限價）');
+    await trig(r, 'buy', 105);
     expect(m.place).not.toHaveBeenCalled();
     const [t, contract, account] = m.add.mock.calls[0]!;
     expect(t).toMatchObject({ code: 'TXFR1', condition: 'above', price: 105, action: 'Buy', quantity: 1, kind: 'stop', role: 'entry',
@@ -89,16 +94,19 @@ it('觸價模式: a click above the traded price places a buy stop entry there, 
     expect(t.send).toBeUndefined();
     expect(contract).toBe(fut);
     expect(account).toBe(accounts[0]);
+    // no mode: the limit cell still sends a limit order
+    await click(r, 'buy', 99);
+    expect(m.place.mock.calls[0]!.slice(1, 3)).toEqual(['Buy', 99]);
+    expect(m.add).toHaveBeenCalledTimes(1);
 });
 
 it('opposite and within the position: a protective stop that closes (Cover, no entry role); at the traded price nothing', async () => {
     const r = await mount({ net: 3 });
     await arm(r);
-    await triggerMode(r);
-    await click(r, 'sell', 95);
+    await trig(r, 'sell', 95);
     expect(m.add.mock.calls[0]![0]).toMatchObject({ condition: 'below', price: 95, action: 'Sell', kind: 'stop', octype: 'Cover' });
     expect(m.add.mock.calls[0]![0].role).toBeUndefined();
-    await click(r, 'sell', 100);
+    await trig(r, 'sell', 100);
     expect(m.add).toHaveBeenCalledTimes(1);
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ title: '⚡ 觸價單未建立', body: expect.stringContaining('立刻觸發') }));
 });
@@ -106,20 +114,28 @@ it('opposite and within the position: a protective stop that closes (Cover, no e
 it('a limit send style goes out toward a fill (sell −N ticks)', async () => {
     const r = await mount({ order: { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT', triggerSend: { type: 'LMT', ticks: 2 } } });
     await arm(r);
-    await triggerMode(r);
-    await click(r, 'sell', 97);
+    await trig(r, 'sell', 97);
     expect(m.add.mock.calls[0]![0]).toMatchObject({ condition: 'below', send: { type: 'LMT', ticks: -2 }, role: 'entry' });
 });
 
-it('locking turns 觸價模式 off; it needs the ladder armed to place anything', async () => {
+it('nothing is placed while locked; the Alt＋點 layout keeps 5 columns and needs Alt for a trigger', async () => {
     const r = await mount();
-    await triggerMode(r);
-    await click(r, 'buy', 105);
+    await trig(r, 'buy', 105);
+    await click(r, 'buy', 99);
     expect(m.add).not.toHaveBeenCalled();
-    await arm(r);
-    await act(async () => { button(r, '點價即')!.props.onClick(); }); // lock
-    expect(byTestId(r, 'flash-trigger-banner')).toHaveLength(0);
-    expect(text(r.root)).toContain('買量');
+    expect(m.place).not.toHaveBeenCalled();
+
+    const alt = await mount({ order: { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT', triggerLayout: 'modifier' } });
+    expect(alt.root.findAll(n => n.type === 'div' && n.props['data-trigger'])).toHaveLength(0);
+    expect(text(alt.root)).not.toContain('觸買');
+    await arm(alt);
+    expect(cell(alt, 'buy', 105).props.title).toContain('Alt＋點＝觸價買（成交價 ≥ 105.00）');
+    await act(async () => { await cell(alt, 'buy', 105).props.onClick({ altKey: true }); });
+    expect(m.add.mock.calls[0]![0]).toMatchObject({ condition: 'above', price: 105, action: 'Buy' });
+    expect(m.place).not.toHaveBeenCalled();
+    await act(async () => { await cell(alt, 'buy', 99).props.onClick({ altKey: false }); });
+    expect(m.place).toHaveBeenCalledTimes(1);
+    expect(m.add).toHaveBeenCalledTimes(1);
 });
 
 it('a pending trigger on the ladder: click deletes it, drag moves it, never across the traded price', async () => {
@@ -162,14 +178,15 @@ it('protection marks show on the exit side and are not editable from the ladder'
     m.background = true;
     const r = await mount({ order: PROTECT, net: 3 });
     expect(text(byTestId(r, 'flash-stop-mark')[0]!)).toBe('損3');
-    expect(text(byTestId(r, 'flash-protect')[0]!)).toContain('保護中 3 口');
-    expect(text(byTestId(r, 'flash-protect')[0]!)).toContain('背景執行');
+    expect(text(byTestId(r, 'flash-protect')[0]!)).toBe('停損停利・保護 3');
+    expect(byTestId(r, 'flash-protect')[0]!.props.title).toContain('保護中 3 口');
+    expect(byTestId(r, 'flash-protect')[0]!.props.title).toContain('由背景執行');
 });
 
 it('自動停損停利: a limit click goes through the panel bracket with the panel conditions and a confirmation note', async () => {
     m.background = true;
     const r = await mount({ order: PROTECT });
-    expect(text(byTestId(r, 'flash-protect')[0]!)).toContain('損 8・利 16 檔');
+    expect(byTestId(r, 'flash-protect')[0]!.props.title).toContain('損 8・利 16 檔');
     await arm(r);
     await click(r, 'buy', 99);
     expect(m.place).not.toHaveBeenCalled();
@@ -199,7 +216,7 @@ it('自動停損停利: reducing is sent plainly, reversing is not sent, an unsu
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('反手') }));
 
     const cover = await mount({ order: { ...PROTECT, octype: 'Cover' } });
-    expect(text(byTestId(cover, 'flash-protect')[0]!)).toContain('新倉');
+    expect(byTestId(cover, 'flash-protect')[0]!.props.title).toContain('新倉');
     await arm(cover);
     await click(cover, 'buy', 99);
     expect(m.bracket).not.toHaveBeenCalled();
@@ -239,14 +256,13 @@ it('a failed deletion is never announced as deleted', async () => {
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', title: '⚡ 觸價單刪除未確認' }));
 });
 
-it('自動停損停利 + 觸價模式: a trigger entry that brackets its fill', async () => {
+it('自動停損停利 + 觸價欄: a trigger entry that brackets its fill', async () => {
     m.bracket.mockResolvedValue('trigger');
     m.background = true;
     const r = await mount({ order: PROTECT });
     await arm(r);
-    await triggerMode(r);
-    expect(text(byTestId(r, 'flash-trigger-banner')[0]!)).toContain('成交後附停損停利');
-    await click(r, 'buy', 104);
+    expect(r.root.findAll(n => n.type === 'div' && n.props['data-trigger'] === 'buy')[6]!.props.title).toContain('附停損停利');
+    await trig(r, 'buy', 104);
     expect(m.add).not.toHaveBeenCalled();
     expect(m.bracket.mock.calls[0]![0]).toMatchObject({ action: 'Buy', refPrice: 104,
         entry: { type: 'touch', price: 104, condition: 'above', send: { type: 'MKT' }, validity: { type: 'today' } } });
@@ -323,4 +339,24 @@ it('全刪 cancels the working orders and ends the 停損停利; enabled by prot
     m.protectedQty = 0;
     const q = await mount({ order: PROTECT, net: 2 });
     expect(button(q, '全刪')!.props.disabled).toBe(true);
+});
+
+it('the gear holds the settings: 觸價點法 is saved on the panel; the protect editor opens from it', async () => {
+    const onChange = vi.fn();
+    let r!: ReactTestRenderer;
+    await act(async () => {
+        r = create(createElement(FlashOrder, { contract: fut, trades: [], positions: [], orderOpts: PROTECT, onOrderOptsChange: onChange }),
+            { createNodeMock: () => ({ getBoundingClientRect: () => ({ top: 0 }), clientHeight: 462, addEventListener() {}, removeEventListener() {} }) });
+    });
+    roots.push(r);
+    // the fast-trading top: no 觸價 mode button, no 跟隨／置中 buttons, a gear
+    expect(byTestId(r, 'flash-trigger-mode')).toHaveLength(0);
+    expect(byTestId(r, 'flash-settings')).toHaveLength(1);
+    await act(async () => { byTestId(r, 'flash-settings')[0]!.props.onClick(); });
+    const item = (label: string) => r.root.findAll(n => n.type === 'button' && text(n).startsWith(label))[0]!;
+    await act(async () => { item('Alt＋點').props.onClick(); });
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ triggerLayout: 'modifier' }));
+    await act(async () => { byTestId(r, 'flash-settings')[0]!.props.onClick(); });
+    await act(async () => { item('自動停損停利').props.onClick(); });
+    expect(r.root.findAll(n => n.props.role === 'dialog' && n.props['aria-label'] === '自動停損停利設定')).toHaveLength(1);
 });

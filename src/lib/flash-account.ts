@@ -95,6 +95,8 @@ export interface FlashOrderOpts {
     protect?: FlashProtect;
     /** #216 觸價單觸發後的送出方式 (absent: 市價) */
     triggerSend?: FlashTriggerSend;
+    /** #216 how triggers are placed: outer 觸買／觸賣 columns (absent) or Alt＋點 */
+    triggerLayout?: 'columns' | 'modifier';
 }
 export const DEFAULT_ORDER_OPTS: FlashOrderOpts = { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT' };
 
@@ -108,6 +110,7 @@ export function normalizeFlashOrderOpts(v: unknown): FlashOrderOpts | undefined 
         futuresPriceType: o.futuresPriceType === 'MKP' ? 'MKP' : 'MKT',
         ...(normalizeFlashProtect(o.protect) ? { protect: normalizeFlashProtect(o.protect) } : {}),
         ...(normalizeTriggerSend(o.triggerSend) ? { triggerSend: normalizeTriggerSend(o.triggerSend) } : {}),
+        ...(o.triggerLayout === 'modifier' ? { triggerLayout: 'modifier' as const } : {}),
     };
 }
 
