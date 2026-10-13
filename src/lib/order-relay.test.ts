@@ -33,11 +33,34 @@ describe('createRelayHost (main window)', () => {
     const host = (post = vi.fn(async () => ({ status: 200, body: '{"ok":1}' })), env = ENV) => ({
         post, run: createRelayHost({ env: () => env, now: () => NOW, accounts: async () => [A], post }),
     });
-    it('sends once; the same id again is refused, never sent twice', async () => {
+    it('sends once to exactly the approved server; the same id again (any envelope) gets the same answer, never a second send', async () => {
         const h = host();
         expect(await h.run({ op: 'post', req: req() })).toEqual({ ok: { status: 200, body: '{"ok":1}' } });
-        expect(await h.run({ op: 'post', req: req() })).toEqual({ notStarted: expect.stringContaining('已處理過') });
+        expect(await h.run({ op: 'post', req: req() })).toEqual({ ok: { status: 200, body: '{"ok":1}' } });
         expect(h.post).toHaveBeenCalledTimes(1);
+        expect(h.post).toHaveBeenCalledWith('/api/v1/order/place_order', body, ENV);
+    });
+
+    it('a replay while the first send is still out waits for that answer — never "not sent"', async () => {
+        let release!: (v: { status: number; body: string }) => void;
+        const post = vi.fn(() => new Promise<{ status: number; body: string }>(r => { release = r; }));
+        const run = createRelayHost({ env: () => ENV, now: () => NOW, accounts: async () => [A], post });
+        const first = run({ op: 'post', req: req() });
+        await Promise.resolve(); await Promise.resolve();
+        const replay = run({ op: 'post', req: req() });
+        release({ status: 200, body: '{}' });
+        expect(await replay).toEqual({ ok: { status: 200, body: '{}' } });
+        expect(await first).toEqual({ ok: { status: 200, body: '{}' } });
+        expect(post).toHaveBeenCalledTimes(1);
+    });
+
+    it('the server / mode changes while the main window reads its accounts: not sent', async () => {
+        let env = ENV;
+        const post = vi.fn();
+        const run = createRelayHost({ env: () => env, now: () => NOW, post,
+            accounts: async () => { env = 'http://127.0.0.1:21323|simulation'; return [A]; } });
+        expect(await run({ op: 'post', req: req() })).toEqual({ notStarted: expect.stringContaining('模擬／正式') });
+        expect(post).not.toHaveBeenCalled();
     });
     it('a server / mode change since the popout approved it: not sent', async () => {
         const h = host(undefined, 'http://127.0.0.1:21322|production');
@@ -61,6 +84,17 @@ describe('relayThroughMain (popout)', () => {
         const e = await relayThroughMain({ send } as never, '/api/v1/order/place_order', body, { env: ENV }).catch(x => x);
         expect(flags(e)).toEqual({ notStarted: true, unknown: false, message: RELAY_NO_MAIN });
         expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('the caller\'s checks run after the ping, right before the order leaves; a refusal there sends nothing', async () => {
+        const order: string[] = [];
+        const send = vi.fn(async (cmd: { op: string }) => { order.push(cmd.op); return cmd.op === 'ping' ? 'pong' : { ok: { status: 200, body: '{}' } }; });
+        await relayThroughMain({ send } as never, '/p', body, { env: ENV, beforeSend: () => order.push('check') });
+        expect(order).toEqual(['ping', 'check', 'post']);
+        const refused = vi.fn(async (cmd: { op: string }) => (cmd.op === 'ping' ? 'pong' : { ok: { status: 200, body: '{}' } }));
+        const e = await relayThroughMain({ send: refused } as never, '/p', body, { env: ENV, beforeSend: () => { throw new Error('帳戶已變更'); } }).catch(x => x);
+        expect(flags(e)).toMatchObject({ notStarted: true, message: '帳戶已變更' });
+        expect(refused).toHaveBeenCalledTimes(1);
     });
 
     it('no answer to the order in time: outcome unknown, sent once, never resent', async () => {

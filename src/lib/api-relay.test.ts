@@ -17,20 +17,20 @@ beforeEach(() => { m.invoke.mockReset(); m.relay.mockReset(); });
 
 it('the exact request goes to the main window; its answer is the response', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    m.relay.mockResolvedValue({ status: 200, body: '{"trade_id":"t-1"}' });
+    m.relay.mockImplementation(async (_p: string, _b: string, beforeSend: () => void) => { beforeSend(); return { status: 200, body: '{"trade_id":"t-1"}' }; });
     const before = vi.fn();
     await expect(apiPost('/api/v1/order/place_order', { code: '2330', quantity: 1 }, { beforeDispatch: before })).resolves.toEqual({ trade_id: 't-1' });
-    expect(m.relay).toHaveBeenCalledWith('/api/v1/order/place_order', '{"code":"2330","quantity":1}');
+    expect(m.relay).toHaveBeenCalledWith('/api/v1/order/place_order', '{"code":"2330","quantity":1}', expect.any(Function));
     expect(before).toHaveBeenCalledTimes(1);
     expect(m.invoke).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
 });
 
-it('refused by the caller right before relaying: nothing goes to the main window', async () => {
+it('the caller\'s last check is handed to the relay (it runs after the main window answered)', async () => {
+    m.relay.mockImplementation(async (_p: string, _b: string, beforeSend: () => void) => { beforeSend(); return { status: 200, body: '{}' }; });
     await expect(apiPost('/api/v1/order/cancel_order', { trade_id: 't' }, { beforeDispatch: () => { throw Object.assign(new Error('帳戶已變更'), { mutationNotStarted: true }); } }))
         .rejects.toThrow('帳戶已變更');
-    expect(m.relay).not.toHaveBeenCalled();
 });
 
 it('relay errors keep their meaning (not sent / outcome unknown)', async () => {

@@ -11,7 +11,7 @@
 // (#249: 結果不確定), never "not sent". The main window not answering a
 // ping first → nothing was sent.
 
-import { createCommandBus, isMainWindow, type CommandBus } from './main-window-commands';
+import { createCommandBus, isExecutor, isMainWindow, type CommandBus } from './main-window-commands';
 import { getApiBase } from './runtime';
 import { knownServerInfo } from './server-info-store';
 
@@ -103,29 +103,43 @@ export interface RelayHostDeps {
     env: () => string | null;
     now: () => number;
     accounts: () => Promise<readonly AccountRef[]>;
-    /** the main window's signed send; throws `notStarted` errors when nothing left */
-    post: (path: string, body: string) => Promise<RelayReply>;
+    /** the main window's signed send to exactly `env`'s server; it must
+     * re-check the environment right before sending and throw a
+     * `mutationNotStarted` error when nothing left */
+    post: (path: string, body: string, env: string) => Promise<RelayReply>;
 }
 
-/** The main window's side: check, remember the id, send once. */
+/** The main window's side: check, remember the id, send once. A request id
+ * seen before gets the SAME answer (pending or settled) — never a second send,
+ * and never a "not sent" for an order that may be out. */
 export function createRelayHost(deps: RelayHostDeps) {
-    const used = new Map<string, number>();
-    const forget = (now: number) => { for (const [id, at] of used) if (now - at > 10 * 60_000) used.delete(id); };
-    return async (cmd: Cmd): Promise<RelayAnswer | 'pong'> => {
-        if (cmd.op === 'ping') return 'pong';
-        const now = deps.now();
-        forget(now);
-        const problem = relayProblem(cmd.req, { env: deps.env(), now, seen: id => used.has(id), accounts: await deps.accounts() });
+    const answers = new Map<string, { at: number; answer: Promise<RelayAnswer> }>();
+    const forget = (now: number) => { for (const [id, a] of answers) if (now - a.at > 10 * 60_000) answers.delete(id); };
+    const decide = async (req: RelayRequest, received: number): Promise<RelayAnswer> => {
+        // every check against one moment: the environment is re-read after
+        // the async account read and the age is measured from the receipt
+        const problem = relayProblem(req, { env: deps.env(), now: received, seen: () => false, accounts: await deps.accounts() })
+            ?? (deps.env() !== req.env ? '主視窗的伺服器或模擬／正式模式與彈出視窗確認時不同' : null)
+            ?? (deps.now() - received > 5_000 ? '主視窗忙碌，請求已逾時' : null);
         if (problem) return { notStarted: problem };
-        // checked again after the async account read: still unused
-        if (used.has(cmd.req.id)) return { notStarted: '這筆請求已處理過，不會再送一次' };
-        used.set(cmd.req.id, now);
         try {
-            return { ok: await deps.post(cmd.req.path, cmd.req.body) };
+            return { ok: await deps.post(req.path, req.body, req.env) };
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             return (e as { mutationNotStarted?: boolean } | null)?.mutationNotStarted ? { notStarted: message } : { unknown: message };
         }
+    };
+    return async (cmd: Cmd): Promise<RelayAnswer | 'pong'> => {
+        if (cmd.op === 'ping') return 'pong';
+        const now = deps.now();
+        forget(now);
+        const req = cmd.req;
+        if (!req || typeof req.id !== 'string' || !req.id) return { notStarted: '代送請求格式不正確' };
+        const seen = answers.get(req.id);
+        if (seen) return seen.answer;
+        const answer = decide(req, now);
+        answers.set(req.id, { at: now, answer });
+        return answer;
     };
 }
 
@@ -139,14 +153,19 @@ export const RELAY_NO_ANSWER = '主視窗沒有回覆送單結果，委託結果
 const newId = () => typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 /** The popout's side: ping first (no main → not sent), then one request. */
-export async function relayThroughMain(bus: Pick<CommandBus<Cmd>, 'send'>, path: string, body: string, opts: { env?: string | null; now?: () => number } = {}): Promise<RelayReply> {
-    const env = opts.env === undefined ? relayEnv() : opts.env;
+export async function relayThroughMain(bus: Pick<CommandBus<Cmd>, 'send'>, path: string, body: string,
+    opts: { env?: string | null; now?: () => number; beforeSend?: () => void } = {}): Promise<RelayReply> {
+    const envNow = () => (opts.env === undefined ? relayEnv() : opts.env);
+    const env = envNow();
     if (!env) throw notStarted('伺服器模式（模擬／正式）尚未確認，這筆沒有送出');
     try {
         if (await bus.send({ op: 'ping' }, RELAY_PING_MS) !== 'pong') throw new Error('no pong');
     } catch {
         throw notStarted(RELAY_NO_MAIN);
     }
+    // the caller's last checks (account, product, server) right before it leaves
+    if (envNow() !== env) throw notStarted('伺服器或模擬／正式模式已切換，這筆沒有送出');
+    try { opts.beforeSend?.(); } catch (e) { throw notStarted(e instanceof Error ? e.message : String(e)); }
     const req: RelayRequest = { v: 1, id: newId(), path, body, env, issuedAt: (opts.now ?? Date.now)() };
     let answer: RelayAnswer;
     try {
@@ -174,10 +193,13 @@ export function startOrderRelay(): CommandBus<Cmd> {
             const [{ getAccountState }, { canTrade }] = await Promise.all([import('./account-store'), import('./account-tradable')]);
             return getAccountState().accounts.filter(canTrade);
         },
-        post: async (path, body) => {
+        post: async (path, body, env) => {
             const { invoke } = await import('@tauri-apps/api/core');
+            // exactly the server the popout approved it for
+            if (relayEnv() !== env) throw notStarted('主視窗的伺服器或模擬／正式模式已切換');
+            const apiBase = env.slice(0, env.lastIndexOf('|'));
             try {
-                return await invoke<RelayReply>('agent_harness_post', { url: getApiBase() + path, body, agentInitiated: false });
+                return await invoke<RelayReply>('agent_harness_post', { url: apiBase + path, body, agentInitiated: false });
             } catch (error) {
                 const message = String(error);
                 const marker = 'AGENT_MUTATION_NOT_STARTED:';
@@ -186,11 +208,12 @@ export function startOrderRelay(): CommandBus<Cmd> {
             }
         },
     });
-    bus = createCommandBus<Cmd, null>({ channel, main: isMainWindow, handle: host, snapshot: () => null, timeoutMs: RELAY_TIMEOUT_MS });
+    // only the executing main window answers (one sender even with two main tabs)
+    bus = createCommandBus<Cmd, null>({ channel, main: () => isMainWindow() && isExecutor(), handle: host, snapshot: () => null, timeoutMs: RELAY_TIMEOUT_MS });
     return bus;
 }
 
 /** A popout's request, sent by the main window. */
-export function relayOrder(path: string, body: string): Promise<RelayReply> {
-    return relayThroughMain(startOrderRelay(), path, body);
+export function relayOrder(path: string, body: string, beforeSend?: () => void): Promise<RelayReply> {
+    return relayThroughMain(startOrderRelay(), path, body, { beforeSend });
 }

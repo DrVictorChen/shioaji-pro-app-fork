@@ -333,8 +333,8 @@ export async function apiPost<T>(
             if (opts?.agentInitiated) {
                 throw Object.assign(new Error('這個操作只能在主視窗執行，這筆沒有送出'), { mutationNotStarted: true });
             }
-            beforeDispatch();
-            proxied = await relayOrder(path, bodyText);
+            // the caller's checks run after the main window answered the ping, right before it leaves
+            proxied = await relayOrder(path, bodyText, beforeDispatch);
             return finishProxied<T>(proxied, path, opts?.onResponse);
         }
         const { invoke } = await import('@tauri-apps/api/core');
