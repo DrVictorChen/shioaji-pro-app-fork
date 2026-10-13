@@ -93,7 +93,7 @@
 - 背景持續執行為實驗功能，預設關閉；開啟前請先在模擬環境熟悉操作。
 - 本版截圖以示範資料在隱私模式下畫出（帳號與金額遮蔽），不是盤中真實行情。
 - 以下尚未驗證：Linux 實機、正式環境下單與回報。App 與 SDK 長時間共存（#57、#75）持續追蹤。
-- 內建 Shioaji 為 1.7.8；本版 private runtime pin 為 `b015da90de63aacf25cce97960555d3201b96ca8`。
+- 內建 Shioaji 為 1.7.8；本版 private runtime pin 為 `713cbe7df9a6759a2cb651fb063ef250a47a2efe`。
 
 ---
 
