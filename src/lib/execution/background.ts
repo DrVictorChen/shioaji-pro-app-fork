@@ -364,6 +364,24 @@ export async function createBackgroundBracket(request: CreateBracketRequest): Pr
     }
 }
 
+/** #226 修改 a bracket whose 觸價 entry did not fire yet: the engine builds
+ * the new one from `request` and replaces it in one step. */
+export async function replaceBackgroundBracket(programId: string, request: CreateBracketRequest): Promise<'replaced' | { refused: string } | { unconfirmed: string }> {
+    if (!isTauri) return { refused: '背景持續執行僅限桌面版' };
+    try {
+        const reply = await invoke<CommandReply>(BRACKET_COMMAND.replace, { programId, request });
+        await refreshBackground();
+        if (!reply.accepted) return { refused: rejection(reply) };
+        return 'replaced';
+    } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        await settled();
+        if (programs.some(p => p.id === request.id)) return 'replaced';
+        if (programs.some(p => p.id === programId)) return { refused: why };
+        return { unconfirmed: why };
+    }
+}
+
 /** 「我已自行處理」: the engine stops tracking; nothing is sent or cancelled. */
 export async function markBackgroundHandled(programId: string, levelId?: string): Promise<void> {
     await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null });
@@ -550,7 +568,10 @@ export function startBackgroundExecution(): void {
         if (main) {
             void listen<Notice[]>('execution://notice', e => {
                 for (const n of e.payload ?? []) {
-                    const bracket = programs.find(p => p.id === n.programId)?.kind === 'bracket'
+                    const owner = programs.find(p => p.id === n.programId);
+                    // a panel bracket's entry level (its 觸價 entry) is no exit
+                    const entryLevel = !!owner && owner.levels.some(lv => lv.id === n.levelId && lv.exit === null);
+                    const bracket = (owner?.kind === 'bracket' && !entryLevel)
                         || n.code.startsWith('bracket.') || n.code === 'protectedAgain';
                     const title = bracket ? (BRACKET_NOTICE_TEXT[n.code] ?? BRACKET_FIRED_TEXT[n.code]) : NOTICE_TEXT[n.code];
                     if (title) notify({ kind: INFO_NOTICES.has(n.code) ? 'info' : 'err', title, body: n.detail });

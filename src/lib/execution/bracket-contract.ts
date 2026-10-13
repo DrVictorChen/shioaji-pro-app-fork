@@ -46,7 +46,7 @@
 // with `bracketViews`. Event `execution://changed` → re-read;
 // `execution://notice` → BracketNoticeCode notices.
 
-import type { AccountKey, Binding, BracketPolicy, Level, OrderProgram, OrderSlot } from './model';
+import type { AccountKey, Binding, BracketPolicy, Feed, Level, OrderProgram, OrderSlot, OrderSpec, TickBand, Validity } from './model';
 
 export type { BracketPolicy } from './model';
 
@@ -56,6 +56,9 @@ export const BRACKET_CONTRACT_VERSION = 2 as const;
 
 export const BRACKET_COMMAND = {
     create: 'execution_create_bracket',
+    /** v3: ({ programId, request }) -> CommandReply: a bracket whose 觸價
+     * entry did not fire yet becomes the one `request` builds (one step). */
+    replace: 'execution_replace_bracket',
     markHandled: 'execution_mark_handled',
     rearm: 'execution_rearm_bracket',
     pause: 'execution_pause',
@@ -116,11 +119,22 @@ export interface CreateBracketRequest {
     stop: number | null;
     take: number | null;
     /** The entry order: trade id (`order.id`), seqno / ordno when known
-     * (ordno may come later with the New report). */
-    entry: { tradeId: string; seqno: string | null; ordno: string | null;
+     * (ordno may come later with the New report). Exactly one of `entry` /
+     * `trigger`. */
+    entry?: { tradeId: string; seqno: string | null; ordno: string | null;
         /** ms epoch the entry was sent: an entry of another trading session
          * than now is refused (orders do not cross sessions). */
         sentAt: number };
+    /** v3 (#226 面板): a 觸價 entry the engine fires itself — it opens a
+     * position, so the App's risk checks apply when it is sent. */
+    trigger?: { condition: 'below' | 'above'; price: number; order: OrderSpec; cross?: boolean; feed?: Feed;
+        limitTicks?: number; validity?: Validity };
+    /** v3: tiers priced from the actual fill price (then stop / take null). */
+    plan?: { tiers: { quantity: number; takeTicks: number | null }[]; stopTicks: number;
+        trail: { activateTicks: number; distanceTicks: number; stepTicks: number } | null;
+        breakeven: { afterTier: number; offsetTicks: number } | null };
+    /** v3: the contract's tick table the plan is priced with. */
+    tickTable?: TickBand[];
 }
 
 export interface RearmBracketRequest {
@@ -221,6 +235,12 @@ export interface BracketView {
     detail: string | null;
     createdAt: number;
     updatedAt: number;
+    /** v3 (#226) a panel bracket's tier: which of how many, its rules in
+     * ticks, whether it is priced yet and its 移動停損 runs. */
+    tier?: { index: number; count: number } | null;
+    rules?: { stopTicks: number; takeTicks: number | null; trail: boolean } | null;
+    priced?: boolean;
+    trailActive?: boolean;
 }
 
 const leaving = (lv: Level) => lv.orders.some(o => o.status === 'pendingSubmit');
@@ -255,13 +275,27 @@ export function bracketFinished(p: OrderProgram): boolean {
 
 const envKey = (b: Binding) => `${b.serverId}|${b.env}`;
 
+/** #226 a bracket's entry level whose 觸價 did not fire yet: shown as a
+ * trigger (see background-view), its tiers not yet as brackets. */
+export function bracketEntryWaiting(p: OrderProgram): Level | null {
+    const e = p.levels.find(lv => lv.exit === null && lv.entry.type === 'touch');
+    if (!e || !p.levels.some(lv => lv.entry.type === 'tier')) return null;
+    return e.orders.length === 0 && (e.phase === 'idle' || e.phase === 'needsConfirm') ? e : null;
+}
+
 /** The views of every background bracket (kind `bracket`). */
 export function bracketViews(programs: readonly OrderProgram[]): BracketView[] {
     const out: BracketView[] = [];
     for (const p of programs) {
         if (p.kind !== 'bracket') continue;
+        // a 觸價 entry not fired yet is a trigger row, not a bracket yet
+        if (bracketEntryWaiting(p) && p.status !== 'stopped') continue;
         const finished = bracketFinished(p);
+        const tiers = p.levels.filter(l => l.entry.type === 'tier').length;
         for (const lv of p.levels) {
+            // a panel bracket's entry level protects nothing itself (it shows
+            // only lots it holds unprotected: a fill of another session)
+            if (lv.exit === null && lv.unprotected <= 0 && (lv.anomalous ?? 0) <= 0) continue;
             const exitSpec = lv.exit?.type === 'oco' ? lv.exit : null;
             const exits = lv.orders.filter(o => o.role === 'exit' && o.cycle === lv.cycles);
             const last = exits[exits.length - 1];
@@ -303,6 +337,10 @@ export function bracketViews(programs: readonly OrderProgram[]): BracketView[] {
                 detail: lv.detail,
                 createdAt: p.createdAt,
                 updatedAt: p.updatedAt,
+                tier: lv.entry.type === 'tier' ? { index: lv.entry.index, count: tiers } : null,
+                rules: lv.rules ? { stopTicks: lv.rules.stopTicks, takeTicks: lv.rules.takeTicks, trail: !!lv.rules.trail } : null,
+                priced: lv.base !== undefined,
+                trailActive: !!lv.trail?.active,
             });
         }
     }
