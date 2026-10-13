@@ -56,7 +56,9 @@ export async function flashStopProtections(scope: Omit<ProtectionScope, 'env'>):
         try { await dismissBracket(id); stopped += 1; } catch (e) { failed.push(e instanceof Error ? e.message : String(e)); }
     }
     for (const b of t.background) {
-        try { await bg.markBackgroundHandled(b.programId, b.levelId); stopped += 1; } catch (e) { failed.push(`背景執行：${e instanceof Error ? e.message : String(e)}`); }
+        const handledScope = { account: { accountType: scope.account.account_type, brokerId: scope.account.broker_id, accountId: scope.account.account_id },
+            codes: [...scope.codes] };
+        try { await bg.markBackgroundHandled(b.programId, b.levelId, handledScope); stopped += 1; } catch (e) { failed.push(`背景執行：${e instanceof Error ? e.message : String(e)}`); }
     }
     // read back: a protection may have fired while it was being ended — its
     // exit is then out (never close on top of it), or it is still tracked

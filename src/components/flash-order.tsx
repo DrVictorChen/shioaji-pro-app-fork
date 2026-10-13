@@ -28,7 +28,6 @@ import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, fla
 import type { TriggerValidity } from '../lib/trigger-engine';
 import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger, flashStopProtections } from '../lib/flash-conditional';
 import { FlashProtectStrip } from './flash-protect';
-import { popoutTradingBlocked } from '../lib/popout-trading';
 import {
     type ReactNode,
     memo,
@@ -1051,7 +1050,6 @@ export function FlashOrder({
     const trigNoteBuy = trigNoteFor('Buy');
     const trigNoteSell = trigNoteFor('Sell');
     const trigNote = useMemo(() => ({ buy: trigNoteBuy, sell: trigNoteSell }), [trigNoteBuy, trigNoteSell]);
-    const viewOnly = popoutTradingBlocked();
     const trigWord = triggerBlock ? '觸價停用（信用條件）' : triggerLayout === 'columns' ? '點觸買／觸賣=觸價單' : 'Alt＋點=觸價單';
     const openProtectRef = useRef<(() => void) | null>(null);
     const ladderBackgroundRef = useRef(ladder.background);
@@ -1322,8 +1320,6 @@ export function FlashOrder({
     const markKey = (g: MarkGroup) => `${g.side}:${keyOf(g.price)}`;
     const onMarkClick = useCallback((g: MarkGroup) => {
         if (dragEnded.current === markKey(g)) { dragEnded.current = null; return; }
-        const blocked = popoutTradingBlocked();
-        if (blocked) { notify({ kind: 'err', title: '⚡ 觸價單未刪除', body: blocked }); return; }
         void cancelMarks(g);
     }, [cancelMarks]);
     const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -1393,8 +1389,6 @@ export function FlashOrder({
     const cancelAt = useCallback(async (action: Action, price: number) => {
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
-        const viewOnlyNow = popoutTradingBlocked();
-        if (viewOnlyNow) { notify({ kind: 'err', title: '⚡ 刪單未送出', body: viewOnlyNow }); return; }
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
@@ -1428,8 +1422,6 @@ export function FlashOrder({
     const cancelSymbol = useCallback(async () => {
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
-        const viewOnlyNow = popoutTradingBlocked();
-        if (viewOnlyNow) { notify({ kind: 'err', title: '⚡ 全刪未送出', body: viewOnlyNow }); return; }
         const code = contractRef.current.code;
         // the context is fixed at the click: a product switched meanwhile cancels nothing of it
         const guard = cancelGuard();
@@ -1742,14 +1734,11 @@ export function FlashOrder({
                 <span className={styles.rowBreak} aria-hidden />
                 <button
                     className={styles.armBtn[armedView ? 'on' : 'off']}
-                    disabled={!live || !activeAccount || !!paused || !!viewOnly}
-                    title={viewOnly ?? undefined}
+                    disabled={!live || !activeAccount || !!paused}
                     onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed(!armedView); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
-                    ) : viewOnly ? (
-                        '彈出視窗僅供檢視'
                     ) : armedView ? (
                         <>
                             <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
@@ -1764,18 +1753,18 @@ export function FlashOrder({
                 <button
                     className={`${styles.mktBtn.buy} ${armedView && !odd && !buyBlock ? '' : styles.disabledCell}`}
                     // 可否融資券的 0 只讓按鈕變淡、仍可點（點下去會重新查）；固定規則才停用
-                    disabled={odd || !!ruleBlockRef.current.Buy || !!viewOnly}
+                    disabled={odd || !!ruleBlockRef.current.Buy}
                     data-blocked={buyBlock ? true : undefined}
-                    title={viewOnly ?? (odd ? ODD_LOT_TEXT.priceType : buyBlock ?? undefined)}
+                    title={odd ? ODD_LOT_TEXT.priceType : buyBlock ?? undefined}
                     onClick={() => void send('Buy', null)}
                 >
                     {mktLabel}{buyCredit}買
                 </button>
                 <button
                     className={`${styles.mktBtn.sell} ${armedView && !odd && !sellBlock ? '' : styles.disabledCell}`}
-                    disabled={odd || !!ruleBlockRef.current.Sell || !!viewOnly}
+                    disabled={odd || !!ruleBlockRef.current.Sell}
                     data-blocked={sellBlock ? true : undefined}
-                    title={viewOnly ?? (odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined)}
+                    title={odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined}
                     onClick={() => void send('Sell', null)}
                 >
                     {mktLabel}{sellCredit}賣
@@ -1783,12 +1772,12 @@ export function FlashOrder({
                 {pos && !paused && (
                     <button
                         className={`${styles.flatBtn} ${armedView ? '' : styles.disabledCell}`}
-                        title={viewOnly ?? (pos.safeExit
+                        title={pos.safeExit
                             ? market === 'S'
                                 ? `平倉 ${maskMoney(fmtStockLots(Math.abs(pos.net)), privMoney)}（整張市價、零股以漲跌停價限價）`
                                 : `市價平倉 ${maskMoney(String(Math.abs(pos.net)), privMoney)}`
-                            : '持倉方向或交易條件不明，請使用持倉面板確認')}
-                        disabled={!pos.safeExit || !armedView || !activeAccount || !!viewOnly}
+                            : '持倉方向或交易條件不明，請使用持倉面板確認'}
+                        disabled={!pos.safeExit || !armedView || !activeAccount}
                         onClick={() => void flatten()}
                     >
                         平倉
@@ -1796,8 +1785,8 @@ export function FlashOrder({
                 )}
                 <button
                     className={styles.cancelAllBtn}
-                    disabled={!!paused || !!viewOnly || (workingCount === 0 && otherLotOrders === 0 && ladder.protectedQty === 0)}
-                    title={viewOnly ?? (ladder.protectedQty > 0 ? '刪除這個商品的委託，並取消這個面板的停損停利' : undefined)}
+                    disabled={!!paused || (workingCount === 0 && otherLotOrders === 0 && ladder.protectedQty === 0)}
+                    title={ladder.protectedQty > 0 ? '刪除這個商品的委託，並取消這個面板的停損停利' : undefined}
                     onClick={() => void cancelSymbol()}
                 >
                     全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}
@@ -1815,11 +1804,6 @@ export function FlashOrder({
                     />
                 )}
             </div>
-            {viewOnly && !paused && (
-                <div className={styles.creditBanner.bad} data-testid='flash-view-only'>
-                    <Ban size={10} aria-hidden /><span>{viewOnly}</span>
-                </div>
-            )}
             {pos && !paused && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
