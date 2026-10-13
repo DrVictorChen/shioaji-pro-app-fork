@@ -326,6 +326,35 @@ describe('setting on (#201 ①-3)', () => {
     });
 });
 
+describe('flash ladder (#216): a background trigger shown on the ladder is deleted through the App', () => {
+    it('the ladder mark of a background exit trigger is editable and its delete removes the program', async () => {
+        m.programs = [program()];
+        await boot();
+        await bg.refreshBackground();
+        const { ladderMarks } = await import('./flash-trigger');
+        const marks = ladderMarks(engine.getDisplayTriggers(), [], { code: 'TXFR1', odd: false, env: SIM,
+            account: { account_type: 'F', broker_id: F1.broker_id, account_id: F1.account_id } }, true);
+        const mark = marks.get('19800.00')!.sell[0]!;
+        expect(mark).toMatchObject({ id: 'bg:trg:p1:L1', kind: 'trigger', editable: true, background: true });
+        const { flashRemoveTrigger } = await import('./flash-conditional');
+        await flashRemoveTrigger(mark.id);
+        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
+        expect(m.place).not.toHaveBeenCalled();
+    });
+
+    it('a refused removal throws (the ladder then says 刪除未確認, never 已刪除)', async () => {
+        m.programs = [program()];
+        await boot();
+        await bg.refreshBackground();
+        const base = m.invoke.getMockImplementation()!;
+        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => cmd === 'execution_remove'
+            ? { accepted: false, notices: [{ code: 'rejected.inFlight', programId: 'trg:p1', levelId: null, detail: '' }], revision: 9 }
+            : base(cmd, args));
+        const { flashRemoveTrigger } = await import('./flash-conditional');
+        await expect(flashRemoveTrigger('bg:trg:p1:L1')).rejects.toThrow('委託送出中');
+    });
+});
+
 describe('background rows', () => {
     it('show as triggers; removing and deciding go to the App, never to this engine', async () => {
         m.programs = [program(), { ...program({ id: 'L1', phase: 'needsConfirm',

@@ -2,8 +2,9 @@
 // 快速下拉：常用的委託條件（信用、效期、期貨倉別與市價鈕）、單位與「更多設定…」。
 // 清單與停用規則來自下單面板共用的 order-conditions；選了什麼由閃電面板保存。
 
-import { Check, Settings2 } from 'lucide-react';
+import { Check, Settings2, ShieldCheck } from 'lucide-react';
 import type { FlashCond, FlashCredit, FlashLot, FlashOrderOpts } from '../lib/flash-account';
+import { TRIGGER_LIMIT_MAX_TICKS, type FlashTriggerSend } from '../lib/flash-trigger';
 import { FUTURES_OCTYPES, ORDER_TYPES, orderTypeDisabledReason } from '../lib/order-conditions';
 import * as styles from './flash-order.css';
 
@@ -43,7 +44,7 @@ function Seg<T extends string>({ label, items, value, disabled, onPick }: {
     );
 }
 
-export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, top, onCredit, onLot, onOrder, onMore, onClose }: {
+export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, top, onCredit, onLot, onOrder, onMore, onClose, triggerSend, onTriggerSend, triggerLayout, onTriggerLayout, onProtect }: {
     market: 'S' | 'F';
     odd: boolean;
     lot: FlashLot;
@@ -58,6 +59,14 @@ export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, to
     onOrder: (o: FlashOrderOpts) => void;
     onMore: () => void;
     onClose: () => void;
+    /** #216 觸價單觸發後的送出方式 */
+    triggerSend?: FlashTriggerSend;
+    onTriggerSend?: (s: FlashTriggerSend) => void;
+    /** #216 觸價單的點法 */
+    triggerLayout?: 'columns' | 'modifier';
+    onTriggerLayout?: (l: 'columns' | 'modifier') => void;
+    /** opens the 自動停損停利 editor */
+    onProtect?: () => void;
 }) {
     const pick = (fn: () => void) => () => { fn(); onClose(); };
     const oddOrderType = orderTypeDisabledReason('IOC', odd);
@@ -128,6 +137,50 @@ export function FlashQuickMenu({ market, odd, lot, credit, order, dayTradeOk, to
                     </>
                 )}
                 <div className={styles.menuNote}>效期用於點價的限價單；市價鈕一律 IOC。</div>
+                {triggerSend && onTriggerSend && (
+                    <>
+                        <Seg
+                            label='觸價後'
+                            items={[
+                                { value: 'MKT', label: market === 'F' && order.futuresPriceType === 'MKP' ? '範圍市價' : '市價', disabled: odd },
+                                { value: 'LMT', label: '限價', disabled: odd, title: '觸發價往成交方向 N 檔的限價（買＋N、賣－N），ROD' },
+                            ] as const}
+                            value={triggerSend.type}
+                            disabled={odd ? '零股觸價單以漲跌停價限價送出' : null}
+                            onPick={type => onTriggerSend(type === 'LMT' ? { type: 'LMT', ticks: triggerSend.type === 'LMT' ? triggerSend.ticks : 2 } : { type: 'MKT' })}
+                        />
+                        {triggerSend.type === 'LMT' && !odd && (
+                            <div className={styles.menuSegRow} role='group' aria-label='觸價後限價檔數'>
+                                <span className={styles.menuSegLabel}>檔數</span>
+                                <button type='button' className={styles.menuSegBtn.off} aria-label='減一檔'
+                                    disabled={triggerSend.ticks <= 0} onClick={() => onTriggerSend({ type: 'LMT', ticks: Math.max(0, triggerSend.ticks - 1) })}>−</button>
+                                <span className={styles.menuDesc}>觸發價 ± {triggerSend.ticks} 檔</span>
+                                <button type='button' className={styles.menuSegBtn.off} aria-label='加一檔'
+                                    disabled={triggerSend.ticks >= TRIGGER_LIMIT_MAX_TICKS} onClick={() => onTriggerSend({ type: 'LMT', ticks: Math.min(TRIGGER_LIMIT_MAX_TICKS, triggerSend.ticks + 1) })}>＋</button>
+                            </div>
+                        )}
+                        {triggerLayout && onTriggerLayout && (
+                            <Seg
+                                label='觸價點法'
+                                items={[
+                                    { value: 'columns', label: '觸價欄', title: '梯形最外側多兩欄「觸買／觸賣」，點那一欄掛觸價單' },
+                                    { value: 'modifier', label: 'Alt＋點', title: '不加欄位（窄面板適用）：按住 Alt（Option）點買量／賣量掛觸價單' },
+                                ] as const}
+                                value={triggerLayout}
+                                onPick={l => { onTriggerLayout(l); onClose(); }}
+                            />
+                        )}
+                        <div className={styles.menuNote}>{odd ? '零股觸價單以漲跌停價限價送出。' : '觸價單觸發後的送出方式；點買量／賣量照常是限價。'}</div>
+                    </>
+                )}
+                {onProtect && (
+                    <>
+                        <div className={styles.menuSep} />
+                        <button type='button' role='menuitem' className={styles.menuItem.off} onClick={() => { onClose(); onProtect(); }}>
+                            <ShieldCheck size={11} aria-hidden />自動停損停利…
+                        </button>
+                    </>
+                )}
                 {market === 'S' && (
                     <>
                         <div className={styles.menuSep} />

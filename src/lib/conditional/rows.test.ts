@@ -175,3 +175,36 @@ describe('projectRows', () => {
     });
 });
 
+
+describe('今日已觸發 counts the background engine too (#216 QA 10/13)', () => {
+    const slot = (role: 'entry' | 'exit') => ({ key: `k-${role}`, role, leg: role === 'entry' ? 'entry' : 'stop', cycle: 0, qty: 1, status: 'filled',
+        orderId: 'o', filled: 1, fills: {}, fillTs: {}, detail: null, acknowledged: false, cancel: null });
+    const lv = (over: Record<string, unknown>) => ({ id: 'L1', side: 'Buy', qty: 1, entry: { type: 'touch', condition: 'above', price: 48100, order: { priceType: 'MKT' } },
+        exit: null, phase: 'done', check: null, recross: [], pending: null, orders: [], position: 0, entryFilled: 0, unprotected: 0, cycles: 0, detail: null, ...over });
+    const prog = (id: string, levels: unknown[], updatedAt = NOW - 60_000) => ({ id, kind: 'bracket', levels, updatedAt, createdAt: updatedAt }) as never;
+
+    it('a flash 觸價 entry that became a bracket, and its stop that went out, count; untriggered and other days do not', () => {
+        const fired = prog('bkt-1', [lv({ orders: [slot('entry')] }), lv({ id: 't0', entry: { type: 'tier', index: 0 }, orders: [slot('exit')] })]);
+        const waiting = prog('bkt-2', [lv({ phase: 'idle' })]);
+        const old = prog('bkt-3', [lv({ orders: [slot('entry')] })], NOW - 3 * 24 * 3600_000);
+        const exitTrigger = prog('trg-1', [lv({ side: 'Sell', entry: { type: 'touch', condition: 'below', price: 48000, order: { priceType: 'MKT', octype: 'Cover' } }, orders: [slot('entry')] })]);
+        expect(projectRows(sources({ bgPrograms: [fired, waiting, old, exitTrigger] })).counts.firedToday).toBe(3);
+        expect(projectRows(sources({})).counts.firedToday).toBe(0);
+    });
+});
+
+describe('shortStatus (the table shows a short label; the sentence on hover)', () => {
+    it('maps every long status to ≤ 6 characters (plus a fill count)', async () => {
+        const { shortStatus } = await import('./rows');
+        expect(shortStatus('盤別已更換，保護未延續')).toBe('盤別已更換');
+        expect(shortStatus('送出結果不明，請確認是否成交')).toBe('結果不明');
+        expect(shortStatus('恢復時已穿價，未自動送出')).toBe('已穿價');
+        expect(shortStatus('異常成交 1 口：委託已回報刪單成功後仍收到成交（資料異常），已記為未受保護，不會自動補保護；請對委託與持倉核對')).toBe('異常成交');
+        expect(shortStatus('保護中 · 成交 1/1')).toBe('保護中 1/1');
+        expect(shortStatus('已暫停')).toBe('已暫停');
+        expect(shortStatus('盯價中')).toBe('盯價中');
+        expect(shortStatus('停損出場結果不明（不會自動重送）')).toBe('結果不明');
+        expect(shortStatus('仍有 7 張未平倉（可能無對手單或漲跌停）')).toBe('未平倉');
+        expect(shortStatus('某個沒見過的很長的狀態說明，後面還有')).toBe('某個沒見過的…');
+    });
+});

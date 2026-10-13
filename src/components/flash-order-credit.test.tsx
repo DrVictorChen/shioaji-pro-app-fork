@@ -5,6 +5,8 @@
 import { createElement, useLayoutEffect } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+vi.mock('../hooks/use-flash-ladder', () => ({ useFlashLadder: () => ({ marks: new Map(), protectedQty: 0, background: false }) }));
+vi.mock('../lib/flash-conditional', () => ({ flashStopProtections: async () => ({ stopped: 0, blocked: [], failed: [] }) }));
 import type { Account } from '../lib/types/portfolio';
 import type { ContractInfo } from '../lib/types/contract';
 const mocks = vi.hoisted(() => ({ place: vi.fn(), exit: vi.fn(), notify: vi.fn(), post: vi.fn(), base: 'fixture', store: new Map<string, string>() }));
@@ -105,7 +107,7 @@ it('現股 (default) looks exactly like today: no tag, 張, 市價買／市價�
     const r = await mount(stk);
     expect(tag(r)).toBeUndefined();
     expect(banner(r)).toBeUndefined();
-    expect(text(creditBtn(r)!)).toBe('張');
+    expect(creditBtn(r)!.props['data-unit']).toBe('張');
     expect(button(r, '市價買')).toBeDefined();
     expect(button(r, '市價賣')).toBeDefined();
     await arm(r);
@@ -120,7 +122,7 @@ it('融資: the panel saves it, shows the tag, the 張·融資 button and 市價
     await pick(r, '融資', () => show(r, stk, owner.extra()));
     expect(owner.state.credit).toEqual({ cond: 'MarginTrading', daytradeShort: false });
     expect(text(tag(r)!)).toBe('融資');
-    expect(text(creditBtn(r)!)).toBe('張·融資');
+    expect(creditBtn(r)!.props['data-unit']).toBe('張·融資');
     expect(text(banner(r)!)).toContain('點買＝融資買進，點賣＝融資賣出');
     expect(button(r, '市價融資買')).toBeDefined();
     expect(button(r, '市價融資賣')).toBeDefined();
@@ -280,7 +282,7 @@ it('odd lots: credit options are disabled with an explanation; orders are cash; 
     const owner = owned({ cond: 'MarginTrading', daytradeShort: false }, 'IntradayOdd');
     const r = await mount(stk, owner.extra());
     expect(tag(r)).toBeUndefined();
-    expect(text(creditBtn(r)!)).toBe('股');
+    expect(creditBtn(r)!.props['data-unit']).toBe('股');
     await act(async () => { creditBtn(r)!.props.onClick(); });
     expect(item(r, '融資').props.disabled).toBe(true);
     expect(item(r, '融券').props.disabled).toBe(true);
@@ -307,7 +309,7 @@ it('odd lots: credit options are disabled with an explanation; orders are cash; 
 it('futures panels show no credit control and never send one', async () => {
     const r = await mount(fut, owned({ cond: 'ShortSelling', daytradeShort: false }).extra());
     // the futures unit menu has no credit items
-    expect(text(creditBtn(r)!)).toBe('口');
+    expect(creditBtn(r)!.props['data-unit']).toBe('口');
     await act(async () => { creditBtn(r)!.props.onClick(); });
     expect(menu(r)!.findAll(n => n.type === 'button' && /^(現股|融資|融券|借券)/.test(text(n)))).toHaveLength(0);
     await act(async () => { creditBtn(r)!.props.onClick(); });
@@ -408,7 +410,7 @@ it('借券／借券豁免 can only sell: buy faded, sell sends the SBL condition
         expect(owner.state.credit).toEqual({ cond, daytradeShort: false });
         expect(text(tag(r)!)).toBe(tagText);
         // the unit button stays short on narrow panels
-        expect(text(creditBtn(r)!)).toBe(cond === 'SBLShort' ? '張·借券' : '張·借豁');
+        expect(creditBtn(r)!.props['data-unit']).toBe(cond === 'SBLShort' ? '張·借券' : '張·借豁');
         expect(button(r, '市價買')!.props.disabled).toBe(true);
         expect(button(r, `市價${tagText}賣`)).toBeDefined();
         await arm(r);
