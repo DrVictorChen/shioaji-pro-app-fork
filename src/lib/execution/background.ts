@@ -268,6 +268,7 @@ const REJECT_TEXT: Record<string, string> = {
     'rejected.inFlight': '委託送出中，請稍候再按',
     'rejected.notRunning': '這張單目前不是執行中',
     'rejected.notPaused': '這張單目前沒有暫停',
+    'rejected.exitBusy': '停損停利的出場單正在送出或結果未知，沒有取消',
     'rejected.expired': '有效期已過',
     'rejected.notReplaceable': '這張單已觸發、待確認或狀態已變，沒有修改；請看清單與委託',
     'rejected.invalidReplace': '修改內容與原本的單不符',
@@ -383,8 +384,12 @@ export async function replaceBackgroundBracket(programId: string, request: Creat
 }
 
 /** 「我已自行處理」: the engine stops tracking; nothing is sent or cancelled. */
-export async function markBackgroundHandled(programId: string, levelId?: string): Promise<void> {
-    await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null });
+/** `scope`: the flash panel's account and product — a flash popout must
+ * send it (the App then ends only that protection, and only while no exit of
+ * it is out, in one engine step). */
+export async function markBackgroundHandled(programId: string, levelId?: string,
+    scope?: { account: { accountType: string; brokerId: string; accountId: string }; codes: string[] }): Promise<void> {
+    await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null, ...(scope ? { scope } : {}) });
 }
 
 /** 「在新盤別重新啟用」 (nothing is sent then). */
