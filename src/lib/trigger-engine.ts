@@ -64,8 +64,9 @@ import {
     getBackgroundPrices,
     getBackgroundPrograms,
     pauseBackgroundProgram,
-    readBackgroundProgram,
     refreshBackground,
+    replaceBackgroundBracket,
+    replaceBackgroundTrigger,
     resumeBackgroundProgram,
     removeBackgroundTrigger,
     resolveBackgroundTrigger,
@@ -73,13 +74,17 @@ import {
 } from './execution/background';
 import {
     backgroundEligible,
+    backgroundGroupEligible,
     backgroundRowId,
     isBackgroundId,
+    programForNewGroup,
     programForNewTrigger,
+    tickTableOf,
     triggerRowsFromPrograms,
     type BackgroundTriggerOrder,
 } from './execution/background-view';
 import { retainQuote } from './quote-ownership';
+import { panelBracketRequest } from './execution/background-bracket';
 import { sameTradingDay } from './conditional/session';
 import { trailStep, type TrailState } from './conditional/trailing';
 import { getConditionalSettings } from './conditional/settings';
@@ -90,7 +95,7 @@ import { notify, placeQuickOrder } from './trade';
 import { getTradingState } from './trading-state';
 import { fmtPrice } from './utils/format';
 import { stepPrice } from './utils/ticksize';
-import { bandTickFor, prefetchTickBands } from './tick-bands';
+import { bandTickFor, ensureTickBands, prefetchTickBands } from './tick-bands';
 import { isOddLot, ODD_LOT_MAX_SHARES, oddLotMarketablePrice, SHARES_PER_LOT, sharesToUnits, stockQtyUnit } from './odd-lot';
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
@@ -665,12 +670,66 @@ function applyGroup(cmd: Extract<Command, { op: 'group' } | { op: 'modify-group'
 
 /** #226 二擇一: pause / resume / remove both legs together. */
 export async function setTriggerGroup(ids: string[], action: 'pause' | 'resume' | 'remove'): Promise<void> {
-    await bus.send({ op: 'group', action, ids });
+    const programId = backgroundGroupOf(ids);
+    if (programId === undefined) { await bus.send({ op: 'group', action, ids }); return; }
+    // a background 二擇一 is one program: both legs go together by design
+    if (action === 'remove') await removeBackgroundTrigger(programId);
+    else await (action === 'pause' ? pauseBackgroundProgram(programId) : resumeBackgroundProgram(programId));
 }
 
-/** #226 二擇一: change both legs together (all or none). */
+/** The background program of a 二擇一's rows (undefined: this window's). */
+function backgroundGroupOf(ids: readonly string[]): string | undefined {
+    if (!ids.length || !ids.every(isBackgroundId)) {
+        if (ids.some(isBackgroundId)) throw new Error('二擇一的兩邊不在同一處執行');
+        return undefined;
+    }
+    const rows = ids.map(backgroundRow);
+    const programId = rows[0]?.background.programId;
+    if (!programId || rows.some(r => r?.background.programId !== programId)) throw new Error('找不到這組二擇一');
+    return programId;
+}
+
+/** #226 二擇一: change both legs together (all or none). A background one is
+ * replaced in one engine step. */
 export async function modifyTriggerGroup(patches: { id: string; patch: TriggerPatch }[]): Promise<void> {
-    await bus.send({ op: 'modify-group', patches });
+    const programId = backgroundGroupOf(patches.map(p => p.id));
+    if (programId === undefined) { await bus.send({ op: 'modify-group', patches }); return; }
+    const original = getBackgroundPrograms().find(p => p.id === programId);
+    const rows = backgroundRows().filter(r => r.background.programId === programId);
+    if (!original || rows.length !== original.levels.length) throw new Error('二擇一已觸發或狀態已變，沒有修改');
+    if (rows.some(r => r.pending || r.ocoLock)) throw new Error('二擇一有一邊待確認或已觸發，請先處理');
+    const legs: TriggerOrder[] = rows.map(r => {
+        const patch = patches.find(p => p.id === r.id)?.patch ?? {};
+        const next: TriggerOrder = { ...r, ...(patch.price !== undefined ? { price: patch.price } : {}),
+            ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
+            ...(patch.send !== undefined ? { send: patch.send } : {}), id: newId(), createdAt: Date.now() };
+        if (patch.validity !== undefined) { if (patch.validity) next.validity = patch.validity; else delete next.validity; }
+        delete (next as Partial<BackgroundTriggerOrder>).background;
+        delete next.awaitingRecross;
+        delete next.paused;
+        const problem = triggerOptionsProblem(next);
+        if (problem) throw new Error(problem.replace('，未建立', ''));
+        return next;
+    });
+    const [up, down] = [legs.find(l => l.condition === 'above'), legs.find(l => l.condition === 'below')];
+    if (up && down && up.price <= down.price) throw new Error('上方價格必須高於下方價格');
+    const contract = await ensureContract(rows[0]!.code);
+    const table = await backgroundTickTable(contract);
+    if (legs.some(l => l.send?.type === 'LMT' && l.send.ticks !== 0) && !table) throw new Error('背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試');
+    const group = `${legs[0]!.id}`;
+    const built = programForNewGroup(legs.map(l => ({ ...l, group })), contract, table);
+    if (!built) throw new Error('背景執行：這組二擇一無法修改，請取消後重新建立');
+    // keep each leg's position effect (rows do not carry it)
+    const made = { ...built, levels: built.levels.map((lv, i) => {
+        const was = original.levels.find(o => o.id === rows[i]!.background.levelId);
+        const octype = was?.entry.type === 'touch' ? was.entry.order.octype : undefined;
+        return lv.entry.type === 'touch' && octype ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, octype } } } : lv;
+    }) };
+    const result = await replaceBackgroundTrigger(programId, made);
+    if (result === 'replaced') return;
+    throw new Error('refused' in result
+        ? `修改未完成：${result.refused}`
+        : `修改結果未確認：${result.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
 }
 
 function pauseTrigger(id: string, on: boolean): TriggerOrder {
@@ -846,6 +905,15 @@ export async function addTriggerGroup(legs: NewTrigger[], contract: ContractBase
         const requestId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : newId();
         prepared.push({ ...p, requestId });
     }
+    // #226: with 「背景持續執行」 on, both legs run as one background program (one owner)
+    if (backgroundSupported() && backgroundGroupEligible(prepared, contract)) {
+        const owner = await backgroundOwnerForNew();
+        if (owner === 'background') return addBackgroundGroup(prepared, contract);
+        if (owner !== 'window') {
+            notify({ kind: 'err', title: '二擇一未建立', body: owner.refused });
+            return null;
+        }
+    }
     try {
         return await bus.send({ op: 'add-group', triggers: prepared }) as TriggerOrder[];
     } catch (e) {
@@ -854,12 +922,67 @@ export async function addTriggerGroup(legs: NewTrigger[], contract: ContractBase
     }
 }
 
+/** The contract's tick table for the engine (bands loaded if needed). */
+async function backgroundTickTable(contract: ContractBase) {
+    const c = contract as ContractBase & { tick_rule?: string; tick?: number };
+    const rule = c.tick_rule;
+    const bands = rule && (c.security_type === 'FUT' || c.security_type === 'OPT')
+        ? await ensureTickBands(rule, c.security_type) : undefined;
+    return tickTableOf(c, bands);
+}
+
+/** The program a trigger becomes in the background engine, or why not. */
+async function backgroundProgram(t: TriggerOrder, contract: ContractBase) {
+    const limitTicks = t.send?.type === 'LMT' ? t.send.ticks : 0;
+    const table = await backgroundTickTable(contract);
+    if (limitTicks !== 0 && !table) return '背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試';
+    return programForNewTrigger(t, contract, table) ?? '背景執行：觸價單缺少帳戶或伺服器資訊';
+}
+
+async function addBackgroundGroup(prepared: NewTrigger[], contract: ContractBase): Promise<TriggerOrder[] | null> {
+    const now = Date.now();
+    const legs: TriggerOrder[] = prepared.map(n => {
+        const t: TriggerOrder = { ...n, id: newId(), createdAt: now };
+        delete t.requestId;
+        return t;
+    });
+    const problem = legs.map(t => oddLotTriggerProblem(t) ?? triggerOptionsProblem(t)).find(Boolean);
+    if (problem) {
+        notify({ kind: 'err', title: '二擇一未建立', body: problem });
+        return null;
+    }
+    const table = await backgroundTickTable(contract);
+    if (legs.some(l => l.send?.type === 'LMT' && l.send.ticks !== 0) && !table) {
+        notify({ kind: 'err', title: '二擇一未建立', body: '背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試' });
+        return null;
+    }
+    const program = programForNewGroup(legs, contract, table);
+    if (!program) {
+        notify({ kind: 'err', title: '二擇一未建立', body: '背景執行：二擇一缺少帳戶或伺服器資訊' });
+        return null;
+    }
+    const result = await createBackgroundTrigger(program);
+    if (result !== 'created') {
+        if ('refused' in result) notify({ kind: 'err', title: '二擇一未建立', body: `背景執行：${result.refused}` });
+        else notify({ kind: 'err', title: '二擇一建立結果未確認', body: `背景執行：${result.unconfirmed}；請先看清單是否已有這組，不要直接重掛` });
+        return null;
+    }
+    if (getConditionalSettings().notify) notify({ kind: 'info', title: '二擇一已設（背景執行）', body: legs.map(describe).join('；') });
+    return backgroundRows().filter(r => r.background.programId === program.id);
+}
+
 async function addBackgroundTrigger(prepared: NewTrigger, contract: ContractBase): Promise<TriggerOrder | null> {
     const t: TriggerOrder = { ...prepared, id: newId(), createdAt: Date.now() };
     delete t.requestId;
-    const program = programForNewTrigger(t, contract);
-    if (!program) {
-        notify({ kind: 'err', title: '觸價單未建立', body: '背景執行：觸價單缺少帳戶或伺服器資訊' });
+    // the same checks as a trigger of this window
+    const problem = oddLotTriggerProblem(t) ?? triggerOptionsProblem(t);
+    if (problem) {
+        notify({ kind: 'err', title: '觸價單未建立', body: problem });
+        return null;
+    }
+    const program = await backgroundProgram(t, contract);
+    if (typeof program === 'string') {
+        notify({ kind: 'err', title: '觸價單未建立', body: program });
         return null;
     }
     const result = await createBackgroundTrigger(program);
@@ -906,10 +1029,11 @@ export async function setTriggerPaused(id: string, paused: boolean): Promise<voi
     await bus.send({ op: paused ? 'pause' : 'resume', id });
 }
 
-/** Change a manual trigger's price / quantity (#226). Nothing is sent by the
- * edit: when the new price is already crossed, the next tick holds it as
- * 待確認. A background trigger is replaced (paused, re-created with the new
- * values, then removed), so it is never armed twice at the same time. */
+/** Change a manual trigger's price / quantity / send style / validity
+ * (#226). Nothing is sent by the edit: when the new price is already
+ * crossed, the next tick holds it as 待確認. A background trigger is
+ * replaced in one engine step (`execution_replace`), so it is never armed
+ * twice, and never left unarmed by a half-done edit. */
 export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<void> {
     if (!isBackgroundId(id)) {
         await bus.send({ op: 'modify', id, patch });
@@ -918,52 +1042,66 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
     const row = backgroundRow(id);
     if (!row) throw new Error('找不到這張觸價單');
     if (row.pending) throw new Error('待確認中的觸價單請先處理（送出、保留或取消）');
-    if (patch.send !== undefined || patch.validity !== undefined) throw new Error('這張單只能修改觸發價與數量');
     const contract = await ensureContract(row.code);
     const programId = row.background.programId;
     const original = getBackgroundPrograms().find(p => p.id === programId);
     const level = original?.levels.find(lv => lv.id === row.background.levelId);
     if (!original || !level || level.entry.type !== 'touch') throw new Error('找不到這張觸價單');
     const next: TriggerOrder = { ...row, ...(patch.price !== undefined ? { price: patch.price } : {}),
-        ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}), id: newId(), createdAt: Date.now() };
+        ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
+        ...(patch.send !== undefined ? { send: patch.send } : {}), id: newId(), createdAt: Date.now() };
+    if (patch.validity !== undefined) {
+        if (patch.validity) next.validity = patch.validity;
+        else delete next.validity;
+    }
     delete (next as Partial<BackgroundTriggerOrder>).background;
     delete next.awaitingRecross;
-    // never armed already crossed: refused here, and the new program's first
-    // tick decides like a restore (already past → 待確認)
-    const latest = getBackgroundPrices()[row.code] ?? lastPrices.get(row.code);
-    if (latest !== undefined && isPast(next, latest)) throw new Error(`新的觸發價已穿過目前價格（${latest}），沒有修改`);
-    const made = programForNewTrigger(next, contract);
-    if (!made) throw new Error('背景執行：這張單無法修改，請取消後重新建立');
-    // keep the original order (e.g. a closing-only Cover stays Cover)
+    delete next.paused;
+    if (patch.price !== undefined && (!Number.isFinite(patch.price) || patch.price <= 0)) throw new Error('觸發價必須是正數');
+    if (patch.quantity !== undefined && (!Number.isSafeInteger(patch.quantity) || patch.quantity <= 0)) throw new Error('數量必須是正整數');
+    const problem = triggerOptionsProblem(next);
+    if (problem) throw new Error(problem.replace('，未建立', ''));
+    // never armed already crossed: refused here (a crossing one waits for a
+    // new crossing anyway), and the engine's first tick decides like a
+    // restore (already past → 待確認)
+    const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[row.code] ?? lastPrices.get(row.code);
+    if (!next.cross && latest !== undefined && isPast(next, latest)) throw new Error(`新的觸發價已穿過目前價格（${latest}），沒有修改`);
+    if (original.kind === 'bracket') {
+        // a panel bracket whose 觸價 entry did not fire: the engine builds the new one
+        const table = await backgroundTickTable(contract);
+        const plan = row.bracketPlan;
+        if (!table || !plan) throw new Error('背景執行：跳動點級距尚未取得，無法修改括號單，請稍後再試');
+        const request = panelBracketRequest({ env: row.env!, account: row.account!, quoteCode: row.code, orderCode: row.orderCode!,
+            securityType: contract.security_type === 'OPT' ? 'OPT' : 'FUT', action: row.action,
+            plan: { ...plan, tiers: patch.quantity !== undefined ? scaleTiers(plan.tiers, patch.quantity) : plan.tiers },
+            tickTable: table, entry: { trigger: { condition: next.condition, price: next.price, send: next.send ?? { type: 'MKT' },
+                ...(next.validity ? { validity: next.validity } : {}) } } });
+        if (!request) throw new Error('背景執行：這張括號單無法修改，請取消後重新建立');
+        const replaced = await replaceBackgroundBracket(programId, request);
+        if (replaced === 'replaced') return;
+        throw new Error('refused' in replaced ? `修改未完成：${replaced.refused}`
+            : `修改結果未確認：${replaced.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+    }
+    const made = await backgroundProgram(next, contract);
+    if (typeof made === 'string') throw new Error(made);
+    // keep the original position effect (e.g. a closing-only Cover stays Cover)
+    const octype = level.entry.order.octype;
     const program = { ...made, levels: made.levels.map(lv => lv.entry.type === 'touch'
-        ? { ...lv, check: 'resume' as const, entry: { ...lv.entry, order: level.entry.type === 'touch' ? level.entry.order : lv.entry.order } } : lv) };
-    try {
-        await pauseBackgroundProgram(programId);
-    } catch (e) {
-        throw new Error(`背景執行中的單目前不能直接修改（${e instanceof Error ? e.message : String(e)}），請取消後重新建立`);
-    }
-    // it may have fired while this was on its way: replace it only when it is
-    // still an untouched, armed condition
-    let fresh: Awaited<ReturnType<typeof readBackgroundProgram>>;
-    try {
-        fresh = await readBackgroundProgram(programId);
-    } catch (e) {
-        // cannot be sure it did not fire: leave it paused for the user to check
-        throw new Error(`修改沒有完成：無法確認原本的單狀態（${e instanceof Error ? e.message : String(e)}）。原本的單已暫停，請確認後按恢復或取消`);
-    }
-    const now = fresh?.status === 'paused' ? fresh.levels.find(lv => lv.id === row.background.levelId) : undefined;
-    if (!now || now.phase !== 'idle' || now.pending || now.orders.length > 0 || now.position > 0) {
-        await resumeBackgroundProgram(programId).catch(() => undefined);
-        throw new Error('這張觸價單在修改期間已觸發或狀態已變，沒有修改；請看清單與委託');
-    }
-    const result = await createBackgroundTrigger(program);
-    if (result !== 'created') {
-        // the old one stays paused: tell the user instead of resuming blindly
-        throw new Error('refused' in result
-            ? `修改未完成：${result.refused}。原本的單已暫停，請確認後按恢復或取消`
-            : `修改結果未確認：${result.unconfirmed}。原本的單已暫停；請先看清單是否已有新單，不要重複建立`);
-    }
-    await removeBackgroundTrigger(programId);
+        ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, ...(octype ? { octype } : {}) } } } : lv) };
+    // one engine step: the old one is gone and the new one armed, or nothing changed
+    const result = await replaceBackgroundTrigger(programId, program);
+    if (result === 'replaced') return;
+    throw new Error('refused' in result
+        ? `修改未完成：${result.refused}`
+        : `修改結果未確認：${result.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+}
+
+/** A bracket's tiers for a new total: only a single tier can change size
+ * (several tiers keep their split — change them by re-creating). */
+function scaleTiers(tiers: { quantity: number; takeTicks: number | null }[], total: number) {
+    if (tiers.length === 1) return [{ ...tiers[0]!, quantity: total }];
+    if (tiers.reduce((n, t) => n + t.quantity, 0) !== total) throw new Error('分批停利的括號單請取消後重新建立以改數量');
+    return tiers;
 }
 
 /** Remove a trigger and throw when that is not confirmed (全平並取消). */
@@ -1070,7 +1208,10 @@ function pendingPricesNow(): Record<string, number> {
     const rows = backgroundRows();
     if (pricesCache.ts !== ts || pricesCache.bg !== bg || pricesCache.rows !== rows) {
         const extra: Record<string, number> = {};
-        for (const r of rows) if (r.pending && bg[r.code] !== undefined) extra[r.code] = bg[r.code]!;
+        for (const r of rows) {
+            const key = priceKeyOf(r); // 對手價 rows read their side of the book
+            if (r.pending && bg[key] !== undefined) extra[key] = bg[key]!;
+        }
         pricesCache = { ts, bg, rows, all: Object.keys(extra).length ? { ...ts, ...extra } : ts };
     }
     return pricesCache.all;
