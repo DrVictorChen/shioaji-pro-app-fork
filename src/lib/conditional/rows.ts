@@ -18,12 +18,15 @@ import {
 import { BRACKET_NOTICE_TEXT, BRACKET_STATE_TEXT, type BracketView } from '../execution/bracket-contract';
 import type { PendingConfirmItem } from '../execution/pending-confirm-contract';
 import { isOddLot } from '../odd-lot';
+import type { FlattenLeftover } from './flatten-leftovers';
+import { quantityText } from './flatten-text';
 
 import type { EndedTrigger, ExitRecord, HistoryEntry, TriggerOrder } from '../trigger-engine';
 import type { RestoreReason } from '../trigger-engine';
 import { fmtNum, fmtUntil, sameTradingDay } from './session';
 
-export type CondKind = 'trigger' | 'oco' | 'bracket' | 'time' | 'grid';
+/** `flatten`: a product 全平並取消 could not fully close (需要你處理 only, no tab). */
+export type CondKind = 'trigger' | 'oco' | 'bracket' | 'time' | 'grid' | 'flatten';
 export type CondTab = 'all' | CondKind | 'ended';
 export type Tone = 'ok' | 'warn' | 'err' | 'muted';
 
@@ -33,6 +36,7 @@ export const KIND_LABEL: Record<CondKind, string> = {
     bracket: '括號單',
     time: '時間',
     grid: '蛛網',
+    flatten: '全平',
 };
 
 export const TABS: { id: CondTab; label: string }[] = [
@@ -64,11 +68,13 @@ export interface RowActions {
     handled: boolean;
     /** background bracket: 在新盤別重新啟用 */
     rearm: boolean;
+    /** 全平 leftover: run 全平並取消 again for that product */
+    retry: boolean;
 }
 
 const NO_ACTIONS: RowActions = {
     modify: false, pause: false, resume: false, cancel: false, send: false, keep: false,
-    reconcile: false, acknowledge: false, confirm: false, handled: false, rearm: false,
+    reconcile: false, acknowledge: false, confirm: false, handled: false, rearm: false, retry: false,
 };
 
 export type RowSource =
@@ -78,7 +84,8 @@ export type RowSource =
     | { type: 'bgBracket'; view: BracketView }
     | { type: 'exit'; exit: ExitRecord; trigger: TriggerOrder | null }
     | { type: 'pendingConfirm'; item: PendingConfirmItem }
-    | { type: 'ended'; ended: EndedTrigger; exit: ExitRecord | null };
+    | { type: 'ended'; ended: EndedTrigger; exit: ExitRecord | null }
+    | { type: 'leftover'; leftover: FlattenLeftover };
 
 export interface CondRow {
     id: string;
@@ -113,6 +120,8 @@ export interface Sources {
     pendingConfirm: readonly PendingConfirmItem[];
     /** brackets run by the background engine (bracket-contract views) */
     bgBrackets?: readonly BracketView[];
+    /** what 全平並取消 left held after its read-back */
+    leftovers?: readonly FlattenLeftover[];
     feedMissing: readonly string[];
     /** this window (or the window it mirrors) is the executor */
     executing: boolean;
@@ -135,9 +144,12 @@ export function levelWord(condition: 'below' | 'above', action: 'Buy' | 'Sell', 
     return action === 'Buy' ? '突破' : '停利';
 }
 
-export function conditionText(t: Pick<TriggerOrder, 'condition' | 'price' | 'action' | 'kind'>): string {
-    return `${t.condition === 'below' ? '≤' : '≥'} ${fmtNum(t.price)} ${levelWord(t.condition, t.action, t.kind)}`;
+export function conditionText(t: Pick<TriggerOrder, 'condition' | 'price' | 'action' | 'kind'> & Partial<Pick<TriggerOrder, 'cross' | 'source'>>): string {
+    const op = t.cross ? (t.condition === 'below' ? '下穿' : '上穿') : t.condition === 'below' ? '≤' : '≥';
+    return `${t.source === 'opposite' ? '對手價 ' : ''}${op} ${fmtNum(t.price)} ${levelWord(t.condition, t.action, t.kind)}`;
 }
+
+const VALIDITY_WORD: Record<'session' | 'today' | 'date', string> = { session: '本盤', today: '今日', date: '至' };
 
 function triggerSide(t: TriggerOrder): CondRow['side'] {
     if (t.kind === 'alert') return { text: '只通知', dir: null };
@@ -145,8 +157,8 @@ function triggerSide(t: TriggerOrder): CondRow['side'] {
 }
 
 function triggerValidity(t: TriggerOrder, now: number): string {
+    if (t.validity) return `${VALIDITY_WORD[t.validity.type]} ${fmtUntil(t.validity.until, now)}`;
     if ('background' in t) return '本盤';
-    void now;
     return '直到取消';
 }
 
@@ -169,12 +181,14 @@ function triggerStatus(t: TriggerOrder, s: Sources): { text: string; tone: Tone 
     if (!s.streamLive) return { text: '連線中斷，暫停盯價', tone: 'warn' };
     if (!('background' in t) && !s.executing) return { text: '主視窗未執行，暫停盯價', tone: 'warn' };
     if (s.feedMissing.includes(t.code)) return { text: '行情未訂閱，自動重試中', tone: 'warn' };
-    if (t.awaitingRecross) return { text: '等待價格回到另一側再穿過', tone: 'ok' };
+    if (t.ocoLock) return { text: '另一邊已觸發，等成交後扣掉對應口數', tone: 'warn' };
+    if (t.awaitingRecross) return { text: t.cross ? '盯價中（等待穿越）' : '等待價格回到另一側再穿過', tone: 'ok' };
     return { text: t.kind === 'alert' ? '盯價中（只通知）' : '盯價中', tone: 'ok' };
 }
 
 function triggerActions(t: TriggerOrder): RowActions {
     if (t.pending) return { ...NO_ACTIONS, send: true, keep: true, cancel: true };
+    if (t.ocoLock) return { ...NO_ACTIONS, cancel: true };
     return {
         ...NO_ACTIONS,
         modify: !t.suspended,
@@ -184,7 +198,37 @@ function triggerActions(t: TriggerOrder): RowActions {
     };
 }
 
+function timeCondition(t: TriggerOrder): string {
+    const time = t.time!;
+    return time.kind === 'flatten'
+        ? `${fmtUntil(time.at)} 全平並取消（${time.scope === 'code' ? '此商品' : '此帳戶'}）`
+        : `${fmtUntil(time.at)} 送出`;
+}
+
 function triggerRow(t: TriggerOrder, s: Sources): CondRow {
+    if (t.time) {
+        const st = triggerStatus(t, s);
+        return {
+            id: t.id,
+            kind: 'time',
+            code: t.code,
+            orderCode: t.orderCode ?? null,
+            side: t.time.kind === 'flatten' ? { text: '平掉剩餘部位', dir: null } : triggerSide(t),
+            condition: timeCondition(t),
+            level: null,
+            status: st.tone === 'ok' ? { text: '等待時間到', tone: 'ok' } : st,
+            validity: `今日 ${fmtUntil(t.time.at, s.now)}`,
+            account: t.account ?? null,
+            env: t.env ?? null,
+            attention: false,
+            paused: !!t.paused,
+            actions: { ...NO_ACTIONS, pause: !t.paused, resume: !!t.paused, cancel: true },
+            source: { type: 'trigger', trigger: t },
+            history: t.history ?? [],
+            createdAt: t.createdAt ?? 0,
+            ended: false,
+        };
+    }
     return {
         id: t.id,
         kind: 'trigger',
@@ -256,6 +300,9 @@ function bracketStatus(p: BracketPlan, legs: TriggerOrder[], s: Sources): { text
     const unit = unitOf(p.account, p.orderLot);
     const pendingLeg = legs.find(l => l.pending);
     if (pendingLeg) return { ...triggerStatus(pendingLeg, s), attention: true };
+    if (p.rules && p.base === undefined && !p.exit && Math.min(p.filled, p.tier?.entryQuantity ?? p.quantity) > (p.tier?.offset ?? 0)) {
+        return { text: `已成交，停損停利尚未建立${p.issues.length ? `（${p.issues[p.issues.length - 1]!.detail}）` : ''}`, tone: 'err', attention: true };
+    }
     if (p.exit?.status === 'unknown' && !p.exit.acknowledged) return { text: EXIT_TEXT.unknown!, tone: 'err', attention: true };
     if (unprotected > 0) return { text: `未受保護 ${unprotected} ${unit}，請對帳後處理`, tone: 'err', attention: true };
     if (workingEntryAfterExit(p) > 0) return { text: `已出場，進場單仍有 ${workingEntryAfterExit(p)} ${unit}未成交`, tone: 'err', attention: true };
@@ -286,14 +333,22 @@ function bracketRow(p: BracketPlan, legs: TriggerOrder[], s: Sources): CondRow {
     const st = bracketStatus(p, legs, s);
     const live = isLive(p);
     const unit = unitOf(p.account, p.orderLot);
-    const parts = [p.stopPrice !== null ? `停損 ${fmtNum(p.stopPrice)}` : null, p.takePrice !== null ? `停利 ${fmtNum(p.takePrice)}` : null];
+    // the armed stop may have moved (移動停損／保本)
+    const stopLeg = legs.find(l => l.kind === 'stop');
+    const stop = stopLeg?.price ?? p.stopPrice;
+    const waitingRules = p.rules && p.base === undefined;
+    const parts = waitingRules
+        ? [`停損 成交價${p.action === 'Buy' ? '−' : '+'}${p.rules!.stopTicks} 檔`,
+            p.rules!.takeTicks !== null ? `停利 ${p.action === 'Buy' ? '+' : '−'}${p.rules!.takeTicks} 檔` : null]
+        : [stop !== null ? `停損 ${fmtNum(stop)}${stopLeg?.trail?.active ? '（移動中）' : ''}` : null, p.takePrice !== null ? `停利 ${fmtNum(p.takePrice)}` : null];
+    if (p.rules?.trail && !parts.some(x => x?.includes('移動'))) parts.push('移動停損');
     const pendingLeg = legs.find(l => l.pending);
     return {
         id: `bracket:${p.id}`,
         kind: 'bracket',
         code: p.quoteCode,
         orderCode: p.orderCode,
-        side: { text: sideText(p.action, p.quantity, unit), dir: p.action },
+        side: { text: `${sideText(p.action, p.quantity, unit)}${p.tier && p.tier.count > 1 ? `（第 ${p.tier.index + 1}/${p.tier.count} 層）` : ''}`, dir: p.action },
         condition: parts.filter(Boolean).join(' · '),
         level: null,
         status: { text: st.text, tone: st.tone },
@@ -304,7 +359,8 @@ function bracketRow(p: BracketPlan, legs: TriggerOrder[], s: Sources): CondRow {
         paused: false,
         actions: {
             ...NO_ACTIONS,
-            modify: live && !p.exit && !pendingLeg,
+            // a rules bracket gets its prices at the first fill: nothing to edit before
+            modify: live && !p.exit && !pendingLeg && !waitingRules,
             cancel: true,
             send: !!pendingLeg,
             keep: !!pendingLeg,
@@ -319,7 +375,13 @@ function bracketRow(p: BracketPlan, legs: TriggerOrder[], s: Sources): CondRow {
 }
 
 function bgBracketRow(v: BracketView, s: Sources): CondRow {
-    const parts = [v.stop !== null ? `停損 ${fmtNum(v.stop)}` : null, v.take !== null ? `停利 ${fmtNum(v.take)}` : null];
+    // a panel bracket's tier: rules in ticks until its first fill prices it (as bracketRow)
+    const waitingRules = !!v.rules && !v.priced;
+    const parts = waitingRules
+        ? [`停損 成交價${v.side === 'Buy' ? '−' : '+'}${v.rules!.stopTicks} 檔`,
+            v.rules!.takeTicks !== null ? `停利 ${v.side === 'Buy' ? '+' : '−'}${v.rules!.takeTicks} 檔` : null]
+        : [v.stop !== null ? `停損 ${fmtNum(v.stop)}${v.trailActive ? '（移動中）' : ''}` : null, v.take !== null ? `停利 ${fmtNum(v.take)}` : null];
+    if (v.rules?.trail && !parts.some(x => x?.includes('移動'))) parts.push('移動停損');
     const ended = v.state === 'done' || v.state === 'handled' || v.state === 'rearmed';
     let status: { text: string; tone: Tone } = { text: BRACKET_STATE_TEXT[v.state], tone: v.attention ? 'err' : ended ? 'muted' : 'ok' };
     if (v.state === 'protected' || v.state === 'exiting') status = { text: `${BRACKET_STATE_TEXT[v.state]} · 成交 ${Math.min(v.entryFilled, v.quantity)}/${v.quantity}`, tone: 'ok' };
@@ -337,7 +399,7 @@ function bgBracketRow(v: BracketView, s: Sources): CondRow {
         kind: 'bracket',
         code: v.quoteCode,
         orderCode: v.orderCode,
-        side: { text: sideText(v.side, v.quantity, '口'), dir: v.side },
+        side: { text: `${sideText(v.side, v.quantity, '口')}${v.tier && v.tier.count > 1 ? `（第 ${v.tier.index + 1}/${v.tier.count} 層）` : ''}`, dir: v.side },
         condition: parts.filter(Boolean).join(' · '),
         level: null,
         status,
@@ -418,6 +480,33 @@ function exitAttentionRow(e: ExitRecord, trigger: TriggerOrder | null): CondRow 
     };
 }
 
+function leftoverRow(l: FlattenLeftover): CondRow {
+    const o = l.order;
+    const qty = quantityText(o.market, o.quantity);
+    return {
+        id: `leftover:${l.id}`,
+        kind: 'flatten',
+        code: o.code,
+        orderCode: o.code,
+        side: { text: `${o.action === 'Sell' ? '多單' : '空單'} ${qty}`, dir: o.action === 'Sell' ? 'Buy' : 'Sell' },
+        condition: '全平並取消',
+        level: null,
+        status: o.unconfirmed
+            ? { text: '平倉結果未能確認，請到持倉核對', tone: 'err' }
+            : { text: `仍有 ${qty} 未平倉（可能無對手單或漲跌停）`, tone: 'err' },
+        validity: '—',
+        account: o.account,
+        env: l.env,
+        attention: true,
+        paused: false,
+        actions: { ...NO_ACTIONS, retry: true, acknowledge: true },
+        source: { type: 'leftover', leftover: l },
+        history: [{ at: l.at, text: `全平並取消送出後回查持倉：${o.unconfirmed ? '查詢失敗' : `仍有 ${qty}`}`, tone: 'err' }],
+        createdAt: l.at,
+        ended: false,
+    };
+}
+
 const CONFIRM_UNIT: Record<PendingConfirmItem['order']['quantityUnit'], string> = { contract: '口', lot: '張', share: '股' };
 
 function pendingConfirmRow(item: PendingConfirmItem): CondRow {
@@ -467,11 +556,11 @@ function endedRow(e: EndedTrigger, exit: ExitRecord | null): CondRow {
     const exitText = exit ? ` · ${EXIT_TEXT[exit.status] ?? exit.status}${exit.status !== 'not-sent' ? ` ${exit.filled}/${exit.quantity}` : ''}` : '';
     return {
         id: `ended:${e.id}`,
-        kind: t.group ? 'oco' : 'trigger',
+        kind: t.time ? 'time' : t.group ? 'oco' : 'trigger',
         code: t.code,
         orderCode: t.orderCode ?? null,
-        side: triggerSide(t),
-        condition: conditionText(t),
+        side: t.time?.kind === 'flatten' ? { text: '平掉剩餘部位', dir: null } : triggerSide(t),
+        condition: t.time ? timeCondition(t) : conditionText(t),
         level: null,
         status: { text: `${ENDED_TEXT[e.reason]}${exitText}`, tone: e.reason === 'fired' ? (exit?.status === 'filled' ? 'ok' : exit && exit.status !== 'working' && exit.status !== 'sending' ? 'err' : 'ok') : 'muted' },
         validity: fmtUntil(e.at),
@@ -526,11 +615,12 @@ export function projectRows(s: Sources): Projection {
         rows.push(exitAttentionRow(e, byTrigger.get(e.triggerId) ?? endedById.get(e.triggerId)?.trigger ?? null));
     }
     for (const item of s.pendingConfirm) rows.push(pendingConfirmRow(item));
+    for (const l of s.leftovers ?? []) rows.push(leftoverRow(l));
     const exitByTrigger = new Map(s.exits.filter(e => !e.bracketId).map(e => [e.triggerId, e]));
     for (const e of s.ended) ended.push(endedRow(e, exitByTrigger.get(e.id) ?? null));
     ended.sort((a, b) => b.createdAt - a.createdAt);
     rows.sort((a, b) => Number(b.attention) - Number(a.attention) || a.createdAt - b.createdAt);
-    const byTab = { all: rows.length, trigger: 0, oco: 0, bracket: 0, time: 0, grid: 0, ended: ended.length } as Record<CondTab, number>;
+    const byTab = { all: rows.length, trigger: 0, oco: 0, bracket: 0, time: 0, grid: 0, flatten: 0, ended: ended.length } as Record<CondTab, number>;
     for (const r of rows) byTab[r.kind] += 1;
     const firedToday = s.ended.filter(e => e.reason === 'fired').length
         + s.brackets.filter(p => p.exit && p.exit.at && sameTradingDay(p.exit.at, s.now)).length;

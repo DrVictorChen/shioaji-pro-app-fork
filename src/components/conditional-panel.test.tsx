@@ -16,9 +16,11 @@ const m = vi.hoisted(() => ({
     remove: vi.fn(async () => undefined),
     resolve: vi.fn(async () => undefined),
     modify: vi.fn(async () => undefined),
+    pauseAll: vi.fn(async () => ({ changed: 1, failed: [] as string[] })),
     group: vi.fn(async () => undefined),
     priv: true,
     bgOn: false as boolean | null,
+    flatten: vi.fn(async (_scope: unknown) => ({ remaining: [], notSent: [], cancelFailed: [] })),
     views: [] as unknown[],
 }));
 
@@ -61,7 +63,18 @@ vi.mock('../lib/execution/bracket-contract', async (orig) => ({
 }));
 vi.mock('./background-bracket-status', () => ({ BracketRearm: () => null }));
 vi.mock('./pending-confirm', () => ({ PendingConfirmItemCard: () => null }));
-vi.mock('./conditional-form', () => ({ NewConditionalDialog: () => createElement('div', { id: 'new-dialog' }) }));
+vi.mock('./conditional-form', async () => ({
+    ...(await vi.importActual<typeof import('./conditional-form')>('./conditional-form')),
+    NewConditionalDialog: () => createElement('div', { id: 'new-dialog' }),
+}));
+vi.mock('../lib/conditional/bracket-policy', () => ({ useBracketPolicy: () => null }));
+vi.mock('../lib/protection-env', () => ({ currentProtectionEnv: () => ENV }));
+vi.mock('../lib/conditional/runtime', () => ({ pauseAll: m.pauseAll, runFlatten: m.flatten, flattenSummary: () => '摘要',
+    pauseAllEligible: (t: { role?: string; bracketId?: string }) => t.role === 'entry' && !t.bracketId }));
+vi.mock('./conditional-dialogs', () => ({ ConditionalSettingsDialog: () => createElement('div', { id: 'settings-dialog' }),
+    FlattenDialog: () => createElement('div', { id: 'flatten-dialog' }) }));
+vi.mock('../lib/conditional/panel-bracket', () => ({ placePanelBracket: vi.fn() }));
+vi.mock('../lib/account-store', () => ({ useAccounts: () => ({ accounts: [], selectedFutures: null, selectedStock: null }) }));
 
 const { ConditionalPanel, ConditionalBracketCards, OPEN_CONDITIONAL_PANEL_EVENT, RUNNER_TEXT } = await import('./conditional-panel');
 const styles = await import('./conditional-panel.css');
@@ -160,7 +173,7 @@ describe('ConditionalPanel', () => {
         const input = r.root.findAll(n => n.type === 'input' && n.props['aria-label'] === '觸發價')[0]!;
         await act(async () => { input.props.onChange({ target: { value: '47,850' } }); });
         await click(button(r, '儲存修改'));
-        expect(m.modify).toHaveBeenCalledWith('tg-1', { price: 47850, quantity: 1 });
+        expect(m.modify).toHaveBeenCalledWith('tg-1', { price: 47850, quantity: 1, send: { type: 'MKT' }, validity: null });
     });
 
     it('已結束（今日） tab lists finished ones without actions', async () => {
@@ -178,6 +191,41 @@ describe('ConditionalPanel', () => {
         await click(button(r, '現在送出'));
         await click(button(r, '再按一次確認送出'));
         expect(m.resolve).toHaveBeenCalledWith('d', 'send', { allowUnpast: false });
+    });
+
+    it('header: 設定 and 全平並取消 open their dialogs; 全部暫停 pauses (entries by default)', async () => {
+        m.sources = sources({ triggers: [trig({ role: 'entry' })] });
+        const r = render();
+        await click(button(r, '全部暫停'));
+        expect(m.pauseAll).toHaveBeenCalledWith(true);
+        await click(button(r, '設定'));
+        expect(r.root.findAll(n => n.props.id === 'settings-dialog')).toHaveLength(1);
+        await click(button(r, '全平並取消'));
+        expect(r.root.findAll(n => n.props.id === 'flatten-dialog')).toHaveLength(1);
+    });
+
+    it('nothing left after a cancel: a disabled 全部暫停, never 全部恢復 (QA 10/12)', () => {
+        m.sources = sources({ ended: [{ id: 'x', trigger: trig({ id: 'x', role: 'entry' }), reason: 'cancelled', at: Date.now() }] });
+        const r = render();
+        expect(button(r, '全部暫停').props.disabled).toBe(true);
+        expect(r.root.findAllByType('button').some(b => text(b).includes('全部恢復'))).toBe(false);
+    });
+
+    it('a 全平 leftover: 再平倉剩餘部位 (deliberate second click) runs 全平並取消 for that product', async () => {
+        const acct = { account_type: 'S' as const, broker_id: 'b', account_id: 's1' };
+        m.sources = sources({ leftovers: [{ id: 'l1', at: 1, env: ENV, order: { account: acct, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' } }] });
+        const r = render();
+        await click(button(r, '再平倉剩餘部位'));
+        expect(m.flatten).not.toHaveBeenCalled();
+        await click(button(r, '再按一次：確認再平倉'));
+        expect(m.flatten).toHaveBeenCalledWith({ type: 'code', codes: ['2330'], account: acct });
+    });
+
+    it('only paused ones left: 全部恢復 resumes', async () => {
+        m.sources = sources({ triggers: [trig({ role: 'entry', paused: true })] });
+        const r = render();
+        await click(button(r, '全部恢復'));
+        expect(m.pauseAll).toHaveBeenCalledWith(false);
     });
 
     it('a 二擇一 is paused / cancelled as one group (one command, no tick between legs)', async () => {

@@ -27,6 +27,8 @@ export const DEMO_PRICES: Record<string, number> = { TXFJ6: 48212, 2330: 1072, 2
 
 const F = { account_type: 'F' as const, broker_id: 'DEMO-F', account_id: '9804567' };
 const S = { account_type: 'S' as const, broker_id: 'DEMO-S', account_id: '0418812' };
+/** Demo accounts for the new-order forms (nothing can be created in the demo). */
+export const DEMO_ACCOUNTS = [F, S].map(a => ({ ...a, person_id: '', signed: true, username: '' }));
 
 function contract(code: string, name: string, security_type: 'FUT' | 'STK', tick: number): ContractInfo {
     return { code, name, symbol: code, security_type, exchange: security_type === 'FUT' ? 'TAIFEX' : 'TSE', category: '',
@@ -46,6 +48,15 @@ function primeDemoContracts() {
 
 export function conditionalDemoSources(now: number): Sources {
     primeDemoContracts();
+    return demoSources(now);
+}
+
+/** Make the demo products resolvable (forms). */
+export function primeConditionalDemo(): void {
+    primeDemoContracts();
+}
+
+function demoSources(now: number): Sources {
     const t0 = now - 4 * 3600_000;
     const at = (min: number) => t0 + min * 60_000;
     const base = { env: DEMO_ENV, createdAt: at(0) };
@@ -111,5 +122,17 @@ export function conditionalDemoSources(now: number): Sources {
     return {
         triggers: [...triggers, ...legs], brackets: [bracket], exits, ended, pendingConfirm: [confirm], bgBrackets: [lapsed, anomaly], feedMissing: [],
         executing: true, envNow: DEMO_ENV, streamLive: true, now,
+    };
+}
+
+/** Demo holdings / working orders for the 全平並取消 preview (nothing is sent in the demo). */
+export function demoFlattenState() {
+    const account = DEMO_ACCOUNTS[0]!;
+    return {
+        account: { account_type: 'F' as const, broker_id: account.broker_id, account_id: account.account_id },
+        positions: [{ id: 1, code: 'TXFJ6', direction: 'Buy' as const, quantity: 2, price: 48150, last_price: 48212, pnl: 0, account }],
+        trades: [1, 2, 3, 4].map(i => ({ contract: { code: 'TXFJ6', target_code: 'TXFJ6', security_type: 'FUT', exchange: 'TAIFEX' },
+            order: { id: `demo-w${i}`, account, quantity: 1, action: 'Buy', price: 48000 - i * 50 },
+            status: { status: 'Submitted', deal_quantity: 0, cancel_quantity: 0, deals: [] } })),
     };
 }
