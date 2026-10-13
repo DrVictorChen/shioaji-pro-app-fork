@@ -14,7 +14,8 @@ import { defineConfig, type Plugin } from 'vite';
 const root = path.resolve(__dirname, '../..');
 const src = (p: string) => path.resolve(root, 'src', p);
 const stub = (p: string) => path.resolve(__dirname, 'stubs', p);
-const REDIRECT: Record<string, string> = {
+// COND_DEMO=1 (cond.html, the panel's own ?condDemo rows): no stubs
+const REDIRECT: Record<string, string> = process.env.COND_DEMO ? {} : {
     [src('hooks/use-stream.ts')]: stub('use-stream.ts'),
     [src('hooks/use-display-book.ts')]: stub('use-display-book.ts'),
     [src('hooks/use-flash-ladder.ts')]: stub('use-flash-ladder.ts'),
