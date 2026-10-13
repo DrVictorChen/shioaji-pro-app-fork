@@ -519,29 +519,29 @@ export const numText = style({ fontFamily: vars.font.mono, fontVariantNumeric: '
 export const statusFull = style({ padding: '0 0 8px', lineHeight: 1.5, whiteSpace: 'normal', overflowWrap: 'anywhere' });
 
 // column widths (colgroup)
-export const cName = style({ width: '150px' });
-export const cKind = style({ width: '78px' });
-export const cSide = style({ width: '96px' });
+export const cName = style({ width: '118px' });
+export const cKind = style({ width: '68px' });
+export const cSide = style({ width: '92px' });
 export const cPrice = style({ width: '118px' });
-export const cStatus = style({ width: '104px' });
-export const cValidity = style({ width: '92px' });
+export const cStatus = style({ width: '92px' });
+export const cValidity = style({ width: '80px' });
 export const cAccount = style({ width: '92px' });
-export const cOps = style({ width: '212px' });
+export const cOps = style({ width: '196px' });
 
 // 操作: fixed slots — primary text button | edit | pause/resume | delete
 export const actionsWrap = style({ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px' });
 export const opsGrid = style({
     display: 'grid',
-    gridTemplateColumns: '108px 24px 24px 24px',
+    gridTemplateColumns: '72px 24px 24px 24px 24px',
     gap: '4px',
     alignItems: 'center',
     justifyItems: 'end',
 });
-export const opsPrimary = style({ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: '2px', width: '100%' });
+export const opsPrimary = style({ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', width: '100%' });
 export const opsSlot = style({ display: 'inline-flex', width: '24px', height: '24px', alignItems: 'center', justifyContent: 'center' });
 const opButtonBase = style({
     height: '24px',
-    minWidth: '76px',
+    minWidth: '70px',
     padding: '0 8px',
     fontSize: '0.7rem',
     borderRadius: vars.radius.sm,
@@ -645,3 +645,4 @@ export const linkButton = style({
     cursor: 'pointer',
     selectors: { '&:hover': { textDecoration: 'underline' } },
 });
+globalStyle(`${table} td${opsCell}`, { paddingLeft: '6px', paddingRight: '6px' });

@@ -276,7 +276,7 @@ function RowActions({ row, expanded, onToggle, compact }: {
             if (r.remaining.length || r.notSent.length || r.cancelFailed.length) throw new Error(flattenSummary(r));
         }, '已再次平倉');
     };
-    // 操作欄：固定格位（主要文字鈕｜編輯｜暫停／繼續｜刪除），沒有的動作留空
+    // 操作欄：固定格位（主要文字鈕｜其他動作｜編輯｜暫停／繼續｜刪除），沒有的動作留空
     type Act = { key: string; label: string; title: string; run: () => void; tone?: 'primary' | 'danger' | 'plain'; expands?: boolean };
     const acts: Act[] = [];
     if (message?.text.includes('未穿價') && pendingId) acts.push({ key: 'force', label: '仍要送出', title: '目前已未穿價；仍要依原設定送出一次', run: () => send(true), tone: 'danger' });
@@ -307,8 +307,8 @@ function RowActions({ row, expanded, onToggle, compact }: {
                                 {primary.label}
                             </button>
                         )}
-                    {more.length > 0 && <MoreMenu items={more} busy={busy} />}
                 </span>
+                <span className={styles.opsSlot}>{more.length > 0 && <MoreMenu items={more} busy={busy} />}</span>
                 <span className={styles.opsSlot}>
                     {a.modify && (
                         <button type='button' className={expanded ? styles.iconButton.active : styles.iconButton.plain}

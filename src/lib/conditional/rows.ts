@@ -689,7 +689,8 @@ export function shortStatus(text: string): string {
     const fill = /(\d+\/\d+)/.exec(text)?.[1];
     for (const [re, label] of SHORT_RULES) {
         if (!re.test(text)) continue;
-        return (label === '保護中' || label === '出場中') && fill ? `${label} ${fill}` : label;
+        // a fill count only while it stays short (保護中 1/1, not 保護中 500/500)
+        return (label === '保護中' || label === '出場中') && fill && fill.length <= 5 ? `${label} ${fill}` : label;
     }
     const head = text.split(/[，,。：:（(·]/)[0]!.trim();
     return head.length > 6 ? `${head.slice(0, 6)}…` : head;
