@@ -8,8 +8,10 @@
 // brackets run in the background; stocks always stay in the window.
 
 import type { AccountRef } from '../bracket-core';
+import type { BracketEntryPlan, TriggerSend, TriggerValidity } from '../trigger-engine';
 import { accountKey, parseEnvKey } from './adapter';
 import type { CreateBracketRequest } from './bracket-contract';
+import type { OrderSpec, TickBand } from './model';
 
 export interface BackgroundBracketSpec {
     env: string; // protection env key `${serverId}|simulation|production`
@@ -61,5 +63,57 @@ export function bracketRequestFor(spec: BackgroundBracketSpec, id = newBracketId
         stop: spec.stopPrice,
         take: spec.takePrice,
         entry: { tradeId: spec.tradeId, seqno: blank(spec.seqno), ordno: blank(spec.ordno), sentAt: spec.sentAt },
+    };
+}
+
+/** #226 a panel bracket in the background: its tiers (priced in the engine
+ * from the actual fill price) and either the window's accepted entry order
+ * or a 觸價 entry the engine fires itself (an opening order). */
+export interface PanelBackgroundSpec {
+    env: string;
+    account: AccountRef;
+    quoteCode: string;
+    orderCode: string;
+    securityType: 'FUT' | 'OPT';
+    action: 'Buy' | 'Sell';
+    plan: BracketEntryPlan;
+    tickTable: TickBand[];
+    entry: { tradeId: string; seqno: string | null; ordno: string | null; sentAt: number }
+        | { trigger: { condition: 'below' | 'above'; price: number; send: TriggerSend; validity?: TriggerValidity } };
+}
+
+/** The order a 觸價 entry sends, by its send style. */
+function triggerOrder(send: TriggerSend): OrderSpec {
+    if (send.type === 'MKP') return { priceType: 'MKP', timeInForce: 'IOC' };
+    if (send.type === 'LMT') return { priceType: 'LMT', timeInForce: 'ROD' };
+    return { priceType: 'MKT', timeInForce: 'IOC' };
+}
+
+export function panelBracketRequest(spec: PanelBackgroundSpec, id = newBracketId()): CreateBracketRequest | null {
+    const env = parseEnvKey(spec.env);
+    const qty = spec.plan.tiers.reduce((n, t) => n + t.quantity, 0);
+    if (!env || !spec.account.broker_id || !spec.account.account_id || !Number.isSafeInteger(qty) || qty <= 0) return null;
+    const blank = (v: string | null | undefined) => (v && v.trim() ? v : null);
+    const e = spec.entry;
+    return {
+        id,
+        binding: {
+            env: env.env,
+            serverId: env.serverId,
+            account: accountKey(spec.account),
+            contract: { market: 'futures', quoteCode: spec.quoteCode, orderCode: spec.orderCode, securityType: spec.securityType },
+        },
+        side: spec.action,
+        qty,
+        stop: null,
+        take: null,
+        ...('trigger' in e
+            ? { trigger: { condition: e.trigger.condition, price: e.trigger.price, order: triggerOrder(e.trigger.send),
+                ...(e.trigger.send.type === 'LMT' ? { limitTicks: e.trigger.send.ticks } : {}),
+                ...(e.trigger.validity ? { validity: { type: e.trigger.validity.type, until: e.trigger.validity.until } } : {}) } }
+            : e.tradeId ? { entry: { tradeId: e.tradeId, seqno: blank(e.seqno), ordno: blank(e.ordno), sentAt: e.sentAt } } : {}),
+        plan: { tiers: spec.plan.tiers.map(t => ({ quantity: t.quantity, takeTicks: t.takeTicks })), stopTicks: spec.plan.stopTicks,
+            trail: spec.plan.trail, breakeven: spec.plan.breakeven },
+        tickTable: spec.tickTable,
     };
 }

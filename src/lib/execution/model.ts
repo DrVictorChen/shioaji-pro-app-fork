@@ -96,7 +96,18 @@ export type EntryRule =
     /** A position already held when the program starts (a bracket turned
      * back on in a new trading session, background engine only): no entry
      * order; `session` is the session it protects in. */
-    | { type: 'position'; session?: string | null };
+    | { type: 'position'; session?: string | null }
+    /** #226 分批停利 (background engine): one tier protecting level `of`'s
+     * entry lots from `offset` on (fill order), up to its `qty`. */
+    | { type: 'tier'; of: string; offset: number; index: number; session?: string | null };
+
+/** #226 a tier's rules in legal ticks from the actual fill price. */
+export interface TierRules {
+    stopTicks: number;
+    takeTicks: number | null;
+    trail?: { activateTicks: number; distanceTicks: number; stepTicks: number };
+    breakeven?: { afterTier: number; offsetTicks: number };
+}
 
 /** A touch leg of an exit (stop or take). Fires a market-style order. */
 export interface TouchLeg {
@@ -167,6 +178,10 @@ export interface OrderSlot {
     closed?: boolean;
     /** Background engine: final in a complete listing with every fill. */
     listed?: boolean;
+    /** Background engine: fill prices, and the lots a bracket's tiers never
+     * protect (after the order was reported closed / of another session). */
+    fillPx?: Record<string, number>;
+    excluded?: number;
 }
 
 export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'resume' | 'unknownNotSent';
@@ -220,6 +235,13 @@ export interface Level {
     ocoLock?: string;
     /** ...and that order's fills already taken off this level's quantity. */
     ocoApplied?: { level: string; filled: number };
+    /** #226 tier (background): its rules, the cost it was priced from (frozen),
+     * the 移動停損 state, 保本 flags. */
+    rules?: TierRules;
+    base?: number;
+    trail?: { active: boolean };
+    beArmed?: boolean;
+    beDone?: boolean;
 }
 
 // ---- generators & policies (parameters; levels are materialised) ----

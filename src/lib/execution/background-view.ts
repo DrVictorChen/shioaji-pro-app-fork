@@ -12,6 +12,7 @@
 import type { ContractBase, TickBand as ContractTickBand } from '../types/contract';
 import type { NewTrigger, RestoreReason as TriggerRestoreReason, TriggerOrder, TriggerSend } from '../trigger-engine';
 import { accountRef, envKeyOf, programsFromTriggers } from './adapter';
+import { bracketEntryWaiting } from './bracket-contract';
 import type { Level, OrderProgram, OrderSpec, TickBand } from './model';
 
 export const BACKGROUND_ID_PREFIX = 'bg:';
@@ -176,13 +177,37 @@ function row(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
 export function triggerRowsFromPrograms(programs: readonly OrderProgram[]): BackgroundTriggerOrder[] {
     const out: BackgroundTriggerOrder[] = [];
     for (const p of programs) {
-        if (p.kind !== 'trigger' || p.status === 'stopped' || p.status === 'stopping') continue;
+        if (p.status === 'stopped' || p.status === 'stopping') continue;
+        if (p.kind === 'bracket') {
+            // #226 a bracket whose 觸價 entry did not fire yet is a trigger
+            // carrying its plan, as in this window
+            const e = bracketEntryWaiting(p);
+            const r = e ? row(p, e) : null;
+            if (r) out.push({ ...r, bracketPlan: planOf(p) });
+            continue;
+        }
+        if (p.kind !== 'trigger') continue;
         for (const lv of p.levels) {
             const r = row(p, lv);
             if (r) out.push(r);
         }
     }
     return out;
+}
+
+/** The plan of a panel bracket's tiers (as the panel created it). */
+export function planOf(p: OrderProgram): NonNullable<TriggerOrder['bracketPlan']> {
+    const tiers = p.levels.filter(lv => lv.entry.type === 'tier')
+        .sort((a, b) => (a.entry.type === 'tier' ? a.entry.index : 0) - (b.entry.type === 'tier' ? b.entry.index : 0));
+    const rules = tiers.map(t => t.rules).find(Boolean);
+    const trail = tiers.map(t => t.rules?.trail).find(Boolean);
+    const be = rules?.breakeven;
+    return {
+        tiers: tiers.map(t => ({ quantity: t.qty, takeTicks: t.rules?.takeTicks ?? null })),
+        stopTicks: rules?.stopTicks ?? 0,
+        trail: trail ? { activateTicks: trail.activateTicks, distanceTicks: trail.distanceTicks, stepTicks: trail.stepTicks } : null,
+        breakeven: be ? { afterTier: be.afterTier, offsetTicks: be.offsetTicks } : null,
+    };
 }
 
 /** Safe to drop: nothing working, no unknown outcome, no position, and

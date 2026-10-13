@@ -20,6 +20,10 @@ export function derivedPriceProblem(r: Pick<PanelBracketRequest, 'contract' | 'a
 }
 import { currentProtectionEnv } from '../protection-env';
 import { notify, placeQuickOrder } from '../trade';
+import { backgroundOwnerForNew, backgroundSupported, createBackgroundBracket } from '../execution/background';
+import { panelBracketRequest } from '../execution/background-bracket';
+import { tickTableOf } from '../execution/background-view';
+import { ensureTickBands } from '../tick-bands';
 import { addTrigger, type BracketEntryPlan, type TriggerSend, type TriggerValidity } from '../trigger-engine';
 import type { ContractInfo } from '../types/contract';
 import type { Account } from '../types/portfolio';
@@ -48,6 +52,15 @@ export async function placePanelBracket(r: PanelBracketRequest): Promise<'placed
     const problem = bracketPlanProblem(r.plan) ?? derivedPriceProblem(r);
     if (problem) return { error: problem };
     const qty = r.plan.tiers.reduce((s, t) => s + t.quantity, 0);
+    // #226: with 「背景持續執行」 on, a futures / options bracket runs in the
+    // background (one owner, decided before anything is sent)
+    if (futures && backgroundSupported()) {
+        const env = currentProtectionEnv();
+        if (!env) return { error: '伺服器模式（模擬／正式）尚未確認，括號單未送出' };
+        const owner = await backgroundOwnerForNew({ liveOn: env });
+        if (owner === 'background') return placeBackgroundPanelBracket(r, qty, env);
+        if (owner !== 'window') return { error: owner.refused };
+    }
     if (r.entry.type === 'touch') {
         const made = await addTrigger({ code: r.contract.code, condition: r.entry.condition, price: r.entry.price, action: r.action, quantity: qty,
             kind: (r.entry.condition === 'below') === (r.action === 'Sell') ? 'stop' : 'take', role: 'entry', bracketPlan: r.plan,
@@ -82,4 +95,50 @@ export async function placePanelBracket(r: PanelBracketRequest): Promise<'placed
         return { error: `進場單已送出；${text}` };
     }
     return 'placed';
+}
+
+/** The panel bracket in the background engine: tiers priced there from the
+ * actual fill price. A 觸價 entry is fired by the engine (an opening order:
+ * the App's risk checks apply); a 限價／市價 entry is sent here first (the
+ * order confirmation setting applies), then handed over with its trade id. */
+async function placeBackgroundPanelBracket(r: PanelBracketRequest, qty: number, env: string): Promise<'placed' | 'trigger' | { error: string }> {
+    const c = r.contract as PanelBracketRequest['contract'] & { tick_rule?: string; tick?: number };
+    const st = c.security_type === 'OPT' ? 'OPT' : 'FUT';
+    const bands = c.tick_rule ? await ensureTickBands(c.tick_rule, st) : undefined;
+    const tickTable = tickTableOf(c, bands);
+    if (!tickTable) return { error: '背景執行：跳動點級距尚未取得，無法依成交價計算停損停利，請稍後再試' };
+    const base = { env, account: { account_type: 'F' as const, broker_id: r.account.broker_id, account_id: r.account.account_id },
+        quoteCode: r.contract.code, securityType: st, action: r.action, plan: r.plan, tickTable } as const;
+    if (r.entry.type === 'touch') {
+        const request = panelBracketRequest({ ...base, orderCode: r.contract.target_code || r.contract.code,
+            entry: { trigger: { condition: r.entry.condition, price: r.entry.price, send: r.entry.send, validity: r.entry.validity } } });
+        if (!request) return { error: '背景執行：括號單缺少帳戶或伺服器資訊' };
+        const created = await createBackgroundBracket(request);
+        if (created === 'created') return 'trigger';
+        return { error: 'refused' in created ? `背景執行：${created.refused}`
+            : `背景執行：建立結果未確認（${created.unconfirmed}）；請先看清單是否已有這張，不要直接重掛` };
+    }
+    let sentAt = Date.now();
+    const trade = await placeQuickOrder(r.contract, r.action, r.entry.type === 'LMT' ? r.entry.price : null, qty, {
+        source: 'manual', // 下單確認設定照常適用
+        account: r.account,
+        beforeSend: () => {
+            if (currentProtectionEnv() !== env) throw new Error('伺服器或模擬／正式模式已切換，進場單未送出');
+            // when it really leaves (after the order confirmation): its trading session
+            sentAt = Date.now();
+        },
+        ocType: 'Auto',
+        ...(r.entry.type === 'LMT' ? { orderType: 'ROD' as const } : {}),
+    });
+    const request = panelBracketRequest({ ...base, orderCode: trade.contract?.target_code || trade.contract?.code || r.contract.target_code || r.contract.code,
+        entry: { tradeId: trade.order.id, seqno: trade.order.seqno ?? null, ordno: trade.order.ordno ?? null, sentAt } });
+    const created = request && request.entry ? await createBackgroundBracket(request)
+        : { refused: '進場單沒有委託編號（送出結果可能尚未確認）' };
+    if (created === 'created') return 'placed';
+    // the entry is out: say so, never resend, never suggest another stop (a late one could double the exit)
+    const text = 'refused' in created
+        ? `背景括號單未建立（${created.refused}）。請到委託／持倉確認後自行處理出場；系統不會自動補送`
+        : `背景括號單建立結果未確認（${created.unconfirmed}）。請先查看條件單清單確認是否已建立；確認前不要另外設定停損或出場單`;
+    notify({ kind: 'err', title: '括號單保護未確認', body: `${r.contract.code} 進場單已送出；${text}` });
+    return { error: `進場單已送出；${text}` };
 }

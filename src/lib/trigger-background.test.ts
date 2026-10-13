@@ -629,3 +629,23 @@ describe('#226 二擇一 in the background (step 2)', () => {
         expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'grp:g:1' }]);
     });
 });
+
+describe('#226 括號單 with a 觸價 entry in the background (step 3)', () => {
+    it('before the entry fires it is a trigger row carrying its plan; cancel removes the program', async () => {
+        const base = program({ entry: { type: 'touch', condition: 'above', price: 20100, order: { priceType: 'MKT', timeInForce: 'IOC' } },
+            exit: null, qty: 2, side: 'Buy' });
+        const tier = (id: string, index: number, takeTicks: number | null) => ({ ...base.levels[0]!, id, qty: 1, exit: { type: 'oco' as const,
+            stop: null, take: null, order: { priceType: 'MKT' as const, timeInForce: 'IOC' as const, octype: 'Cover' as const } },
+            entry: { type: 'tier' as const, of: 'L1', offset: index, index },
+            rules: { stopTicks: 4, takeTicks, ...(takeTicks === null ? { trail: { activateTicks: 5, distanceTicks: 3, stepTicks: 1 } } : {}) } });
+        m.programs = [{ ...base, id: 'bkt-x', kind: 'bracket', opens: true, levels: [base.levels[0]!, tier('T1', 0, 5), tier('T2', 1, null)] }];
+        await boot();
+        await bg.refreshBackground();
+        const [row] = engine.getDisplayTriggers();
+        expect(row).toMatchObject({ id: 'bg:bkt-x:L1', role: 'entry', price: 20100, quantity: 2,
+            bracketPlan: { tiers: [{ quantity: 1, takeTicks: 5 }, { quantity: 1, takeTicks: null }], stopTicks: 4,
+                trail: { activateTicks: 5, distanceTicks: 3, stepTicks: 1 }, breakeven: null } });
+        await engine.removeTrigger(row!.id);
+        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'bkt-x' }]);
+    });
+});
