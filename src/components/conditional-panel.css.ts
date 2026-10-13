@@ -430,6 +430,86 @@ export const level = styleVariants({
     muted: [levelBase, { borderColor: vars.color.mutedForeground, color: vars.color.mutedForeground }],
 });
 
+// ---- 括號單 form ----
+
+export const subhead = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    margin: '10px 0 4px',
+    paddingTop: '8px',
+    borderTop: `1px dashed ${vars.color.border}`,
+    fontWeight: 700,
+});
+
+export const tier = style({
+    display: 'grid',
+    gridTemplateColumns: '44px 110px 80px 1fr',
+    gap: '6px',
+    alignItems: 'center',
+    margin: '4px 0 4px 72px',
+});
+
+export const tierTail = style({ display: 'flex', alignItems: 'center', gap: '8px' });
+
+export const check = style({ display: 'inline-flex', alignItems: 'center', gap: '4px', color: vars.color.mutedForeground, cursor: 'pointer' });
+
+const switchBase = style({
+    width: '30px',
+    height: '17px',
+    flex: 'none',
+    padding: 0,
+    border: 'none',
+    borderRadius: '9px',
+    position: 'relative',
+    cursor: 'pointer',
+    background: vars.color.borderBright,
+    selectors: {
+        '&::after': {
+            content: '""',
+            position: 'absolute',
+            width: '13px',
+            height: '13px',
+            borderRadius: '50%',
+            background: '#fff',
+            top: '2px',
+            left: '2px',
+            transition: 'left 0.12s',
+        },
+    },
+});
+
+export const switchOff = style([switchBase]);
+export const switchOn = style([switchBase, { background: vars.color.accent, selectors: { '&::after': { left: '15px' } } }]);
+
+// ---- settings ----
+
+export const settings = style({ margin: '-12px -12px 0' });
+
+export const setting = style({
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '12px',
+    padding: '10px 12px',
+    borderBottom: `1px solid ${vars.color.border}`,
+});
+export const settingLast = style([setting, { borderBottom: 'none' }]);
+export const settingName = style({ fontWeight: 600, marginBottom: '2px' });
+export const settingSection = style({
+    padding: '6px 12px',
+    background: vars.color.inset,
+    color: vars.color.mutedForeground,
+    fontSize: '0.68rem',
+    borderBottom: `1px solid ${vars.color.border}`,
+});
+export const settingEmbed = style({ padding: '0 12px 10px', borderBottom: `1px solid ${vars.color.border}` });
+
+export const nameCell = style({ maxWidth: '190px', overflow: 'hidden', textOverflow: 'ellipsis' });
+export const statusCell = style({});
+globalStyle(`${table} td.${statusCell}`, { whiteSpace: 'normal', minWidth: '140px', maxWidth: '260px' });
+/** a number with its words: never split across lines */
+export const group = style({ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' });
+
 // ---- column priority (TXF QA 2026-10-12: at ~800px the 操作 column
 // scrolled out of view) ----
 // 操作 stays pinned to the right edge; 帳戶, 有效期 and 現價／距離 give way

@@ -15,6 +15,8 @@ const SIM = 'http://sim.invalid|simulation';
 
 const m = vi.hoisted(() => ({
     tick: [] as ((t: { code: string; close: number; simtrade?: boolean }) => void)[],
+    bidask: [] as ((b: { code: string; bid_price: string[]; ask_price: string[] }) => void)[],
+    pins: [] as string[],
     place: vi.fn(),
     notify: vi.fn(),
     ensure: vi.fn(),
@@ -24,6 +26,8 @@ const m = vi.hoisted(() => ({
     settingUnreadable: false,
     create: null as null | ((a: { program: OrderProgram }) => Promise<unknown>),
     programs: [] as unknown[],
+    trading: { positions: [], queries: { positions: { updatedAt: null as number | null, needsReconcile: false, error: null },
+        account: { updatedAt: null, needsReconcile: false, error: null } }, margin: undefined as unknown, marginAccount: undefined as string | undefined },
     refresh: vi.fn(async (_scope?: string) => undefined),
 }));
 
@@ -34,15 +38,15 @@ vi.mock('./stream', () => ({
     onOrderEvent: () => () => undefined,
     onAnyTick: (cb: (typeof m.tick)[number]) => { m.tick.push(cb); return () => undefined; },
     onOddLotTick: () => () => undefined,
-    onAnyBidAsk: () => () => undefined,
+    onAnyBidAsk: (cb: (typeof m.bidask)[number]) => { m.bidask.push(cb); return () => undefined; },
     onStreamEvent: () => () => undefined,
 }));
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: [S1, F1], selectedStock: S1, selectedFutures: F1 }) }));
 vi.mock('./trade', () => ({ notify: m.notify, placeQuickOrder: m.place }));
 vi.mock('./contracts-cache', () => ({ ensureContract: m.ensure, getCachedContract: () => undefined }));
-vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined }));
-vi.mock('./trading-state', () => ({ refreshTradingState: m.refresh, getTradingState: () => ({ positions: [],
-    queries: { positions: { updatedAt: null, needsReconcile: false, error: null } } }) }));
+vi.mock('./quote-ownership', () => ({ retainQuote: () => () => undefined,
+    pinQuote: (c: { code: string }, type: string) => { m.pins.push(`${c.code}|${type}`); return () => { m.pins = m.pins.filter(x => x !== `${c.code}|${type}`); }; } }));
+vi.mock('./trading-state', () => ({ refreshTradingState: m.refresh, getTradingState: () => m.trading }));
 vi.mock('./shioaji', () => ({ fetchTrades: async () => [] }));
 vi.mock('./protection-env', () => ({
     currentProtectionEnv: () => SIM,
@@ -101,6 +105,8 @@ beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal('BroadcastChannel', undefined);
     m.tick = [];
+    m.bidask = [];
+    m.pins = [];
     m.enabled = false;
     m.programs = [];
     for (const f of [m.place, m.notify, m.ensure, m.invoke]) f.mockReset();
@@ -108,6 +114,8 @@ beforeEach(() => {
     m.place.mockImplementation(async () => ({ order: { id: 'exit-1' }, status: { status: 'PendingSubmit' } }));
     m.engineDown = false;
     m.settingUnreadable = false;
+    m.trading = { positions: [], queries: { positions: { updatedAt: null, needsReconcile: false, error: null },
+        account: { updatedAt: null, needsReconcile: false, error: null } }, margin: undefined, marginAccount: undefined };
     m.create = null;
     m.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'execution_create' && m.create) { const f = m.create; m.create = null; return f(args as { program: OrderProgram }); }
@@ -333,41 +341,36 @@ describe('background rows', () => {
         expect(m.place).not.toHaveBeenCalled();
     });
 
-    it('#226 modify: paused, re-created with the same order (Cover kept, first tick decides), then removed; a crossed price is refused', async () => {
+    it('#226 modify: one engine step (execution_replace) with the same order (Cover kept); a crossed price is refused', async () => {
         m.programs = [program({ entry: { type: 'touch', condition: 'below', price: 19800, order: { priceType: 'MKT', timeInForce: 'IOC', octype: 'Cover' } } })];
         await boot();
         await bg.refreshBackground();
         await expect(engine.modifyTrigger('bg:trg:p1:L1', { price: 20100 })).rejects.toThrow('已穿過目前價格');
-        expect(calls('execution_pause')).toHaveLength(0);
-        m.create = async ({ program: p }) => { m.programs = [...m.programs, p]; return { accepted: true, notices: [], revision: 10 }; };
-        const orig = m.invoke.getMockImplementation()!;
-        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
-            if (cmd === 'execution_pause') m.programs = (m.programs as OrderProgram[]).map(p => ({ ...p, status: 'paused' as const }));
-            return orig(cmd, args);
-        });
-        await engine.modifyTrigger('bg:trg:p1:L1', { price: 19700, quantity: 2 });
-        expect(calls('execution_pause').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
-        const created = calls('execution_create')[0]![1] as { program: OrderProgram };
-        const lv = created.program.levels[0]!;
-        expect(lv.check).toBe('resume');
+        expect(calls('execution_replace')).toHaveLength(0);
+        await engine.modifyTrigger('bg:trg:p1:L1', { price: 19700, quantity: 2, send: { type: 'MKP' },
+            validity: { type: 'today', until: Date.now() + 3_600_000 } });
+        const args = calls('execution_replace')[0]![1] as { programId: string; program: OrderProgram };
+        expect(args.programId).toBe('trg:p1');
+        const lv = args.program.levels[0]!;
         expect(lv.qty).toBe(2);
-        expect(lv.entry).toMatchObject({ type: 'touch', price: 19700, order: { octype: 'Cover' } });
-        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
+        expect(lv.entry).toMatchObject({ type: 'touch', price: 19700, order: { priceType: 'MKP', timeInForce: 'IOC', octype: 'Cover' },
+            validity: { type: 'today' } });
+        expect(args.program.id).not.toBe('trg:p1');
+        // never the old pause / create / remove dance
+        for (const cmd of ['execution_pause', 'execution_create', 'execution_remove']) expect(calls(cmd)).toHaveLength(0);
         expect(m.place).not.toHaveBeenCalled();
     });
 
-    it('#226 modify: when the trigger fired while pausing, nothing is replaced and it is resumed as it was', async () => {
+    it('#226 modify: the engine refuses (it fired meanwhile): nothing changed, said so', async () => {
         m.programs = [program()];
         await boot();
         await bg.refreshBackground();
         const orig = m.invoke.getMockImplementation()!;
-        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
-            if (cmd === 'execution_pause') m.programs = [program({ phase: 'working', orders: [{ key: 'k' } as never] }), { ...program(), id: 'trg:other' }];
-            return orig(cmd, args);
-        });
+        m.invoke.mockImplementation(async (cmd: string, args?: unknown) => cmd === 'execution_replace'
+            ? { accepted: false, notices: [{ code: 'rejected.notReplaceable', programId: 'trg:p1', levelId: null, detail: '' }], revision: 9 }
+            : orig(cmd, args));
         await expect(engine.modifyTrigger('bg:trg:p1:L1', { price: 19700 })).rejects.toThrow('已觸發');
         expect(calls('execution_create')).toHaveLength(0);
-        expect(calls('execution_resume').map(([, a]) => a)).toEqual([{ programId: 'trg:p1' }]);
     });
 
     it('a trigger turned back on in a new session that is already past says so', async () => {
@@ -407,6 +410,125 @@ describe('background rows', () => {
     });
 });
 
+describe('#226 conditional orders in the background (step 1: triggers)', () => {
+    const TXF1 = { ...TXF, tick: 1 };
+    const created = () => calls('execution_create').map(([, a]) => (a as { program: OrderProgram }).program);
+    const entry = (over: Record<string, unknown> = {}) => ({ code: 'TXFR1', condition: 'above' as const, price: 20100,
+        action: 'Buy' as const, quantity: 1, kind: 'stop' as const, role: 'entry' as const, ...over });
+
+    it('an entry with 上穿, 對手價, 觸價後限價 and 有效期 runs in the background with the App risk checks', async () => {
+        m.enabled = true;
+        await boot();
+        const until = Date.now() + 3_600_000;
+        await engine.addTrigger(entry({ cross: true, source: 'opposite', send: { type: 'LMT', ticks: 2 },
+            validity: { type: 'session', until } }), TXF1 as never);
+        expect(engine.getTriggers()).toHaveLength(0);
+        const [p] = created();
+        expect(p).toMatchObject({ opens: true, tickTable: [{ min: 0, max: null, tick: 1 }],
+            levels: [{ side: 'Buy', entry: { type: 'touch', condition: 'above', price: 20100, cross: true, feed: 'ask',
+                limitTicks: 2, validity: { type: 'session', until }, order: { priceType: 'LMT', timeInForce: 'ROD' } } }] });
+        // a sell watches the bid; a protective stop does not open
+        await engine.addTrigger(stop({ source: 'opposite', send: { type: 'MKP' } }), TXF1 as never);
+        const q = created()[1]!;
+        expect(q.opens).toBeUndefined();
+        expect(q.levels[0]!.entry).toMatchObject({ feed: 'bid', order: { priceType: 'MKP', timeInForce: 'IOC' } });
+    });
+
+    it('a 待確認 對手價 row shows (and arms 送出 with) its side of the book', async () => {
+        m.programs = [program({ entry: { type: 'touch', condition: 'below', price: 19800, feed: 'bid',
+            order: { priceType: 'MKT', timeInForce: 'IOC' } }, phase: 'needsConfirm', pending: { leg: 'entry', price: 19790, ts: 5, reason: 'resume' } })];
+        await boot();
+        await bg.refreshBackground();
+        for (const cb of m.bidask) cb({ code: 'TXFR1', bid_price: ['19795'], ask_price: ['19797'] });
+        await flush();
+        const [row] = engine.getDisplayTriggers();
+        expect(engine.priceKeyOf(row!)).toBe('TXFR1#bid');
+        expect(bg.getBackgroundPrices()['TXFR1#bid']).toBe(19795);
+    });
+
+    it('the main window keeps the book subscribed for a 對手價 condition (not only ticks)', async () => {
+        m.programs = [program({ entry: { type: 'touch', condition: 'below', price: 19800, feed: 'bid',
+            order: { priceType: 'MKT', timeInForce: 'IOC' } } })];
+        await boot();
+        await bg.refreshBackground();
+        await flush();
+        expect([...m.pins].sort()).toEqual(['TXFR1|BidAsk', 'TXFR1|Tick']);
+        m.programs = [program(), { ...program(), id: 'trg:p2' }]; // the 對手價 one is gone (a new revision)
+        await bg.refreshBackground();
+        await flush();
+        expect(m.pins).toEqual(['TXFR1|Tick']);
+    });
+
+    it('the rows show the options as the window shows them', async () => {
+        m.programs = [{ ...program({ entry: { type: 'touch', condition: 'below', price: 19800, cross: true, feed: 'bid', limitTicks: -1,
+            validity: { type: 'today', until: 99 }, order: { priceType: 'LMT', timeInForce: 'ROD' } }, recross: ['entry'] }), opens: true }];
+        await boot();
+        await bg.refreshBackground();
+        const [row] = engine.getDisplayTriggers();
+        expect(row).toMatchObject({ role: 'entry', cross: true, source: 'opposite', send: { type: 'LMT', ticks: -1 },
+            validity: { type: 'today', until: 99 }, awaitingRecross: true });
+    });
+
+    it('the same option checks as this window: a past validity is refused, nothing created', async () => {
+        m.enabled = true;
+        await boot();
+        expect(await engine.addTrigger(entry({ validity: { type: 'date', until: Date.now() - 1 } }), TXF1 as never)).toBeNull();
+        expect(created()).toHaveLength(0);
+        expect(m.notify.mock.calls.some(([n]) => (n as { body: string }).body.includes('有效期已過'))).toBe(true);
+    });
+
+    it('a limit in ticks without a tick table is never created (no guessed price)', async () => {
+        m.enabled = true;
+        await boot();
+        expect(await engine.addTrigger(entry({ send: { type: 'LMT', ticks: -2 } }), TXF as never)).toBeNull();
+        expect(created()).toHaveLength(0);
+        // 0 ticks needs no table
+        await engine.addTrigger(entry({ send: { type: 'LMT', ticks: 0 } }), TXF as never);
+        expect(created()).toHaveLength(1);
+    });
+
+    it('OCO groups, time orders and brackets by trigger stay in this window', async () => {
+        m.enabled = true;
+        await boot();
+        await engine.addTrigger(entry({ time: { kind: 'send', at: Date.now() + 60_000 } }), TXF1 as never);
+        expect(created()).toHaveLength(0);
+        expect(engine.getTriggers()).toHaveLength(1);
+    });
+
+    it('the main window pushes the risk settings (with whether the P&L is known) on change and every 2 s', async () => {
+        m.enabled = true;
+        vi.stubGlobal('window', new EventTarget()); // risk.ts listens for other windows' changes
+        await boot();
+        await bg.refreshBackground();
+        await vi.advanceTimersByTimeAsync(bg.RISK_PUSH_MS + 10);
+        const pushed = calls('execution_set_risk').map(([, a]) => (a as { risk: Record<string, unknown> }).risk);
+        expect(pushed.length).toBeGreaterThan(0);
+        expect(pushed.at(-1)).toMatchObject({ enabled: false, locked: false, pnlKnown: false });
+        const { setRiskSettings } = await import('./risk');
+        setRiskSettings({ locked: true });
+        await flush();
+        expect(calls('execution_set_risk').map(([, a]) => (a as { risk: { locked: boolean } }).risk.locked).at(-1)).toBe(true);
+    });
+
+    it('the P&L is pushed as known only when read and reconciled, with the account it belongs to', async () => {
+        m.enabled = true;
+        vi.stubGlobal('window', new EventTarget());
+        await boot();
+        // the selected futures account F1: −1,500 unrealized, settled −100; another account's gain never offsets it
+        const F2 = { ...F1, account_id: 'fixture-account-F2' };
+        m.trading = { ...m.trading, margin: { future_settle_profitloss: -100 }, marginAccount: `F:${F1.broker_id}:${F1.account_id}`,
+            positions: [{ account: F1, pnl: -1500 }, { account: F2, pnl: 2000 }, { account: S1, pnl: 900 }] as never,
+            queries: { ...m.trading.queries, positions: { updatedAt: 5, needsReconcile: false, error: null } } };
+        await bg.pushBackgroundRisk(true);
+        const last = () => (calls('execution_set_risk').at(-1)![1] as { risk: Record<string, unknown> }).risk;
+        expect(last()).toMatchObject({ dailyPnl: -1600, pnlKnown: true, pnlAccount: { brokerId: F1.broker_id, accountId: F1.account_id } });
+        // a stream outage / failed read leaves something to reconcile: not trusted until read again
+        m.trading = { ...m.trading, queries: { ...m.trading.queries, positions: { updatedAt: 5, needsReconcile: true, error: null } } };
+        await bg.pushBackgroundRisk(true);
+        expect(last()).toMatchObject({ pnlKnown: false });
+    });
+});
+
 describe('background fills reach the window (QA 10/12: 持倉暫未套用, stale positions)', () => {
     const slot = (orderId: string, filled: number) => ({ key: `k-${orderId}`, role: 'entry', cycle: 0, index: 0, status: filled ? 'filled' : 'working',
         orderId, filled, fills: {}, fillTs: {}, qty: 1, cancel: null, detail: null, sentAt: 1 });
@@ -441,3 +563,89 @@ describe('background fills reach the window (QA 10/12: 持倉暫未套用, stale
     });
 });
 
+
+describe('#226 二擇一 in the background (step 2)', () => {
+    const TXF1 = { ...TXF, tick: 1 };
+    const legs = (mode: 'trigger' | 'fill', over: Record<string, unknown> = {}) => [
+        { code: 'TXFR1', condition: 'above' as const, price: 20100, action: 'Buy' as const, quantity: 3, kind: 'stop' as const,
+            role: 'entry' as const, group: 'g', ocoMode: mode, ...over },
+        { code: 'TXFR1', condition: 'below' as const, price: 19900, action: 'Sell' as const, quantity: 3, kind: 'stop' as const,
+            role: 'entry' as const, group: 'g', ocoMode: mode, ...over },
+    ];
+    function groupProgram(mode?: 'fill'): OrderProgram {
+        const base = program();
+        const lv = base.levels[0]!;
+        return { ...base, id: 'grp:g:1', ocoLevels: true, ...(mode ? { ocoMode: mode } : {}), opens: true, levels: [
+            { ...lv, id: 'U', side: 'Buy', qty: 3, entry: { type: 'touch', condition: 'above', price: 20100, order: { priceType: 'MKT', timeInForce: 'IOC' } } },
+            { ...lv, id: 'D', side: 'Sell', qty: 3, entry: { type: 'touch', condition: 'below', price: 19900, order: { priceType: 'MKT', timeInForce: 'IOC' } } },
+        ] };
+    }
+
+    it('both legs become one background program; 成交後刪對應口數 sends limits IOC', async () => {
+        m.enabled = true;
+        await boot();
+        await engine.addTriggerGroup(legs('fill', { send: { type: 'LMT', ticks: -1 } }), TXF1 as never);
+        expect(engine.getTriggers()).toHaveLength(0);
+        const created = calls('execution_create').map(([, a]) => (a as { program: OrderProgram }).program);
+        expect(created).toHaveLength(1);
+        expect(created[0]).toMatchObject({ ocoLevels: true, ocoMode: 'fill', opens: true, tickTable: [{ min: 0, max: null, tick: 1 }] });
+        expect(created[0]!.levels.map(l => [l.side, l.qty, l.entry.type === 'touch' && l.entry.order.timeInForce])).toEqual([
+            ['Buy', 3, 'IOC'], ['Sell', 3, 'IOC']]);
+        await engine.addTriggerGroup(legs('trigger'), TXF1 as never);
+        const second = calls('execution_create').at(-1)![1] as { program: OrderProgram };
+        expect(second.program.ocoLevels).toBe(true);
+        expect(second.program.ocoMode).toBeUndefined();
+    });
+
+    it('rows carry the group, the mode and which side a waiting leg waits for', async () => {
+        const p = groupProgram('fill');
+        p.levels[0] = { ...p.levels[0]!, ocoLock: 'D' };
+        p.levels[1] = { ...p.levels[1]!, phase: 'working' };
+        m.programs = [p];
+        await boot();
+        await bg.refreshBackground();
+        const rows = engine.getDisplayTriggers();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ group: 'grp:g:1', ocoMode: 'fill', ocoLock: 'bg:grp:g:1:D', quantity: 3 });
+    });
+
+    it('pause / remove / modify act on the one program (modify in one engine step)', async () => {
+        const gp = groupProgram();
+        gp.levels = gp.levels.map(lv => lv.entry.type === 'touch' ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, octype: 'New' as const } } } : lv);
+        m.programs = [gp];
+        await boot();
+        await bg.refreshBackground();
+        const ids = engine.getDisplayTriggers().map(r => r.id);
+        expect(ids).toEqual(['bg:grp:g:1:U', 'bg:grp:g:1:D']);
+        await engine.setTriggerGroup(ids, 'pause');
+        expect(calls('execution_pause').map(([, a]) => a)).toEqual([{ programId: 'grp:g:1' }]);
+        await engine.modifyTriggerGroup([{ id: ids[0]!, patch: { price: 20200 } }, { id: ids[1]!, patch: { quantity: 2 } }]);
+        const [, args] = calls('execution_replace')[0]! as [string, { programId: string; program: OrderProgram }];
+        expect(args.programId).toBe('grp:g:1');
+        expect(args.program.levels.map(l => [l.entry.type === 'touch' && l.entry.price, l.qty])).toEqual([[20200, 3], [19900, 2]]);
+        expect(args.program.levels.map(l => l.entry.type === 'touch' && l.entry.order.octype)).toEqual(['New', 'New']);
+        await expect(engine.modifyTriggerGroup([{ id: ids[0]!, patch: { price: 19800 } }])).rejects.toThrow('上方價格必須高於下方價格');
+        await engine.setTriggerGroup(ids, 'remove');
+        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'grp:g:1' }]);
+    });
+});
+
+describe('#226 括號單 with a 觸價 entry in the background (step 3)', () => {
+    it('before the entry fires it is a trigger row carrying its plan; cancel removes the program', async () => {
+        const base = program({ entry: { type: 'touch', condition: 'above', price: 20100, order: { priceType: 'MKT', timeInForce: 'IOC' } },
+            exit: null, qty: 2, side: 'Buy' });
+        const tier = (id: string, index: number, takeTicks: number | null) => ({ ...base.levels[0]!, id, qty: 1, exit: { type: 'oco' as const,
+            stop: null, take: null, order: { priceType: 'MKT' as const, timeInForce: 'IOC' as const, octype: 'Cover' as const } },
+            entry: { type: 'tier' as const, of: 'L1', offset: index, index },
+            rules: { stopTicks: 4, takeTicks, ...(takeTicks === null ? { trail: { activateTicks: 5, distanceTicks: 3, stepTicks: 1 } } : {}) } });
+        m.programs = [{ ...base, id: 'bkt-x', kind: 'bracket', opens: true, levels: [base.levels[0]!, tier('T1', 0, 5), tier('T2', 1, null)] }];
+        await boot();
+        await bg.refreshBackground();
+        const [row] = engine.getDisplayTriggers();
+        expect(row).toMatchObject({ id: 'bg:bkt-x:L1', role: 'entry', price: 20100, quantity: 2,
+            bracketPlan: { tiers: [{ quantity: 1, takeTicks: 5 }, { quantity: 1, takeTicks: null }], stopTicks: 4,
+                trail: { activateTicks: 5, distanceTicks: 3, stepTicks: 1 }, breakeven: null } });
+        await engine.removeTrigger(row!.id);
+        expect(calls('execution_remove').map(([, a]) => a)).toEqual([{ programId: 'bkt-x' }]);
+    });
+});

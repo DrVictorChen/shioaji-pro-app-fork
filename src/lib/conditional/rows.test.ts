@@ -163,5 +163,15 @@ describe('projectRows', () => {
         const bg = { ...live.rows[0]!, source: { type: 'trigger' as const, trigger: { ...(live.rows[0]!.source as { trigger: object }).trigger, background: { programId: 'p' } } as never } };
         expect(rowRunner(bg)).toBe('background');
     });
+
+    it('全平 leftovers are 需要你處理 rows with 再平倉 and 我已核對', () => {
+        const acct = { account_type: 'S' as const, broker_id: 'b', account_id: 's' };
+        const p = projectRows(sources({ leftovers: [{ id: 'l1', at: NOW, env: ENV,
+            order: { account: acct, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' } }] }));
+        expect(p.rows[0]).toMatchObject({ kind: 'flatten', attention: true, side: { text: '多單 7 張' } });
+        expect(p.rows[0]!.status.text).toContain('仍有 7 張 未平倉');
+        expect(p.rows[0]!.actions).toMatchObject({ retry: true, acknowledge: true, cancel: false });
+        expect(p.counts.attention).toBe(1);
+    });
 });
 

@@ -10,6 +10,7 @@ import { currentProtectionEnv } from '../protection-env';
 import { useServerInfo } from '../server-info-store';
 import { getStreamStatus, subscribeStatusStore, type StreamStatus } from '../stream';
 import { useEndedTriggers, useTriggerExits, useTriggerFeed, useTriggers } from '../trigger-engine';
+import { useFlattenLeftovers } from './flatten-leftovers';
 import { conditionalDemoActive, conditionalDemoSources, DEMO_ENV } from './demo';
 import { projectRows, type Projection } from './rows';
 
@@ -42,6 +43,7 @@ export function useConditionalView(): ConditionalView {
     const pending = usePendingConfirm();
     const stream = useStreamStatus();
     const programs = useBackgroundPrograms();
+    const leftovers = useFlattenLeftovers();
     const bgBrackets = useMemo(() => bracketViews(programs), [programs]);
     useServerInfo(); // re-render when the server mode becomes known / changes
     const envNow = currentProtectionEnv();
@@ -49,9 +51,9 @@ export function useConditionalView(): ConditionalView {
     const items = pending.snapshot?.items;
     const demo = conditionalDemoActive();
     const projection = useMemo(() => projectRows(demo ? conditionalDemoSources(now) : {
-        triggers, brackets, exits, ended, pendingConfirm: items ?? [], bgBrackets, feedMissing: feed.feedMissing,
+        triggers, brackets, exits, ended, pendingConfirm: items ?? [], bgBrackets, leftovers, feedMissing: feed.feedMissing,
         executing: feed.executing, envNow, streamLive: stream === 'live', now,
-    }), [demo, bgBrackets, triggers, brackets, exits, ended, items, feed.feedMissing, feed.executing, envNow, stream, now]);
+    }), [demo, bgBrackets, leftovers, triggers, brackets, exits, ended, items, feed.feedMissing, feed.executing, envNow, stream, now]);
     if (demo) return { ...projection, stream: 'live', envNow: DEMO_ENV, executing: true };
     return { ...projection, stream, envNow, executing: feed.executing };
 }
