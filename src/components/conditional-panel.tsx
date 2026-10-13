@@ -297,28 +297,24 @@ function RowActions({ row, expanded, onToggle, compact }: {
     const deleting = confirm.step === 'cancel';
     return (
         <div className={compact ? styles.cardActions : styles.actionsWrap} onClick={e => e.stopPropagation()}>
-            <div className={styles.opsGrid}>
-                <span className={styles.opsPrimary}>
-                    {elsewhere && (row.actions.send || row.actions.rearm || row.actions.handled) && !primary
+            {(() => {
+                const slots: [string, ReactNode][] = [
+                    ['primary', elsewhere && (row.actions.send || row.actions.rearm || row.actions.handled) && !primary
                         ? <span className={styles.muted} title='這張由背景執行，請在主視窗處理'>主視窗處理</span>
-                        : primary && (
+                        : primary ? (
                             <button type='button' className={styles.opButton[primary.tone ?? 'plain']} disabled={busy} title={primary.title}
                                 aria-expanded={primary.expands ? expanded : undefined} onClick={primary.run}>
                                 {primary.label}
                             </button>
-                        )}
-                </span>
-                <span className={styles.opsSlot}>{more.length > 0 && <MoreMenu items={more} busy={busy} />}</span>
-                <span className={styles.opsSlot}>
-                    {a.modify && (
+                        ) : null],
+                    ['more', more.length > 0 ? <MoreMenu items={more} busy={busy} /> : null],
+                    ['edit', a.modify ? (
                         <button type='button' className={expanded ? styles.iconButton.active : styles.iconButton.plain}
                             title='修改' aria-label='修改' aria-expanded={expanded} onClick={onToggle}>
                             <Pencil size={13} aria-hidden />
                         </button>
-                    )}
-                </span>
-                <span className={styles.opsSlot}>
-                    {a.pause ? (
+                    ) : null],
+                    ['pause', a.pause ? (
                         <button type='button' className={styles.iconButton.plain} disabled={busy} title='暫停（不再盯價，之後可恢復）'
                             aria-label='暫停' onClick={() => pause(true)}>
                             <Pause size={13} aria-hidden />
@@ -328,19 +324,27 @@ function RowActions({ row, expanded, onToggle, compact }: {
                             title='恢復盯價；若暫停期間已穿價，會先等你確認，不會直接送出' aria-label='恢復' onClick={() => pause(false)}>
                             <Play size={13} aria-hidden />
                         </button>
-                    ) : null}
-                </span>
-                <span className={styles.opsSlot}>
-                    {del && (
+                    ) : null],
+                    ['delete', del ? (
                         <button type='button' className={deleting ? styles.iconButton.dangerSolid : styles.iconButton.danger} disabled={busy}
                             title={deleting ? `再按一次確認：${HANDLED_TEXT}` : HANDLED_TEXT}
                             aria-label={deleting ? `再按一次確認：${HANDLED_TEXT}` : HANDLED_TEXT}
                             data-testid='cond-delete' onClick={del}>
                             <Trash2 size={13} aria-hidden />
                         </button>
-                    )}
-                </span>
-            </div>
+                    ) : null],
+                ];
+                // wide table: fixed slots (empty ones keep their place, rows line up);
+                // narrow card: the same order, packed to the right
+                if (compact) {
+                    return <div className={styles.opsRow}>{slots.filter(([, el]) => el).map(([k, el]) => <span key={k} className={styles.opsItem}>{el}</span>)}</div>;
+                }
+                return (
+                    <div className={styles.opsGrid}>
+                        {slots.map(([k, el]) => <span key={k} className={k === 'primary' ? styles.opsPrimary : styles.opsSlot}>{el}</span>)}
+                    </div>
+                );
+            })()}
             {deleting && <span className={styles.opsNote.danger}>再按一次刪除</span>}
             {message && !deleting && <span className={styles.opsNote[message.tone]} role='status' title={message.text}>{message.text}</span>}
         </div>
@@ -675,10 +679,11 @@ function Card({ row, expanded, onToggle }: { row: CondRow; expanded: boolean; on
         <div className={`${row.attention ? styles.card.alert : expanded ? styles.card.selected : styles.card.plain} ${styles.rowClickable}`}
             onClick={onToggle} aria-expanded={expanded}>
             <div className={styles.cardHead}>
-                <ProductCell row={row} />
-                <span>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></span>
-                <SideText side={row.side} />
-                <span className={styles.grow} />
+                <span className={styles.cardTitle}>
+                    <ProductCell row={row} />
+                    <span>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></span>
+                    <SideText side={row.side} />
+                </span>
                 <StatusLabel row={row} />
             </div>
             <div className={`${styles.numText} ${styles.muted} ${styles.cardText}`}>{facts}</div>

@@ -352,7 +352,10 @@ export const card = styleVariants({
     selected: [cardBase, { borderColor: vars.color.borderBright, background: vars.color.inset }],
 });
 
-export const cardHead = style({ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', minWidth: 0 });
+// 第一列：標題（截斷）＋狀態標籤固定在最右
+export const cardHead = style({ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 });
+export const cardTitle = style({ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' });
+globalStyle(`${cardHead} > [data-testid='cond-status']`, { flexShrink: 0, whiteSpace: 'nowrap' });
 export const cardActions = style({ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px', marginLeft: 'auto' });
 
 // ---- empty state ----
@@ -646,3 +649,5 @@ export const linkButton = style({
     selectors: { '&:hover': { textDecoration: 'underline' } },
 });
 globalStyle(`${table} td${opsCell}`, { paddingLeft: '6px', paddingRight: '6px' });
+export const opsRow = style({ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' });
+export const opsItem = style({ display: 'inline-flex', alignItems: 'center' });
