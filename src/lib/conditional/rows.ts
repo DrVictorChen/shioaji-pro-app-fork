@@ -653,6 +653,48 @@ export function backgroundFiredToday(programs: readonly OrderProgram[], now: num
     return n;
 }
 
+/** The status as a short label for the table (≤ 6 characters, plus a fill
+ * count); the full text goes to the tooltip and the expanded row. */
+const SHORT_RULES: [RegExp, string][] = [
+    [/異常成交|進場單結束後才成交/, '異常成交'],
+    [/盤別已更換|盤別更換|保護未延續/, '盤別已更換'],
+    [/結果不明|結果未知|未能確認/, '結果不明'],
+    [/已穿價|穿價，未自動送出/, '已穿價'],
+    [/未受保護/, '未受保護'],
+    [/尚未建立/, '保護未建立'],
+    [/保護未確認/, '保護未確認'],
+    [/仍有 .*未平倉|未平倉/, '未平倉'],
+    [/已停用/, '已停用'],
+    [/連線中斷/, '連線中斷'],
+    [/主視窗未執行/, '主視窗未執行'],
+    [/行情未訂閱/, '行情未訂閱'],
+    [/另一邊已觸發/, '等另一邊成交'],
+    [/已暫停/, '已暫停'],
+    [/出場未完全成交/, '出場未完成'],
+    [/出場未送出/, '出場未送出'],
+    [/出場送單中|出場委託已送出|出場中|等待成交/, '出場中'],
+    [/已出場|已成交|filled/, '已出場'],
+    [/保護中/, '保護中'],
+    [/等待進場/, '等待進場'],
+    [/等待時間/, '等待時間'],
+    [/盯價中/, '盯價中'],
+    [/已觸發/, '已觸發'],
+    [/已取消|已刪除/, '已取消'],
+    [/有效期已過|到期/, '已到期'],
+    [/已結束|進場未成交/, '已結束'],
+    [/待確認|請確認/, '待確認'],
+    [/已改由你自行處理/, '已自行處理'],
+];
+export function shortStatus(text: string): string {
+    const fill = /(\d+\/\d+)/.exec(text)?.[1];
+    for (const [re, label] of SHORT_RULES) {
+        if (!re.test(text)) continue;
+        return (label === '保護中' || label === '出場中') && fill ? `${label} ${fill}` : label;
+    }
+    const head = text.split(/[，,。：:（(·]/)[0]!.trim();
+    return head.length > 6 ? `${head.slice(0, 6)}…` : head;
+}
+
 export function rowsForTab(p: Projection, tab: CondTab): CondRow[] {
     if (tab === 'ended') return p.ended;
     if (tab === 'all') return p.rows;

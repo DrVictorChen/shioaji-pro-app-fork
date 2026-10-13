@@ -192,3 +192,19 @@ describe('今日已觸發 counts the background engine too (#216 QA 10/13)', () 
         expect(projectRows(sources({})).counts.firedToday).toBe(0);
     });
 });
+
+describe('shortStatus (the table shows a short label; the sentence on hover)', () => {
+    it('maps every long status to ≤ 6 characters (plus a fill count)', async () => {
+        const { shortStatus } = await import('./rows');
+        expect(shortStatus('盤別已更換，保護未延續')).toBe('盤別已更換');
+        expect(shortStatus('送出結果不明，請確認是否成交')).toBe('結果不明');
+        expect(shortStatus('恢復時已穿價，未自動送出')).toBe('已穿價');
+        expect(shortStatus('異常成交 1 口：委託已回報刪單成功後仍收到成交（資料異常），已記為未受保護，不會自動補保護；請對委託與持倉核對')).toBe('異常成交');
+        expect(shortStatus('保護中 · 成交 1/1')).toBe('保護中 1/1');
+        expect(shortStatus('已暫停')).toBe('已暫停');
+        expect(shortStatus('盯價中')).toBe('盯價中');
+        expect(shortStatus('停損出場結果不明（不會自動重送）')).toBe('結果不明');
+        expect(shortStatus('仍有 7 張未平倉（可能無對手單或漲跌停）')).toBe('未平倉');
+        expect(shortStatus('某個沒見過的很長的狀態說明，後面還有')).toBe('某個沒見過的…');
+    });
+});

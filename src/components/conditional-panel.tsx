@@ -22,9 +22,9 @@ import {
     Play,
     Plus,
     Server,
+    ChevronDown,
     Trash2,
     TriangleAlert,
-    X,
 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { acknowledgeBracketExit, dismissBracket, modifyBracket, reconcileBracket } from '../lib/bracket';
@@ -51,7 +51,7 @@ import {
     type HistoryEntry,
     type TriggerOrder,
 } from '../lib/trigger-engine';
-import { accountTag, bgBracketRows, KIND_LABEL, rowRunner, rowsForTab, TABS, type CondRow, type CondTab } from '../lib/conditional/rows';
+import { accountTag, bgBracketRows, KIND_LABEL, rowRunner, rowsForTab, shortStatus, TABS, type CondRow, type CondTab } from '../lib/conditional/rows';
 import { useConditionalView, useStreamStatus, type ConditionalView } from '../lib/conditional/use-conditional';
 import { useConditionalSettings } from '../lib/conditional/settings';
 import { useBracketPolicy } from '../lib/conditional/bracket-policy';
@@ -144,10 +144,10 @@ function ProductCell({ row }: { row: CondRow }) {
     const name = contractLabel(row.code, contract);
     const code = row.orderCode && /\d/.test(row.orderCode) ? row.orderCode : row.code;
     return (
-        <>
+        <span className={styles.nameText} title={name !== row.code ? `${code} ${name}` : code}>
             <span className={styles.code}>{code}</span>
             {name !== row.code && <span className={styles.muted}> {name}</span>}
-        </>
+        </span>
     );
 }
 
@@ -225,7 +225,7 @@ function RowActions({ row, expanded, onToggle, compact }: {
     });
     const handled = () => {
         if (src.type !== 'bgBracket') return;
-        if (confirm.step !== 'handled') { confirm.arm('handled'); return; }
+        if (confirm.step !== 'cancel') { confirm.arm('cancel'); return; }
         if (!confirm.settled()) return;
         confirm.arm(null);
         void run(() => markBackgroundHandled(src.view.programId, src.view.levelId));
@@ -276,102 +276,100 @@ function RowActions({ row, expanded, onToggle, compact }: {
             if (r.remaining.length || r.notSent.length || r.cancelFailed.length) throw new Error(flattenSummary(r));
         }, '已再次平倉');
     };
-    const cancelLabel = src.type === 'bracket' ? '再按一次：移除並撤銷保護' : src.type === 'bgBracket' ? '再按一次：移除' : '再按一次：取消';
+    // 操作欄：固定格位（主要文字鈕｜編輯｜暫停／繼續｜刪除），沒有的動作留空
+    type Act = { key: string; label: string; title: string; run: () => void; tone?: 'primary' | 'danger' | 'plain'; expands?: boolean };
+    const acts: Act[] = [];
+    if (message?.text.includes('未穿價') && pendingId) acts.push({ key: 'force', label: '仍要送出', title: '目前已未穿價；仍要依原設定送出一次', run: () => send(true), tone: 'danger' });
+    if (a.send) acts.push({ key: 'send', label: confirm.step === 'send' ? '確認送出' : '現在送出', title: '重新檢查行情、環境與帳戶後，依原設定送出一次', run: () => send(), tone: confirm.step === 'send' ? 'danger' : 'primary' });
+    if (a.confirm) acts.push({ key: 'confirm', label: '確認成交', title: '展開確認這筆委託的結果', run: onToggle, tone: 'primary', expands: true });
+    if (a.rearm) acts.push({ key: 'rearm', label: '重新啟用', title: '重新查詢持倉、確認口數後，在這個盤別重新開始盯停損停利；不會立即送單', run: onToggle, tone: 'primary', expands: true });
+    if (a.retry) acts.push({ key: 'retry', label: confirm.step === 'retry' ? '確認再平倉' : '再平倉', title: '重新查詢委託與持倉，刪除此商品未成交委託後再平倉剩餘部位', run: retry, tone: confirm.step === 'retry' ? 'danger' : 'primary' });
+    if (a.keep && (pendingId || bg)) acts.push({ key: 'keep', label: '保留盯價', title: '先不送單；價格回到觸發價另一側、再次穿過時才會觸發',
+        run: () => void run(() => bg ? resolveBackgroundTrigger(bg.programId, bg.levelId, 'keep') : resolvePendingTrigger(pendingId!, 'keep')) });
+    if (a.acknowledge) acts.push({ key: 'ack', label: '我已核對', title: '已在委託與持倉確認結果；不會送出任何委託',
+        run: () => void run(async () => src.type === 'bracket' ? acknowledgeBracketExit(src.plan.id)
+            : src.type === 'exit' ? acknowledgeExit(src.exit.id) : src.type === 'leftover' ? dismissFlattenLeftover(src.leftover.id) : undefined) });
+    if (a.reconcile && row.attention && src.type === 'bracket') acts.push({ key: 'reconcile', label: '對帳', title: '向券商更新此帳戶委託（會使用查詢額度）',
+        run: () => void run(() => reconcileBracket(src.plan.id), '對帳完成') });
+    const [primary, ...more] = acts;
+    // 刪除：取消條件單與「我已自行處理」是同一件事（不送委託、不動持倉），同一顆鈕、同一個二次確認
+    const del = a.handled ? handled : a.cancel ? cancel : null;
+    const deleting = confirm.step === 'cancel';
     return (
-        <div className={compact ? styles.cardActions : styles.actions}>
-            {elsewhere && (row.actions.send || row.actions.rearm || row.actions.handled) && <span className={styles.muted}>請在主視窗處理</span>}
-            {message && <span className={styles.message[message.tone]} role='status'>{message.text}</span>}
-            {message?.text.includes('未穿價') && pendingId && (
-                <button type='button' className={styles.button.danger} disabled={busy} onClick={() => send(true)}>仍要送出</button>
-            )}
-            {a.send && (
-                <button type='button' className={styles.button.primary} disabled={busy} onClick={() => send()}
-                    title='重新檢查行情、環境與帳戶後，依原設定送出一次'>
-                    {confirm.step === 'send' ? '再按一次確認送出' : '現在送出'}
-                </button>
-            )}
-            {a.keep && (pendingId || bg) && (
-                <button type='button' className={styles.button.plain} disabled={busy}
-                    title='先不送單；價格回到觸發價另一側、再次穿過時才會觸發'
-                    onClick={() => void run(() => bg ? resolveBackgroundTrigger(bg.programId, bg.levelId, 'keep')
-                        : resolvePendingTrigger(pendingId!, 'keep'))}>
-                    保留盯價
-                </button>
-            )}
-            {a.confirm && (
-                <button type='button' className={styles.button.primary} onClick={onToggle} aria-expanded={expanded}>
-                    確認成交…
-                </button>
-            )}
-            {a.rearm && (
-                <button type='button' className={styles.button.primary} onClick={onToggle} aria-expanded={expanded}
-                    title='重新查詢持倉、確認口數後，在這個盤別重新開始盯停損停利；不會立即送單'>
-                    重新啟用…
-                </button>
-            )}
-            {a.handled && (confirm.step === 'handled' ? (
-                <button type='button' className={styles.button.danger} disabled={busy} title={HANDLED_TEXT} aria-label={HANDLED_TEXT}
-                    onClick={handled}>
-                    再按一次確認刪除
-                </button>
-            ) : (
-                // 「我已自行處理」 as an icon (fewer words in the actions column)
-                <button type='button' className={styles.iconButton.danger} disabled={busy} title={HANDLED_TEXT} aria-label={HANDLED_TEXT}
-                    data-testid='cond-handled' onClick={handled}>
-                    <Trash2 size={13} aria-hidden />
-                </button>
-            ))}
-            {a.retry && (
-                <button type='button' className={confirm.step === 'retry' ? styles.button.danger : styles.button.primary} disabled={busy}
-                    title='重新查詢委託與持倉，刪除此商品未成交委託後再平倉剩餘部位'
-                    onClick={retry}>
-                    {confirm.step === 'retry' ? '再按一次：確認再平倉' : '再平倉剩餘部位'}
-                </button>
-            )}
-            {a.reconcile && row.attention && src.type === 'bracket' && (
-                <button type='button' className={styles.button.plain} disabled={busy}
-                    title='向券商更新此帳戶委託（會使用查詢額度）'
-                    onClick={() => void run(() => reconcileBracket(src.plan.id), '對帳完成')}>
-                    對帳
-                </button>
-            )}
-            {a.acknowledge && (
-                <button type='button' className={styles.button.plain} disabled={busy}
-                    title='已在委託與持倉確認結果；不會送出任何委託'
-                    onClick={() => void run(async () => src.type === 'bracket' ? acknowledgeBracketExit(src.plan.id)
-                        : src.type === 'exit' ? acknowledgeExit(src.exit.id)
-                            : src.type === 'leftover' ? dismissFlattenLeftover(src.leftover.id) : undefined)}>
-                    我已核對
-                </button>
-            )}
-            {a.modify && (
-                <button type='button' className={expanded ? styles.iconButton.active : styles.iconButton.plain}
-                    title='修改' aria-label='修改' aria-expanded={expanded} onClick={onToggle}>
-                    <Pencil size={13} aria-hidden />
-                </button>
-            )}
-            {a.pause && (
-                <button type='button' className={styles.iconButton.plain} disabled={busy} title='暫停（不再盯價，之後可恢復）'
-                    aria-label='暫停' onClick={() => pause(true)}>
-                    <Pause size={13} aria-hidden />
-                </button>
-            )}
-            {a.resume && (
-                <button type='button' className={styles.iconButton.plain} disabled={busy}
-                    title='恢復盯價；若暫停期間已穿價，會先等你確認，不會直接送出' aria-label='恢復' onClick={() => pause(false)}>
-                    <Play size={13} aria-hidden />
-                </button>
-            )}
-            {a.cancel && (confirm.step === 'cancel' ? (
-                <button type='button' className={styles.button.danger} disabled={busy} onClick={cancel}>{cancelLabel}</button>
-            ) : (
-                <button type='button' className={styles.iconButton.danger} disabled={busy}
-                    title={src.type === 'bracket' ? '移除追蹤並撤銷停損停利保護（不會刪除已送出的委託）' : '取消這張條件單，不送單'}
-                    aria-label='取消' onClick={cancel}>
-                    <X size={13} aria-hidden />
-                </button>
-            ))}
+        <div className={compact ? styles.cardActions : styles.actionsWrap} onClick={e => e.stopPropagation()}>
+            <div className={styles.opsGrid}>
+                <span className={styles.opsPrimary}>
+                    {elsewhere && (row.actions.send || row.actions.rearm || row.actions.handled) && !primary
+                        ? <span className={styles.muted} title='這張由背景執行，請在主視窗處理'>主視窗處理</span>
+                        : primary && (
+                            <button type='button' className={styles.opButton[primary.tone ?? 'plain']} disabled={busy} title={primary.title}
+                                aria-expanded={primary.expands ? expanded : undefined} onClick={primary.run}>
+                                {primary.label}
+                            </button>
+                        )}
+                    {more.length > 0 && <MoreMenu items={more} busy={busy} />}
+                </span>
+                <span className={styles.opsSlot}>
+                    {a.modify && (
+                        <button type='button' className={expanded ? styles.iconButton.active : styles.iconButton.plain}
+                            title='修改' aria-label='修改' aria-expanded={expanded} onClick={onToggle}>
+                            <Pencil size={13} aria-hidden />
+                        </button>
+                    )}
+                </span>
+                <span className={styles.opsSlot}>
+                    {a.pause ? (
+                        <button type='button' className={styles.iconButton.plain} disabled={busy} title='暫停（不再盯價，之後可恢復）'
+                            aria-label='暫停' onClick={() => pause(true)}>
+                            <Pause size={13} aria-hidden />
+                        </button>
+                    ) : a.resume ? (
+                        <button type='button' className={styles.iconButton.plain} disabled={busy}
+                            title='恢復盯價；若暫停期間已穿價，會先等你確認，不會直接送出' aria-label='恢復' onClick={() => pause(false)}>
+                            <Play size={13} aria-hidden />
+                        </button>
+                    ) : null}
+                </span>
+                <span className={styles.opsSlot}>
+                    {del && (
+                        <button type='button' className={deleting ? styles.iconButton.dangerSolid : styles.iconButton.danger} disabled={busy}
+                            title={deleting ? `再按一次確認：${HANDLED_TEXT}` : HANDLED_TEXT}
+                            aria-label={deleting ? `再按一次確認：${HANDLED_TEXT}` : HANDLED_TEXT}
+                            data-testid='cond-delete' onClick={del}>
+                            <Trash2 size={13} aria-hidden />
+                        </button>
+                    )}
+                </span>
+            </div>
+            {deleting && <span className={styles.opsNote.danger}>再按一次刪除</span>}
+            {message && !deleting && <span className={styles.opsNote[message.tone]} role='status' title={message.text}>{message.text}</span>}
         </div>
+    );
+}
+
+/** Secondary actions in the primary slot (keeps every row's slots aligned). */
+function MoreMenu({ items, busy }: { items: { key: string; label: string; title: string; run: () => void }[]; busy: boolean }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <span className={styles.moreAnchor}>
+            <button type='button' className={styles.iconButton.plain} disabled={busy} title='其他動作' aria-label='其他動作'
+                aria-haspopup='menu' aria-expanded={open} onClick={() => setOpen(!open)}>
+                <ChevronDown size={13} aria-hidden />
+            </button>
+            {open && (
+                <>
+                    <span className={styles.moreBackdrop} onClick={() => setOpen(false)} />
+                    <span className={styles.moreMenu} role='menu'>
+                        {items.map(it => (
+                            <button key={it.key} type='button' role='menuitem' className={styles.moreItem} title={it.title}
+                                onClick={() => { setOpen(false); it.run(); }}>
+                                {it.label}
+                            </button>
+                        ))}
+                    </span>
+                </>
+            )}
+        </span>
     );
 }
 
@@ -577,15 +575,16 @@ function Expanded({ row, onClose }: { row: CondRow; onClose: () => void }) {
     else if (src.type === 'bracket' && row.actions.modify) left = <BracketEdit row={row} onDone={onClose} />;
     else if (src.type === 'pendingConfirm') left = <PendingConfirmItemCard id={src.item.id} />;
     else if (src.type === 'bgBracket' && row.actions.rearm) left = <BracketRearm v={src.view} onClose={onClose} />;
-    else left = <div className={styles.muted}>{row.status.text}</div>;
+    else left = null;
     return (
-        <div className={styles.expandGrid}>
+        <div className={styles.expandGrid} onClick={e => e.stopPropagation()}>
             <div className={styles.pane}>
                 <div className={styles.paneTitle}>
                     {src.type === 'pendingConfirm' ? <TriangleAlert size={13} aria-hidden /> : <Pencil size={13} aria-hidden />}
                     {editTitle(row)}
                     <span className={styles.muted} style={{ fontWeight: 400 }}>{row.side.text} · <AccountText row={row} /></span>
                 </div>
+                <div className={`${styles.statusFull} ${styles.tone[row.status.tone]}`} data-testid='cond-status-full'>{row.status.text}</div>
                 {left}
             </div>
             <div className={styles.paneSplit}>
@@ -598,17 +597,23 @@ function Expanded({ row, onClose }: { row: CondRow; onClose: () => void }) {
 
 // ---- wide table ----
 
+/** Short status label; the whole sentence on hover and in the expanded row. */
+function StatusLabel({ row }: { row: CondRow }) {
+    return <span className={styles.tone[row.status.tone]} title={row.status.text} data-testid='cond-status'>{shortStatus(row.status.text)}</span>;
+}
+
 function TableRow({ row, expanded, onToggle }: { row: CondRow; expanded: boolean; onToggle: () => void }) {
-    const cls = [row.attention ? styles.rowAlert : '', expanded ? styles.rowSelected : ''].filter(Boolean).join(' ');
+    const cls = [row.attention ? styles.rowAlert : '', expanded ? styles.rowSelected : '', styles.rowClickable].filter(Boolean).join(' ');
     return (
         <>
-            <tr className={cls || undefined}>
-                <td className={styles.nameCell} title={row.code}><ProductCell row={row} /></td>
+            {/* the row opens its details (full status, edit, history) */}
+            <tr className={cls} onClick={onToggle} aria-expanded={expanded}>
+                <td className={styles.nameCell}><ProductCell row={row} /></td>
                 <td>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></td>
                 <td><SideText side={row.side} /></td>
-                <td className={styles.mono}>{row.condition}</td>
-                <td className={styles.colPrice}><PriceCell row={row} /></td>
-                <td className={`${styles.tone[row.status.tone]} ${styles.statusCell}`}>{row.status.text}</td>
+                <td className={styles.numCell} title={row.condition}>{row.condition}</td>
+                <td className={`${styles.colPrice} ${styles.numCell}`}><PriceCell row={row} /></td>
+                <td className={styles.statusCell}><StatusLabel row={row} /></td>
                 <td className={`${styles.muted} ${styles.colValidity}`}>{row.validity}</td>
                 <td className={styles.colAccount}><AccountText row={row} /></td>
                 <td className={styles.opsCell}><RowActions row={row} expanded={expanded} onToggle={onToggle} /></td>
@@ -632,9 +637,16 @@ function Table({ rows, ended, expanded, onToggle }: {
     const running = rows.filter(r => !r.attention);
     return (
         <table className={styles.table}>
+            {/* one table, one set of widths: 需要你處理 and 執行中 line up */}
+            <colgroup>
+                <col className={styles.cName} /><col className={styles.cKind} /><col className={styles.cSide} /><col />
+                <col className={`${styles.cPrice} ${styles.colPrice}`} /><col className={styles.cStatus} />
+                <col className={`${styles.cValidity} ${styles.colValidity}`} /><col className={`${styles.cAccount} ${styles.colAccount}`} />
+                <col className={styles.cOps} />
+            </colgroup>
             <thead>
                 <tr>
-                    <th>商品</th><th>類型</th><th>方向／數量</th><th>條件</th><th className={styles.colPrice}>現價／距離</th>
+                    <th>商品</th><th>類型</th><th>方向／數量</th><th className={styles.thRight}>條件</th><th className={`${styles.colPrice} ${styles.thRight}`}>現價／距離</th>
                     <th>狀態</th><th className={styles.colValidity}>{ended ? '結束時間' : '有效期'}</th>
                     <th className={styles.colAccount}>帳戶</th><th className={`${styles.thRight} ${styles.opsCell}`}>操作</th>
                 </tr>
@@ -660,18 +672,20 @@ function Card({ row, expanded, onToggle }: { row: CondRow; expanded: boolean; on
         row.validity !== '—' ? row.validity : null,
     ].filter(Boolean).join(' · ');
     return (
-        <div className={row.attention ? styles.card.alert : expanded ? styles.card.selected : styles.card.plain}>
+        <div className={`${row.attention ? styles.card.alert : expanded ? styles.card.selected : styles.card.plain} ${styles.rowClickable}`}
+            onClick={onToggle} aria-expanded={expanded}>
             <div className={styles.cardHead}>
                 <ProductCell row={row} />
                 <span>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></span>
                 <SideText side={row.side} />
                 <span className={styles.grow} />
-                {!row.attention && <span className={styles.tone[row.status.tone]}>{row.status.text}</span>}
+                <StatusLabel row={row} />
             </div>
-            <div className={`${styles.mono} ${styles.muted}`}>{facts}</div>
-            {row.attention && <div className={styles.tone[row.status.tone]}>{row.status.text}</div>}
-            <div className={styles.muted}><AccountText row={row} /></div>
-            <RowActions row={row} expanded={expanded} onToggle={onToggle} compact />
+            <div className={`${styles.numText} ${styles.muted} ${styles.cardText}`}>{facts}</div>
+            <div className={styles.cardFoot}>
+                <span className={styles.muted}><AccountText row={row} /></span>
+                <RowActions row={row} expanded={expanded} onToggle={onToggle} compact />
+            </div>
             {expanded && <Expanded row={row} onClose={onToggle} />}
         </div>
     );

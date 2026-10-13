@@ -94,7 +94,7 @@ export const button = styleVariants({
 
 const iconButtonBase = style({
     width: '24px',
-    height: '22px',
+    height: '24px',
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -113,6 +113,7 @@ const iconButtonBase = style({
 export const iconButton = styleVariants({
     plain: [iconButtonBase],
     danger: [iconButtonBase, { color: vars.color.danger }],
+    dangerSolid: [iconButtonBase, { color: '#fff', background: vars.color.danger, borderColor: vars.color.danger }],
     active: [iconButtonBase, { borderColor: vars.color.accent, color: vars.color.accent }],
 });
 
@@ -156,6 +157,8 @@ export const table = style({
     width: '100%',
     borderCollapse: 'collapse',
     fontVariantNumeric: 'tabular-nums',
+    // fixed widths from the colgroup: every section lines up, rows stay one line
+    tableLayout: 'fixed',
 });
 
 globalStyle(`${table} th`, {
@@ -172,9 +175,12 @@ globalStyle(`${table} th`, {
 });
 
 globalStyle(`${table} td`, {
-    padding: '6px 10px',
+    padding: '4px 10px',
+    height: '30px',
     borderBottom: `1px solid ${vars.color.border}`,
     whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
     verticalAlign: 'middle',
 });
 
@@ -328,6 +334,8 @@ export const dot = styleVariants({
 export const cards = style({ display: 'flex', flexDirection: 'column', padding: '4px 0' });
 
 const cardBase = style({
+    minWidth: 0,
+    overflow: 'hidden',
     margin: '6px 8px',
     padding: '8px',
     border: `1px solid ${vars.color.border}`,
@@ -344,8 +352,8 @@ export const card = styleVariants({
     selected: [cardBase, { borderColor: vars.color.borderBright, background: vars.color.inset }],
 });
 
-export const cardHead = style({ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' });
-export const cardActions = style({ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap', marginTop: '4px' });
+export const cardHead = style({ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', minWidth: 0 });
+export const cardActions = style({ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px', marginLeft: 'auto' });
 
 // ---- empty state ----
 
@@ -504,9 +512,73 @@ export const settingSection = style({
 });
 export const settingEmbed = style({ padding: '0 12px 10px', borderBottom: `1px solid ${vars.color.border}` });
 
-export const nameCell = style({ maxWidth: '190px', overflow: 'hidden', textOverflow: 'ellipsis' });
+export const nameCell = style({});
+export const nameText = style({ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 });
+export const numCell = style({ textAlign: 'right', fontFamily: vars.font.mono, fontVariantNumeric: 'tabular-nums' });
+export const numText = style({ fontFamily: vars.font.mono, fontVariantNumeric: 'tabular-nums' });
+export const statusFull = style({ padding: '0 0 8px', lineHeight: 1.5, whiteSpace: 'normal', overflowWrap: 'anywhere' });
+
+// column widths (colgroup)
+export const cName = style({ width: '150px' });
+export const cKind = style({ width: '78px' });
+export const cSide = style({ width: '96px' });
+export const cPrice = style({ width: '118px' });
+export const cStatus = style({ width: '104px' });
+export const cValidity = style({ width: '92px' });
+export const cAccount = style({ width: '92px' });
+export const cOps = style({ width: '212px' });
+
+// 操作: fixed slots — primary text button | edit | pause/resume | delete
+export const actionsWrap = style({ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px' });
+export const opsGrid = style({
+    display: 'grid',
+    gridTemplateColumns: '108px 24px 24px 24px',
+    gap: '4px',
+    alignItems: 'center',
+    justifyItems: 'end',
+});
+export const opsPrimary = style({ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: '2px', width: '100%' });
+export const opsSlot = style({ display: 'inline-flex', width: '24px', height: '24px', alignItems: 'center', justifyContent: 'center' });
+const opButtonBase = style({
+    height: '24px',
+    minWidth: '76px',
+    padding: '0 8px',
+    fontSize: '0.7rem',
+    borderRadius: vars.radius.sm,
+    border: `1px solid ${vars.color.border}`,
+    background: 'transparent',
+    color: vars.color.foreground,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    selectors: { '&:disabled': { opacity: 0.4, cursor: 'not-allowed' } },
+});
+export const opButton = styleVariants({
+    plain: [opButtonBase, { selectors: { '&:hover:not(:disabled)': { background: vars.color.muted } } }],
+    primary: [opButtonBase, { background: vars.color.accent, borderColor: vars.color.accent, color: '#fff', fontWeight: 600 }],
+    danger: [opButtonBase, { borderColor: vars.color.danger, color: vars.color.danger, fontWeight: 600 }],
+});
+const opsNoteBase = style({ fontSize: '0.64rem', maxWidth: '212px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
+export const opsNote = styleVariants({
+    ok: [opsNoteBase, { color: vars.color.success }],
+    err: [opsNoteBase, { color: vars.color.danger }],
+    danger: [opsNoteBase, { color: vars.color.danger }],
+    muted: [opsNoteBase, { color: vars.color.mutedForeground }],
+    warn: [opsNoteBase, { color: vars.color.amber }],
+});
+export const moreAnchor = style({ position: 'relative', display: 'inline-flex' });
+export const moreBackdrop = style({ position: 'fixed', inset: 0, zIndex: 40 });
+export const moreMenu = style({
+    position: 'absolute', top: 'calc(100% + 2px)', right: 0, zIndex: 41, display: 'flex', flexDirection: 'column', minWidth: '96px', padding: '3px',
+    background: vars.color.panelRaised, border: `1px solid ${vars.color.borderBright}`, borderRadius: vars.radius.md, boxShadow: '0 8px 20px rgba(0,0,0,.3)',
+});
+export const moreItem = style({
+    padding: '4px 8px', fontSize: '0.7rem', textAlign: 'left', border: 'none', background: 'transparent', color: vars.color.foreground,
+    borderRadius: vars.radius.sm, cursor: 'pointer', whiteSpace: 'nowrap', selectors: { '&:hover': { background: vars.color.muted } },
+});
+export const cardText = style({ whiteSpace: 'normal', overflowWrap: 'anywhere', minWidth: 0 });
+export const cardFoot = style({ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '6px', minWidth: 0 });
 export const statusCell = style({});
-globalStyle(`${table} td.${statusCell}`, { whiteSpace: 'normal', minWidth: '140px', maxWidth: '260px' });
+globalStyle(`${table} td.${statusCell}`, { whiteSpace: 'nowrap' });
 /** a number with its words: never split across lines */
 export const group = style({ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' });
 
