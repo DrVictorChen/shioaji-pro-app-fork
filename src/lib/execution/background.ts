@@ -23,10 +23,20 @@ import { ensureContract } from '../contracts-cache';
 import { isMainWindow } from '../main-window-commands';
 import { currentProtectionEnv, onProtectionEnvChange } from '../protection-env';
 import { pinQuote } from '../quote-ownership';
-import { getStreamStatus, onAnyTick, subscribeStatusStore } from '../stream';
+import { getStreamStatus, onAnyBidAsk, onAnyTick, onOddLotTick, subscribeStatusStore } from '../stream';
 import { notify } from '../trade';
 import { envKeyOf } from './adapter';
 import { programFinished } from './background-view';
+import {
+    BRACKET_COMMAND,
+    BRACKET_NOTICE_TEXT,
+    DEFAULT_BRACKET_POLICY,
+    parseBracketPolicy,
+    type BracketPolicy,
+    REARM_REFUSAL_TEXT,
+    type CreateBracketRequest,
+    type RearmBracketResult,
+} from './bracket-contract';
 import type { Notice, OrderProgram } from './model';
 import { createTauriPendingConfirmBackend, installPendingConfirmBackend } from './pending-confirm';
 
@@ -85,6 +95,7 @@ export function useBackgroundSetting(): boolean | null {
 }
 
 export const BACKGROUND_UNAVAILABLE = '背景執行目前無法使用，請稍後再試或關閉背景持續執行改用本視窗';
+export const BACKGROUND_NOT_LIVE = '背景執行尚未連上目前的伺服器，請稍後再試或關閉背景持續執行改用本視窗';
 export const BACKGROUND_SETTING_UNKNOWN = '背景持續執行的開關狀態不明，請稍後再試或到設定確認開關';
 
 async function readSetting(): Promise<boolean | null> {
@@ -101,7 +112,7 @@ async function readSetting(): Promise<boolean | null> {
  * (exactly as before, the engine's state does not matter); on → the
  * background engine, or a refusal while it cannot be reached; unknown
  * setting → a refusal (never a silent guess either way). */
-export async function backgroundOwnerForNew(): Promise<'window' | 'background' | { refused: string }> {
+export async function backgroundOwnerForNew(opts: { liveOn?: string } = {}): Promise<'window' | 'background' | { refused: string }> {
     if (!isTauri) return 'window';
     // read now, every time: a cached value never decides (another window may
     // have changed it, or the file became unreadable)
@@ -118,6 +129,11 @@ export async function backgroundOwnerForNew(): Promise<'window' | 'background' |
     adoptHealth(h);
     // the engine must be up and running with the setting on
     if (!h || h.enabled !== true) return { refused: BACKGROUND_UNAVAILABLE };
+    // a bracket is taken over only by an engine live on its environment now
+    // (its entry is not sent otherwise)
+    if (opts.liveOn !== undefined && (h.state !== 'live' || `${h.serverId}|${h.env}` !== opts.liveOn)) {
+        return { refused: BACKGROUND_NOT_LIVE };
+    }
     return 'background';
 }
 
@@ -205,6 +221,15 @@ export function refreshBackground(): Promise<void> {
     return refreshing;
 }
 
+/** One program read from the App now (not the cached mirror); throws when
+ * the App cannot be read — a caller that must be sure never guesses. */
+export async function readBackgroundProgram(programId: string): Promise<OrderProgram | null> {
+    if (!isTauri) throw new Error('背景持續執行僅限桌面版');
+    const view = await invoke<ProgramsView>('execution_programs');
+    if (!view || !Array.isArray(view.programs)) throw new Error('背景執行清單無法讀取');
+    return view.programs.find(p => p.id === programId) ?? null;
+}
+
 /** Refreshed until no read is in flight (every read started after now). */
 async function settled(): Promise<void> {
     await refreshBackground();
@@ -240,6 +265,18 @@ const REJECT_TEXT: Record<string, string> = {
     'rejected.unpast': '價格已回到觸發價另一側，需要再確認',
     'rejected.noPrice': '背景執行尚未收到即時成交價',
     'rejected.notPending': '這張單已不在待確認',
+    'rejected.inFlight': '委託送出中，請稍候再按',
+    'rejected.notRunning': '這張單目前不是執行中',
+    'rejected.notPaused': '這張單目前沒有暫停',
+    'rejected.expired': '有效期已過',
+    'rejected.notReplaceable': '這張單已觸發、待確認或狀態已變，沒有修改；請看清單與委託',
+    'rejected.invalidReplace': '修改內容與原本的單不符',
+    'rejected.noTickTable': '跳動點級距尚未取得，無法計算限價',
+    'rejected.invalidFeed': '對手價設定不正確',
+    'rejected.invalidLimit': '限價檔數不正確',
+    'rejected.invalidOrder': '送出方式不正確',
+    'rejected.invalidValidity': '有效期不正確',
+    'rejected.invalidPrice': '觸發價不正確',
     'partition.failed': '背景執行資料無法寫入，這個環境已停止，請重新啟動 App',
 };
 
@@ -273,6 +310,24 @@ export async function createBackgroundTrigger(program: OrderProgram): Promise<'c
     }
 }
 
+/** #226 修改: the untouched trigger `programId` becomes `program` in one
+ * engine step (never both armed). `replaced`, `refused` (nothing changed)
+ * or `unconfirmed` (the answer was lost: check the list, do not retry). */
+export async function replaceBackgroundTrigger(programId: string, program: OrderProgram): Promise<'replaced' | { refused: string } | { unconfirmed: string }> {
+    try {
+        await command('execution_replace', { programId, program });
+        return 'replaced';
+    } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        if (e instanceof BackgroundRefusal) return { refused: why };
+        // the App's own error text, or a lost answer: what it holds now decides
+        await settled();
+        if (programs.some(p => p.id === program.id)) return 'replaced';
+        if (programs.some(p => p.id === programId)) return { refused: why };
+        return { unconfirmed: why };
+    }
+}
+
 /** Removes a background trigger (one with an order still working is
  * stopped first and dropped once it ended). */
 export async function removeBackgroundTrigger(programId: string): Promise<void> {
@@ -289,6 +344,86 @@ export async function resolveBackgroundTrigger(programId: string, levelId: strin
     await command('execution_resolve_trigger', { request: { programId, levelId, choice, allowUnpast } });
 }
 
+// ---- brackets (括號單, #201 ②; see bracket-contract.ts) ----
+
+/** Right after the entry order was accepted. Like a trigger: `created`,
+ * `refused` (definitely not created) or `unconfirmed` (answer lost). */
+export async function createBackgroundBracket(request: CreateBracketRequest): Promise<'created' | { refused: string } | { unconfirmed: string }> {
+    if (!isTauri) return { refused: '背景持續執行僅限桌面版' };
+    try {
+        const reply = await invoke<CommandReply>(BRACKET_COMMAND.create, { request });
+        await refreshBackground();
+        if (!reply.accepted) return { refused: rejection(reply) };
+        return 'created';
+    } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        await settled();
+        if (programs.some(p => p.id === request.id)) return 'created';
+        // the App answered with a refusal text (a string error): not created
+        return typeof e === 'string' ? { refused: why } : { unconfirmed: why };
+    }
+}
+
+/** #226 修改 a bracket whose 觸價 entry did not fire yet: the engine builds
+ * the new one from `request` and replaces it in one step. */
+export async function replaceBackgroundBracket(programId: string, request: CreateBracketRequest): Promise<'replaced' | { refused: string } | { unconfirmed: string }> {
+    if (!isTauri) return { refused: '背景持續執行僅限桌面版' };
+    try {
+        const reply = await invoke<CommandReply>(BRACKET_COMMAND.replace, { programId, request });
+        await refreshBackground();
+        if (!reply.accepted) return { refused: rejection(reply) };
+        return 'replaced';
+    } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        await settled();
+        if (programs.some(p => p.id === request.id)) return 'replaced';
+        if (programs.some(p => p.id === programId)) return { refused: why };
+        return { unconfirmed: why };
+    }
+}
+
+/** 「我已自行處理」: the engine stops tracking; nothing is sent or cancelled. */
+export async function markBackgroundHandled(programId: string, levelId?: string): Promise<void> {
+    await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null });
+}
+
+/** 「在新盤別重新啟用」 (nothing is sent then). */
+export async function rearmBackgroundBracket(programId: string, levelId: string, quantity: number): Promise<string> {
+    if (!isTauri) throw new Error('背景持續執行僅限桌面版');
+    const r = await invoke<RearmBracketResult>(BRACKET_COMMAND.rearm, { request: { programId, levelId, quantity } });
+    await refreshBackground();
+    if (!r.ok) throw new BackgroundRefusal(REARM_REFUSAL_TEXT[r.reason ?? 'rearmFailed'] ?? '重新啟用沒有完成');
+    return r.programId ?? '';
+}
+
+/** The saved bracket settings (v2); throws when unreadable. */
+export async function getBracketPolicy(): Promise<BracketPolicy> {
+    if (!isTauri) return { ...DEFAULT_BRACKET_POLICY };
+    return parseBracketPolicy(await invoke<unknown>(BRACKET_COMMAND.getPolicy));
+}
+
+/** Save the bracket settings (main window only); resolves with what holds. */
+export async function setBracketPolicy(policy: BracketPolicy): Promise<BracketPolicy> {
+    if (!isTauri) throw new Error('背景持續執行僅限桌面版');
+    const saved = parseBracketPolicy(await invoke<unknown>(BRACKET_COMMAND.setPolicy, { policy }));
+    await refreshBackground();
+    return saved;
+}
+
+/** Pause stops new entries only; stop / take keep watching. */
+export async function pauseBackgroundProgram(programId: string): Promise<void> {
+    await command(BRACKET_COMMAND.pause, { programId });
+}
+
+export async function resumeBackgroundProgram(programId: string): Promise<void> {
+    await command(BRACKET_COMMAND.resume, { programId });
+}
+
+/** A finished bracket leaves the list (the App refuses one still tracking). */
+export async function removeBackgroundBracket(programId: string): Promise<void> {
+    await command(BRACKET_COMMAND.remove, { programId });
+}
+
 // ---- main window upkeep ----
 
 const removing = new Set<string>();
@@ -298,7 +433,7 @@ const swept = new Map<string, number>(); // program id → version already tried
  * engine's change event refreshes the list). */
 function housekeeping() {
     for (const p of programs) {
-        if (p.kind !== 'trigger' || !programFinished(p) || removing.has(p.id) || swept.get(p.id) === p.version) continue;
+        if ((p.kind !== 'trigger' && p.kind !== 'flatten') || !programFinished(p) || removing.has(p.id) || swept.get(p.id) === p.version) continue;
         swept.set(p.id, p.version);
         // a failed request is tried again on the next refresh
         void invoke<CommandReply>('execution_remove', { programId: p.id }).catch(() => { swept.delete(p.id); });
@@ -306,22 +441,33 @@ function housekeeping() {
 }
 
 const quoteHolds = new Map<string, { release?: () => void }>();
-/** Keep the tick feed of the current environment's background triggers
- * retained by this window (the engine subscribes it too). */
+/** Keep the feeds of the current environment's background triggers
+ * retained by this window (the engine subscribes them too): ticks, and the
+ * book of 對手價 conditions — closing the last chart or quote panel never
+ * unsubscribes what a background condition watches. */
 function syncQuotes() {
     const env = currentProtectionEnv();
-    const codes = new Set(programs.filter(p => p.status !== 'stopped' && envKeyOf(p.binding) === env)
-        .map(p => p.binding.contract.quoteCode));
-    for (const [code, hold] of quoteHolds) {
-        if (!codes.has(code)) { hold.release?.(); quoteHolds.delete(code); }
+    const wanted = new Map<string, { code: string; type: 'Tick' | 'BidAsk'; odd?: boolean }>();
+    for (const p of programs) {
+        if (p.status === 'stopped' || envKeyOf(p.binding) !== env) continue;
+        const code = p.binding.contract.quoteCode;
+        wanted.set(`${code}|Tick`, { code, type: 'Tick' });
+        const feeds = p.levels.filter(lv => lv.phase !== 'done' && lv.entry.type === 'touch')
+            .map(lv => lv.entry.type === 'touch' ? lv.entry.feed : undefined);
+        if (feeds.some(f => f === 'bid' || f === 'ask')) wanted.set(`${code}|BidAsk`, { code, type: 'BidAsk' });
+        // 零股 conditions: the 盤中零股 trades
+        if (feeds.includes('odd')) wanted.set(`${code}|TickOdd`, { code, type: 'Tick', odd: true });
     }
-    for (const code of codes) {
-        if (quoteHolds.has(code)) continue;
+    for (const [key, hold] of quoteHolds) {
+        if (!wanted.has(key)) { hold.release?.(); quoteHolds.delete(key); }
+    }
+    for (const [key, { code, type, odd }] of wanted) {
+        if (quoteHolds.has(key)) continue;
         const hold: { release?: () => void } = {};
-        quoteHolds.set(code, hold);
+        quoteHolds.set(key, hold);
         void ensureContract(code).then(contract => {
-            if (quoteHolds.get(code) === hold) hold.release = pinQuote(contract, 'Tick');
-        }).catch(() => { if (quoteHolds.get(code) === hold) quoteHolds.delete(code); });
+            if (quoteHolds.get(key) === hold) hold.release = pinQuote(contract, type, odd ? { oddLot: true } : undefined);
+        }).catch(() => { if (quoteHolds.get(key) === hold) quoteHolds.delete(key); });
     }
 }
 
@@ -338,9 +484,22 @@ const NOTICE_TEXT: Record<string, string> = {
     notSent: '背景觸價單未送出',
     unknown: '背景觸價單送出結果不明（不會自動重送）',
     'session.lapsed': '背景觸價單：盤別已結束',
+    expired: '背景條件單已到期或時間已過，沒有送出',
+    'flatten.started': '收盤前平倉：背景執行開始全平並取消',
+    'flatten.done': '收盤前平倉：背景執行全平並取消已完成',
+    'flatten.failed': '收盤前平倉：背景執行沒有完成，請手動處理',
     'ledger.failed': '背景執行資料無法寫入，已停止',
     'partition.failed': '背景執行資料無法寫入，已停止',
 };
+
+const BRACKET_FIRED_TEXT: Record<string, string> = {
+    fired: '背景括號單出場已觸發',
+    needsConfirm: '背景括號單待確認：恢復盯價時已穿價，未自動送單',
+    notSent: '背景括號單出場未送出',
+    unknown: '背景括號單出場送出結果不明（不會自動重送）',
+};
+
+const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'expired', 'flatten.started', 'flatten.done', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
 
 let pendingInstalled = false;
 function onFirstStatus() {
@@ -349,6 +508,141 @@ function onFirstStatus() {
         pendingInstalled = true;
         installPendingConfirmBackend(createTauriPendingConfirmBackend());
     }
+}
+
+/** The engine's 全平並取消 started (`detail`: its account, codes and time
+ * order): this window stops its own conditional orders in that scope, waits
+ * until none of them is sending, and answers — the engine cancels and
+ * closes nothing before that answer (or gives up after a while). */
+async function stopWindowConditionals(detail: string): Promise<void> {
+    let programId = '';
+    let ok = false;
+    let why = '';
+    try {
+        const d = JSON.parse(detail) as { programId: string;
+            account: { accountType: 'F' | 'S'; brokerId: string; accountId: string }; codes: string[] | null };
+        programId = d.programId;
+        const account = { account_type: d.account.accountType, broker_id: d.account.brokerId, account_id: d.account.accountId };
+        const { stopConditionalInScope, waitInFlight } = await import('../conditional/runtime');
+        const scope = d.codes ? { type: 'code' as const, codes: d.codes, account } : { type: 'account' as const, account };
+        const r = await stopConditionalInScope(scope);
+        const drained = r.failed.length === 0 && await waitInFlight(scope);
+        // an order that just went out may have armed new protection: stop again
+        const again = drained ? await stopConditionalInScope(scope) : { stopped: 0, failed: [] as string[] };
+        const failed = [...r.failed, ...again.failed];
+        // an exit whose outcome is unknown may still be live at the broker: the user decides first
+        const { getExits } = await import('../trigger-engine');
+        const { inScope } = await import('../conditional/flatten');
+        if (getExits().some(e => e.status === 'unknown' && !e.acknowledged && inScope(scope, e.account, e.orderCode))) {
+            failed.push('本視窗有觸價單送出結果不明，請先核對');
+        }
+        ok = drained && failed.length === 0;
+        why = failed.length ? failed.join('；') : drained ? '' : '本視窗有條件單仍在送單';
+    } catch (e) {
+        why = e instanceof Error ? e.message : String(e);
+    }
+    if (programId) await invoke<void>('execution_flatten_ack', { programId, ok, detail: why }).catch(() => undefined);
+    if (!ok) notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有全部停止', body: why || '請手動處理' });
+}
+
+/** A window's 全平並取消 holds the one shared with the engine's 收盤前平倉
+ * (they never read the same holdings at once). Resolves false when the
+ * engine's is running; true when held (or there is no engine to share with). */
+let sharedHold = false; // the engine granted it (else: no engine was running)
+let holdLost = false;
+export async function beginWindowFlatten(): Promise<boolean> {
+    sharedHold = false;
+    holdLost = false;
+    if (!isTauri) return true;
+    let granted: boolean;
+    try {
+        granted = await invoke<boolean>('execution_flatten_begin');
+    } catch {
+        return true; // the engine is not running: it runs none
+    }
+    sharedHold = granted;
+    return granted;
+}
+
+/** Keep the hold while the window's 全平並取消 runs (the engine only takes
+ * over a hold not renewed for two minutes). A renewal that fails or is
+ * refused loses it for good: this run sends nothing more. */
+export const FLATTEN_RENEW_MS = 30_000;
+let renewTimer: ReturnType<typeof setInterval> | null = null;
+async function renewHold(): Promise<boolean> {
+    if (!sharedHold || holdLost) return !holdLost;
+    try {
+        if (await invoke<boolean>('execution_flatten_renew') === true) return true;
+    } catch { /* unknown: not held */ }
+    holdLost = true;
+    return false;
+}
+export function keepWindowFlatten(): void {
+    if (!isTauri || renewTimer) return;
+    renewTimer = setInterval(() => { void renewHold(); }, FLATTEN_RENEW_MS);
+}
+
+/** Right before each cancel / close of the window's 全平並取消: still the
+ * holder (renewed now)? False: stop, send nothing more. */
+export async function stillHoldingFlatten(): Promise<boolean> {
+    if (!isTauri) return true;
+    return renewHold();
+}
+
+export async function endWindowFlatten(): Promise<void> {
+    if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
+    const held = sharedHold && !holdLost;
+    sharedHold = false;
+    if (!isTauri || !held) return;
+    await invoke<void>('execution_flatten_end').catch(() => undefined);
+}
+
+// ---- risk settings for opening entries (#226) ----
+
+/** Push at least this often while the engine may send an opening entry:
+ * the App stops trusting settings it has not heard for 10 s. */
+export const RISK_PUSH_MS = 2000;
+let lastRisk = '';
+/** The App's risk settings (kill switch / lock, per-order cap, daily loss
+ * limit and the day's P&L, whether that P&L was read): on every change and
+ * as a heartbeat (`force`). Main window only (the App refuses others). */
+let riskQueue: Promise<void> = Promise.resolve();
+export function pushBackgroundRisk(force = false): Promise<void> {
+    if (!isTauri) return Promise.resolve();
+    // one at a time, each reading the state when it runs: an older read can
+    // never land after a newer one
+    const run = riskQueue.then(() => pushRiskNow(force));
+    riskQueue = run.catch(() => undefined);
+    return run;
+}
+
+async function pushRiskNow(force: boolean): Promise<void> {
+    // loaded on use: risk.ts reads window / localStorage when imported
+    const [{ getRiskSettings }, { getTradingState }] = await Promise.all([import('../risk'), import('../trading-state')]);
+    const s = getRiskSettings();
+    const t = getTradingState();
+    // one account's P&L: the futures account whose margin was read ("F:<broker>:<account>"),
+    // its settled P&L plus the unrealized P&L of its own positions only
+    const [type, brokerId, accountId] = (t.marginAccount ?? '').split(':');
+    const pnlAccount = type === 'F' && brokerId && accountId ? { brokerId, accountId } : null;
+    const own = (t.positions ?? []).filter(p => p.account && p.account.account_type === 'F'
+        && p.account.broker_id === brokerId && p.account.account_id === accountId);
+    const dailyPnl = own.reduce((sum, p) => sum + (Number(p.pnl) || 0), 0) + (Number(t.margin?.future_settle_profitloss) || 0);
+    // trusted only as read: positions and margin in, nothing left to reconcile
+    // (a stream outage or a failed read raises one), the stream live
+    const pnlKnown = pnlAccount !== null && t.margin !== undefined && t.queries.positions.updatedAt !== null
+        && !t.queries.positions.needsReconcile && !t.queries.account.needsReconcile && getStreamStatus() === 'live';
+    const risk = { enabled: s.enabled, maxQty: s.maxQty, maxDailyLoss: s.maxDailyLoss, locked: s.locked,
+        dailyPnl, pnlKnown, pnlAccount };
+    const key = JSON.stringify(risk);
+    if (!force && key === lastRisk) return;
+    await invoke<void>('execution_set_risk', { risk });
+    lastRisk = key;
+}
+
+/** The engine may send an opening entry: the setting is on, or one exists. */
+function riskWanted(): boolean {
+    return setting === true || programs.some(p => p.opens && p.status !== 'stopped');
 }
 
 let started = false;
@@ -366,13 +660,25 @@ export function startBackgroundExecution(): void {
         if (main) {
             void listen<Notice[]>('execution://notice', e => {
                 for (const n of e.payload ?? []) {
-                    const title = NOTICE_TEXT[n.code];
-                    if (title) notify({ kind: n.code === 'fired' || n.code === 'needsConfirm' ? 'info' : 'err', title, body: n.detail });
+                    // 收盤前平倉 run by the engine: this window stops its own conditional orders in scope
+                    if (n.code === 'flatten.started') { void stopWindowConditionals(n.detail); continue; }
+                    const owner = programs.find(p => p.id === n.programId);
+                    // a panel bracket's entry level (its 觸價 entry) is no exit
+                    const entryLevel = !!owner && owner.levels.some(lv => lv.id === n.levelId && lv.exit === null);
+                    const bracket = (owner?.kind === 'bracket' && !entryLevel)
+                        || n.code.startsWith('bracket.') || n.code === 'protectedAgain';
+                    const title = bracket ? (BRACKET_NOTICE_TEXT[n.code] ?? BRACKET_FIRED_TEXT[n.code]) : NOTICE_TEXT[n.code];
+                    if (title) notify({ kind: INFO_NOTICES.has(n.code) ? 'info' : 'err', title, body: n.detail });
                 }
             });
         }
     }).catch(() => undefined);
     if (main) {
+        // opening entries: the settings on change, and every 2 s as a heartbeat
+        void import('../risk').then(({ subscribeRiskSettings }) => subscribeRiskSettings(() => {
+            if (riskWanted()) void pushBackgroundRisk().catch(() => undefined);
+        })).catch(() => undefined);
+        setInterval(() => { if (riskWanted()) void pushBackgroundRisk(true).catch(() => undefined); }, RISK_PUSH_MS);
         // window-feed prices belong to one environment and a live stream
         const dropPrices = () => { if (Object.keys(prices).length) { prices = {}; emit(); } };
         onProtectionEnvChange(() => { dropPrices(); syncQuotes(); });
@@ -385,6 +691,28 @@ export function startBackgroundExecution(): void {
                 prices = { ...prices, [tick.code]: price };
                 emit();
             }
+        });
+        // 零股 rows: the 盤中零股 trades (`<code>#odd`)
+        onOddLotTick(tick => {
+            if (tick.simtrade || !programs.some(p => p.binding.contract.quoteCode === tick.code
+                && p.levels.some(lv => lv.phase === 'needsConfirm' && lv.entry.type === 'touch' && lv.entry.feed === 'odd'))) return;
+            const price = Number(tick.close);
+            const key = `${tick.code}#odd`;
+            if (Number.isFinite(price) && price > 0 && prices[key] !== price) { prices = { ...prices, [key]: price }; emit(); }
+        });
+        // 對手價 rows: their side of the book, under the same keys as this
+        // window's triggers (`<code>#bid` / `<code>#ask`)
+        onAnyBidAsk(ba => {
+            if (ba.simtrade || ba.intraday_odd || !programs.some(p => p.binding.contract.quoteCode === ba.code
+                && p.levels.some(lv => lv.phase === 'needsConfirm' && lv.entry.type === 'touch' && lv.entry.feed))) return;
+            const next = { ...prices };
+            let changed = false;
+            for (const [feed, raw] of [['bid', ba.bid_price?.[0]], ['ask', ba.ask_price?.[0]]] as const) {
+                const price = Number(raw);
+                const key = `${ba.code}#${feed}`;
+                if (Number.isFinite(price) && price > 0 && next[key] !== price) { next[key] = price; changed = true; }
+            }
+            if (changed) { prices = next; emit(); }
         });
     }
     void refreshBackground();
@@ -402,4 +730,6 @@ export function __setBackgroundInvokeForTest(fn: Invoke | null, opts: { desktop?
     pendingInstalled = false;
     swept.clear();
     epoch = 0;
+    lastRisk = '';
+    riskQueue = Promise.resolve();
 }

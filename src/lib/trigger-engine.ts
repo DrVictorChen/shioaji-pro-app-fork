@@ -64,26 +64,39 @@ import {
     createBackgroundTrigger,
     getBackgroundPrices,
     getBackgroundPrograms,
+    pauseBackgroundProgram,
     refreshBackground,
+    replaceBackgroundBracket,
+    replaceBackgroundTrigger,
+    resumeBackgroundProgram,
     removeBackgroundTrigger,
     resolveBackgroundTrigger,
     subscribeBackground,
 } from './execution/background';
 import {
     backgroundEligible,
+    backgroundGroupEligible,
     backgroundRowId,
     isBackgroundId,
+    programForNewGroup,
     programForNewTrigger,
+    tickTableOf,
     triggerRowsFromPrograms,
     type BackgroundTriggerOrder,
 } from './execution/background-view';
 import { retainQuote } from './quote-ownership';
+import { panelBracketRequest } from './execution/background-bracket';
+import { sameTradingDay } from './conditional/session';
+import { trailStep, type TrailState } from './conditional/trailing';
+import { getConditionalSettings } from './conditional/settings';
 import { getApiBase } from './runtime';
 import { fetchTrades } from './shioaji';
-import { getStreamStatus, onAnyTick, onOddLotTick, onStreamEvent, subscribeStatusStore } from './stream';
+import { getStreamStatus, onAnyBidAsk, onAnyTick, onOddLotTick, onStreamEvent, subscribeStatusStore } from './stream';
 import { notify, placeQuickOrder } from './trade';
 import { getTradingState } from './trading-state';
 import { fmtPrice } from './utils/format';
+import { stepPrice } from './utils/ticksize';
+import { bandTickFor, ensureTickBands, prefetchTickBands } from './tick-bands';
 import { isOddLot, ODD_LOT_MAX_SHARES, oddLotMarketablePrice, SHARES_PER_LOT, sharesToUnits, stockQtyUnit } from './odd-lot';
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
@@ -92,14 +105,56 @@ import { orderStatusLabel, orderStatusWithNumber } from './order-status-label';
 
 /** Why protection resumed with a first-tick check (#144). */
 /** `rearm`: a background trigger turned back on in a new session (#201). */
-export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'rearm';
+/** `resume`: the user resumed a paused trigger (#226). */
+export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'rearm' | 'resume';
 
 export const RESTORE_REASON_TEXT: Record<RestoreReason, string> = {
     restart: 'App 關閉、重新載入或切換主視窗期間已穿價',
     disconnect: '行情連線中斷（或伺服器模式未確認）超過 1 分鐘期間已穿價',
     env: '先前不在此伺服器環境執行，切回時已穿價',
     rearm: '在新盤別重新啟用時價格已穿過觸發價',
+    resume: '暫停期間價格已穿過觸發價',
 };
+
+/** #226 時間: 指定時間送單, or 收盤前平倉 (全平並取消 of this product /
+ * account). Missed by more than TIME_GRACE_MS (App not running) → lapses. */
+export type TimeSpec = { kind: 'send'; at: number } | { kind: 'flatten'; at: number; scope: 'code' | 'account' };
+export const TIME_GRACE_MS = 60_000;
+
+/** #226 括號單 placed by a trigger: tiers and rules for its protection. */
+export interface BracketEntryPlan {
+    tiers: { quantity: number; takeTicks: number | null }[];
+    stopTicks: number;
+    trail: { activateTicks: number; distanceTicks: number; stepTicks: number } | null;
+    breakeven: { afterTier: number; offsetTicks: number } | null;
+}
+
+/** #226 send style: 市價, 範圍市價 (futures), or 觸價後限價 at the trigger
+ * price moved `ticks` price steps (signed; a sell usually − to fill). */
+export type TriggerSend = { type: 'MKT' } | { type: 'MKP' } | { type: 'LMT'; ticks: number };
+
+export interface TriggerValidity {
+    type: 'session' | 'today' | 'date';
+    until: number; // ms epoch
+}
+
+/** One line of a conditional order's history (#226 management panel). */
+export interface HistoryEntry {
+    at: number;
+    text: string;
+    tone?: 'ok' | 'warn' | 'err';
+}
+
+/** A trigger that left the engine today (fired, cancelled, removed by OCO). */
+export interface EndedTrigger {
+    id: string;
+    trigger: TriggerOrder;
+    reason: 'fired' | 'cancelled' | 'oco' | 'expired';
+    at: number;
+    detail?: string;
+}
+
+export const HISTORY_LIMIT = 30;
 
 export interface TriggerOrder {
     id: string;
@@ -124,6 +179,36 @@ export interface TriggerOrder {
     requestId?: string; // sender-generated; a re-applied add returns the same trigger
     pending?: { price: number; at: number; reason?: RestoreReason }; // 待確認: already past when protection resumed (#144)
     awaitingRecross?: boolean; // kept after 待確認: arms once price is seen on the non-trigger side
+    /** #226: 'entry' — a conditional order that opens a position (created in
+     * the management panel): risk checks apply when it fires, and 全部暫停
+     * pauses it. Absent: a protective stop / take (or an alert). */
+    role?: 'entry';
+    paused?: boolean; // #226: the user paused it; never evaluated until resumed
+    /** #226 上穿／下穿: fires only on a crossing — the price must first be
+     * seen on the other side (kept in `awaitingRecross` until then). */
+    cross?: boolean;
+    /** #226 price the condition watches: last trade (default) or the
+     * opposite side of the book (sell → best bid, buy → best ask). */
+    source?: 'last' | 'opposite';
+    /** #226 how the order goes out when it fires (default market). */
+    send?: TriggerSend;
+    /** #226 the condition lapses at `until` (本盤／今日／指定日). */
+    validity?: TriggerValidity;
+    /** #226 OCO sibling handling: 'trigger' (default) removes the others
+     * when one fires; 'fill' keeps them and takes away what actually filled. */
+    ocoMode?: 'trigger' | 'fill';
+    /** 'fill' OCO: the sibling exit this leg waits for (not evaluated meanwhile). */
+    ocoLock?: string;
+    /** 'fill' OCO: fills of that exit already taken off this leg. */
+    ocoApplied?: { exit: string; filled: number };
+    /** #226 移動停損 on a bracket stop: moves the price favourably only. */
+    trail?: TrailState;
+    /** #226 括號單 entry by trigger: the protection registered once the
+     * entry order is accepted (see onEntryPlaced). */
+    bracketPlan?: BracketEntryPlan;
+    /** #226 時間條件: fires at `at` instead of on a price (price unused). */
+    time?: TimeSpec;
+    history?: HistoryEntry[]; // #226: newest last, capped at HISTORY_LIMIT
 }
 
 export interface ExitRecord extends BracketExit {
@@ -146,6 +231,7 @@ export type NewTrigger = Omit<TriggerOrder, 'id'>;
 const STORAGE_KEY = 'sj-pro-triggers';
 const GROUPS_KEY = 'sj-pro-trigger-groups';
 const EXITS_KEY = 'sj-pro-trigger-exits';
+const ENDED_KEY = 'sj-pro-trigger-ended';
 const GROUP_TTL_MS = 3 * 24 * 3600 * 1000;
 export const LEGACY_SUSPENDED = '舊版觸價單未綁定帳戶／伺服器，不會自動送單；請刪除後重新設定';
 
@@ -180,12 +266,15 @@ const main = isMainWindow();
 let triggers: TriggerOrder[] = [];
 let processedGroups: Record<string, number> = {};
 let exits: ExitRecord[] = [];
+let ended: EndedTrigger[] = [];
 function loadExecutorState() {
     triggers = loadTriggers();
     processedGroups = readJson<Record<string, number>>(GROUPS_KEY, {});
     // An exit still `sending` when the app went away has an unknown outcome.
     exits = readJson<ExitRecord[]>(EXITS_KEY, []).filter(e => e && typeof e.id === 'string')
         .map(e => e.status === 'sending' ? { ...e, status: 'unknown' as const, detail: '送單期間 App 重新載入，結果未知' } : e);
+    const arr = readJson<unknown>(ENDED_KEY, []);
+    ended = Array.isArray(arr) ? (arr as EndedTrigger[]).filter(e => e && typeof e.id === 'string' && e.trigger && typeof e.at === 'number') : [];
 }
 const listeners = new Set<() => void>();
 const exitListeners = new Set<(exit: ExitRecord) => void>();
@@ -193,6 +282,7 @@ const exitListeners = new Set<(exit: ExitRecord) => void>();
 interface Snapshot {
     triggers: TriggerOrder[];
     exits: ExitRecord[];
+    ended?: EndedTrigger[]; // #226: today's finished triggers (display)
     feedMissing: string[];
     executing: boolean;
     prices?: Record<string, number>; // latest tick of codes with a 待確認 trigger
@@ -200,7 +290,7 @@ interface Snapshot {
 }
 let executing = false; // this window holds the executor lock
 const feedMissing = new Set<string>(); // trigger codes without a tick subscription
-let snapshot: Snapshot = { triggers, exits, feedMissing: [], executing: false, prices: {}, sending: [] };
+let snapshot: Snapshot = { triggers, exits, ended: [], feedMissing: [], executing: false, prices: {}, sending: [] };
 // Executor only: triggers whose first tick after a (re)start decides between
 // normal operation and 待確認; the latest tick per code since the stream /
 // environment last changed; and the last stream activity (tick or heartbeat)
@@ -214,13 +304,21 @@ const lastPrices = new Map<string, number>();
 // 出場單送進零股市場撮合，零股與整股分開撮合、價格可能不同，觸發條件要看
 // 實際成交的那個市場。整股單與價格警示仍看整股成交價。零股成交較稀疏，
 // 觸發時點以零股實際成交為準。lastPrices／待確認價格以 priceKey 區分兩者。
-const ODD_PRICE_SUFFIX = '#odd';
-function feedKey(code: string, oddLot: boolean): string {
-    return oddLot ? `${code}${ODD_PRICE_SUFFIX}` : code;
+// #226 對手價: a sell watches the best bid, a buy the best ask.
+export type Feed = 'trade' | 'odd' | 'bid' | 'ask';
+function feedKey(code: string, feed: Feed | boolean): string {
+    const f: Feed = feed === true ? 'odd' : feed === false ? 'trade' : feed;
+    return f === 'trade' ? code : `${code}#${f}`;
 }
 /** Key of the price feed a trigger is evaluated on (see usePendingPrices). */
-export function priceKeyOf(t: Pick<TriggerOrder, 'code' | 'orderLot' | 'kind'>): string {
-    return feedKey(t.code, usesOddFeed(t));
+export function priceKeyOf(t: Pick<TriggerOrder, 'code' | 'orderLot' | 'kind' | 'source' | 'action'>): string {
+    return feedKey(t.code, feedOf(t));
+}
+export function feedOf(t: Pick<TriggerOrder, 'orderLot' | 'kind' | 'source' | 'action'>): Feed {
+    if (t.kind === 'alert') return 'trade';
+    if (t.orderLot === 'IntradayOdd') return 'odd';
+    if (t.source === 'opposite') return t.action === 'Sell' ? 'bid' : 'ask';
+    return 'trade';
 }
 function usesOddFeed(t: Pick<TriggerOrder, 'orderLot' | 'kind'>): boolean {
     return t.kind !== 'alert' && t.orderLot === 'IntradayOdd';
@@ -234,7 +332,14 @@ type Command =
     | { op: 'remove'; id: string }
     | { op: 'ack-exit'; id: string }
     | { op: 'resolve-pending'; id: string; choice: PendingChoice; allowUnpast?: boolean }
-    | { op: 'publish-prices' };
+    | { op: 'publish-prices' }
+    | { op: 'pause'; id: string }
+    | { op: 'resume'; id: string }
+    | { op: 'modify'; id: string; patch: TriggerPatch }
+    | { op: 'add-group'; triggers: NewTrigger[] }
+    // #226 二擇一: every leg in one executor step (no tick in between)
+    | { op: 'group'; action: 'pause' | 'resume' | 'remove'; ids: string[] }
+    | { op: 'modify-group'; patches: { id: string; patch: TriggerPatch }[] };
 
 let decideRole!: () => void;
 const roleDecided = new Promise<void>(resolve => { decideRole = resolve; });
@@ -254,6 +359,7 @@ const bus = createCommandBus<Command, Snapshot>({
             ...state,
             triggers: same(state.triggers, snapshot.triggers),
             exits: same(state.exits, snapshot.exits),
+            ended: same(state.ended, snapshot.ended),
             feedMissing: same(state.feedMissing, snapshot.feedMissing),
             prices: same(state.prices, snapshot.prices),
             sending: same(state.sending, snapshot.sending),
@@ -283,7 +389,9 @@ function commit() {
     writeJson(STORAGE_KEY, triggers);
     writeJson(GROUPS_KEY, processedGroups);
     writeJson(EXITS_KEY, exits);
-    snapshot = { triggers, exits, feedMissing: [...feedMissing], executing, prices: pendingPrices(), sending: [...userSending] };
+    ended = ended.filter(e => sameTradingDay(e.at, now)).slice(-ENDED_LIMIT);
+    writeJson(ENDED_KEY, ended);
+    snapshot = { triggers, exits, ended, feedMissing: [...feedMissing], executing, prices: pendingPrices(), sending: [...userSending] };
     syncQuotes();
     listeners.forEach(l => l());
     bus.publish();
@@ -291,12 +399,376 @@ function commit() {
 
 const groupKey = (env: string | undefined, group: string) => `${env ?? ''}|${group}`;
 
+const ENDED_LIMIT = 100;
+
+/** Append a history line (newest last, capped); same text twice in a row
+ * is kept once. */
+function withHistory(t: TriggerOrder, text: string, tone?: HistoryEntry['tone'], at = Date.now()): TriggerOrder {
+    const prev = t.history ?? [];
+    if (prev.length && prev[prev.length - 1]!.text === text) return t;
+    return { ...t, history: [...prev, { at, text, ...(tone ? { tone } : {}) }].slice(-HISTORY_LIMIT) };
+}
+
+function noteHistory(ids: Set<string>, text: string, tone?: HistoryEntry['tone']) {
+    let changed = false;
+    triggers = triggers.map(t => {
+        if (!ids.has(t.id)) return t;
+        const next = withHistory(t, text, tone);
+        if (next !== t) changed = true;
+        return next;
+    });
+    return changed;
+}
+
+/** Remember a finished manual trigger for 已結束（今日）. Bracket legs are
+ * shown with their bracket instead. */
+function recordEnded(t: TriggerOrder, reason: EndedTrigger['reason'], detail?: string) {
+    if (t.bracketId) return;
+    const at = Date.now();
+    const text = reason === 'fired' ? '觸發送單' : reason === 'oco' ? '另一邊已觸發，自動刪除' : reason === 'expired' ? '有效期已過' : '已取消';
+    ended = [...ended.filter(e => e.id !== t.id), { id: t.id, trigger: withHistory(t, detail ? `${text}：${detail}` : text,
+        reason === 'fired' ? 'ok' : undefined, at), reason, at, ...(detail ? { detail } : {}) }].slice(-ENDED_LIMIT);
+}
+
+function prepareAdd(n: NewTrigger): TriggerOrder {
+    const created: TriggerOrder = { ...n, id: newId(), createdAt: Date.now() };
+    delete created.suspended;
+    delete created.pending;
+    delete created.awaitingRecross;
+    delete created.paused;
+    delete created.history;
+    delete created.ocoLock;
+    delete created.ocoApplied;
+    // 上穿／下穿: the price must first be seen on the other side
+    if (created.cross) created.awaitingRecross = true;
+    const t = withHistory(created, `建立 · ${describe(created)}`, undefined, created.createdAt);
+    if (!hasContext(t)) throw new Error('觸價單缺少帳戶或伺服器資訊，未建立');
+    if (t.bracketId) throw new Error('括號單保護只由主視窗建立');
+    const oddProblem = oddLotTriggerProblem(t);
+    if (oddProblem) throw new Error(oddProblem);
+    const optionProblem = triggerOptionsProblem(t);
+    if (optionProblem) throw new Error(optionProblem);
+    if (t.group && processedGroups[groupKey(t.env, t.group)]) throw new Error('此 OCO 群組已觸發過，不再建立');
+    return t;
+}
+
+/** #226 options a market / product cannot take, refused when created. */
+export function triggerOptionsProblem(t: Pick<TriggerOrder, 'send' | 'source' | 'validity' | 'orderLot' | 'account' | 'kind'> & { time?: TimeSpec }, now = Date.now()): string | null {
+    if (t.validity && (!Number.isFinite(t.validity.until) || t.validity.until <= now)) return '有效期已過，未建立';
+    if (t.time && (!Number.isFinite(t.time.at) || t.time.at <= now)) return '指定時間已過，未建立';
+    if (t.kind === 'alert') return null;
+    const odd = isOddLot(t.orderLot);
+    if (odd && t.source === 'opposite') return '零股觸價單只支援成交價';
+    if (odd && t.send && t.send.type !== 'MKT') return '零股以漲跌停價限價送出，不能另選送出方式';
+    if (t.send?.type === 'MKP' && t.account?.account_type !== 'F') return '範圍市價只適用期貨選擇權';
+    if (t.send?.type === 'LMT' && (!Number.isSafeInteger(t.send.ticks) || Math.abs(t.send.ticks) > 50)) return '限價檔數須為 −50～50 的整數';
+    return null;
+}
+
+/** Lapse every manual trigger whose validity ended (true when any did). */
+function expireDue(now = Date.now()): boolean {
+    const due = triggers.filter(t => !t.bracketId && t.validity && t.validity.until <= now);
+    if (!due.length) return false;
+    triggers = triggers.filter(t => !due.includes(t));
+    for (const t of due) {
+        recordEnded(t, 'expired');
+        restoreCheck.delete(t.id);
+    }
+    commit();
+    for (const t of due) notify({ kind: 'info', title: '條件單已到期', body: `${describe(t)}：有效期已過，已移除，沒有送單` });
+    return true;
+}
+export const EXPIRY_CHECK_MS = 5000;
+export const TIME_CHECK_MS = 1000;
+
+// #226 time orders: run in the executing main window
+type TimedFlatten = (t: TriggerOrder) => void;
+let timedFlatten: TimedFlatten | null = null;
+export function onTimedFlatten(handler: TimedFlatten): void {
+    timedFlatten = handler;
+}
+
+/** Fire every time order that is due; lapse the ones missed. */
+function checkTimed(now = Date.now()) {
+    if (!executing) return;
+    const env = getStreamStatus() === 'live' ? currentProtectionEnv() : null;
+    for (const t of triggers.slice()) {
+        if (!t.time || t.paused || t.suspended || t.time.at > now) continue;
+        if (!triggers.some(x => x.id === t.id)) continue;
+        // missed: past the grace, or due before this window took over (the
+        // App was closed / reloaded at the time) — never sent late
+        if (now - t.time.at > TIME_GRACE_MS || t.time.at < executorSince) {
+            triggers = triggers.filter(x => x.id !== t.id);
+            recordEnded(t, 'expired', '時間已過（App 當時沒有執行或連線中斷），沒有送出');
+            commit();
+            notify({ kind: 'err', title: '時間條件單沒有執行', body: `${describe(t)}：時間已過，沒有送出` });
+            continue;
+        }
+        if (t.env !== env) continue; // waits (within the grace) for the stream / environment
+        if (t.time.kind === 'flatten') {
+            triggers = triggers.filter(x => x.id !== t.id);
+            recordEnded(t, 'fired', '時間到，全平並取消');
+            commit();
+            if (timedFlatten) timedFlatten(t);
+            else notify({ kind: 'err', title: '收盤前平倉沒有執行', body: `${describe(t)}：主視窗尚未準備好，請手動處理` });
+            continue;
+        }
+        fire(t, lastPrices.get(priceKeyOf(t)) ?? 0);
+    }
+}
+
+/** 'fill' OCO: once the exit a leg waits for is final, take what filled off
+ * it (removed at zero) and let it watch again; later fills of that exit
+ * keep being taken off. */
+/** A final exit is trusted for unlocking only after this long: a Cancel
+ * report can arrive before the last deal report of the same order. */
+export const OCO_SETTLE_MS = 3000;
+export const OCO_RECHECK_MS = 10_000;
+// exits whose final fills were read back authoritatively (or decided by the user)
+const ocoReconciled = new Set<string>();
+const ocoReading = new Set<string>();
+/** An ended exit (Cancel / IOC remainder) unlocks the other side only after
+ * an authoritative read of that order (fills that arrive late are counted);
+ * a failed read keeps it locked and tries again. */
+async function reconcileOcoExit(id: string, attempt = 1) {
+    const rec = exits.find(e => e.id === id);
+    if (!rec || !executing || ocoReconciled.has(id)) { ocoReading.delete(id); return; }
+    try {
+        const query = createAccountQuery();
+        const rows = await query.read(rec.account.account_type, rec.account,
+            current => fetchTrades(rec.account.account_type, current, { refresh: true }));
+        const trade = rows.find(t => t.order.id === rec.orderId);
+        if (!trade && rec.orderId) throw new Error('委託清單找不到這筆');
+        if (trade) {
+            // complete evidence only: an ended order whose fill details cover what it says filled
+            const listed = (trade.status.deals ?? []).reduce((n, d) => n + (Number.isSafeInteger(d.quantity) ? d.quantity : 0), 0);
+            // Inactive is the SDK's placeholder before the broker answered: not over (#177)
+            const ended = ['Cancelled', 'Failed', 'Filled', 'PartFilled'].includes(trade.status.status);
+            if (!ended || listed < trade.status.deal_quantity) throw new Error('成交明細尚不完整');
+            applyExitTrade(trade, { settle: true });
+        }
+        ocoReconciled.add(id);
+        ocoReading.delete(id);
+        const cur = exits.find(e => e.id === id);
+        if (cur) settleOco(cur);
+    } catch {
+        ocoReading.delete(id);
+        if (attempt === 3 && noteHistory(new Set(triggers.filter(t => t.ocoLock === id).map(t => t.id)),
+            '無法確認另一邊實際成交多少，仍暫停；請到委託核對後取消或保留', 'warn')) commit();
+        ocoReading.add(id);
+        setTimeout(() => void reconcileOcoExit(id, attempt + 1), OCO_RECHECK_MS);
+    }
+}
+function settleOco(rec: ExitRecord) {
+    let final = rec.status === 'filled' || rec.status === 'incomplete' || rec.status === 'not-sent'
+        || (rec.status === 'unknown' && !!rec.acknowledged);
+    const userDecided = rec.status === 'unknown' && !!rec.acknowledged;
+    if (final && rec.status !== 'filled' && rec.status !== 'not-sent' && !userDecided && !ocoReconciled.has(rec.id)
+        && triggers.some(t => t.ocoLock === rec.id)) {
+        if (!ocoReading.has(rec.id)) {
+            ocoReading.add(rec.id);
+            setTimeout(() => void reconcileOcoExit(rec.id), OCO_SETTLE_MS);
+        }
+        final = false;
+    }
+    let changed = false;
+    triggers = triggers.flatMap(t => {
+        if (t.ocoLock === rec.id) {
+            if (!final) return [t];
+            changed = true;
+            const rem = t.quantity - rec.filled;
+            if (rem <= 0) { recordEnded(t, 'oco', `另一邊成交 ${rec.filled}`); return []; }
+            if (t.cross) t = { ...t, awaitingRecross: true };
+            else restoreCheck.set(t.id, 'resume');
+            return [withHistory({ ...t, quantity: rem, ocoLock: undefined, ocoApplied: { exit: rec.id, filled: rec.filled } },
+                rec.filled > 0 ? `另一邊成交 ${rec.filled}，剩 ${rem} 繼續盯價` : '另一邊沒有成交，繼續盯價')];
+        }
+        if (t.ocoApplied?.exit === rec.id && rec.filled > t.ocoApplied.filled) {
+            changed = true;
+            const delta = rec.filled - t.ocoApplied.filled;
+            const rem = t.quantity - delta;
+            if (rem <= 0) { recordEnded(t, 'oco', `另一邊成交 ${rec.filled}`); return []; }
+            return [withHistory({ ...t, quantity: rem, ocoApplied: { exit: rec.id, filled: rec.filled } }, `另一邊又成交 ${delta}，剩 ${rem}`)];
+        }
+        return [t];
+    });
+    if (changed) commit();
+}
+
+/** What the panel may change on a manual trigger (#226). */
+export interface TriggerPatch {
+    price?: number;
+    quantity?: number;
+    send?: TriggerSend;
+    validity?: TriggerValidity | null;
+}
+
+function applyModify(id: string, patch: TriggerPatch): TriggerOrder {
+    const t = triggers.find(x => x.id === id);
+    if (!t) throw new Error('找不到這張觸價單（可能已觸發或已刪除）');
+    if (t.bracketId) throw new Error('括號單的停損停利請在括號單列修改');
+    if (t.pending) throw new Error('待確認中的觸價單請先處理（送出、保留或取消）');
+    const next: TriggerOrder = { ...t };
+    const changes: string[] = [];
+    if (patch.price !== undefined) {
+        if (!Number.isFinite(patch.price) || patch.price <= 0) throw new Error('觸發價必須是正數');
+        if (patch.price !== t.price) changes.push(`觸發價 ${fmtPrice(t.price)} → ${fmtPrice(patch.price)}`);
+        next.price = patch.price;
+    }
+    if (patch.quantity !== undefined) {
+        if (t.kind === 'alert') throw new Error('價格警示沒有數量');
+        if (!Number.isSafeInteger(patch.quantity) || patch.quantity <= 0) throw new Error('數量必須是正整數');
+        if (patch.quantity !== t.quantity) changes.push(`數量 ${t.quantity} → ${patch.quantity}`);
+        next.quantity = patch.quantity;
+        const odd = oddLotTriggerProblem(next);
+        if (odd) throw new Error(odd);
+    }
+    if (patch.send !== undefined && JSON.stringify(patch.send) !== JSON.stringify(t.send ?? { type: 'MKT' })) {
+        next.send = patch.send;
+        changes.push(`送出方式改為${exitStyleLabel(next)}`);
+    }
+    if (patch.validity !== undefined && JSON.stringify(patch.validity) !== JSON.stringify(t.validity ?? null)) {
+        if (patch.validity) next.validity = patch.validity;
+        else delete next.validity;
+        changes.push(patch.validity ? '修改有效期' : '有效期改為直到取消');
+    }
+    const optionProblem = triggerOptionsProblem(next);
+    if (optionProblem) throw new Error(optionProblem.replace('，未建立', ''));
+    if (!changes.length) return t;
+    // A new price may already be crossed: like a restore, the first tick
+    // decides (past → 待確認, never sent by the edit itself). A crossing
+    // trigger needs a fresh crossing instead.
+    if (t.cross) next.awaitingRecross = true;
+    else if (t.kind !== 'alert' && !t.paused) restoreCheck.set(id, 'resume');
+    const done = withHistory(next, `修改${changes.join('、')}`);
+    triggers = triggers.map(x => x.id === id ? done : x);
+    commit();
+    return done;
+}
+
+/** All legs or none: on any refusal the earlier legs are put back. */
+function applyGroup(cmd: Extract<Command, { op: 'group' } | { op: 'modify-group' }>): boolean {
+    const saved = triggers;
+    const savedEnded = ended;
+    try {
+        if (cmd.op === 'modify-group') {
+            for (const { id, patch } of cmd.patches) applyModify(id, patch);
+        } else if (cmd.action === 'remove') {
+            const gone = triggers.filter(t => cmd.ids.includes(t.id));
+            if (gone.some(t => t.bracketId)) throw new Error('括號單保護請在括號單列移除');
+            triggers = triggers.filter(t => !cmd.ids.includes(t.id));
+            for (const t of gone) recordEnded(t, 'cancelled');
+            commit();
+        } else {
+            for (const id of cmd.ids) pauseTrigger(id, cmd.action === 'pause');
+        }
+        return true;
+    } catch (e) {
+        triggers = saved;
+        ended = savedEnded;
+        commit();
+        throw e;
+    }
+}
+
+/** #226 二擇一: pause / resume / remove both legs together. */
+export async function setTriggerGroup(ids: string[], action: 'pause' | 'resume' | 'remove'): Promise<void> {
+    const programId = backgroundGroupOf(ids);
+    if (programId === undefined) { await bus.send({ op: 'group', action, ids }); return; }
+    // a background 二擇一 is one program: both legs go together by design
+    if (action === 'remove') await removeBackgroundTrigger(programId);
+    else await (action === 'pause' ? pauseBackgroundProgram(programId) : resumeBackgroundProgram(programId));
+}
+
+/** The background program of a 二擇一's rows (undefined: this window's). */
+function backgroundGroupOf(ids: readonly string[]): string | undefined {
+    if (!ids.length || !ids.every(isBackgroundId)) {
+        if (ids.some(isBackgroundId)) throw new Error('二擇一的兩邊不在同一處執行');
+        return undefined;
+    }
+    const rows = ids.map(backgroundRow);
+    const programId = rows[0]?.background.programId;
+    if (!programId || rows.some(r => r?.background.programId !== programId)) throw new Error('找不到這組二擇一');
+    return programId;
+}
+
+/** #226 二擇一: change both legs together (all or none). A background one is
+ * replaced in one engine step. */
+export async function modifyTriggerGroup(patches: { id: string; patch: TriggerPatch }[]): Promise<void> {
+    const programId = backgroundGroupOf(patches.map(p => p.id));
+    if (programId === undefined) { await bus.send({ op: 'modify-group', patches }); return; }
+    const original = getBackgroundPrograms().find(p => p.id === programId);
+    const rows = backgroundRows().filter(r => r.background.programId === programId);
+    if (!original || rows.length !== original.levels.length) throw new Error('二擇一已觸發或狀態已變，沒有修改');
+    if (rows.some(r => r.pending || r.ocoLock)) throw new Error('二擇一有一邊待確認或已觸發，請先處理');
+    const legs: TriggerOrder[] = rows.map(r => {
+        const patch = patches.find(p => p.id === r.id)?.patch ?? {};
+        const next: TriggerOrder = { ...r, ...(patch.price !== undefined ? { price: patch.price } : {}),
+            ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
+            ...(patch.send !== undefined ? { send: patch.send } : {}), id: newId(), createdAt: Date.now() };
+        if (patch.validity !== undefined) { if (patch.validity) next.validity = patch.validity; else delete next.validity; }
+        delete (next as Partial<BackgroundTriggerOrder>).background;
+        delete next.awaitingRecross;
+        delete next.paused;
+        const problem = triggerOptionsProblem(next);
+        if (problem) throw new Error(problem.replace('，未建立', ''));
+        return next;
+    });
+    const [up, down] = [legs.find(l => l.condition === 'above'), legs.find(l => l.condition === 'below')];
+    if (up && down && up.price <= down.price) throw new Error('上方價格必須高於下方價格');
+    const contract = await ensureContract(rows[0]!.code);
+    const table = await backgroundTickTable(contract);
+    if (legs.some(l => l.send?.type === 'LMT' && l.send.ticks !== 0) && !table) throw new Error('背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試');
+    const group = `${legs[0]!.id}`;
+    const built = programForNewGroup(legs.map(l => ({ ...l, group })), contract, table);
+    if (!built) throw new Error('背景執行：這組二擇一無法修改，請取消後重新建立');
+    // keep each leg's position effect (rows do not carry it)
+    const made = { ...built, levels: built.levels.map((lv, i) => {
+        const was = original.levels.find(o => o.id === rows[i]!.background.levelId);
+        const octype = was?.entry.type === 'touch' ? was.entry.order.octype : undefined;
+        return lv.entry.type === 'touch' && octype ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, octype } } } : lv;
+    }) };
+    const result = await replaceBackgroundTrigger(programId, made);
+    if (result === 'replaced') return;
+    throw new Error('refused' in result
+        ? `修改未完成：${result.refused}`
+        : `修改結果未確認：${result.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+}
+
+function pauseTrigger(id: string, on: boolean): TriggerOrder {
+    const t = triggers.find(x => x.id === id);
+    if (!t) throw new Error('找不到這張觸價單（可能已觸發或已刪除）');
+    if (t.bracketId) throw new Error('括號單的停損停利不能單獨暫停');
+    if (on) {
+        if (t.paused) return t;
+        if (t.pending) throw new Error('待確認中的觸價單請先處理（送出、保留或取消）');
+        restoreCheck.delete(id);
+        const next = withHistory({ ...t, paused: true }, '已暫停，不再盯價', 'warn');
+        triggers = triggers.map(x => x.id === id ? next : x);
+        commit();
+        return next;
+    }
+    if (!t.paused) return t;
+    // resumed: price may have crossed meanwhile — the first tick decides
+    // (a crossing trigger waits for a fresh crossing)
+    if (t.kind !== 'alert' && !t.cross) restoreCheck.set(id, 'resume');
+    const next = withHistory({ ...t, paused: undefined, ...(t.cross ? { awaitingRecross: true } : {}) }, '恢復盯價', 'ok');
+    triggers = triggers.map(x => x.id === id ? next : x);
+    commit();
+    return next;
+}
+
 function newId() {
     return `tg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function kindLabel(t: Pick<TriggerOrder, 'kind'>) {
-    return t.kind === 'stop' ? '停損單已掛' : t.kind === 'take' ? '停利單已掛' : '警示已設';
+/** 停損 / 停利, or 觸價單 for an entry (#226). */
+export function roleWord(t: Pick<TriggerOrder, 'kind' | 'role'>): string {
+    return t.role === 'entry' ? '觸價單' : t.kind === 'stop' ? '停損' : '停利';
+}
+
+function kindLabel(t: Pick<TriggerOrder, 'kind' | 'role'>) {
+    return t.role === 'entry' ? '觸價單已設' : t.kind === 'stop' ? '停損單已掛' : t.kind === 'take' ? '停利單已掛' : '警示已設';
 }
 
 function qtyText(t: Pick<TriggerOrder, 'quantity' | 'orderLot'>, quantity = t.quantity): string {
@@ -304,9 +776,15 @@ function qtyText(t: Pick<TriggerOrder, 'quantity' | 'orderLot'>, quantity = t.qu
 }
 
 function describe(t: TriggerOrder) {
+    if (t.time) {
+        const hhmm = new Date(t.time.at + 8 * 3600_000).toISOString().slice(11, 16);
+        return t.time.kind === 'flatten'
+            ? `${t.code} ${hhmm} 全平並取消（${t.time.scope === 'code' ? '此商品' : '此帳戶'}）`
+            : `${t.code} ${hhmm} 送出 ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}`;
+    }
     return t.kind === 'alert'
         ? `${t.code} 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} 時通知`
-        : `${t.code} 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}${t.group ? '（OCO）' : ''}`;
+        : `${t.code} ${t.source === 'opposite' ? '對手價' : '觸價'} ${t.cross ? (t.condition === 'below' ? '下穿' : '上穿') : t.condition === 'below' ? '≤' : '≥'} ${t.price} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}${t.group ? '（OCO）' : ''}`;
 }
 
 /** Odd-lot triggers: stocks only, 盤中零股 only, 1–999 shares. */
@@ -322,33 +800,43 @@ function handleCommand(cmd: Command): unknown {
     if (cmd.op === 'add') {
         const again = cmd.trigger.requestId && triggers.find(x => x.requestId === cmd.trigger.requestId);
         if (again) return again; // resent after a main-window reload
-        const t: TriggerOrder = { ...cmd.trigger, id: newId(), createdAt: Date.now() };
-        delete t.suspended;
-        delete t.pending;
-        delete t.awaitingRecross;
-        if (!hasContext(t)) throw new Error('觸價單缺少帳戶或伺服器資訊，未建立');
-        if (t.bracketId) throw new Error('括號單保護只由主視窗建立');
-        const oddProblem = oddLotTriggerProblem(t);
-        if (oddProblem) throw new Error(oddProblem);
-        if (t.group && processedGroups[groupKey(t.env, t.group)]) throw new Error('此 OCO 群組已觸發過，不再建立');
+        const t = prepareAdd(cmd.trigger);
         triggers = [...triggers, t];
         commit();
-        notify({ kind: 'info', title: kindLabel(t), body: describe(t) });
+        if (getConditionalSettings().notify) notify({ kind: 'info', title: kindLabel(t), body: describe(t) });
         return t;
+    }
+    if (cmd.op === 'add-group') {
+        // #226 二擇一: both legs are checked first, then added together
+        const again = cmd.triggers[0]?.requestId && triggers.filter(x => x.requestId && cmd.triggers.some(n => n.requestId === x.requestId));
+        if (again && again.length) return again;
+        if (cmd.triggers.length < 2) throw new Error('二擇一需要兩邊條件');
+        const group = cmd.triggers[0]!.group;
+        if (!group || cmd.triggers.some(n => n.group !== group || n.env !== cmd.triggers[0]!.env)) throw new Error('二擇一兩邊必須同一組、同一環境');
+        const made = cmd.triggers.map(prepareAdd);
+        triggers = [...triggers, ...made];
+        commit();
+        if (getConditionalSettings().notify) notify({ kind: 'info', title: '二擇一已設', body: made.map(describe).join('；') });
+        return made;
     }
     if (cmd.op === 'remove') {
         // A bracket's OCO pair belongs to its plan: removing one side here
         // would leave the plan believing it is protected (and could re-arm).
         if (triggers.some(t => t.id === cmd.id && t.bracketId)) throw new Error('括號單保護請在下單面板的括號單狀態中移除追蹤');
+        const gone = triggers.find(t => t.id === cmd.id);
         triggers = triggers.filter(t => t.id !== cmd.id);
+        if (gone) recordEnded(gone, 'cancelled');
         commit();
         return true;
     }
+    if (cmd.op === 'pause' || cmd.op === 'resume') return pauseTrigger(cmd.id, cmd.op === 'pause');
+    if (cmd.op === 'modify') return applyModify(cmd.id, cmd.patch);
+    if (cmd.op === 'group' || cmd.op === 'modify-group') return applyGroup(cmd);
     if (cmd.op === 'ack-exit') {
         exits = exits.map(e => e.id === cmd.id && e.status === 'unknown' ? { ...e, acknowledged: true, at: Date.now() } : e);
         const rec = exits.find(e => e.id === cmd.id);
         commit();
-        if (rec) emitExit(rec);
+        if (rec) { emitExit(rec); settleOco(rec); }
         return true;
     }
     if (cmd.op === 'resolve-pending') return resolvePending(cmd.id, cmd.choice, cmd.allowUnpast);
@@ -407,12 +895,97 @@ export async function addTrigger(t: NewTrigger, contract?: ContractBase, opts?: 
     }
 }
 
+/** #226 二擇一: both legs (same `group`) are created together in this
+ * window's engine, or neither. */
+export async function addTriggerGroup(legs: NewTrigger[], contract: ContractBase, opts?: { account?: Account }): Promise<TriggerOrder[] | null> {
+    const prepared: NewTrigger[] = [];
+    for (const leg of legs) {
+        const p = withContext(leg, contract, opts?.account);
+        if (typeof p === 'string') {
+            notify({ kind: 'err', title: '二擇一未建立', body: p });
+            return null;
+        }
+        const requestId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : newId();
+        prepared.push({ ...p, requestId });
+    }
+    // #226: with 「背景持續執行」 on, both legs run as one background program (one owner)
+    if (backgroundSupported() && backgroundGroupEligible(prepared, contract)) {
+        const owner = await backgroundOwnerForNew();
+        if (owner === 'background') return addBackgroundGroup(prepared, contract);
+        if (owner !== 'window') {
+            notify({ kind: 'err', title: '二擇一未建立', body: owner.refused });
+            return null;
+        }
+    }
+    try {
+        return await bus.send({ op: 'add-group', triggers: prepared }) as TriggerOrder[];
+    } catch (e) {
+        notify({ kind: 'err', title: '二擇一未確認', body: e instanceof Error ? e.message : String(e) });
+        return null;
+    }
+}
+
+/** The contract's tick table for the engine (bands loaded if needed). */
+async function backgroundTickTable(contract: ContractBase) {
+    const c = contract as ContractBase & { tick_rule?: string; tick?: number };
+    const rule = c.tick_rule;
+    const bands = rule && (c.security_type === 'FUT' || c.security_type === 'OPT')
+        ? await ensureTickBands(rule, c.security_type) : undefined;
+    return tickTableOf(c, bands);
+}
+
+/** The program a trigger becomes in the background engine, or why not. */
+async function backgroundProgram(t: TriggerOrder, contract: ContractBase) {
+    const limitTicks = t.send?.type === 'LMT' ? t.send.ticks : 0;
+    const table = await backgroundTickTable(contract);
+    if (limitTicks !== 0 && !table) return '背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試';
+    return programForNewTrigger(t, contract, table) ?? '背景執行：觸價單缺少帳戶或伺服器資訊';
+}
+
+async function addBackgroundGroup(prepared: NewTrigger[], contract: ContractBase): Promise<TriggerOrder[] | null> {
+    const now = Date.now();
+    const legs: TriggerOrder[] = prepared.map(n => {
+        const t: TriggerOrder = { ...n, id: newId(), createdAt: now };
+        delete t.requestId;
+        return t;
+    });
+    const problem = legs.map(t => oddLotTriggerProblem(t) ?? triggerOptionsProblem(t)).find(Boolean);
+    if (problem) {
+        notify({ kind: 'err', title: '二擇一未建立', body: problem });
+        return null;
+    }
+    const table = await backgroundTickTable(contract);
+    if (legs.some(l => l.send?.type === 'LMT' && l.send.ticks !== 0) && !table) {
+        notify({ kind: 'err', title: '二擇一未建立', body: '背景執行：跳動點級距尚未取得，無法計算觸價後限價，請稍後再試' });
+        return null;
+    }
+    const program = programForNewGroup(legs, contract, table);
+    if (!program) {
+        notify({ kind: 'err', title: '二擇一未建立', body: '背景執行：二擇一缺少帳戶或伺服器資訊' });
+        return null;
+    }
+    const result = await createBackgroundTrigger(program);
+    if (result !== 'created') {
+        if ('refused' in result) notify({ kind: 'err', title: '二擇一未建立', body: `背景執行：${result.refused}` });
+        else notify({ kind: 'err', title: '二擇一建立結果未確認', body: `背景執行：${result.unconfirmed}；請先看清單是否已有這組，不要直接重掛` });
+        return null;
+    }
+    if (getConditionalSettings().notify) notify({ kind: 'info', title: '二擇一已設（背景執行）', body: legs.map(describe).join('；') });
+    return backgroundRows().filter(r => r.background.programId === program.id);
+}
+
 async function addBackgroundTrigger(prepared: NewTrigger, contract: ContractBase): Promise<TriggerOrder | null> {
     const t: TriggerOrder = { ...prepared, id: newId(), createdAt: Date.now() };
     delete t.requestId;
-    const program = programForNewTrigger(t, contract);
-    if (!program) {
-        notify({ kind: 'err', title: '觸價單未建立', body: '背景執行：觸價單缺少帳戶或伺服器資訊' });
+    // the same checks as a trigger of this window
+    const problem = oddLotTriggerProblem(t) ?? triggerOptionsProblem(t);
+    if (problem) {
+        notify({ kind: 'err', title: '觸價單未建立', body: problem });
+        return null;
+    }
+    const program = await backgroundProgram(t, contract);
+    if (typeof program === 'string') {
+        notify({ kind: 'err', title: '觸價單未建立', body: program });
         return null;
     }
     const result = await createBackgroundTrigger(program);
@@ -445,6 +1018,107 @@ export async function removeTrigger(id: string): Promise<void> {
     } catch (e) {
         notify({ kind: 'err', title: '觸價單移除未確認', body: e instanceof Error ? e.message : String(e) });
     }
+}
+
+/** Pause / resume a trigger (#226). A resumed trigger's first tick decides:
+ * already past → 待確認, never sent by the resume itself. */
+export async function setTriggerPaused(id: string, paused: boolean): Promise<void> {
+    if (isBackgroundId(id)) {
+        const row = backgroundRow(id);
+        if (!row) throw new Error('找不到這張觸價單');
+        await (paused ? pauseBackgroundProgram(row.background.programId) : resumeBackgroundProgram(row.background.programId));
+        return;
+    }
+    await bus.send({ op: paused ? 'pause' : 'resume', id });
+}
+
+/** Change a manual trigger's price / quantity / send style / validity
+ * (#226). Nothing is sent by the edit: when the new price is already
+ * crossed, the next tick holds it as 待確認. A background trigger is
+ * replaced in one engine step (`execution_replace`), so it is never armed
+ * twice, and never left unarmed by a half-done edit. */
+export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<void> {
+    if (!isBackgroundId(id)) {
+        await bus.send({ op: 'modify', id, patch });
+        return;
+    }
+    const row = backgroundRow(id);
+    if (!row) throw new Error('找不到這張觸價單');
+    if (row.pending) throw new Error('待確認中的觸價單請先處理（送出、保留或取消）');
+    const contract = await ensureContract(row.code);
+    const programId = row.background.programId;
+    const original = getBackgroundPrograms().find(p => p.id === programId);
+    const level = original?.levels.find(lv => lv.id === row.background.levelId);
+    if (!original || !level || level.entry.type !== 'touch') throw new Error('找不到這張觸價單');
+    const next: TriggerOrder = { ...row, ...(patch.price !== undefined ? { price: patch.price } : {}),
+        ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
+        ...(patch.send !== undefined ? { send: patch.send } : {}), id: newId(), createdAt: Date.now() };
+    if (patch.validity !== undefined) {
+        if (patch.validity) next.validity = patch.validity;
+        else delete next.validity;
+    }
+    delete (next as Partial<BackgroundTriggerOrder>).background;
+    delete next.awaitingRecross;
+    delete next.paused;
+    if (patch.price !== undefined && (!Number.isFinite(patch.price) || patch.price <= 0)) throw new Error('觸發價必須是正數');
+    if (patch.quantity !== undefined && (!Number.isSafeInteger(patch.quantity) || patch.quantity <= 0)) throw new Error('數量必須是正整數');
+    const problem = triggerOptionsProblem(next);
+    if (problem) throw new Error(problem.replace('，未建立', ''));
+    // never armed already crossed: refused here (a crossing one waits for a
+    // new crossing anyway), and the engine's first tick decides like a
+    // restore (already past → 待確認)
+    // the price this condition watches (a trade, or 零股 trades; 對手價 is left to the engine)
+    const key = priceKeyOf(next);
+    const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[key] ?? lastPrices.get(key);
+    if (!next.cross && latest !== undefined && isPast(next, latest)) throw new Error(`新的觸發價已穿過目前價格（${latest}），沒有修改`);
+    if (original.kind === 'bracket') {
+        // a panel bracket whose 觸價 entry did not fire: the engine builds the new one
+        const table = await backgroundTickTable(contract);
+        const plan = row.bracketPlan;
+        if (!table || !plan) throw new Error('背景執行：跳動點級距尚未取得，無法修改括號單，請稍後再試');
+        const request = panelBracketRequest({ env: row.env!, account: row.account!, quoteCode: row.code, orderCode: row.orderCode!,
+            securityType: contract.security_type === 'OPT' ? 'OPT' : contract.security_type === 'STK' ? 'STK' : 'FUT', action: row.action,
+            plan: { ...plan, tiers: patch.quantity !== undefined ? scaleTiers(plan.tiers, patch.quantity) : plan.tiers },
+            tickTable: table, entry: { trigger: { condition: next.condition, price: next.price, send: next.send ?? { type: 'MKT' },
+                ...(next.validity ? { validity: next.validity } : {}),
+                // keep a 新倉 entry new (#216)
+                ...(level.entry.order.octype === 'New' ? { octype: 'New' as const } : {}) } } });
+        if (!request) throw new Error('背景執行：這張括號單無法修改，請取消後重新建立');
+        const replaced = await replaceBackgroundBracket(programId, request);
+        if (replaced === 'replaced') return;
+        throw new Error('refused' in replaced ? `修改未完成：${replaced.refused}`
+            : `修改結果未確認：${replaced.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+    }
+    const made = await backgroundProgram(next, contract);
+    if (typeof made === 'string') throw new Error(made);
+    // keep the original position effect (e.g. a closing-only Cover stays Cover)
+    const octype = level.entry.order.octype;
+    const program = { ...made, levels: made.levels.map(lv => lv.entry.type === 'touch'
+        ? { ...lv, entry: { ...lv.entry, order: { ...lv.entry.order, ...(octype ? { octype } : {}) } } } : lv) };
+    // one engine step: the old one is gone and the new one armed, or nothing changed
+    const result = await replaceBackgroundTrigger(programId, program);
+    if (result === 'replaced') return;
+    throw new Error('refused' in result
+        ? `修改未完成：${result.refused}`
+        : `修改結果未確認：${result.unconfirmed}。請先看清單是否已是新的單，不要重複修改`);
+}
+
+/** A bracket's tiers for a new total: only a single tier can change size
+ * (several tiers keep their split — change them by re-creating). */
+function scaleTiers(tiers: { quantity: number; takeTicks: number | null }[], total: number) {
+    if (tiers.length === 1) return [{ ...tiers[0]!, quantity: total }];
+    if (tiers.reduce((n, t) => n + t.quantity, 0) !== total) throw new Error('分批停利的括號單請取消後重新建立以改數量');
+    return tiers;
+}
+
+/** Remove a trigger and throw when that is not confirmed (全平並取消). */
+export async function removeTriggerStrict(id: string): Promise<void> {
+    if (isBackgroundId(id)) {
+        const row = backgroundRow(id);
+        if (row) await removeBackgroundTrigger(row.background.programId);
+        return;
+    }
+    await bus.send({ op: 'remove', id });
 }
 
 /** User confirms an unknown-outcome exit was reconciled by hand; releases
@@ -483,6 +1157,12 @@ export function getTriggers(): TriggerOrder[] {
 
 export function getExits(): ExitRecord[] {
     return snapshot.exits;
+}
+
+const NO_ENDED: EndedTrigger[] = [];
+/** Today's finished manual triggers (newest last). */
+export function useEndedTriggers(): EndedTrigger[] {
+    return useSyncExternalStore(subscribe, () => snapshot.ended ?? NO_ENDED);
 }
 
 function subscribe(l: () => void) {
@@ -535,7 +1215,10 @@ function pendingPricesNow(): Record<string, number> {
     const rows = backgroundRows();
     if (pricesCache.ts !== ts || pricesCache.bg !== bg || pricesCache.rows !== rows) {
         const extra: Record<string, number> = {};
-        for (const r of rows) if (r.pending && bg[r.code] !== undefined) extra[r.code] = bg[r.code]!;
+        for (const r of rows) {
+            const key = priceKeyOf(r); // 對手價 rows read their side of the book
+            if (r.pending && bg[key] !== undefined) extra[key] = bg[key]!;
+        }
         pricesCache = { ts, bg, rows, all: Object.keys(extra).length ? { ...ts, ...extra } : ts };
     }
     return pricesCache.all;
@@ -579,6 +1262,11 @@ export interface BracketArm {
     takePrice: number | null;
     quantity: number;
     restore?: boolean; // armed from fills recovered after a (re)start
+    /** #226: the user changed the prices — the first tick decides (already
+     * past → 待確認), like a restore. */
+    edited?: boolean;
+    /** #226 移動停損 for the stop leg (state kept across resizes). */
+    trail?: TrailState;
 }
 
 /** Create or resize the OCO pair of a bracket. Returns false when the group
@@ -600,7 +1288,7 @@ export function armBracketGroup(arm: BracketArm): boolean {
     const added: TriggerOrder[] = [];
     if (arm.stopPrice !== null) {
         added.push({ ...base, id: newId(), kind: 'stop', price: arm.stopPrice,
-            condition: arm.entryAction === 'Buy' ? 'below' : 'above' });
+            condition: arm.entryAction === 'Buy' ? 'below' : 'above', ...(arm.trail ? { trail: arm.trail } : {}) });
     }
     if (arm.takePrice !== null) {
         added.push({ ...base, id: newId(), kind: 'take', price: arm.takePrice,
@@ -610,7 +1298,9 @@ export function armBracketGroup(arm: BracketArm): boolean {
     // Armed from a fill recovered after a (re)start (cache lookup, buffered
     // reports) or while the restore window is open: the first tick decides
     // (#144). Exits armed from live fills fire as usual.
-    if (arm.restore || restoreWindowOpen()) {
+    if (arm.edited) {
+        for (const t of added) restoreCheck.set(t.id, 'resume');
+    } else if (arm.restore || restoreWindowOpen()) {
         const reason: RestoreReason = arm.restore ? lastRestoreReason : startRestore ? 'restart' : 'disconnect';
         for (const t of added) restoreCheck.set(t.id, reason);
     }
@@ -711,9 +1401,13 @@ function reserve(t: TriggerOrder, lastPrice: number): { rec: ExitRecord; sibling
         commit();
         return null;
     }
-    const siblings = t.group ? triggers.filter(x => x.group === t.group && x.env === t.env && x.id !== t.id) : [];
+    // 'fill' OCO (#226): the other side stays (locked) and later loses what fills
+    const fillMode = !!t.group && t.ocoMode === 'fill';
+    const siblings = t.group && !fillMode ? triggers.filter(x => x.group === t.group && x.env === t.env && x.id !== t.id) : [];
     triggers = triggers.filter(x => x.id !== t.id && !siblings.includes(x));
-    if (gk) processedGroups[gk] = Date.now();
+    if (gk && !fillMode) processedGroups[gk] = Date.now();
+    recordEnded(t, 'fired', t.time ? '時間到' : `現價 ${fmtPrice(lastPrice)}`);
+    for (const x of siblings) recordEnded(x, 'oco');
     if (t.kind === 'alert') {
         commit();
         notify({ kind: 'info', title: '到價警示',
@@ -733,13 +1427,17 @@ function reserve(t: TriggerOrder, lastPrice: number): { rec: ExitRecord; sibling
         status: plan.quantity > 0 ? 'sending' : 'not-sent', filled: 0, fills: {}, detail: plan.detail, at: Date.now(),
     };
     exits = [...exits, rec];
+    if (fillMode && plan.quantity > 0) {
+        triggers = triggers.map(x => x.group === t.group && x.env === t.env
+            ? withHistory({ ...x, ocoLock: rec.id }, '另一邊已觸發，等它成交後扣掉對應口數', 'warn') : x);
+    }
     commit();
     if (siblings.length) {
         notify({ kind: 'info', title: 'OCO 互斥撤銷', body: `${t.code} 另一邊觸價單已自動移除` });
     }
     emitExit(rec);
     if (plan.quantity <= 0) {
-        notify({ kind: 'err', title: t.kind === 'stop' ? '停損未送出' : '停利未送出', body: `${t.code} ${plan.detail ?? ''}` });
+        notify({ kind: 'err', title: `${roleWord(t)}未送出`, body: `${t.code} ${plan.detail ?? ''}` });
         return null;
     }
     return { rec, siblings, gk };
@@ -757,10 +1455,39 @@ function planFor(t: TriggerOrder) {
         closable === null ? null : reserved + sharesToUnits(Math.max(0, closable - resShares), t.orderLot));
 }
 
-/** Limit price of an odd-lot exit (none for whole lots / futures). */
-function exitPrice(t: TriggerOrder, contract: ContractBase): number | null | 'missing' {
-    if (!isOddLot(t.orderLot)) return null;
-    return oddLotMarketablePrice(contract as ContractBase & { limit_up?: number; limit_down?: number }, t.action) ?? 'missing';
+/** How a firing trigger's order goes out: price (null = market), MKP and
+ * the time in force. A string: refused, nothing is sent. */
+export interface OrderPlan {
+    price: number | null;
+    futuresPriceType?: 'MKP';
+    orderType?: 'ROD' | 'IOC';
+}
+export function orderPlanFor(t: Pick<TriggerOrder, 'orderLot' | 'action' | 'price' | 'send' | 'ocoMode' | 'group'>,
+    contract: ContractBase & { limit_up?: number; limit_down?: number }): OrderPlan | string {
+    if (isOddLot(t.orderLot)) {
+        const p = oddLotMarketablePrice(contract, t.action);
+        return p === null || p === undefined ? ODD_PRICE_MISSING : { price: p };
+    }
+    const send = t.send ?? { type: 'MKT' as const };
+    if (send.type === 'MKT') return { price: null };
+    if (send.type === 'MKP') {
+        if (contract.security_type !== 'FUT' && contract.security_type !== 'OPT') return '範圍市價只適用期貨選擇權，未送出';
+        return { price: null, futuresPriceType: 'MKP' };
+    }
+    // 觸價後限價: the trigger price moved `ticks` legal price steps — on the
+    // exchange's band table when the product has one (never a guessed tick)
+    const rule = (contract as { tick_rule?: string }).tick_rule;
+    if (rule && send.ticks !== 0 && bandTickFor(rule, t.price) === undefined) {
+        if (contract.security_type === 'FUT' || contract.security_type === 'OPT') prefetchTickBands(rule, contract.security_type);
+        return '跳動點級距尚未載入，限價未送出';
+    }
+    const price = send.ticks === 0 ? t.price : stepPrice(contract, t.price, send.ticks);
+    if (!Number.isFinite(price) || price <= 0) return '限價計算結果無效，未送出';
+    const up = Number(contract.limit_up);
+    const down = Number(contract.limit_down);
+    if ((up > 0 && price > up) || (down > 0 && price < down)) return `限價 ${price} 超出漲跌停（${down}～${up}），未送出`;
+    // a 'fill' OCO takes off what filled: the order must end (IOC), not rest
+    return { price, orderType: t.group && t.ocoMode === 'fill' ? 'IOC' : 'ROD' };
 }
 const ODD_PRICE_MISSING = '零股需要有效漲跌停價作為限價，未送出';
 
@@ -780,6 +1507,7 @@ function updateExit(id: string, patch: (e: ExitRecord) => ExitRecord) {
     if (changed) {
         commit();
         emitExit(changed);
+        settleOco(changed);
     }
     return changed;
 }
@@ -807,17 +1535,24 @@ const notSentExit = (t: TriggerOrder, rec: ExitRecord, detail: string) => {
     notify({ kind: 'err', title: '觸價單未送出', body: `${t.code} ${detail}（不會自動重送）` });
 };
 
-function exitSent(t: TriggerOrder, rec: ExitRecord, trade: Trade, lastPrice: number) {
+function exitSent(t: TriggerOrder, rec: ExitRecord, trade: Trade, lastPrice: number, op?: OrderPlan) {
     const orderId = trade.order.id;
     const odd = isOddLot(t.orderLot);
+    const resting = !odd && op?.price !== null && op?.price !== undefined && op.orderType === 'ROD';
     updateExit(rec.id, e => ({ ...e, status: e.filled >= e.quantity ? 'filled' : 'working', orderId, at: Date.now(),
         // odd-lot exits are ROD limits at the price limit: the rest keeps
         // working until filled or cancelled (reports / 對帳), no IOC settle
         ...(odd && e.filled < e.quantity ? { detail: `${e.detail ? `${e.detail}；` : ''}零股以漲跌停價限價 ROD 送出，依成交回報更新` } : {}) }));
     for (const report of recentReportsFor(envBase(rec.env), orderId)) applyExitReport(report, envBase(rec.env));
-    if (!odd) scheduleIocCheck(rec.id);
-    notify({ kind: 'ok', title: t.kind === 'stop' ? '停損觸發' : '停利觸發',
-        body: `${t.code} @${lastPrice} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)}（${orderStatusWithNumber(trade)}）` });
+    // a resting 觸價後限價 (ROD) settles by its reports / 對帳, not the IOC check
+    if (!odd && !resting) scheduleIocCheck(rec.id);
+    if (t.bracketPlan) {
+        try { entryPlaced?.(t, trade); } catch (e) {
+            notify({ kind: 'err', title: '括號單保護未登記', body: `${t.code} 進場單已送出；${e instanceof Error ? e.message : String(e)}。請到委託／持倉確認後自行處理出場` });
+        }
+    }
+    if (getConditionalSettings().notify) notify({ kind: 'ok', title: `${roleWord(t)}觸發`,
+        body: `${t.code} ${t.time ? '時間到' : `@${lastPrice}`} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)}（${orderStatusWithNumber(trade)}）` });
 }
 
 function exitUnknown(t: TriggerOrder, rec: ExitRecord, message: string) {
@@ -832,17 +1567,26 @@ const notStarted = (e: unknown) => !!(e as { mutationNotStarted?: boolean })?.mu
 async function dispatch(t: TriggerOrder, rec: ExitRecord, lastPrice: number) {
     const ctx = await sendContext(t, rec.env);
     if (typeof ctx === 'string') { notSentExit(t, rec, ctx); return; }
-    const price = exitPrice(t, ctx.contract);
-    if (price === 'missing') { notSentExit(t, rec, ODD_PRICE_MISSING); return; }
+    const op = orderPlanFor(t, ctx.contract);
+    if (typeof op === 'string') { notSentExit(t, rec, op); return; }
+    // the condition may have lapsed while the contract was being checked
+    if (t.validity && Date.now() >= t.validity.until) { notSentExit(t, rec, '有效期已過，未送出'); return; }
     try {
-        const trade = await placeQuickOrder(ctx.contract, t.action, price, rec.quantity, {
-            bypassRisk: true, // protective exit — never blocked by kill switch
+        const trade = await placeQuickOrder(ctx.contract, t.action, op.price, rec.quantity, {
+            // protective exit — never blocked by kill switch; an entry is a
+            // new position: kill switch and loss limits apply
+            bypassRisk: t.role !== 'entry',
             source: 'auto', // 使用者可能不在場，不彈確認
             account: ctx.account,
             ocType: t.octype,
             orderLot: isOddLot(t.orderLot) ? t.orderLot : undefined,
+            ...(op.futuresPriceType ? { futuresPriceType: op.futuresPriceType } : {}),
+            ...(op.orderType && op.price !== null ? { orderType: op.orderType } : {}),
+            beforeSend: () => {
+                if (t.validity && Date.now() >= t.validity.until) throw new Error('有效期已過，未送出');
+            },
         });
-        exitSent(t, rec, trade, lastPrice);
+        exitSent(t, rec, trade, lastPrice, op);
     } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         if (notStarted(e)) notSentExit(t, rec, message);
@@ -879,25 +1623,29 @@ async function sendPending(id: string, allowUnpast: boolean) {
     if (typeof ctx === 'string') { refused(ctx); return; }
     const planned = planFor(first);
     if (planned.quantity <= 0) { refused(planned.detail ?? '沒有可送出的數量'); return; }
-    const price = exitPrice(first, ctx.contract);
-    if (price === 'missing') { refused(ODD_PRICE_MISSING); return; }
+    const op = orderPlanFor(first, ctx.contract);
+    if (typeof op === 'string') { refused(op); return; }
     // A manual trigger may be an entry: it is a user order (risk checks,
     // manual confirm). Bracket exits stay protective.
     const userOrder = !first.bracketId;
     const box: { fired: { t: TriggerOrder; rec: ExitRecord; siblings: TriggerOrder[]; gk: string | null; price: number } | null } = { fired: null };
     try {
-        const trade = await placeQuickOrder(ctx.contract, first.action, price, planned.quantity, {
+        const trade = await placeQuickOrder(ctx.contract, first.action, op.price, planned.quantity, {
             bypassRisk: !userOrder,
             source: userOrder ? 'manual' : 'auto',
             account: ctx.account,
             ocType: first.octype,
             orderLot: isOddLot(first.orderLot) ? first.orderLot : undefined,
+            ...(op.futuresPriceType ? { futuresPriceType: op.futuresPriceType } : {}),
+            ...(op.orderType && op.price !== null ? { orderType: op.orderType } : {}),
             confirmLivePriceCode: userOrder ? priceKeyOf(first) : undefined,
             beforeSend: () => {
                 const cur = triggers.find(x => x.id === id);
                 if (!cur?.pending) throw new Error('已不在待確認（OCO 另一邊可能已觸發或已被處理），未送出');
                 if (currentProtectionEnv() !== cur.env) throw new Error('伺服器或模擬／正式模式已切換，未送出');
                 if (cur.group && processedGroups[groupKey(cur.env, cur.group)]) throw new Error('此 OCO 群組已觸發，未送出');
+                if (cur.ocoLock) throw new Error('二擇一另一邊的委託還在處理，未送出');
+                if (cur.validity && Date.now() >= cur.validity.until) throw new Error('有效期已過，未送出');
                 const price = lastPrices.get(priceKeyOf(cur));
                 if (getStreamStatus() !== 'live' || price === undefined) throw new Error('行情中斷，未送出');
                 // The manual order dialog can stay open while the price crosses
@@ -914,7 +1662,7 @@ async function sendPending(id: string, allowUnpast: boolean) {
                 box.fired = { t: next, ...r, price };
             },
         });
-        if (box.fired) exitSent(box.fired.t, box.fired.rec, trade, box.fired.price);
+        if (box.fired) exitSent(box.fired.t, box.fired.rec, trade, box.fired.price, op);
     } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         const f = box.fired;
@@ -925,25 +1673,32 @@ async function sendPending(id: string, allowUnpast: boolean) {
         // re-armed and re-evaluated against the latest price
         exits = exits.filter(x => x.id !== f.rec.id);
         if (f.gk) delete processedGroups[f.gk];
+        // a 'fill' OCO sibling locked on this (never sent) order watches again
+        triggers = triggers.map(x => {
+            if (x.ocoLock !== f.rec.id) return x;
+            if (!x.cross) restoreCheck.set(x.id, 'resume');
+            return { ...x, ocoLock: undefined, ...(x.cross ? { awaitingRecross: true } : {}) };
+        });
         const back = [{ ...f.t, pending: first.pending }, ...f.siblings].filter(x => !triggers.some(y => y.id === x.id));
         triggers = [...triggers, ...back];
         commit();
         notify({ kind: 'err', title: '觸價單未送出（仍待確認）', body: `${f.t.code} ${message}` });
         const latest = lastPrices.get(priceKeyOf(f.t));
-        if (latest !== undefined) evaluateTick(f.t.code, latest, usesOddFeed(f.t));
+        if (latest !== undefined) evaluateFeed(f.t.code, latest, feedOf(f.t));
     }
 }
 
 /** Exits are market IOC. Their unfilled remainder may never produce a Cancel
  * report, so the exit order is read from the cache only (refresh:false) at
- * most TWICE: a final status (Cancelled/Failed/Inactive/Filled) settles it at
+ * most TWICE: a final status (Cancelled/Failed/Filled) settles it at
  * once; PartFilled settles only when a second, later read shows the same
  * fills/cancels. Otherwise the remainder stays 待確認 for an explicit 對帳.
  * A row missing from the cache changes nothing (never filled/cancelled).
  * Late fills still apply after settling and shrink the unprotected rest. */
 export const IOC_CHECK_MS = 3000;
 export const IOC_RECHECK_MS = 5000;
-const FINAL = ['Cancelled', 'Failed', 'Inactive', 'Filled'];
+// Inactive is not final: the SDK's placeholder before the broker answered (#177)
+const FINAL = ['Cancelled', 'Failed', 'Filled'];
 const rowSignature = (t: Trade) => `${t.status.status}|${t.status.deal_quantity}|${t.status.cancel_quantity}|${t.status.deals?.length ?? 0}`;
 function scheduleIocCheck(id: string, previous?: string) {
     setTimeout(() => {
@@ -994,7 +1749,7 @@ export function applyExitTrade(trade: Trade, opts: { settle?: boolean } = {}) {
         updateExit(rec.id, e => {
             let next = e;
             for (const fill of fillsFromTrade(trade)) next = applyExitFill(next, fill, Date.now());
-            const ended = ['Cancelled', 'Failed', 'Inactive'].includes(trade.status.status)
+            const ended = ['Cancelled', 'Failed'].includes(trade.status.status)
                 || (opts.settle && trade.status.status === 'PartFilled');
             if (next.status === 'working' && ended) {
                 next = { ...next, status: 'incomplete', at: Date.now(),
@@ -1005,14 +1760,63 @@ export function applyExitTrade(trade: Trade, opts: { settle?: boolean } = {}) {
     }
 }
 
+/** A stop with 移動停損 after one price: the moved trigger, or null when
+ * nothing changed. The state (extreme / anchor) is kept even when the stop
+ * does not move. */
+function trailed(t: TriggerOrder, price: number): TriggerOrder | null {
+    const contract = getCachedContract(t.code);
+    if (!contract || !t.trail) return null;
+    // no move on a guessed tick: wait for the exchange band table
+    const rule = (contract as { tick_rule?: string }).tick_rule;
+    if (rule && bandTickFor(rule, price) === undefined) return null;
+    const long = t.condition === 'below'; // a long position's stop sells below
+    const r = trailStep(long, t.price, t.trail, price, (p, n) => stepPrice(contract, p, n));
+    if (r.stop === t.price && JSON.stringify(r.state) === JSON.stringify(t.trail)) return null;
+    const next: TriggerOrder = { ...t, trail: r.state };
+    if (r.stop === t.price) return next;
+    // never against the position
+    if (long ? r.stop < t.price : r.stop > t.price) return next;
+    next.price = r.stop;
+    return withHistory(next, `移動停損${long ? '上移' : '下移'}至 ${fmtPrice(r.stop)}${!t.trail.active ? '（已啟動）' : ''}`, 'ok');
+}
+
+/** 保本 and other one-way moves of a bracket's stop (main window only):
+ * applied only when it is in the position's favour. */
+export function tightenBracketStop(env: string, group: string, price: number, why: string): boolean {
+    if (!main || !Number.isFinite(price) || price <= 0) return false;
+    const stop = triggers.find(t => t.group === group && t.env === env && t.kind === 'stop' && t.bracketId);
+    if (!stop) return false;
+    const long = stop.condition === 'below';
+    if (long ? price <= stop.price : price >= stop.price) return false;
+    const next = withHistory({ ...stop, price }, `${why}：停損 ${fmtPrice(stop.price)} → ${fmtPrice(price)}`, 'ok');
+    triggers = triggers.map(t => t.id === stop.id ? next : t);
+    // the new stop may already be crossed: the first tick decides
+    restoreCheck.set(stop.id, 'resume');
+    commit();
+    return true;
+}
+
+// #226: a trigger-placed 括號單 entry registers its protection here
+type EntryPlaced = (t: TriggerOrder, trade: Trade) => void;
+let entryPlaced: EntryPlaced | null = null;
+export function onEntryPlaced(handler: EntryPlaced): void {
+    entryPlaced = handler;
+}
+
 const isPast = (t: Pick<TriggerOrder, 'condition' | 'price'>, price: number) =>
     (t.condition === 'below' && price <= t.price) || (t.condition === 'above' && price >= t.price);
 
 /** `oddLot`: a 盤中零股 trade — evaluates only odd-lot triggers of `code`;
  * a regular-lot trade evaluates everything else (#204). */
 export function evaluateTick(code: string, price: number, oddLot = false) {
+    evaluateFeed(code, price, oddLot ? 'odd' : 'trade');
+}
+
+/** #226: one price of one feed (trade, odd-lot trade, best bid / ask). */
+export function evaluateFeed(code: string, price: number, feed: Feed) {
     if (!main || !executing || !Number.isFinite(price) || price <= 0) return;
-    const key = feedKey(code, oddLot);
+    expireDue();
+    const key = feedKey(code, feed);
     const previous = lastPrices.get(key);
     lastPrices.set(key, price);
     if (triggers.length === 0) return;
@@ -1020,13 +1824,13 @@ export function evaluateTick(code: string, price: number, oddLot = false) {
     let rearmed = false;
     const held: { t: TriggerOrder; reason: RestoreReason }[] = [];
     for (const t of triggers.slice()) {
-        if (t.code !== code || usesOddFeed(t) !== oddLot || t.suspended || t.pending) continue;
+        if (t.code !== code || feedOf(t) !== feed || t.suspended || t.pending || t.paused || t.ocoLock || t.time) continue;
         if (t.kind !== 'alert' && t.env !== env) continue;
         const past = isPast(t, price);
         if (t.awaitingRecross) {
             // kept after 待確認: seeing the non-trigger side arms it again
             if (!past) {
-                triggers = triggers.map(x => x.id === t.id ? { ...x, awaitingRecross: undefined } : x);
+                triggers = triggers.map(x => x.id === t.id ? withHistory({ ...x, awaitingRecross: undefined }, '價格回到另一側，恢復盯價', 'ok') : x);
                 rearmed = true;
             }
             continue;
@@ -1036,7 +1840,17 @@ export function evaluateTick(code: string, price: number, oddLot = false) {
             held.push({ t, reason });
             continue;
         }
-        if (!past) continue;
+        if (!past) {
+            // 移動停損: only after the existing stop was checked; then the new
+            // stop is checked against the same price (at most one send)
+            const moved = t.trail ? trailed(t, price) : null;
+            if (!moved) continue;
+            triggers = triggers.map(x => x.id === t.id ? moved : x);
+            rearmed = true;
+            if (!isPast(moved, price)) continue;
+            fire(moved, price);
+            continue;
+        }
         // an earlier trigger on this tick may have removed it (OCO)
         if (!triggers.some(x => x.id === t.id)) continue;
         fire(t, price);
@@ -1158,7 +1972,7 @@ const fmtDiff = (d: number) => `${d > 0 ? '+' : ''}${Number(d.toFixed(4))}`;
 export function describePending(t: TriggerOrder, price: number | undefined, priv: boolean): string {
     const acct = t.account ? `${t.account.account_type === 'F' ? '[期]' : '[證]'}${maskAccountId(t.account.account_id, priv)} ` : '';
     const now = price === undefined ? '目前價未知' : `目前 ${price}（差 ${fmtDiff(price - t.price)}）`;
-    return `${t.code} ${acct}${t.kind === 'stop' ? '停損' : '停利'} ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}`
+    return `${t.code} ${acct}${roleWord(t)} ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t)}`
         + ` 觸價 ${t.condition === 'below' ? '≤' : '≥'} ${t.price} · ${now}`;
 }
 
@@ -1169,7 +1983,9 @@ function pendingName(t: TriggerOrder): string {
 function holdPending(held: { t: TriggerOrder; reason: RestoreReason }[], price: number) {
     const at = Date.now();
     const why = new Map(held.map(h => [h.t.id, h.reason]));
-    triggers = triggers.map(t => why.has(t.id) ? { ...t, pending: { price, at, reason: why.get(t.id) } } : t);
+    triggers = triggers.map(t => why.has(t.id)
+        ? withHistory({ ...t, pending: { price, at, reason: why.get(t.id) } }, `${RESTORE_REASON_TEXT[why.get(t.id) ?? 'restart']}，未自動送出`, 'err', at)
+        : t);
     commit();
     for (const { t, reason } of held) {
         notify({ kind: 'err', title: '觸價單待確認（未自動送出）',
@@ -1181,8 +1997,11 @@ function holdPending(held: { t: TriggerOrder; reason: RestoreReason }[], price: 
 /** Every order-sending trigger of `env` (all envs when omitted) decides on
  * its next tick whether it is 待確認. */
 function markRestore(reason: RestoreReason, env?: string) {
+    // a crossing trigger is never held: it needs a fresh crossing after a gap
+    triggers = triggers.map(t => t.cross && !t.awaitingRecross && !t.pending && (env === undefined || t.env === env)
+        ? { ...t, awaitingRecross: true } : t);
     for (const t of triggers) {
-        if (t.kind === 'alert' || t.suspended || t.pending || t.awaitingRecross) continue;
+        if (t.kind === 'alert' || t.suspended || t.pending || t.awaitingRecross || t.paused || t.time) continue;
         if (env === undefined || t.env === env) restoreCheck.set(t.id, reason);
     }
 }
@@ -1191,7 +2010,7 @@ function resolvePending(id: string, choice: PendingChoice, allowUnpast = false):
     const t = triggers.find(x => x.id === id);
     if (!t?.pending) throw new Error('此觸價單已不在待確認狀態');
     if (choice === 'keep') {
-        triggers = triggers.map(x => x.id === id ? { ...x, pending: undefined, awaitingRecross: true } : x);
+        triggers = triggers.map(x => x.id === id ? withHistory({ ...x, pending: undefined, awaitingRecross: true }, '保留，等價格回到另一側再次穿過') : x);
         commit();
         notify({ kind: 'info', title: '觸價單保留', body: `${pendingName(t)} ${pendingKindLabel(t)}：價格回到觸發價另一側、再次穿過時才會觸發` });
         return true;
@@ -1200,11 +2019,13 @@ function resolvePending(id: string, choice: PendingChoice, allowUnpast = false):
         // Same rule as remove: a bracket's pair belongs to its plan.
         if (t.bracketId) throw new Error('括號單保護請在下單面板的括號單狀態中移除追蹤');
         triggers = triggers.filter(x => x.id !== id);
+        recordEnded(t, 'cancelled', '待確認時取消，沒有送單');
         commit();
         notify({ kind: 'info', title: '觸價單已取消', body: `${pendingName(t)} ${pendingKindLabel(t)} 已刪除，沒有送單` });
         return true;
     }
     if (choice !== 'send') throw new Error('未知選項');
+    if (t.validity && Date.now() >= t.validity.until) throw new Error('有效期已過，未送出');
     if (currentProtectionEnv() !== t.env) throw new Error('伺服器或模擬／正式模式與建立時不同，未送出');
     const account = t.account && getAccountState().accounts.find(a => canTrade(a) && a.account_type === t.account!.account_type
         && a.broker_id === t.account!.broker_id && a.account_id === t.account!.account_id);
@@ -1231,10 +2052,10 @@ function syncQuotes() {
     const env = currentProtectionEnv();
     const base = getApiBase();
     // one hold per price feed: 整股 Tick, and 盤中零股 Tick for odd-lot triggers
-    const feeds = new Map<string, { code: string; oddLot: boolean }>();
+    const feeds = new Map<string, { code: string; feed: Feed }>();
     for (const t of triggers) {
         if (t.suspended || !(t.kind === 'alert' || t.env === env || (!env && t.env?.startsWith(`${base}|`)))) continue;
-        feeds.set(priceKeyOf(t), { code: t.code, oddLot: usesOddFeed(t) });
+        feeds.set(priceKeyOf(t), { code: t.code, feed: feedOf(t) });
     }
     const codes = new Set([...feeds.values()].map(f => f.code));
     for (const [key, hold] of quoteHolds) {
@@ -1242,13 +2063,14 @@ function syncQuotes() {
     }
     let changed = false;
     for (const code of [...feedMissing]) if (!codes.has(code)) { feedMissing.delete(code); changed = true; }
-    for (const [key, { code, oddLot }] of feeds) {
+    for (const [key, { code, feed }] of feeds) {
         if (quoteHolds.has(key)) continue;
         const hold: { release?: () => void } = {};
         quoteHolds.set(key, hold);
         void ensureContract(code).then(contract => {
             if (quoteHolds.get(key) !== hold) return;
-            hold.release = oddLot ? retainQuote(contract, 'Tick', { oddLot: true }) : retainQuote(contract, 'Tick');
+            hold.release = feed === 'odd' ? retainQuote(contract, 'Tick', { oddLot: true })
+                : feed === 'bid' || feed === 'ask' ? retainQuote(contract, 'BidAsk') : retainQuote(contract, 'Tick');
             retryDelay = 5000;
             if (feedMissing.delete(code)) publishFeed();
         }).catch(() => {
@@ -1299,10 +2121,20 @@ export function startTriggerEngine() {
     void claim.acquired.then(becomeExecutor);
 }
 
+let executorSince = Number.POSITIVE_INFINITY;
 function becomeExecutor() {
+    executorSince = Date.now();
     loadExecutorState();
     executing = true;
     decideRole();
+    // 'fill' OCO legs locked before a reload: settle them again (an exit that
+    // no longer exists sent nothing: the leg watches again, first tick decides)
+    triggers = triggers.map(t => {
+        if (!t.ocoLock || exits.some(e => e.id === t.ocoLock)) return t;
+        restoreCheck.set(t.id, 'resume');
+        return { ...t, ocoLock: undefined };
+    });
+    for (const rec of exits) if (triggers.some(t => t.ocoLock === rec.id)) setTimeout(() => settleOco(rec), 0);
     const suspended = triggers.filter(t => t.suspended === LEGACY_SUSPENDED).length;
     if (suspended) {
         notify({ kind: 'err', title: '舊版觸價單已暫停',
@@ -1316,6 +2148,19 @@ function becomeExecutor() {
         noteActivity();
         if (!tick.simtrade) evaluateTick(tick.code, Number(tick.close), true);
     });
+    // #226 對手價 triggers: best bid / ask (a missing or zero side is skipped)
+    onAnyBidAsk(ba => {
+        if (ba.intraday_odd) return;
+        noteActivity(); // a stall / sleep is noticed before this update is evaluated
+        if (ba.simtrade) return;
+        if (!triggers.some(t => t.code === ba.code && (feedOf(t) === 'bid' || feedOf(t) === 'ask'))) return;
+        const bid = Number(ba.bid_price?.[0]);
+        const ask = Number(ba.ask_price?.[0]);
+        if (bid > 0) evaluateFeed(ba.code, bid, 'bid');
+        if (ask > 0) evaluateFeed(ba.code, ask, 'ask');
+    });
+    setInterval(() => { if (expireDue()) commit(); }, EXPIRY_CHECK_MS);
+    setInterval(() => checkTimed(), TIME_CHECK_MS);
     onStreamEvent('heartbeat', () => noteActivity());
     onTrackedReport((report, _info, base) => applyExitReport(report, base));
     markRestore('restart');
@@ -1327,10 +2172,18 @@ function becomeExecutor() {
         syncQuotes();
     });
     watchProtectionEnv(); // stream down → mode forgotten → no dispatch until fresh /info
+    let wasLive = getStreamStatus() === 'live';
     subscribeStatusStore(() => {
-        if (getStreamStatus() !== 'live') dropPrices();
+        const live = getStreamStatus() === 'live';
+        if (!live) dropPrices();
         refreshEvaluation();
-        if (getStreamStatus() === 'live') syncQuotes();
+        if (live) syncQuotes();
+        if (live !== wasLive) {
+            wasLive = live;
+            const env = currentProtectionEnv();
+            const watched = new Set(triggers.filter(t => !t.paused && !t.suspended && (t.kind === 'alert' || !env || t.env === env)).map(t => t.id));
+            if (noteHistory(watched, live ? '重新連線，恢復盯價' : '連線中斷，暫停盯價', live ? 'ok' : 'warn')) commit();
+        }
     });
     refreshEvaluation();
     void refreshProtectionEnv();

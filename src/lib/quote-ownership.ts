@@ -96,8 +96,9 @@ export function retainQuote(contract: ContractBase, type: QuoteTypeName, options
 }
 /** Like retainQuote, but kept when this page goes away (main window only;
  * for the background engine's watched contracts). */
-export function pinQuote(contract: ContractBase, type: QuoteTypeName): () => void {
-    const desired: Desired = { contract, type };
+export function pinQuote(contract: ContractBase, type: QuoteTypeName, options?: { oddLot?: boolean }): () => void {
+    // 盤中零股 (#226 背景零股條件): a separate subscription, stocks only
+    const desired: Desired = options?.oddLot && contract.security_type === 'STK' ? { contract, type, odd: true } : { contract, type };
     const key = keyOf(desired);
     pinned.set(key, { desired, refs: (pinned.get(key)?.refs ?? 0) + 1 });
     sync();

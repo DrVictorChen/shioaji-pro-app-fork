@@ -4,6 +4,8 @@ import { createContainer, globalStyle, style, styleVariants } from '@vanilla-ext
 import { vars } from '../theme.css';
 
 const COLS = '3rem 1fr 4.8rem 1fr 3rem';
+// #216 外側觸買／觸賣欄：觸價 | 委託 | 量 | 價格 | 量 | 委託 | 觸價
+const COLS7 = '1.9rem 2rem minmax(0, 1fr) 3.9rem minmax(0, 1fr) 2rem 1.9rem';
 
 const flashContainer = createContainer();
 
@@ -237,6 +239,7 @@ export const recenterBtn = style({
 // ---- action bar (market orders / flatten / cancel-all) ----
 
 export const actionBar = style({
+    position: 'relative',
     display: 'flex',
     alignItems: 'center',
     flexWrap: 'wrap',
@@ -825,3 +828,270 @@ export const expiryTag = style({
     color: vars.color.danger,
     border: `1px solid ${vars.color.danger}`,
 });
+
+// ---- #216 觸價模式與梯形上的觸價單／停損停利 ----
+
+// 標在買量／賣量格的外側邊緣（買：左、賣：右），不新增欄位
+const markSlot = style({
+    position: 'absolute',
+    top: 2,
+    bottom: 2,
+    zIndex: 2,
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: 2,
+});
+export const markSlotInline = style({
+    display: 'flex',
+    alignItems: 'stretch',
+    justifyContent: 'center',
+    gap: 2,
+    height: '100%',
+    padding: '2px 0',
+    position: 'relative',
+    zIndex: 2,
+});
+export const markSlotSide = styleVariants({
+    buy: [markSlot, { left: 2 }],
+    sell: [markSlot, { right: 2 }],
+});
+
+const markBase = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 2,
+    fontFamily: vars.font.mono,
+    fontSize: '0.6rem',
+    fontWeight: 700,
+    lineHeight: 1,
+    padding: '0 3px',
+    minWidth: '1.6rem',
+    justifyContent: 'center',
+    borderRadius: vars.radius.sm,
+    border: '1px solid',
+    whiteSpace: 'nowrap',
+    userSelect: 'none',
+    touchAction: 'none',
+});
+
+export const mark = styleVariants({
+    triggerBuy: [markBase, { color: vars.color.up, borderColor: vars.color.up, borderStyle: 'dashed', background: vars.color.panel, cursor: 'grab' }],
+    triggerSell: [markBase, { color: vars.color.down, borderColor: vars.color.down, borderStyle: 'dashed', background: vars.color.panel, cursor: 'grab' }],
+    stop: [markBase, { color: vars.color.amber, borderColor: vars.color.amber, background: amberDim, cursor: 'help' }],
+    take: [markBase, { color: vars.color.accent, borderColor: vars.color.accent, background: vars.color.accentDim, cursor: 'help' }],
+});
+
+export const markLocked = style({ cursor: 'help' });
+export const markPaused = style({ opacity: 0.45 });
+export const markPending = style({ background: amberDim, borderColor: vars.color.amber, color: vars.color.amber });
+export const markDragging = style({ opacity: 0.35 });
+
+// 拖曳中的目標列
+export const dropRow = styleVariants({
+    ok: { outline: `1px dashed ${vars.color.amber}`, outlineOffset: -1, background: amberDim },
+    bad: { outline: `1px dashed ${vars.color.danger}`, outlineOffset: -1 },
+});
+
+// ---- #216 自動停損停利 ----
+
+export const protectAnchor = style({
+    position: 'relative',
+    flexShrink: 0,
+    borderBottom: `1px solid ${vars.color.border}`,
+});
+
+const protectBase = style({
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    columnGap: 5,
+    rowGap: 0,
+    width: '100%',
+    padding: `2px ${vars.space.sm}`,
+    fontFamily: vars.font.body,
+    fontSize: '0.62rem',
+    lineHeight: 1.35,
+    textAlign: 'left',
+    border: 'none',
+    cursor: 'pointer',
+    minWidth: 0,
+});
+
+export const protectStrip = styleVariants({
+    off: [protectBase, { color: vars.color.mutedForeground, background: 'transparent', ':hover': { color: vars.color.foreground } }],
+    on: [protectBase, { color: vars.color.success, background: 'rgba(34, 197, 94, 0.07)' }],
+    bad: [protectBase, { color: vars.color.danger, background: 'rgba(239, 68, 68, 0.08)' }],
+});
+
+export const protectLabel = style({ fontWeight: 700, whiteSpace: 'nowrap' });
+export const protectValue = style({ fontFamily: vars.font.mono, whiteSpace: 'nowrap' });
+export const protectMeta = style({ color: vars.color.mutedForeground, whiteSpace: 'nowrap' });
+export const protectWarn = style({ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 });
+export const protectChevron = style({ marginLeft: 'auto', flexShrink: 0 });
+
+export const protectMenu = style({
+    position: 'absolute',
+    top: 'calc(100% + 2px)',
+    left: 6,
+    right: 6,
+    zIndex: 41,
+    maxWidth: '20rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    padding: 6,
+    fontFamily: vars.font.body,
+    fontSize: '0.68rem',
+    color: vars.color.foreground,
+    background: vars.color.panelRaised,
+    border: `1px solid ${vars.color.borderBright}`,
+    borderRadius: vars.radius.md,
+    boxShadow: '0 12px 30px rgba(0, 0, 0, 0.35)',
+});
+
+export const protectHead = style({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    fontWeight: 700,
+    padding: '2px 4px 4px',
+    borderBottom: `1px solid ${vars.color.border}`,
+});
+
+export const protectRow = style({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '2px 4px',
+    whiteSpace: 'nowrap',
+});
+
+export const protectSub = style({
+    padding: '0 4px 2px 22px',
+    lineHeight: 1.8,
+    color: vars.color.mutedForeground,
+});
+
+export const protectInput = style({
+    width: '2.6rem',
+    fontFamily: vars.font.mono,
+    fontSize: '0.7rem',
+    textAlign: 'center',
+    color: vars.color.foreground,
+    background: vars.color.inset,
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    padding: '1px 3px',
+    outline: 'none',
+    ':focus': { borderColor: vars.color.accent },
+    ':disabled': { opacity: 0.4 },
+});
+
+export const protectError = style({
+    padding: '2px 4px',
+    fontSize: '0.62rem',
+    color: vars.color.danger,
+});
+
+export const protectActions = style({
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: 4,
+    padding: '4px 4px 0',
+});
+
+// #216 觸價欄：琥珀色虛線框、hover 顯示「觸≥／觸≤」預覽，跟限價的買量／賣量格分開
+export const cols7 = style({ gridTemplateColumns: COLS7 });
+// narrower cells in the 7-column ladder: volumes keep their digits
+globalStyle(`${cols7} [data-side='buy']`, { paddingRight: 4 });
+globalStyle(`${cols7} [data-side='sell']`, { paddingLeft: 4 });
+globalStyle(`${cols7} > span, ${cols7} > button`, { whiteSpace: 'nowrap', overflow: 'hidden' });
+
+export const trigCell = style([
+    cellBase,
+    {
+        justifyContent: 'center',
+        cursor: 'pointer',
+        background: amberDim,
+        borderLeft: `1px dashed ${vars.color.border}`,
+        borderRight: `1px dashed ${vars.color.border}`,
+        selectors: {
+            '&:hover': { outline: `1px dashed ${vars.color.amber}`, outlineOffset: -2 },
+            '&:hover:empty::after': {
+                content: 'attr(data-preview)',
+                fontFamily: vars.font.body,
+                fontSize: '0.58rem',
+                fontWeight: 700,
+                color: vars.color.amber,
+            },
+        },
+    },
+]);
+
+export const headTrigger = style({
+    color: vars.color.amber,
+    fontWeight: 700,
+});
+
+const headPriceBase = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 3,
+    fontFamily: vars.font.display,
+    fontSize: '0.6rem',
+    fontWeight: 600,
+    padding: 0,
+    border: 'none',
+    background: 'transparent',
+    cursor: 'pointer',
+});
+export const headPrice = styleVariants({
+    on: [headPriceBase, { color: vars.color.accent }],
+    off: [headPriceBase, { color: vars.color.mutedForeground, ':hover': { color: vars.color.foreground } }],
+});
+
+const gearBase = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '1.5rem',
+    height: '1.3rem',
+    padding: 0,
+    color: vars.color.mutedForeground,
+    background: 'transparent',
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    cursor: 'pointer',
+    ':hover': { color: vars.color.foreground },
+});
+export const gearBtn = styleVariants({
+    closed: [gearBase],
+    open: [gearBase, { color: vars.color.foreground, borderColor: vars.color.accent }],
+});
+
+// 動作列裡的停損停利狀態小標（開／關＋保護中 N）
+const protectChipBase = style({
+    flex: '0 0 auto',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 3,
+    padding: '3px 6px',
+    fontFamily: vars.font.body,
+    fontSize: '0.62rem',
+    fontWeight: 700,
+    whiteSpace: 'nowrap',
+    borderRadius: vars.radius.sm,
+    border: '1px solid',
+    cursor: 'pointer',
+});
+export const protectChip = styleVariants({
+    off: [protectChipBase, { color: vars.color.mutedForeground, borderColor: vars.color.border, background: 'transparent' }],
+    on: [protectChipBase, { color: vars.color.success, borderColor: vars.color.success, background: 'rgba(34, 197, 94, 0.08)' }],
+    bad: [protectChipBase, { color: vars.color.danger, borderColor: vars.color.danger, background: 'rgba(239, 68, 68, 0.08)' }],
+});
+export const protectChipAnchor = style({ position: 'static', display: 'inline-flex' });
+
+// several marks in one 觸價 cell: no minimum width, tight padding
+export const markCrowded = style({ gap: 1 });
+globalStyle(`${markCrowded} > *`, { minWidth: 0, padding: '0 2px' });

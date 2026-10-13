@@ -342,7 +342,7 @@ export async function apiPost<T>(
             if (message === NATIVE_MAIN_WINDOW_ONLY) {
                 dispatched = false;
                 throw Object.assign(
-                    new Error(`此視窗不能送出交易指令（${message}），未送出；請改在主視窗操作`),
+                    new Error('彈出視窗目前不能下單或刪單，這筆沒有送出；請在主視窗操作'),
                     { mutationNotStarted: true },
                 );
             }

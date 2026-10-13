@@ -47,6 +47,7 @@ vi.mock('./stream', () => ({
     onOrderEvent: (cb: (r: OrderEventReport) => void) => { m.order = cb; return () => undefined; },
     onAnyTick: (cb: typeof m.tick) => { m.tick = cb; return () => undefined; },
     onOddLotTick: (cb: typeof m.tick) => { m.oddTick = cb; return () => undefined; },
+    onAnyBidAsk: (cb: (b: unknown) => void) => { (m as Record<string, unknown>).bidask = cb; return () => undefined; },
     onStreamEvent: (name: string, cb: () => void) => { if (name === 'heartbeat') m.heartbeat = cb; return () => undefined; },
 }));
 vi.mock('./account-store', () => ({ getAccountState: () => ({ accounts: m.accounts, selectedFutures: m.accounts.find(a => a.account_type === 'F') ?? null,
@@ -426,6 +427,24 @@ describe('trigger execution (main window only)', () => {
         expect(planOf(plan.id).exit).toMatchObject({ status: 'filled', filled: 2 });
     });
 
+    it('#226 modify: re-prices the armed pair at once; a crossed new stop waits for the user; refuses inverted prices', async () => {
+        const plan = await armed();
+        const before = triggersOf(plan.id);
+        const stop0 = before.find(t => t.kind === 'stop')!.price;
+        const take0 = before.find(t => t.kind === 'take')!.price;
+        await tick(stop0 + 100);
+        await expect(bracket.modifyBracket(plan.id, take0 + 10, take0)).rejects.toThrow('停損價必須低於停利價');
+        await bracket.modifyBracket(plan.id, stop0 + 50, take0);
+        const after = triggersOf(plan.id);
+        expect(after.map(t => [t.kind, t.price, t.quantity])).toEqual([['stop', stop0 + 50, 2], ['take', take0, 2]]);
+        expect(planOf(plan.id).edits?.at(-1)?.text).toContain(`停損 ${stop0} → ${stop0 + 50}`);
+        // the new stop is above the last price: the first tick decides → 待確認, nothing sent
+        await bracket.modifyBracket(plan.id, stop0 + 200, take0);
+        await tick(stop0 + 100);
+        expect(m.place).not.toHaveBeenCalled();
+        expect(triggersOf(plan.id).find(t => t.kind === 'stop')!.pending?.reason).toBe('resume');
+    });
+
     it('a bracket trigger cannot be removed on its own (only via the plan)', async () => {
         const plan = await armed();
         await engine.removeTrigger(triggersOf(plan.id)[0]!.id);
@@ -539,6 +558,18 @@ describe('trigger execution (main window only)', () => {
         m.cancel.mockResolvedValueOnce(confirmed);
         await expect(bracket.cancelRemainingEntry(planOf(other.id))).resolves.toBe('cancelled');
         expect(planOf(other.id).entryClosed).toBe(true);
+    });
+
+    it('#177: a read-back Cancelled row with fills missing is not final — 刪單待確認, not closed', async () => {
+        const plan = await armed(1);
+        await tick(47000);
+        const partial = cacheTrade('fixture-f1', F1, [{ seq: '000001', quantity: 1 }]);
+        // says 2 filled but lists 1: a fill is missing, the row proves nothing
+        partial.status = { ...partial.status, status: 'Cancelled', cancel_quantity: 1, deal_quantity: 2 };
+        m.cancel.mockResolvedValueOnce(partial);
+        await expect(bracket.cancelRemainingEntry(planOf(plan.id))).resolves.toBe('unconfirmed');
+        expect(planOf(plan.id).entryClosed).toBe(false);
+        expect(planOf(plan.id).entryCancel).toBe('unconfirmed');
     });
 
     it('a reload during an entry cancel becomes 刪單待確認 and the done plan still reconciles', async () => {

@@ -55,6 +55,29 @@ export function prefetchTickBands(
     }
 }
 
+// 已載入的整張級距表（背景執行 #226：程式帶著級距表，由 App 端算觸價後限價）
+export function bandsFor(rule: string): TickBand[] | undefined {
+    return cache.get(rule);
+}
+
+// 需要整張表時：未快取就取一次（失敗回 undefined，不猜）
+export async function ensureTickBands(
+    rule: string,
+    securityType: 'FUT' | 'OPT',
+): Promise<TickBand[] | undefined> {
+    const known = cache.get(rule);
+    if (known) return known;
+    try {
+        const res = await fetchTickBands(rule, securityType);
+        if (!Array.isArray(res?.bands) || res.bands.length === 0) return undefined;
+        cache.set(rule, res.bands);
+        bump();
+        return res.bands;
+    } catch {
+        return undefined;
+    }
+}
+
 // 依 tick 計算 memo 的元件把這個 version 放進 deps — bands 到貨即重算
 export function useTickBandsVersion(): number {
     return useSyncExternalStore(
