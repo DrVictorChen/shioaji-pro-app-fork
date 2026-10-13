@@ -424,11 +424,17 @@ it('a view-only popout says so before any click: no arming, no 全刪, no trigge
         editable: true, background: false, condition: 'above', title: '觸價單' };
     m.marks = new Map([['105.00', { buy: [mark], sell: [] }]]);
     m.protectedQty = 1;
-    const r = await mount({ order: PROTECT });
+    const r = await mount({ order: PROTECT, net: 2 });
     expect(text(byTestId(r, 'flash-view-only')[0]!)).toBe(popout.POPOUT_VIEW_ONLY);
+    expect(button(r, '平倉')!.props.disabled).toBe(true);
+    expect(button(r, '平倉')!.props.title).toBe(popout.POPOUT_VIEW_ONLY);
     const armBtn = button(r, '彈出視窗僅供檢視')!;
     expect(armBtn.props.disabled).toBe(true);
     expect(button(r, '全刪')!.props.disabled).toBe(true);
+    for (const label of ['市價買', '市價賣']) {
+        expect(button(r, label)!.props.disabled).toBe(true);
+        expect(button(r, label)!.props.title).toBe(popout.POPOUT_VIEW_ONLY);
+    }
     await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onClick({ stopPropagation() {} }); });
     expect(m.remove).not.toHaveBeenCalled();
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: popout.POPOUT_VIEW_ONLY }));

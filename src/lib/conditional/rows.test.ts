@@ -175,3 +175,20 @@ describe('projectRows', () => {
     });
 });
 
+
+describe('今日已觸發 counts the background engine too (#216 QA 10/13)', () => {
+    const slot = (role: 'entry' | 'exit') => ({ key: `k-${role}`, role, leg: role === 'entry' ? 'entry' : 'stop', cycle: 0, qty: 1, status: 'filled',
+        orderId: 'o', filled: 1, fills: {}, fillTs: {}, detail: null, acknowledged: false, cancel: null });
+    const lv = (over: Record<string, unknown>) => ({ id: 'L1', side: 'Buy', qty: 1, entry: { type: 'touch', condition: 'above', price: 48100, order: { priceType: 'MKT' } },
+        exit: null, phase: 'done', check: null, recross: [], pending: null, orders: [], position: 0, entryFilled: 0, unprotected: 0, cycles: 0, detail: null, ...over });
+    const prog = (id: string, levels: unknown[], updatedAt = NOW - 60_000) => ({ id, kind: 'bracket', levels, updatedAt, createdAt: updatedAt }) as never;
+
+    it('a flash 觸價 entry that became a bracket, and its stop that went out, count; untriggered and other days do not', () => {
+        const fired = prog('bkt-1', [lv({ orders: [slot('entry')] }), lv({ id: 't0', entry: { type: 'tier', index: 0 }, orders: [slot('exit')] })]);
+        const waiting = prog('bkt-2', [lv({ phase: 'idle' })]);
+        const old = prog('bkt-3', [lv({ orders: [slot('entry')] })], NOW - 3 * 24 * 3600_000);
+        const exitTrigger = prog('trg-1', [lv({ side: 'Sell', entry: { type: 'touch', condition: 'below', price: 48000, order: { priceType: 'MKT', octype: 'Cover' } }, orders: [slot('entry')] })]);
+        expect(projectRows(sources({ bgPrograms: [fired, waiting, old, exitTrigger] })).counts.firedToday).toBe(3);
+        expect(projectRows(sources({})).counts.firedToday).toBe(0);
+    });
+});

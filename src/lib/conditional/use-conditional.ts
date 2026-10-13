@@ -51,9 +51,9 @@ export function useConditionalView(): ConditionalView {
     const items = pending.snapshot?.items;
     const demo = conditionalDemoActive();
     const projection = useMemo(() => projectRows(demo ? conditionalDemoSources(now) : {
-        triggers, brackets, exits, ended, pendingConfirm: items ?? [], bgBrackets, leftovers, feedMissing: feed.feedMissing,
+        triggers, brackets, exits, ended, pendingConfirm: items ?? [], bgBrackets, bgPrograms: programs, leftovers, feedMissing: feed.feedMissing,
         executing: feed.executing, envNow, streamLive: stream === 'live', now,
-    }), [demo, bgBrackets, leftovers, triggers, brackets, exits, ended, items, feed.feedMissing, feed.executing, envNow, stream, now]);
+    }), [demo, bgBrackets, programs, leftovers, triggers, brackets, exits, ended, items, feed.feedMissing, feed.executing, envNow, stream, now]);
     if (demo) return { ...projection, stream: 'live', envNow: DEMO_ENV, executing: true };
     return { ...projection, stream, envNow, executing: feed.executing };
 }

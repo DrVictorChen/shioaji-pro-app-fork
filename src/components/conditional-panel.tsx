@@ -22,6 +22,7 @@ import {
     Play,
     Plus,
     Server,
+    Trash2,
     TriangleAlert,
     X,
 } from 'lucide-react';
@@ -197,6 +198,9 @@ function RunnerTag({ row }: { row: CondRow }) {
 
 type Step = 'cancel' | 'send' | 'handled' | 'retry';
 
+/** 「我已自行處理」: the engine stops tracking it; nothing is sent or cancelled. */
+export const HANDLED_TEXT = '刪除這張條件單，不送任何委託、不動持倉';
+
 function RowActions({ row, expanded, onToggle, compact }: {
     row: CondRow;
     expanded: boolean;
@@ -305,13 +309,18 @@ function RowActions({ row, expanded, onToggle, compact }: {
                     重新啟用…
                 </button>
             )}
-            {a.handled && (
-                <button type='button' className={confirm.step === 'handled' ? styles.button.danger : styles.button.plain} disabled={busy}
-                    title='停止追蹤這張括號單（包含部位與保護），不會送出或刪除任何委託；仍在委託中的單與部位請自行處理'
+            {a.handled && (confirm.step === 'handled' ? (
+                <button type='button' className={styles.button.danger} disabled={busy} title={HANDLED_TEXT} aria-label={HANDLED_TEXT}
                     onClick={handled}>
-                    {confirm.step === 'handled' ? '再按一次：確認我已自行處理' : '我已自行處理'}
+                    再按一次確認刪除
                 </button>
-            )}
+            ) : (
+                // 「我已自行處理」 as an icon (fewer words in the actions column)
+                <button type='button' className={styles.iconButton.danger} disabled={busy} title={HANDLED_TEXT} aria-label={HANDLED_TEXT}
+                    data-testid='cond-handled' onClick={handled}>
+                    <Trash2 size={13} aria-hidden />
+                </button>
+            ))}
             {a.retry && (
                 <button type='button' className={confirm.step === 'retry' ? styles.button.danger : styles.button.primary} disabled={busy}
                     title='重新查詢委託與持倉，刪除此商品未成交委託後再平倉剩餘部位'

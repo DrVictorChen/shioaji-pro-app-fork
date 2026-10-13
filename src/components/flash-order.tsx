@@ -1759,18 +1759,18 @@ export function FlashOrder({
                 <button
                     className={`${styles.mktBtn.buy} ${armedView && !odd && !buyBlock ? '' : styles.disabledCell}`}
                     // 可否融資券的 0 只讓按鈕變淡、仍可點（點下去會重新查）；固定規則才停用
-                    disabled={odd || !!ruleBlockRef.current.Buy}
+                    disabled={odd || !!ruleBlockRef.current.Buy || !!viewOnly}
                     data-blocked={buyBlock ? true : undefined}
-                    title={odd ? ODD_LOT_TEXT.priceType : buyBlock ?? undefined}
+                    title={viewOnly ?? (odd ? ODD_LOT_TEXT.priceType : buyBlock ?? undefined)}
                     onClick={() => void send('Buy', null)}
                 >
                     {mktLabel}{buyCredit}買
                 </button>
                 <button
                     className={`${styles.mktBtn.sell} ${armedView && !odd && !sellBlock ? '' : styles.disabledCell}`}
-                    disabled={odd || !!ruleBlockRef.current.Sell}
+                    disabled={odd || !!ruleBlockRef.current.Sell || !!viewOnly}
                     data-blocked={sellBlock ? true : undefined}
-                    title={odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined}
+                    title={viewOnly ?? (odd ? ODD_LOT_TEXT.priceType : sellBlock ?? undefined)}
                     onClick={() => void send('Sell', null)}
                 >
                     {mktLabel}{sellCredit}賣
@@ -1778,12 +1778,12 @@ export function FlashOrder({
                 {pos && !paused && (
                     <button
                         className={`${styles.flatBtn} ${armedView ? '' : styles.disabledCell}`}
-                        title={pos.safeExit
+                        title={viewOnly ?? (pos.safeExit
                             ? market === 'S'
                                 ? `平倉 ${maskMoney(fmtStockLots(Math.abs(pos.net)), privMoney)}（整張市價、零股以漲跌停價限價）`
                                 : `市價平倉 ${maskMoney(String(Math.abs(pos.net)), privMoney)}`
-                            : '持倉方向或交易條件不明，請使用持倉面板確認'}
-                        disabled={!pos.safeExit || !armedView || !activeAccount}
+                            : '持倉方向或交易條件不明，請使用持倉面板確認')}
+                        disabled={!pos.safeExit || !armedView || !activeAccount || !!viewOnly}
                         onClick={() => void flatten()}
                     >
                         平倉

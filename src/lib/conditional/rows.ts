@@ -18,6 +18,7 @@ import {
 } from '../bracket-core';
 import { BRACKET_NOTICE_TEXT, BRACKET_STATE_TEXT, type BracketView } from '../execution/bracket-contract';
 import type { PendingConfirmItem } from '../execution/pending-confirm-contract';
+import type { OrderProgram } from '../execution/model';
 import { isOddLot } from '../odd-lot';
 import type { FlattenLeftover } from './flatten-leftovers';
 import { quantityText } from './flatten-text';
@@ -121,6 +122,8 @@ export interface Sources {
     pendingConfirm: readonly PendingConfirmItem[];
     /** brackets run by the background engine (bracket-contract views) */
     bgBrackets?: readonly BracketView[];
+    /** the background engine's programs (今日已觸發 of its triggers / brackets) */
+    bgPrograms?: readonly OrderProgram[];
     /** what 全平並取消 left held after its read-back */
     leftovers?: readonly FlattenLeftover[];
     feedMissing: readonly string[];
@@ -628,9 +631,26 @@ export function projectRows(s: Sources): Projection {
     const byTab = { all: rows.length, trigger: 0, oco: 0, bracket: 0, time: 0, grid: 0, flatten: 0, ended: ended.length } as Record<CondTab, number>;
     for (const r of rows) byTab[r.kind] += 1;
     const firedToday = s.ended.filter(e => e.reason === 'fired').length
-        + s.brackets.filter(p => p.exit && p.exit.at && sameTradingDay(p.exit.at, s.now)).length;
+        + s.brackets.filter(p => p.exit && p.exit.at && sameTradingDay(p.exit.at, s.now)).length
+        + backgroundFiredToday(s.bgPrograms ?? [], s.now);
     const attention = rows.filter(r => r.attention).length;
     return { rows, ended, counts: { active: rows.length - attention, attention, firedToday, byTab } };
+}
+
+/** 今日已觸發 in the background engine: every 觸價／時間 entry that sent its
+ * order (a flash 觸價欄 trigger, a trigger that becomes a bracket's entry…)
+ * and every protective exit that went out, of programs touched today. The
+ * engine's programs do not outlive their session. */
+export function backgroundFiredToday(programs: readonly OrderProgram[], now: number): number {
+    let n = 0;
+    for (const p of programs) {
+        if (!sameTradingDay(p.updatedAt, now)) continue;
+        for (const lv of p.levels) {
+            if ((lv.entry.type === 'touch' || lv.entry.type === 'time') && lv.orders.some(o => o.role === 'entry')) n += 1;
+            if (lv.orders.some(o => o.role === 'exit')) n += 1;
+        }
+    }
+    return n;
 }
 
 export function rowsForTab(p: Projection, tab: CondTab): CondRow[] {
