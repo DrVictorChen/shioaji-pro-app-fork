@@ -308,11 +308,13 @@ it('我已自行處理 is offered on every card of a v3 engine and records only 
         mockPendingConfirmItem({ id: 'b', env: SIM, state: 'expired', expiredAt: 1_791_000_000_000,
             owner: { kind: 'bracket', id: 'bkt-1', leg: 'stop' } })]);
     const r = render();
-    expect(buttons(r).filter(b => text(b).includes('我已自行處理'))).toHaveLength(2);
-    await click(buttons(r).filter(b => text(b).includes('我已自行處理'))[1]!);
+    const handled = (x: typeof r) => buttons(x).filter(b => b.props['data-testid'] === 'pending-handled');
+    expect(handled(r)).toHaveLength(2);
+    expect(handled(r)[0]!.props['aria-label']).toBe('刪除這張條件單，不送任何委託、不動持倉');
+    await click(handled(r)[1]!);
     expect(text(r.root)).toContain('停止追蹤這張括號單');
     await click(button(r, '確認我已自行處理'));
     expect(m.resolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }), 'handledByUser');
     show([mockPendingConfirmItem({ id: 'a', env: SIM })], { version: 2 });
-    expect(buttons(render()).some(b => text(b).includes('我已自行處理'))).toBe(false);
+    expect(buttons(render()).some(b => b.props['data-testid'] === 'pending-handled')).toBe(false);
 });

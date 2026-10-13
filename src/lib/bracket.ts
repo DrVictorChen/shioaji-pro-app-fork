@@ -33,6 +33,8 @@ import {
     protectionQuantity,
     tradeMatchesPlan,
     unprotectedQuantity,
+    lateFillQuantity,
+    listingRowFinality,
     workingEntryAfterExit,
     type AccountRef,
     type BracketPlan,
@@ -314,7 +316,13 @@ function syncProtection(before: BracketPlan | undefined, p: BracketPlan) {
             body: `${p.quoteCode} 已成交 ${Math.min(p.filled, p.quantity)}/${p.quantity} → OCO${describeProtection(p)} 保護 ${qty}` });
     }
     const late = unprotectedQuantity(p) - (before ? unprotectedQuantity(before) : 0);
-    if (late > 0) {
+    // per entry order once (the tiers of one entry share its late fills)
+    const afterClose = lateFillQuantity(p) - (before ? lateFillQuantity(before) : 0);
+    if (afterClose > 0) {
+        // #177: the entry was already over — never protected, never resent
+        notify({ kind: 'err', title: '括號單進場單結束後又成交',
+            body: `${p.quoteCode} 進場單已結束後仍收到成交 ${afterClose}（資料異常），這部分不受保護；請到委託與持倉核對後自行處理，系統不會自動補掛停損停利` });
+    } else if (late > 0) {
         notify({ kind: 'err', title: '括號單有未保護部位',
             body: `${p.quoteCode} ${unprotectedQuantity(p)} 可能未受保護（待確認）；請先按「對帳」確認實際成交再決定，勿直接另下出場單；系統不會自動重送` });
     }
@@ -360,7 +368,10 @@ function applyReport(p: BracketPlan, report: OrderEventReport, now: number): Bra
 function onReport(report: OrderEventReport, info: TrackedReportInfo, base: string) {
     const now = Date.now();
     for (const p of plans.slice()) {
-        if (!isLive(p) || !reportEnvMatches(p.env, base)) continue;
+        // a closed entry still hears its own deals: one after the close is an
+        // anomaly the user must see (#177), never protected
+        const closedEntryDeal = p.entryClosed && !p.dismissed && report.kind === 'deal' && report.tradeId === p.orderId;
+        if ((!isLive(p) && !closedEntryDeal) || !reportEnvMatches(p.env, base)) continue;
         let next = p;
         if (info.untrackable && report.market === p.market) {
             next = addIssue(next, 'untrackable', '收到沒有可追蹤事件 ID 的回報，無法確認是否漏回報', now);
@@ -393,6 +404,13 @@ const inflight = new Map<string, Promise<void>>();
 
 function plansFor(account: AccountRef, env: string) {
     return plans.filter(p => p.env === env && accountRefKey(p.account) === accountRefKey(account) && isLive(p));
+}
+
+/** Plans whose entry is over and no longer live: a listing still shows the
+ * fills they missed (an anomaly after the close, #177) — nothing else. */
+function closedPlansFor(account: AccountRef, env: string) {
+    return plans.filter(p => p.env === env && accountRefKey(p.account) === accountRefKey(account)
+        && !isLive(p) && p.entryClosed && !p.dismissed);
 }
 
 function applyHealth(account: AccountRef, env: string, health: TradeCacheHealth, now: number) {
@@ -449,8 +467,12 @@ function lookup(account: AccountRef, env: string, restore = false): Promise<void
                 for (const p of plansFor(account, env)) {
                     if (!continuous) update(p.id, x => addIssue(x, 'no-baseline', '委託快取尚無連續基準（未完成權威查詢或串流曾中斷）；請對帳', now));
                     const trade = trades.find(t => tradeMatchesPlan(t, p));
-                    if (trade) update(p.id, x => applyEntryTrade(x, trade, now));
+                    if (trade) update(p.id, x => applyEntryTrade(x, trade, now, 'cache'));
                     else update(p.id, x => addIssue(x, 'lookup-failed', '伺服器委託快取找不到此進場單（可能伺服器重啟）；請對帳', now));
+                }
+                for (const p of closedPlansFor(account, env)) {
+                    const trade = trades.find(t => tradeMatchesPlan(t, p));
+                    if (trade) update(p.id, x => applyEntryTrade(x, trade, now, 'cache'));
                 }
             });
         } catch (e) {
@@ -490,10 +512,14 @@ async function reconcile(id: string): Promise<{ health: TradeCacheHealth['state'
         const trades = await query.read(plan.account.account_type, plan.account, current => fetchTrades(plan.account.account_type, current, { refresh: true }));
         query.assertCurrent();
         const now = Date.now();
+        for (const p of closedPlansFor(plan.account, env)) {
+            const trade = trades.find(t => tradeMatchesPlan(t, p));
+            if (trade) update(p.id, x => applyEntryTrade(x, trade, now, 'refreshed'));
+        }
         for (const p of plansFor(plan.account, env)) {
             const trade = trades.find(t => tradeMatchesPlan(t, p));
             if (trade) update(p.id, x => {
-                const next = applyEntryTrade(x, trade, now);
+                const next = applyEntryTrade(x, trade, now, 'refreshed');
                 return next.entryClosed && next.entryCancel ? { ...next, entryCancel: undefined } : next;
             });
             const exitTrade = p.exit?.orderId ? trades.find(t => t.order.id === p.exit?.orderId) : undefined;
@@ -509,8 +535,12 @@ async function reconcile(id: string): Promise<{ health: TradeCacheHealth['state'
         }
         if (health.state === 'Healthy') {
             for (const p of plansFor(plan.account, env)) {
-                if (trades.some(t => tradeMatchesPlan(t, p))) {
-                    update(p.id, x => ({ ...x, updatedAt: now, issues: x.issues.filter(i => i.code === 'overfill') }));
+                const row = trades.find(t => tradeMatchesPlan(t, p));
+                // a row whose counts contradict each other proves nothing: its warning stays
+                if (row && listingRowFinality(row) === 'inconsistent') continue;
+                if (row) {
+                    // what the listing cannot undo stays: an overfill, a fill after the close
+                    update(p.id, x => ({ ...x, updatedAt: now, issues: x.issues.filter(i => i.code === 'overfill' || i.code === 'fill-after-close') }));
                 } else {
                     update(p.id, x => addIssue(x, 'lookup-failed', '對帳結果仍找不到此進場單；請至委託分頁確認', now));
                 }
@@ -689,13 +719,25 @@ async function cancelEntry(id: string): Promise<'cancelled' | 'unconfirmed'> {
     update(id, p => ({ ...p, entryCancel: 'sending', updatedAt: Date.now() }));
     try {
         const trade = await cancelOrder(plan.orderId);
-        const confirmed = trade?.order?.id === plan.orderId && trade.status?.status === 'Cancelled';
-        update(id, p => {
-            if (!confirmed) return { ...p, entryCancel: 'unconfirmed', updatedAt: Date.now() };
-            const next = applyEntryTrade({ ...p, entryCancel: undefined }, trade, Date.now());
-            return { ...next, entryClosed: true };
-        });
-        return confirmed ? 'cancelled' : 'unconfirmed';
+        // the read-back-confirmed cancel (#129) closes the entry only when its
+        // row is final by the background engine's rule (#177): every lot
+        // accounted for, every fill listed
+        const final = trade?.order?.id === plan.orderId && trade.status?.status === 'Cancelled'
+            && ['ended', 'filled'].includes(listingRowFinality(trade));
+        if (!final) {
+            update(id, p => ({ ...p, entryCancel: 'unconfirmed', updatedAt: Date.now() }));
+        } else {
+            // every plan of this entry order (the tiers) is over, its fills first
+            const siblings = plans.filter(p => p.orderId === plan.orderId && p.env === plan.env
+                && accountRefKey(p.account) === accountRefKey(plan.account));
+            for (const sib of siblings) {
+                update(sib.id, p => {
+                    const next = applyEntryTrade({ ...p, entryCancel: undefined }, trade, Date.now(), 'cache');
+                    return { ...next, entryClosed: true };
+                });
+            }
+        }
+        return final ? 'cancelled' : 'unconfirmed';
     } catch (error) {
         if ((error as { mutationNotStarted?: boolean })?.mutationNotStarted) {
             update(id, p => ({ ...p, entryCancel: undefined, updatedAt: Date.now() }));

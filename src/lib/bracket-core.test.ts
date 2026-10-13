@@ -8,6 +8,7 @@ import {
     bracketPhase,
     mergeFill,
     matchDeal,
+    needsAttention,
     protectionQuantity,
     unprotectedQuantity,
     type AccountRef,
@@ -108,13 +109,16 @@ describe('bracket entry accumulation on real 1.7.6 simulation wire (de-identifie
         expect(protectionQuantity(p)).toBe(1);
     });
 
-    it('closes the entry on Cancel / failed New but still counts late fills', () => {
+    it('closes the entry on Cancel / failed New; a fill after that is an anomaly, never protected (#177)', () => {
         const cancel = withBody(reports[1]!, { operation: { op_type: 'Cancel', op_code: '00', op_msg: '' }, event_id: 'v1:FO:x:r:77' });
         let p = applyEntryOrderReport(plan(), cancel, 1);
         expect(bracketPhase(p)).toBe('closed');
         p = feed(p, [reports[0]!]);
-        expect(bracketPhase(p)).toBe('protected');
-        expect(protectionQuantity(p)).toBe(1);
+        expect(p.filled).toBe(1); // counted (and de-duplicated) …
+        expect(protectionQuantity(p)).toBe(0); // … but never protected
+        expect(unprotectedQuantity(p)).toBe(1); // shown 未受保護
+        expect(p.issues.map(i => i.code)).toContain('fill-after-close');
+        expect(needsAttention(p)).toBe(true);
     });
 
     it('merges fills from a cache-only Trade lookup with SSE fills without double counting', () => {
@@ -123,9 +127,11 @@ describe('bracket entry accumulation on real 1.7.6 simulation wire (de-identifie
             order: { id: 'fixture-f1', seqno: 'fixture-f1', ordno: 'o', action: 'Buy', price: 0, quantity: 2 },
             status: { id: 'fixture-f1', status: 'Filled', status_code: '00', order_quantity: 2, deal_quantity: 2, cancel_quantity: 0,
                 modified_price: 0, msg: '', deals: [{ seq: '000001', price: 1, quantity: 1, ts: 1 }, { seq: '000002', price: 1, quantity: 1, ts: 2 }] } } as unknown as Trade;
-        const merged = applyEntryTrade(sse, trade, 2);
+        const merged = applyEntryTrade(sse, trade, 2, 'cache');
         expect(merged.filled).toBe(2);
-        expect(merged.entryClosed).toBe(true);
+        // #177: a cache-only read never closes the entry; a refreshed listing does
+        expect(merged.entryClosed).toBe(false);
+        expect(applyEntryTrade(merged, trade, 3, 'refreshed').entryClosed).toBe(true);
     });
 
     it('flags an overfill and caps protection at the entry quantity', () => {
@@ -181,7 +187,7 @@ describe('one identity per fill', () => {
         const noSeq = withBody(reports[0]!, { exchange_seq: '' });
         let p = feed(plan(), [noSeq]);
         expect(p.filled).toBe(1);
-        p = applyEntryTrade(p, cacheRow([{ seq: '000001', quantity: 1, ts: noSeq.ts! }]), 2);
+        p = applyEntryTrade(p, cacheRow([{ seq: '000001', quantity: 1, ts: noSeq.ts! }]), 2, 'cache');
         expect(p.filled).toBe(1);
         expect(Object.keys(p.fills)).toEqual(['fixture-f1:000001']);
     });
@@ -189,7 +195,7 @@ describe('one identity per fill', () => {
     it('keeps two distinct same-size fills apart when times differ, and marks the plan unconfirmed', () => {
         const noSeq = withBody(reports[0]!, { exchange_seq: '' });
         let p = feed(plan(), [noSeq]);
-        p = applyEntryTrade(p, cacheRow([{ seq: '000002', quantity: 1, ts: noSeq.ts! + 2 }]), 2);
+        p = applyEntryTrade(p, cacheRow([{ seq: '000002', quantity: 1, ts: noSeq.ts! + 2 }]), 2, 'cache');
         expect(p.filled).toBe(2);
         expect(p.issues.map(i => i.code)).toContain('report-mismatch');
     });

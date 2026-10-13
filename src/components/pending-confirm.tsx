@@ -7,7 +7,7 @@
 // whose trading session already changed are shown as 已失效 only.
 // The main window shows the cards; popouts only a badge.
 
-import { CalendarX2, ChevronDown, ChevronUp, CircleHelp, ListChecks, RefreshCw, RotateCcw, TriangleAlert, UserCheck } from 'lucide-react';
+import { CalendarX2, ChevronDown, ChevronUp, CircleHelp, ListChecks, RefreshCw, RotateCcw, Trash2, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { requestOpenOrdersTab } from '../lib/dock-events';
 import { refreshPendingConfirm, resolvePendingConfirm, usePendingConfirm } from '../lib/execution/pending-confirm';
@@ -106,6 +106,8 @@ function useRun() {
 
 type Choice = Extract<PendingResolution, 'confirmedSent' | 'confirmedNotSent'>;
 
+const HANDLED_TEXT = '刪除這張條件單，不送任何委託、不動持倉';
+
 /** 「我已自行處理」 (v3): always available; asks once before it records. */
 function HandledButton({ item, envNow }: { item: PendingConfirmItem; envNow: string | null }) {
     const [asking, setAsking] = useState(false);
@@ -113,9 +115,10 @@ function HandledButton({ item, envNow }: { item: PendingConfirmItem; envNow: str
     void envNow;
     if (!asking) {
         return (
-            <button type='button' className={styles.button} disabled={busy}
-                title='你已自行到委託查詢處理這筆（不需連線，也不會送出或刪除委託）' onClick={() => setAsking(true)}>
-                <UserCheck size={12} aria-hidden />我已自行處理
+            // 「我已自行處理」 as an icon; the next step still explains and asks once
+            <button type='button' className={styles.iconButton} disabled={busy} data-testid='pending-handled'
+                title={HANDLED_TEXT} aria-label={HANDLED_TEXT} onClick={() => setAsking(true)}>
+                <Trash2 size={13} aria-hidden />
             </button>
         );
     }

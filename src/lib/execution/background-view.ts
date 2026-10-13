@@ -44,42 +44,61 @@ export function backgroundEligible(t: NewTrigger, contract: ContractBase | undef
     if (t.time && (t.group || (t.time.kind === 'send' && t.send?.type === 'LMT'))) return false;
     // 二擇一 legs go together (backgroundGroupEligible)
     if (!inGroup && (t.group || t.ocoMode)) return false;
-    if (t.bracketId || (t.orderLot && t.orderLot !== 'Common')) return false;
-    if (t.account?.account_type !== 'F' || !t.env || !t.orderCode) return false;
+    // #226 step 5: stocks too — 整股 and 盤中零股 (shares)
+    if (t.bracketId || (t.orderLot && t.orderLot !== 'Common' && t.orderLot !== 'IntradayOdd')) return false;
+    if (!t.env || !t.orderCode) return false;
+    if (t.account?.account_type === 'S') return contract?.security_type === 'STK';
+    if (t.account?.account_type !== 'F' || (t.orderLot && t.orderLot !== 'Common')) return false;
     return contract?.security_type === 'FUT' || contract?.security_type === 'OPT';
 }
+
+/** The stock tick table (TWSE / TPEx; ETFs, codes 00…, their own). */
+export function stockTickTable(code: string): TickBand[] {
+    return code.startsWith('00')
+        ? [{ min: 0, max: 50, tick: 0.01 }, { min: 50, max: null, tick: 0.05 }]
+        : [{ min: 0, max: 10, tick: 0.01 }, { min: 10, max: 50, tick: 0.05 }, { min: 50, max: 100, tick: 0.1 },
+            { min: 100, max: 500, tick: 0.5 }, { min: 500, max: 1000, tick: 1 }, { min: 1000, max: null, tick: 5 }];
+}
+
+const isMarket = (c: ContractBase) => c.security_type === 'FUT' || c.security_type === 'OPT' || c.security_type === 'STK';
 
 /** The contract's tick-size table for the engine: the server's bands of
  * its tick rule (`bands`), else its one fixed tick; null when neither is
  * known (nothing can be priced in ticks then). */
 export function tickTableOf(contract: ContractBase & { tick_rule?: string; tick?: number },
     bands: readonly ContractTickBand[] | undefined): TickBand[] | null {
+    if (contract.security_type === 'STK') return stockTickTable(contract.code);
     if (contract.tick_rule) return bands && bands.length ? bands.map(b => ({ min: b.min, max: b.max, tick: b.tick })) : null;
     const tick = Number(contract.tick);
     return Number.isFinite(tick) && tick > 0 ? [{ min: 0, max: null, tick }] : null;
 }
 
-/** The order a firing trigger sends, by its send style (#226). */
-function sendOrder(base: OrderSpec, send: TriggerSend | undefined): OrderSpec {
-    const octype = base.octype ? { octype: base.octype } : {};
-    if (!send || send.type === 'MKT') return { priceType: 'MKT', timeInForce: 'IOC', ...octype };
+/** The order a firing trigger sends, by its send style (#226); stocks in
+ * cash, 整股 or 盤中零股 (零股: always ROD — at market it goes out as a
+ * limit at the price limit). */
+function sendOrder(base: OrderSpec, send: TriggerSend | undefined, stockLot?: 'Common' | 'IntradayOdd'): OrderSpec {
+    const octype = base.octype && !stockLot ? { octype: base.octype } : {};
+    const stock = stockLot ? { stockCond: 'Cash' as const, stockLot } : {};
+    const odd = stockLot === 'IntradayOdd';
+    if (!send || send.type === 'MKT') return { priceType: 'MKT', timeInForce: odd ? 'ROD' : 'IOC', ...octype, ...stock };
     if (send.type === 'MKP') return { priceType: 'MKP', timeInForce: 'IOC', ...octype };
-    return { priceType: 'LMT', timeInForce: 'ROD', ...octype };
+    return { priceType: 'LMT', timeInForce: 'ROD', ...octype, ...stock };
 }
 
 /** #226 時間條件: 指定時間送單 (an opening order: risk checks) or 收盤前平倉
  * (全平並取消 of the product / account, run by the engine at the time). */
 function programForTimeTrigger(t: TriggerOrder, contract: ContractBase): OrderProgram | null {
-    if (!t.time || (contract.security_type !== 'FUT' && contract.security_type !== 'OPT')) return null;
+    if (!t.time || !isMarket(contract)) return null;
     const flatten = t.time.kind === 'flatten';
     // a flatten closes whatever is held: its own quantity is unused
     const p = programsFromTriggers([{ ...t, quantity: flatten ? 1 : t.quantity }])[0];
     const lv = p?.levels[0];
     if (!p || !lv || p.levels.length !== 1) return null;
-    const order: OrderSpec = t.send?.type === 'MKP' ? { priceType: 'MKP', timeInForce: 'IOC' } : { priceType: 'MKT', timeInForce: 'IOC' };
+    const stockLot = contract.security_type === 'STK' ? (t.orderLot === 'IntradayOdd' ? 'IntradayOdd' as const : 'Common' as const) : undefined;
+    const order: OrderSpec = flatten ? { priceType: 'MKT', timeInForce: 'IOC' } : sendOrder({ priceType: 'MKT' }, t.send, stockLot);
     const entry = { type: 'time' as const, at: t.time.at, order, ...(t.time.kind === 'flatten' ? { flatten: t.time.scope } : {}) };
     const at = t.createdAt ?? Date.now();
-    return { ...p, binding: { ...p.binding, contract: { ...p.binding.contract, securityType: contract.security_type } },
+    return { ...p, binding: { ...p.binding, contract: { ...p.binding.contract, securityType: contract.security_type as "STK" | "FUT" | "OPT" } },
         levels: [{ ...lv, entry, recross: [] }], ...(t.role === 'entry' && !flatten ? { opens: true } : {}), createdAt: at, updatedAt: at };
 }
 
@@ -120,22 +139,24 @@ export function programForNewGroup(legs: readonly TriggerOrder[], contract: Cont
 export function programForNewTrigger(t: TriggerOrder, contract: ContractBase, tickTable: TickBand[] | null = null): OrderProgram | null {
     if (t.time) return programForTimeTrigger(t, contract);
     const p = programsFromTriggers([t])[0];
-    if (!p || (contract.security_type !== 'FUT' && contract.security_type !== 'OPT')) return null;
+    if (!p || !isMarket(contract)) return null;
     const lv = p.levels[0];
     if (!lv || lv.entry.type !== 'touch' || p.levels.length !== 1) return null;
+    const stockLot = contract.security_type === 'STK' ? (t.orderLot === 'IntradayOdd' ? 'IntradayOdd' as const : 'Common' as const) : undefined;
     const ticks = t.send?.type === 'LMT' ? t.send.ticks : null;
     if (ticks !== null && ticks !== 0 && !tickTable) return null;
     const entry = {
         ...lv.entry,
-        order: sendOrder(lv.entry.order, t.send),
+        order: sendOrder(lv.entry.order, t.send, stockLot),
         ...(t.cross ? { cross: true } : {}),
-        // 對手價: a sell watches the best bid, a buy the best ask
-        ...(t.source === 'opposite' ? { feed: t.action === 'Sell' ? 'bid' as const : 'ask' as const } : {}),
+        // 對手價: a sell watches the best bid, a buy the best ask; 零股: its trades
+        ...(stockLot === 'IntradayOdd' ? { feed: 'odd' as const }
+            : t.source === 'opposite' ? { feed: t.action === 'Sell' ? 'bid' as const : 'ask' as const } : {}),
         ...(ticks !== null ? { limitTicks: ticks } : {}),
         ...(t.validity ? { validity: { type: t.validity.type, until: t.validity.until } } : {}),
     };
     const at = t.createdAt ?? Date.now();
-    return { ...p, binding: { ...p.binding, contract: { ...p.binding.contract, securityType: contract.security_type } },
+    return { ...p, binding: { ...p.binding, contract: { ...p.binding.contract, securityType: contract.security_type as "STK" | "FUT" | "OPT" } },
         levels: [{ ...lv, entry, recross: [] }],
         ...(t.role === 'entry' ? { opens: true } : {}),
         ...(tickTable ? { tickTable } : {}),
@@ -181,7 +202,8 @@ function row(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
         ...(p.status === 'paused' ? { paused: true } : {}),
         ...(p.opens ? { role: 'entry' as const } : {}),
         ...(e.cross ? { cross: true } : {}),
-        ...(e.feed ? { source: 'opposite' as const } : {}),
+        ...(e.feed === 'bid' || e.feed === 'ask' ? { source: 'opposite' as const } : {}),
+        ...(e.order.stockLot === 'IntradayOdd' ? { orderLot: 'IntradayOdd' as const } : {}),
         ...(send ? { send } : {}),
         ...(e.validity ? { validity: { type: e.validity.type, until: e.validity.until } } : {}),
         // 二擇一: one group per program; a waiting side names the row it waits for
@@ -210,6 +232,7 @@ function timeRow(p: OrderProgram, lv: Level): BackgroundTriggerOrder | null {
         createdAt: p.createdAt,
         time: e.flatten ? { kind: 'flatten', at: e.at, scope: e.flatten } : { kind: 'send', at: e.at },
         ...(e.order.priceType === 'MKP' ? { send: { type: 'MKP' as const } } : {}),
+        ...(e.order.stockLot === 'IntradayOdd' ? { orderLot: 'IntradayOdd' as const } : {}),
         ...(p.opens ? { role: 'entry' as const } : {}),
         ...(p.status === 'paused' ? { paused: true } : {}),
         background: { programId: p.id, levelId: lv.id },

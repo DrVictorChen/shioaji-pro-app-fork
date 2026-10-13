@@ -71,7 +71,8 @@ export const PRICE_SCALE = 10_000;
 /** How a level opens its position. */
 /** #226 the price a touch condition watches: absent = last trade; a sell
  * watches the best bid, a buy the best ask (對手價). */
-export type Feed = 'bid' | 'ask';
+/** `odd`: 盤中零股 trades (a 零股 condition, stocks). */
+export type Feed = 'bid' | 'ask' | 'odd';
 
 /** #226 有效期 (`until` epoch ms; 本盤 also ends with its trading session). */
 export interface Validity { type: 'session' | 'today' | 'date'; until: number }
