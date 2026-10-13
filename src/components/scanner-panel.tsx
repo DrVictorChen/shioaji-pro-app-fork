@@ -266,7 +266,7 @@ export function ScannerPanel({
                                     {it.name}
                                 </span>
                             </span>
-                            {catByCode.get(it.code) ? (
+                            {catByCode.get(it.code) && (
                                 <button
                                     className={styles.sectorTag}
                                     title='跳到此類股熱力圖'
@@ -277,8 +277,6 @@ export function ScannerPanel({
                                 >
                                     {sectorLabel(catByCode.get(it.code)!)}
                                 </button>
-                            ) : (
-                                <span />
                             )}
                             <span className={styles.valueBlock}>
                                 <span

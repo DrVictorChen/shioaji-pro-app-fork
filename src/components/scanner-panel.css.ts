@@ -49,8 +49,8 @@ export const body = style({
 // volume stacked on the right — no dead space between code and name
 export const row = style({
     display: 'grid',
-    // 4em：代號欄保底寬度（6 碼代號），不再被壓成 0
-    gridTemplateColumns: '1.2rem minmax(4em, 1fr) auto auto',
+    // 代號欄保底 6 字寬（6 碼代號，ch 依實際等寬字型），不再被壓成 0
+    gridTemplateColumns: '1.2rem minmax(6ch, 1fr) auto auto',
     alignItems: 'center',
     columnGap: vars.space.xs,
     padding: `3px ${vars.space.sm}`,
@@ -104,8 +104,9 @@ export const sectorTag = style({
     borderRadius: vars.radius.sm,
     padding: '1px 5px',
     whiteSpace: 'nowrap',
-    // 空間不足時 chip 先以省略號縮短，讓出代號與價格
+    // 空間不足時 chip 先以省略號縮短，讓出代號與價格；保底留一字＋「…」
     overflow: 'hidden',
+    minWidth: '3em',
     textOverflow: 'ellipsis',
     cursor: 'pointer',
     ':hover': {
