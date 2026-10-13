@@ -196,6 +196,8 @@ export async function placeQuickOrder(
         afterConfirm?: () => Promise<void>;
         // 期貨市價單的價別：市價（缺省）或範圍市價 MKP；一律 IOC
         futuresPriceType?: 'MKT' | 'MKP';
+        // 確認視窗多顯示一句（例如閃電下單附自動停損停利，#216）
+        confirmNote?: string;
     },
 ): Promise<Trade> {
     const startedBase = getApiBase();
@@ -255,7 +257,7 @@ export async function placeQuickOrder(
             price,
             quantity,
             opts?.orderLot,
-            quickOrderNote({
+            [quickOrderNote({
                 market: price === null,
                 futures: isFuturesContract(contract),
                 priceType: futuresPriceType,
@@ -263,7 +265,7 @@ export async function placeQuickOrder(
                 octype: opts?.ocType,
                 credit: credit ? CREDIT_NOTE[credit] : undefined,
                 oddLotLabel: odd ? lotLabel(opts?.orderLot) : undefined,
-            }),
+            }), opts?.confirmNote].filter(Boolean).join('・') || undefined,
             capturedAccount,
             opts?.confirmLivePriceCode,
             credit,

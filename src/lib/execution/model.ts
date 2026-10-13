@@ -71,7 +71,8 @@ export const PRICE_SCALE = 10_000;
 /** How a level opens its position. */
 /** #226 the price a touch condition watches: absent = last trade; a sell
  * watches the best bid, a buy the best ask (對手價). */
-export type Feed = 'bid' | 'ask';
+/** `odd`: 盤中零股 trades (a 零股 condition, stocks). */
+export type Feed = 'bid' | 'ask' | 'odd';
 
 /** #226 有效期 (`until` epoch ms; 本盤 also ends with its trading session). */
 export interface Validity { type: 'session' | 'today' | 'date'; until: number }
@@ -97,6 +98,10 @@ export type EntryRule =
      * back on in a new trading session, background engine only): no entry
      * order; `session` is the session it protects in. */
     | { type: 'position'; session?: string | null }
+    /** #226 時間條件 (background engine): `order` goes out at `at`, or with
+     * `flatten` 全平並取消 of this account / product starts then; missed by
+     * more than a minute it lapses (never late). */
+    | { type: 'time'; at: number; order: OrderSpec; flatten?: 'code' | 'account' }
     /** #226 分批停利 (background engine): one tier protecting level `of`'s
      * entry lots from `offset` on (fill order), up to its `qty`. */
     | { type: 'tier'; of: string; offset: number; index: number; session?: string | null };
@@ -311,7 +316,7 @@ export interface StrategyHook {
     hysteresisBars: number | null;
 }
 
-export type ProgramKind = 'trigger' | 'bracket' | 'grid' | 'custom';
+export type ProgramKind = 'trigger' | 'bracket' | 'grid' | 'custom' | 'flatten';
 export type ProgramStatus = 'running' | 'paused' | 'stopping' | 'stopped';
 /** Why a running program is not sending right now (not a user state). */
 export type ProgramHold = 'envMismatch' | 'disconnected' | 'unknownEnv' | null;

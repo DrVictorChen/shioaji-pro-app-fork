@@ -11,12 +11,14 @@ import {
     isLive,
     protectionQuantity,
     unprotectedQuantity,
+    lateFillQuantity,
     workingEntryAfterExit,
     type AccountRef,
     type BracketPlan,
 } from '../bracket-core';
 import { BRACKET_NOTICE_TEXT, BRACKET_STATE_TEXT, type BracketView } from '../execution/bracket-contract';
 import type { PendingConfirmItem } from '../execution/pending-confirm-contract';
+import type { OrderProgram } from '../execution/model';
 import { isOddLot } from '../odd-lot';
 import type { FlattenLeftover } from './flatten-leftovers';
 import { quantityText } from './flatten-text';
@@ -120,6 +122,8 @@ export interface Sources {
     pendingConfirm: readonly PendingConfirmItem[];
     /** brackets run by the background engine (bracket-contract views) */
     bgBrackets?: readonly BracketView[];
+    /** the background engine's programs (今日已觸發 of its triggers / brackets) */
+    bgPrograms?: readonly OrderProgram[];
     /** what 全平並取消 left held after its read-back */
     leftovers?: readonly FlattenLeftover[];
     feedMissing: readonly string[];
@@ -300,6 +304,10 @@ function bracketStatus(p: BracketPlan, legs: TriggerOrder[], s: Sources): { text
     const unit = unitOf(p.account, p.orderLot);
     const pendingLeg = legs.find(l => l.pending);
     if (pendingLeg) return { ...triggerStatus(pendingLeg, s), attention: true };
+    // before anything about building protection: a fill after the close never gets any (#177)
+    if (lateFillQuantity(p) > 0) {
+        return { text: `未受保護 ${unprotected} ${unit}：進場單結束後才成交，不會自動補保護，請核對持倉`, tone: 'err', attention: true };
+    }
     if (p.rules && p.base === undefined && !p.exit && Math.min(p.filled, p.tier?.entryQuantity ?? p.quantity) > (p.tier?.offset ?? 0)) {
         return { text: `已成交，停損停利尚未建立${p.issues.length ? `（${p.issues[p.issues.length - 1]!.detail}）` : ''}`, tone: 'err', attention: true };
     }
@@ -623,9 +631,69 @@ export function projectRows(s: Sources): Projection {
     const byTab = { all: rows.length, trigger: 0, oco: 0, bracket: 0, time: 0, grid: 0, flatten: 0, ended: ended.length } as Record<CondTab, number>;
     for (const r of rows) byTab[r.kind] += 1;
     const firedToday = s.ended.filter(e => e.reason === 'fired').length
-        + s.brackets.filter(p => p.exit && p.exit.at && sameTradingDay(p.exit.at, s.now)).length;
+        + s.brackets.filter(p => p.exit && p.exit.at && sameTradingDay(p.exit.at, s.now)).length
+        + backgroundFiredToday(s.bgPrograms ?? [], s.now);
     const attention = rows.filter(r => r.attention).length;
     return { rows, ended, counts: { active: rows.length - attention, attention, firedToday, byTab } };
+}
+
+/** 今日已觸發 in the background engine: every 觸價／時間 entry that sent its
+ * order (a flash 觸價欄 trigger, a trigger that becomes a bracket's entry…)
+ * and every protective exit that went out, of programs touched today. The
+ * engine's programs do not outlive their session. */
+export function backgroundFiredToday(programs: readonly OrderProgram[], now: number): number {
+    let n = 0;
+    for (const p of programs) {
+        if (!sameTradingDay(p.updatedAt, now)) continue;
+        for (const lv of p.levels) {
+            if ((lv.entry.type === 'touch' || lv.entry.type === 'time') && lv.orders.some(o => o.role === 'entry')) n += 1;
+            if (lv.orders.some(o => o.role === 'exit')) n += 1;
+        }
+    }
+    return n;
+}
+
+/** The status as a short label for the table (≤ 6 characters, plus a fill
+ * count); the full text goes to the tooltip and the expanded row. */
+const SHORT_RULES: [RegExp, string][] = [
+    [/異常成交|進場單結束後才成交/, '異常成交'],
+    [/盤別已更換|盤別更換|保護未延續/, '盤別已更換'],
+    [/結果不明|結果未知|未能確認/, '結果不明'],
+    [/已穿價|穿價，未自動送出/, '已穿價'],
+    [/未受保護/, '未受保護'],
+    [/尚未建立/, '保護未建立'],
+    [/保護未確認/, '保護未確認'],
+    [/仍有 .*未平倉|未平倉/, '未平倉'],
+    [/已停用/, '已停用'],
+    [/連線中斷/, '連線中斷'],
+    [/主視窗未執行/, '主視窗未執行'],
+    [/行情未訂閱/, '行情未訂閱'],
+    [/另一邊已觸發/, '等另一邊成交'],
+    [/已暫停/, '已暫停'],
+    [/出場未完全成交/, '出場未完成'],
+    [/出場未送出/, '出場未送出'],
+    [/出場送單中|出場委託已送出|出場中|等待成交/, '出場中'],
+    [/已出場|已成交|filled/, '已出場'],
+    [/保護中/, '保護中'],
+    [/等待進場/, '等待進場'],
+    [/等待時間/, '等待時間'],
+    [/盯價中/, '盯價中'],
+    [/已觸發/, '已觸發'],
+    [/已取消|已刪除/, '已取消'],
+    [/有效期已過|到期/, '已到期'],
+    [/已結束|進場未成交/, '已結束'],
+    [/待確認|請確認/, '待確認'],
+    [/已改由你自行處理/, '已自行處理'],
+];
+export function shortStatus(text: string): string {
+    const fill = /(\d+\/\d+)/.exec(text)?.[1];
+    for (const [re, label] of SHORT_RULES) {
+        if (!re.test(text)) continue;
+        // a fill count only while it stays short (保護中 1/1, not 保護中 500/500)
+        return (label === '保護中' || label === '出場中') && fill && fill.length <= 5 ? `${label} ${fill}` : label;
+    }
+    const head = text.split(/[，,。：:（(·]/)[0]!.trim();
+    return head.length > 6 ? `${head.slice(0, 6)}…` : head;
 }
 
 export function rowsForTab(p: Projection, tab: CondTab): CondRow[] {

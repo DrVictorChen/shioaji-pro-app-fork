@@ -98,6 +98,7 @@ function render() {
 const text = (n: ReactTestInstance): string => n.children.map(c => typeof c === 'string' ? c : text(c)).join('');
 const byLabel = (r: ReactTestRenderer, label: string) => r.root.findAll(n => n.type === 'button' && n.props['aria-label'] === label);
 const button = (r: ReactTestRenderer, label: string) => r.root.findAllByType('button').find(b => text(b).includes(label))!;
+const del = (r: ReactTestRenderer) => r.root.findAll(n => n.type === 'button' && n.props['data-testid'] === 'cond-delete');
 const click = async (b: ReactTestInstance, quick = false) => {
     if (!quick) vi.advanceTimersByTime(500);
     await act(async () => { b.props.onClick(); });
@@ -126,7 +127,10 @@ describe('ConditionalPanel', () => {
         const all = text(r.root);
         const sections = r.root.findAll(n => n.type === 'td' && n.props.colSpan === 9).map(text);
         expect(sections).toEqual(['需要你處理', '執行中']);
-        expect(all).toContain('恢復時已穿價，未自動送出');
+        // short label in the table; the sentence on hover / in the details
+        const status = r.root.findAll(n => n.props['data-testid'] === 'cond-status' && n.type === 'span');
+        expect(status.map(text)).toEqual(['已穿價', '盯價中']);
+        expect(status[0]!.props.title).toBe('恢復時已穿價，未自動送出');
         expect(all).toContain('[期] •••••67');
         expect(all).not.toContain('9804567');
         expect(all).toContain('待確認 1');
@@ -139,11 +143,13 @@ describe('ConditionalPanel', () => {
         let r = render();
         await click(byLabel(r, '暫停')[0]!);
         expect(m.pause).toHaveBeenCalledWith('tg-1', true);
-        await click(byLabel(r, '取消')[0]!);
+        expect(del(r)[0]!.props.title).toBe('刪除這張條件單，不送任何委託、不動持倉');
+        await click(del(r)[0]!);
         expect(m.remove).not.toHaveBeenCalled();
-        await click(button(r, '再按一次：取消'), true); // a double-click does not pass
+        expect(text(r.root)).toContain('再按一次刪除');
+        await click(del(r)[0]!, true); // a double-click does not pass
         expect(m.remove).not.toHaveBeenCalled();
-        await click(button(r, '再按一次：取消'));
+        await click(del(r)[0]!);
         expect(m.remove).toHaveBeenCalledWith('tg-1');
         m.sources = sources({ triggers: [trig({ paused: true })] });
         act(() => r.unmount());
@@ -158,8 +164,10 @@ describe('ConditionalPanel', () => {
         const r = render();
         await click(button(r, '現在送出'));
         expect(m.resolve).not.toHaveBeenCalled();
-        await click(button(r, '再按一次確認送出'));
+        await click(button(r, '確認送出'));
         expect(m.resolve).toHaveBeenCalledWith('tg-1', 'send', { allowUnpast: false });
+        // 保留盯價: the secondary action, in the primary slot's menu
+        await click(byLabel(r, '其他動作')[0]!);
         await click(button(r, '保留盯價'));
         expect(m.resolve).toHaveBeenCalledWith('tg-1', 'keep');
     });
@@ -181,7 +189,7 @@ describe('ConditionalPanel', () => {
         const r = render();
         await click(button(r, '已結束（今日）'));
         expect(text(r.root)).toContain('已取消');
-        expect(byLabel(r, '取消')).toHaveLength(0);
+        expect(del(r)).toHaveLength(0);
     });
 
     it('a 待確認 leg of a 二擇一 is decided from its row', async () => {
@@ -189,7 +197,7 @@ describe('ConditionalPanel', () => {
             trig({ id: 'd', group: 'g', pending: { price: 47800, at: 1, reason: 'resume' } })] });
         const r = render();
         await click(button(r, '現在送出'));
-        await click(button(r, '再按一次確認送出'));
+        await click(button(r, '確認送出'));
         expect(m.resolve).toHaveBeenCalledWith('d', 'send', { allowUnpast: false });
     });
 
@@ -215,9 +223,9 @@ describe('ConditionalPanel', () => {
         const acct = { account_type: 'S' as const, broker_id: 'b', account_id: 's1' };
         m.sources = sources({ leftovers: [{ id: 'l1', at: 1, env: ENV, order: { account: acct, code: '2330', action: 'Sell', quantity: 7000, market: 'stock' } }] });
         const r = render();
-        await click(button(r, '再平倉剩餘部位'));
+        await click(button(r, '再平倉'));
         expect(m.flatten).not.toHaveBeenCalled();
-        await click(button(r, '再按一次：確認再平倉'));
+        await click(button(r, '確認再平倉'));
         expect(m.flatten).toHaveBeenCalledWith({ type: 'code', codes: ['2330'], account: acct });
     });
 
@@ -233,8 +241,8 @@ describe('ConditionalPanel', () => {
         const r = render();
         await click(byLabel(r, '暫停')[0]!);
         expect(m.group).toHaveBeenCalledWith(['u', 'd'], 'pause');
-        await click(byLabel(r, '取消')[0]!);
-        await click(button(r, '再按一次：取消'));
+        await click(del(r)[0]!);
+        await click(del(r)[0]!);
         expect(m.group).toHaveBeenCalledWith(['u', 'd'], 'remove');
         expect(m.remove).not.toHaveBeenCalled();
     });
@@ -245,7 +253,7 @@ describe('ConditionalPanel', () => {
         const cells = r.root.findAll(n => n.type === 'td' && n.parent?.type === 'tr').filter(n => n.parent!.findAll(c => c.type === 'td').length === 9);
         const last = cells.at(-1)!;
         expect(last.props.className).toContain(styles.opsCell);
-        expect(last.findAll(n => n.type === 'button' && n.props['aria-label'] === '取消')).toHaveLength(1);
+        expect(last.findAll(n => n.type === 'button' && n.props['data-testid'] === 'cond-delete')).toHaveLength(1);
         const ths = r.root.findAll(n => n.type === 'th');
         expect(ths.at(-1)!.props.className).toContain(styles.opsCell);
         const cls = (label: string) => String(ths.find(t => text(t).includes(label))!.props.className);
@@ -253,7 +261,10 @@ describe('ConditionalPanel', () => {
         expect(cls('有效期')).toContain(styles.colValidity);
         expect(cls('現價')).toContain(styles.colPrice);
         // the identifying columns never collapse
-        for (const label of ['商品', '類型', '方向', '條件', '狀態']) expect(ths.find(t => text(t).includes(label))!.props.className ?? '').toBe('');
+        for (const label of ['商品', '類型', '方向', '條件', '狀態']) {
+            const c = String(ths.find(t => text(t).includes(label))!.props.className ?? '');
+            for (const hide of [styles.colAccount, styles.colValidity, styles.colPrice]) expect(c).not.toContain(hide);
+        }
     });
 
     it('背景持續執行 on: each row says where it runs; off: no label', () => {

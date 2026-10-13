@@ -540,7 +540,8 @@ async function reconcileOcoExit(id: string, attempt = 1) {
         if (trade) {
             // complete evidence only: an ended order whose fill details cover what it says filled
             const listed = (trade.status.deals ?? []).reduce((n, d) => n + (Number.isSafeInteger(d.quantity) ? d.quantity : 0), 0);
-            const ended = ['Cancelled', 'Failed', 'Inactive', 'Filled', 'PartFilled'].includes(trade.status.status);
+            // Inactive is the SDK's placeholder before the broker answered: not over (#177)
+            const ended = ['Cancelled', 'Failed', 'Filled', 'PartFilled'].includes(trade.status.status);
             if (!ended || listed < trade.status.deal_quantity) throw new Error('成交明細尚不完整');
             applyExitTrade(trade, { settle: true });
         }
@@ -1064,7 +1065,9 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
     // never armed already crossed: refused here (a crossing one waits for a
     // new crossing anyway), and the engine's first tick decides like a
     // restore (already past → 待確認)
-    const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[row.code] ?? lastPrices.get(row.code);
+    // the price this condition watches (a trade, or 零股 trades; 對手價 is left to the engine)
+    const key = priceKeyOf(next);
+    const latest = next.source === 'opposite' ? undefined : getBackgroundPrices()[key] ?? lastPrices.get(key);
     if (!next.cross && latest !== undefined && isPast(next, latest)) throw new Error(`新的觸發價已穿過目前價格（${latest}），沒有修改`);
     if (original.kind === 'bracket') {
         // a panel bracket whose 觸價 entry did not fire: the engine builds the new one
@@ -1072,10 +1075,12 @@ export async function modifyTrigger(id: string, patch: TriggerPatch): Promise<vo
         const plan = row.bracketPlan;
         if (!table || !plan) throw new Error('背景執行：跳動點級距尚未取得，無法修改括號單，請稍後再試');
         const request = panelBracketRequest({ env: row.env!, account: row.account!, quoteCode: row.code, orderCode: row.orderCode!,
-            securityType: contract.security_type === 'OPT' ? 'OPT' : 'FUT', action: row.action,
+            securityType: contract.security_type === 'OPT' ? 'OPT' : contract.security_type === 'STK' ? 'STK' : 'FUT', action: row.action,
             plan: { ...plan, tiers: patch.quantity !== undefined ? scaleTiers(plan.tiers, patch.quantity) : plan.tiers },
             tickTable: table, entry: { trigger: { condition: next.condition, price: next.price, send: next.send ?? { type: 'MKT' },
-                ...(next.validity ? { validity: next.validity } : {}) } } });
+                ...(next.validity ? { validity: next.validity } : {}),
+                // keep a 新倉 entry new (#216)
+                ...(level.entry.order.octype === 'New' ? { octype: 'New' as const } : {}) } } });
         if (!request) throw new Error('背景執行：這張括號單無法修改，請取消後重新建立');
         const replaced = await replaceBackgroundBracket(programId, request);
         if (replaced === 'replaced') return;
@@ -1682,14 +1687,15 @@ async function sendPending(id: string, allowUnpast: boolean) {
 
 /** Exits are market IOC. Their unfilled remainder may never produce a Cancel
  * report, so the exit order is read from the cache only (refresh:false) at
- * most TWICE: a final status (Cancelled/Failed/Inactive/Filled) settles it at
+ * most TWICE: a final status (Cancelled/Failed/Filled) settles it at
  * once; PartFilled settles only when a second, later read shows the same
  * fills/cancels. Otherwise the remainder stays 待確認 for an explicit 對帳.
  * A row missing from the cache changes nothing (never filled/cancelled).
  * Late fills still apply after settling and shrink the unprotected rest. */
 export const IOC_CHECK_MS = 3000;
 export const IOC_RECHECK_MS = 5000;
-const FINAL = ['Cancelled', 'Failed', 'Inactive', 'Filled'];
+// Inactive is not final: the SDK's placeholder before the broker answered (#177)
+const FINAL = ['Cancelled', 'Failed', 'Filled'];
 const rowSignature = (t: Trade) => `${t.status.status}|${t.status.deal_quantity}|${t.status.cancel_quantity}|${t.status.deals?.length ?? 0}`;
 function scheduleIocCheck(id: string, previous?: string) {
     setTimeout(() => {
@@ -1740,7 +1746,7 @@ export function applyExitTrade(trade: Trade, opts: { settle?: boolean } = {}) {
         updateExit(rec.id, e => {
             let next = e;
             for (const fill of fillsFromTrade(trade)) next = applyExitFill(next, fill, Date.now());
-            const ended = ['Cancelled', 'Failed', 'Inactive'].includes(trade.status.status)
+            const ended = ['Cancelled', 'Failed'].includes(trade.status.status)
                 || (opts.settle && trade.status.status === 'PartFilled');
             if (next.status === 'working' && ended) {
                 next = { ...next, status: 'incomplete', at: Date.now(),

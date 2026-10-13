@@ -87,6 +87,24 @@ describe('executeFlatten', () => {
         expect(r).toMatchObject({ stopped: 2, cancelled: 1, sent: [{ code: 'TXFJ6', action: 'Sell', quantity: 3 }] });
     });
 
+    it('the hold shared with the background engine lost: nothing more is cancelled or closed', async () => {
+        m.trades.mockImplementation(async (a: Account) => a === F ? [working('w1', 'TXFJ6', F)] : []);
+        m.cancel.mockResolvedValue([{ status: 'fulfilled', value: { status: { status: 'Cancelled' } } }]);
+        m.positions.mockImplementation(async (a: Account) => a === F ? [{ id: 1, code: 'TXFJ6', direction: 'Buy', quantity: 1 }] : []);
+        // still held for the cancels, lost before the close
+        const owned = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+        const r = await executeFlatten({ type: 'code', codes: ['TXFJ6'], account: null }, { sleep: noWait, stopConditional, stillOwned: owned });
+        expect(m.order).toContain('cancel:w1');
+        expect(m.place).not.toHaveBeenCalled();
+        expect(r.notSent.join()).toContain('執行權已失效');
+        // lost before the cancels: nothing at all
+        m.order = [];
+        const none = await executeFlatten({ type: 'code', codes: ['TXFJ6'], account: null },
+            { sleep: noWait, stopConditional, stillOwned: async () => false });
+        expect(m.order.some(o => o.startsWith('cancel') || o.startsWith('place'))).toBe(false);
+        expect(none.notSent.join()).toContain('執行權已失效');
+    });
+
     it('a product whose cancel is not confirmed is not closed', async () => {
         m.trades.mockImplementation(async (a: Account) => a === F ? [working('w1', 'TXFJ6', F)] : []);
         m.cancel.mockResolvedValue([{ status: 'rejected', reason: new Error('CANCEL_UNCONFIRMED') }]);

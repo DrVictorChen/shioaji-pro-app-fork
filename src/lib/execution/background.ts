@@ -23,7 +23,7 @@ import { ensureContract } from '../contracts-cache';
 import { isMainWindow } from '../main-window-commands';
 import { currentProtectionEnv, onProtectionEnvChange } from '../protection-env';
 import { pinQuote } from '../quote-ownership';
-import { getStreamStatus, onAnyBidAsk, onAnyTick, subscribeStatusStore } from '../stream';
+import { getStreamStatus, onAnyBidAsk, onAnyTick, onOddLotTick, subscribeStatusStore } from '../stream';
 import { notify } from '../trade';
 import { envKeyOf } from './adapter';
 import { programFinished } from './background-view';
@@ -433,7 +433,7 @@ const swept = new Map<string, number>(); // program id → version already tried
  * engine's change event refreshes the list). */
 function housekeeping() {
     for (const p of programs) {
-        if (p.kind !== 'trigger' || !programFinished(p) || removing.has(p.id) || swept.get(p.id) === p.version) continue;
+        if ((p.kind !== 'trigger' && p.kind !== 'flatten') || !programFinished(p) || removing.has(p.id) || swept.get(p.id) === p.version) continue;
         swept.set(p.id, p.version);
         // a failed request is tried again on the next refresh
         void invoke<CommandReply>('execution_remove', { programId: p.id }).catch(() => { swept.delete(p.id); });
@@ -447,24 +447,26 @@ const quoteHolds = new Map<string, { release?: () => void }>();
  * unsubscribes what a background condition watches. */
 function syncQuotes() {
     const env = currentProtectionEnv();
-    const wanted = new Map<string, { code: string; type: 'Tick' | 'BidAsk' }>();
+    const wanted = new Map<string, { code: string; type: 'Tick' | 'BidAsk'; odd?: boolean }>();
     for (const p of programs) {
         if (p.status === 'stopped' || envKeyOf(p.binding) !== env) continue;
         const code = p.binding.contract.quoteCode;
         wanted.set(`${code}|Tick`, { code, type: 'Tick' });
-        if (p.levels.some(lv => lv.phase !== 'done' && lv.entry.type === 'touch' && lv.entry.feed)) {
-            wanted.set(`${code}|BidAsk`, { code, type: 'BidAsk' });
-        }
+        const feeds = p.levels.filter(lv => lv.phase !== 'done' && lv.entry.type === 'touch')
+            .map(lv => lv.entry.type === 'touch' ? lv.entry.feed : undefined);
+        if (feeds.some(f => f === 'bid' || f === 'ask')) wanted.set(`${code}|BidAsk`, { code, type: 'BidAsk' });
+        // 零股 conditions: the 盤中零股 trades
+        if (feeds.includes('odd')) wanted.set(`${code}|TickOdd`, { code, type: 'Tick', odd: true });
     }
     for (const [key, hold] of quoteHolds) {
         if (!wanted.has(key)) { hold.release?.(); quoteHolds.delete(key); }
     }
-    for (const [key, { code, type }] of wanted) {
+    for (const [key, { code, type, odd }] of wanted) {
         if (quoteHolds.has(key)) continue;
         const hold: { release?: () => void } = {};
         quoteHolds.set(key, hold);
         void ensureContract(code).then(contract => {
-            if (quoteHolds.get(key) === hold) hold.release = pinQuote(contract, type);
+            if (quoteHolds.get(key) === hold) hold.release = pinQuote(contract, type, odd ? { oddLot: true } : undefined);
         }).catch(() => { if (quoteHolds.get(key) === hold) quoteHolds.delete(key); });
     }
 }
@@ -482,7 +484,10 @@ const NOTICE_TEXT: Record<string, string> = {
     notSent: '背景觸價單未送出',
     unknown: '背景觸價單送出結果不明（不會自動重送）',
     'session.lapsed': '背景觸價單：盤別已結束',
-    expired: '背景條件單已到期，沒有送出',
+    expired: '背景條件單已到期或時間已過，沒有送出',
+    'flatten.started': '收盤前平倉：背景執行開始全平並取消',
+    'flatten.done': '收盤前平倉：背景執行全平並取消已完成',
+    'flatten.failed': '收盤前平倉：背景執行沒有完成，請手動處理',
     'ledger.failed': '背景執行資料無法寫入，已停止',
     'partition.failed': '背景執行資料無法寫入，已停止',
 };
@@ -494,7 +499,7 @@ const BRACKET_FIRED_TEXT: Record<string, string> = {
     unknown: '背景括號單出場送出結果不明（不會自動重送）',
 };
 
-const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'expired', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
+const INFO_NOTICES = new Set(['fired', 'needsConfirm', 'expired', 'flatten.started', 'flatten.done', 'handled', 'bracket.rearmed', 'bracket.autoRearmed', 'protectedAgain']);
 
 let pendingInstalled = false;
 function onFirstStatus() {
@@ -503,6 +508,93 @@ function onFirstStatus() {
         pendingInstalled = true;
         installPendingConfirmBackend(createTauriPendingConfirmBackend());
     }
+}
+
+/** The engine's 全平並取消 started (`detail`: its account, codes and time
+ * order): this window stops its own conditional orders in that scope, waits
+ * until none of them is sending, and answers — the engine cancels and
+ * closes nothing before that answer (or gives up after a while). */
+async function stopWindowConditionals(detail: string): Promise<void> {
+    let programId = '';
+    let ok = false;
+    let why = '';
+    try {
+        const d = JSON.parse(detail) as { programId: string;
+            account: { accountType: 'F' | 'S'; brokerId: string; accountId: string }; codes: string[] | null };
+        programId = d.programId;
+        const account = { account_type: d.account.accountType, broker_id: d.account.brokerId, account_id: d.account.accountId };
+        const { stopConditionalInScope, waitInFlight } = await import('../conditional/runtime');
+        const scope = d.codes ? { type: 'code' as const, codes: d.codes, account } : { type: 'account' as const, account };
+        const r = await stopConditionalInScope(scope);
+        const drained = r.failed.length === 0 && await waitInFlight(scope);
+        // an order that just went out may have armed new protection: stop again
+        const again = drained ? await stopConditionalInScope(scope) : { stopped: 0, failed: [] as string[] };
+        const failed = [...r.failed, ...again.failed];
+        // an exit whose outcome is unknown may still be live at the broker: the user decides first
+        const { getExits } = await import('../trigger-engine');
+        const { inScope } = await import('../conditional/flatten');
+        if (getExits().some(e => e.status === 'unknown' && !e.acknowledged && inScope(scope, e.account, e.orderCode))) {
+            failed.push('本視窗有觸價單送出結果不明，請先核對');
+        }
+        ok = drained && failed.length === 0;
+        why = failed.length ? failed.join('；') : drained ? '' : '本視窗有條件單仍在送單';
+    } catch (e) {
+        why = e instanceof Error ? e.message : String(e);
+    }
+    if (programId) await invoke<void>('execution_flatten_ack', { programId, ok, detail: why }).catch(() => undefined);
+    if (!ok) notify({ kind: 'err', title: '收盤前平倉：本視窗的條件單沒有全部停止', body: why || '請手動處理' });
+}
+
+/** A window's 全平並取消 holds the one shared with the engine's 收盤前平倉
+ * (they never read the same holdings at once). Resolves false when the
+ * engine's is running; true when held (or there is no engine to share with). */
+let sharedHold = false; // the engine granted it (else: no engine was running)
+let holdLost = false;
+export async function beginWindowFlatten(): Promise<boolean> {
+    sharedHold = false;
+    holdLost = false;
+    if (!isTauri) return true;
+    let granted: boolean;
+    try {
+        granted = await invoke<boolean>('execution_flatten_begin');
+    } catch {
+        return true; // the engine is not running: it runs none
+    }
+    sharedHold = granted;
+    return granted;
+}
+
+/** Keep the hold while the window's 全平並取消 runs (the engine only takes
+ * over a hold not renewed for two minutes). A renewal that fails or is
+ * refused loses it for good: this run sends nothing more. */
+export const FLATTEN_RENEW_MS = 30_000;
+let renewTimer: ReturnType<typeof setInterval> | null = null;
+async function renewHold(): Promise<boolean> {
+    if (!sharedHold || holdLost) return !holdLost;
+    try {
+        if (await invoke<boolean>('execution_flatten_renew') === true) return true;
+    } catch { /* unknown: not held */ }
+    holdLost = true;
+    return false;
+}
+export function keepWindowFlatten(): void {
+    if (!isTauri || renewTimer) return;
+    renewTimer = setInterval(() => { void renewHold(); }, FLATTEN_RENEW_MS);
+}
+
+/** Right before each cancel / close of the window's 全平並取消: still the
+ * holder (renewed now)? False: stop, send nothing more. */
+export async function stillHoldingFlatten(): Promise<boolean> {
+    if (!isTauri) return true;
+    return renewHold();
+}
+
+export async function endWindowFlatten(): Promise<void> {
+    if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
+    const held = sharedHold && !holdLost;
+    sharedHold = false;
+    if (!isTauri || !held) return;
+    await invoke<void>('execution_flatten_end').catch(() => undefined);
 }
 
 // ---- risk settings for opening entries (#226) ----
@@ -568,6 +660,8 @@ export function startBackgroundExecution(): void {
         if (main) {
             void listen<Notice[]>('execution://notice', e => {
                 for (const n of e.payload ?? []) {
+                    // 收盤前平倉 run by the engine: this window stops its own conditional orders in scope
+                    if (n.code === 'flatten.started') { void stopWindowConditionals(n.detail); continue; }
                     const owner = programs.find(p => p.id === n.programId);
                     // a panel bracket's entry level (its 觸價 entry) is no exit
                     const entryLevel = !!owner && owner.levels.some(lv => lv.id === n.levelId && lv.exit === null);
@@ -597,6 +691,14 @@ export function startBackgroundExecution(): void {
                 prices = { ...prices, [tick.code]: price };
                 emit();
             }
+        });
+        // 零股 rows: the 盤中零股 trades (`<code>#odd`)
+        onOddLotTick(tick => {
+            if (tick.simtrade || !programs.some(p => p.binding.contract.quoteCode === tick.code
+                && p.levels.some(lv => lv.phase === 'needsConfirm' && lv.entry.type === 'touch' && lv.entry.feed === 'odd'))) return;
+            const price = Number(tick.close);
+            const key = `${tick.code}#odd`;
+            if (Number.isFinite(price) && price > 0 && prices[key] !== price) { prices = { ...prices, [key]: price }; emit(); }
         });
         // 對手價 rows: their side of the book, under the same keys as this
         // window's triggers (`<code>#bid` / `<code>#ask`)

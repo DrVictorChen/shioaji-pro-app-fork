@@ -5,7 +5,8 @@
 
 import { dismissBracket, getBrackets } from '../bracket';
 import { isLive } from '../bracket-core';
-import { getBackgroundPrograms, markBackgroundHandled, pauseBackgroundProgram, resumeBackgroundProgram } from '../execution/background';
+import { beginWindowFlatten, endWindowFlatten, getBackgroundPrograms, keepWindowFlatten, stillHoldingFlatten, markBackgroundHandled, pauseBackgroundProgram,
+    resumeBackgroundProgram } from '../execution/background';
 import { bracketViews } from '../execution/bracket-contract';
 import { currentProtectionEnv } from '../protection-env';
 import { notify } from '../trade';
@@ -113,7 +114,17 @@ async function exclusively<T>(fn: () => Promise<T>): Promise<T> {
 
 export async function runFlatten(scope: FlattenScope): Promise<FlattenResult> {
     const env = currentProtectionEnv();
-    const r = await exclusively(() => executeFlatten(scope, { stopConditional: () => stopConditionalInScope(scope), waitInFlight: () => waitInFlight(scope) }));
+    const r = await exclusively(async () => {
+        // one 全平並取消 at a time with the background engine's 收盤前平倉 too
+        if (!(await beginWindowFlatten())) throw new Error('背景執行的收盤前平倉正在執行（或它的平倉單尚未結束），請等它完成');
+        keepWindowFlatten();
+        try {
+            return await executeFlatten(scope, { stopConditional: () => stopConditionalInScope(scope), waitInFlight: () => waitInFlight(scope),
+                stillOwned: stillHoldingFlatten });
+        } finally {
+            await endWindowFlatten();
+        }
+    });
     // what is still held after the read-back goes to 需要你處理 (with 再平倉)
     if (r.sent.length || r.remaining.length) recordFlattenLeftovers(r.sent, r.remaining, env);
     // the 委託／持倉 panels show what the broker has now (QA 10/12: stale rows after a flatten)

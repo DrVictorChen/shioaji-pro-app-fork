@@ -74,19 +74,24 @@ export interface PanelBackgroundSpec {
     account: AccountRef;
     quoteCode: string;
     orderCode: string;
-    securityType: 'FUT' | 'OPT';
+    /** STK: 現股 整股 (its exits close in cash) */
+    securityType: 'FUT' | 'OPT' | 'STK';
     action: 'Buy' | 'Sell';
     plan: BracketEntryPlan;
     tickTable: TickBand[];
     entry: { tradeId: string; seqno: string | null; ordno: string | null; sentAt: number }
-        | { trigger: { condition: 'below' | 'above'; price: number; send: TriggerSend; validity?: TriggerValidity } };
+        | { trigger: { condition: 'below' | 'above'; price: number; send: TriggerSend; validity?: TriggerValidity;
+            /** futures: the entry opens a new position only (#216 新倉) */
+            octype?: 'New' } };
 }
 
 /** The order a 觸價 entry sends, by its send style. */
-function triggerOrder(send: TriggerSend): OrderSpec {
-    if (send.type === 'MKP') return { priceType: 'MKP', timeInForce: 'IOC' };
-    if (send.type === 'LMT') return { priceType: 'LMT', timeInForce: 'ROD' };
-    return { priceType: 'MKT', timeInForce: 'IOC' };
+function triggerOrder(send: TriggerSend, stock: boolean, octype?: 'New'): OrderSpec {
+    const cash = stock ? { stockCond: 'Cash' as const, stockLot: 'Common' as const } : {};
+    const oc = octype && !stock ? { octype } : {};
+    if (send.type === 'MKP' && !stock) return { priceType: 'MKP', timeInForce: 'IOC', ...oc };
+    if (send.type === 'LMT') return { priceType: 'LMT', timeInForce: 'ROD', ...cash, ...oc };
+    return { priceType: 'MKT', timeInForce: 'IOC', ...cash, ...oc };
 }
 
 export function panelBracketRequest(spec: PanelBackgroundSpec, id = newBracketId()): CreateBracketRequest | null {
@@ -101,14 +106,15 @@ export function panelBracketRequest(spec: PanelBackgroundSpec, id = newBracketId
             env: env.env,
             serverId: env.serverId,
             account: accountKey(spec.account),
-            contract: { market: 'futures', quoteCode: spec.quoteCode, orderCode: spec.orderCode, securityType: spec.securityType },
+            contract: { market: spec.securityType === 'STK' ? 'stock' : 'futures', quoteCode: spec.quoteCode, orderCode: spec.orderCode,
+                securityType: spec.securityType },
         },
         side: spec.action,
         qty,
         stop: null,
         take: null,
         ...('trigger' in e
-            ? { trigger: { condition: e.trigger.condition, price: e.trigger.price, order: triggerOrder(e.trigger.send),
+            ? { trigger: { condition: e.trigger.condition, price: e.trigger.price, order: triggerOrder(e.trigger.send, spec.securityType === 'STK', e.trigger.octype),
                 ...(e.trigger.send.type === 'LMT' ? { limitTicks: e.trigger.send.ticks } : {}),
                 ...(e.trigger.validity ? { validity: { type: e.trigger.validity.type, until: e.trigger.validity.until } } : {}) } }
             : e.tradeId ? { entry: { tradeId: e.tradeId, seqno: blank(e.seqno), ordno: blank(e.ordno), sentAt: e.sentAt } } : {}),
