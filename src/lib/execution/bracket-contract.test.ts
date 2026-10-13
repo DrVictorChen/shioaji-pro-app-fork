@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bracketFinished, bracketViews, lapsedLevel } from './bracket-contract';
+import { bracketEntryWaiting, bracketFinished, bracketViews, lapsedLevel } from './bracket-contract';
 import { bracketRequestFor, backgroundBracketEligible, newBracketId } from './background-bracket';
 import type { Level, OrderProgram, OrderSlot } from './model';
 
@@ -112,5 +112,34 @@ describe('v2: bracket settings', () => {
         expect(one(program({}, { id: 'late:bkt-1:abc:1' })).origin).toBe('lateFill');
         expect(one(program({}, { id: 'rearm:bkt-1:abc:1' })).origin).toBe('rearm');
         expect(one(program({})).origin).toBe('entry');
+    });
+});
+
+describe('#226 panel bracket tiers', () => {
+    const tier = (id: string, index: number, over: Partial<Level> = {}): Level => ({ id, side: 'Buy', qty: 1,
+        entry: { type: 'tier', of: 'L1', offset: index, index }, exit: { type: 'oco', stop: null, take: null,
+            order: { priceType: 'MKT', timeInForce: 'IOC', octype: 'Cover' } },
+        phase: 'idle', check: null, recross: [], pending: null, orders: [], position: 0, entryFilled: 0, unprotected: 0, cycles: 0,
+        detail: null, rules: { stopTicks: 4, takeTicks: index === 0 ? 5 : null, ...(index === 1 ? { trail: { activateTicks: 5, distanceTicks: 3, stepTicks: 1 } } : {}) },
+        ...over });
+    function tiered(entry: Partial<Level>, tiers: Level[]): OrderProgram {
+        const p = program({ ...entry, exit: null, qty: 2 });
+        return { ...p, levels: [p.levels[0]!, ...tiers] };
+    }
+
+    it('one view per tier (the entry level protects nothing itself), with its tier and rules', () => {
+        const views = bracketViews([tiered({}, [tier('T1', 0, { phase: 'holding', position: 1, base: 100,
+            exit: { type: 'oco', stop: { price: 96, condition: 'below' }, take: { price: 105, condition: 'above' },
+                order: { priceType: 'MKT', timeInForce: 'IOC', octype: 'Cover' } } }), tier('T2', 1)])]);
+        expect(views.map(v => [v.levelId, v.state, v.priced, v.tier])).toEqual([
+            ['T1', 'protected', true, { index: 0, count: 2 }], ['T2', 'waitingEntry', false, { index: 1, count: 2 }]]);
+        expect(views[1]!.rules).toEqual({ stopTicks: 4, takeTicks: null, trail: true });
+    });
+
+    it('a 觸價 entry not fired yet is not a bracket yet (a trigger row shows it)', () => {
+        const p = tiered({ entry: { type: 'touch', condition: 'above', price: 100, order: { priceType: 'MKT', timeInForce: 'IOC' } },
+            phase: 'idle', orders: [] }, [tier('T1', 0), tier('T2', 1)]);
+        expect(bracketEntryWaiting(p)?.id).toBe('L1');
+        expect(bracketViews([p])).toEqual([]);
     });
 });

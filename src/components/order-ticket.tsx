@@ -21,7 +21,7 @@ import {
     validateBracketRequest,
 } from '../lib/bracket';
 import { BracketStatusList } from './bracket-status';
-import { BackgroundBracketList } from './background-bracket-status';
+import { ConditionalBracketCards } from './conditional-panel';
 import { backgroundOwnerForNew, createBackgroundBracket } from '../lib/execution/background';
 import { backgroundBracketEligible, bracketRequestFor } from '../lib/execution/background-bracket';
 import { usePickedPrice } from '../lib/price-sync';
@@ -1465,7 +1465,7 @@ export function OrderTicket({
             {/* after the submit button: ended / handed-over cards never push
                 下單 below the fold (TXF QA 2026-10-12) */}
             <BracketStatusList code={contract.code} />
-            <BackgroundBracketList code={contract.code} />
+            <ConditionalBracketCards code={contract.code} />
         </div>
     );
 }
