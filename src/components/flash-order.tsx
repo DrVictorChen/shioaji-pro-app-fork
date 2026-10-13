@@ -1315,10 +1315,11 @@ export function FlashOrder({
     }, []);
 
     const [drag, setDrag] = useState<{ group: MarkGroup; over: number | null } | null>(null);
-    // the click that ends a drag is not a delete
-    const draggedAt = useRef(0);
+    // the click that ends a drag (or an Esc-cancelled drag) of THIS marker is not a delete
+    const dragEnded = useRef<string | null>(null);
+    const markKey = (g: MarkGroup) => `${g.side}:${keyOf(g.price)}`;
     const onMarkClick = useCallback((g: MarkGroup) => {
-        if (Date.now() - draggedAt.current < 400) return;
+        if (dragEnded.current === markKey(g)) { dragEnded.current = null; return; }
         const blocked = popoutTradingBlocked();
         if (blocked) { notify({ kind: 'err', title: '⚡ 觸價單未刪除', body: blocked }); return; }
         void cancelMarks(g);
@@ -1330,6 +1331,7 @@ export function FlashOrder({
         e.preventDefault();
         e.stopPropagation();
         dragCleanupRef.current?.();
+        dragEnded.current = null;
         const startY = e.clientY;
         let moved = false;
         const rowAt = (y: number): number | null => {
@@ -1354,7 +1356,7 @@ export function FlashOrder({
             setDrag(null);
             // a plain click is the button's own click (deletes); only a drag moves
             if (!moved) return;
-            draggedAt.current = Date.now();
+            dragEnded.current = markKey(g);
             const target = rowAt(ev.clientY);
             if (target !== null) void moveMarks(g, target);
         };
@@ -1364,6 +1366,7 @@ export function FlashOrder({
             ev.preventDefault();
             cleanup();
             setDrag(null);
+            if (moved) dragEnded.current = markKey(g);
         };
         window.addEventListener('pointermove', move, true);
         window.addEventListener('pointerup', up, true);

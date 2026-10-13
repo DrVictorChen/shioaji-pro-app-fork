@@ -23,3 +23,13 @@ it('the main window, the Harness off, or the web build: can trade', () => {
     m.harness = true; m.tauri = false;
     expect(popoutTradingBlocked()).toBeNull();
 });
+
+it('follows the setting the main window saved after this popout opened', () => {
+    const store = new Map<string, string>([['sj-agent-harness-enabled', 'false']]);
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null });
+    expect(popoutTradingBlocked()).toBeNull(); // cache says on, the saved setting says off
+    store.set('sj-agent-harness-enabled', 'true');
+    m.harness = false;
+    expect(popoutTradingBlocked()).toBe(POPOUT_VIEW_ONLY);
+    vi.unstubAllGlobals();
+});

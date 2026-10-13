@@ -177,6 +177,14 @@ it('a pending trigger on the ladder: click deletes it, drag moves it, never acro
     await act(async () => { fire('keydown', { key: 'Escape', preventDefault() {} }); });
     await act(async () => { fire('pointerup', ev(1 * 22 + 5)); });
     expect(m.modify).toHaveBeenCalledTimes(1);
+    // …and the click that follows the cancelled drag is not a delete either
+    await act(async () => { chip().props.onClick({ stopPropagation() {} }); });
+    expect(m.remove).toHaveBeenCalledTimes(1);
+    // a later, separate click deletes
+    await act(async () => { chip().props.onPointerDown(ev(5 * 22 + 5)); });
+    await act(async () => { fire('pointerup', ev(5 * 22 + 5)); });
+    await act(async () => { chip().props.onClick({ stopPropagation() {} }); });
+    expect(m.remove).toHaveBeenCalledTimes(2);
 });
 
 it('protection marks show on the exit side and are not editable from the ladder', async () => {
