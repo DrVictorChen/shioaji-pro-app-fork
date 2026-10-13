@@ -26,7 +26,8 @@ import { getConditionalSettings } from '../lib/conditional/settings';
 import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, flashProtectPlan, flashProtectText, positionEffect,
     protectConditionProblem, protectEffect, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf, triggerSendText, type LadderMark } from '../lib/flash-trigger';
 import type { TriggerValidity } from '../lib/trigger-engine';
-import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger, flashStopProtections } from '../lib/flash-conditional';
+import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashReadHeld, flashRemoveTrigger, flashRestoreProtection, flashStopProtections } from '../lib/flash-conditional';
+import { restoreAfterUnfilledClose, restoreTriggers } from '../lib/flash-flatten-restore';
 import { FlashProtectStrip } from './flash-protect';
 import { popoutTradingBlocked } from '../lib/popout-trading';
 import {
@@ -1031,6 +1032,8 @@ export function FlashOrder({
     // 觸價方向只看真正的成交價（零股看零股成交），不拿參考價充數
     const triggerPriceRef = useRef<number | null>(null);
     triggerPriceRef.current = odd ? (oddQuote?.tick ? Number(oddQuote.tick.close) : null) : tradedLast;
+    const lastTradeRef = useRef<number | null>(null);
+    lastTradeRef.current = tradedLast;
     const ladder = useFlashLadder({ code: contract.code, odd, account: activeAccount }, market === 'F');
     // #216 觸價單與限價同時可點：外側觸買／觸賣欄（預設）或 Alt＋點買量／賣量
     const triggerLayout = panelOrder.triggerLayout ?? 'columns';
@@ -1495,8 +1498,29 @@ export function FlashOrder({
             } else {
                 await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account), beforeSend });
             }
-            notify({ kind: 'info', title: '⚡ 平倉已送出', body: `${stop.stopped ? `已先取消停損停利 ${stop.stopped} 張；` : ''}請以委託與成交回報確認結果` });
+            // quantities in the product's unit (口／張／股), not a count of orders
+            const stock = account.account_type === 'S';
+            const unit = !stock ? '口' : '張';
+            // stocks: whole-lot protections only (a 平倉 closes shares too; odd-lot ones are not restored)
+            const restore = stock ? stop.restore.filter(r => !r.odd) : stop.restore;
+            const protectedQty = stop.restore.reduce((n, r) => n + r.quantity, 0);
+            const protectedText = stop.restore.some(r => r.odd) && stock
+                ? `已先取消停損停利（${stop.restore.filter(r => !r.odd).reduce((n, r) => n + r.quantity, 0)} 張、${stop.restore.filter(r => r.odd).reduce((n, r) => n + r.quantity, 0)} 股）；`
+                : protectedQty > 0 ? `已先取消停損停利（${protectedQty} ${unit}）；` : stop.stopped ? '已先取消停損停利；' : '';
+            notify({ kind: 'info', title: '⚡ 平倉已送出', body: `${protectedText}請以委託與成交回報確認結果${restore.length ? '；若沒有成交，會對剩餘部位恢復停損停利' : ''}` });
             onOrdersChangedRef.current?.();
+            if (restore.length) {
+                // the close may not fill (IOC): put the protection back for what is still held, once, no order
+                const codes = [contract.code, contract.target_code].filter((x): x is string => !!x);
+                const before = stock ? Math.sign(pos.net) * Math.floor(Math.abs(pos.net) / 1000) : pos.net;
+                const group = `restore-${Date.now().toString(36)}`;
+                void restoreAfterUnfilledClose(before, restore, contract.code, unit, {
+                    readHeld: () => flashReadHeld(account, codes, stock),
+                    last: () => lastTradeRef.current,
+                    restore: leg => flashRestoreProtection(restoreTriggers(leg, { code: contract.code, futures: !stock, odd: false, group: `${group}-${leg.stop ?? ''}-${leg.take ?? ''}` }), contract, account),
+                    notify,
+                });
+            }
         } catch (error) {
             if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
             // 確定一筆都沒送出（例如確認期間伺服器模式變更）：照實說未送出

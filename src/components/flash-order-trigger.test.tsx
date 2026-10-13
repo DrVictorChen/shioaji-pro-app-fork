@@ -10,14 +10,16 @@ import type { ContractInfo } from '../lib/types/contract';
 import type { LadderMark } from '../lib/flash-trigger';
 import type { FlashOrderOpts } from '../lib/flash-account';
 
-const m = vi.hoisted(() => ({ stop: vi.fn(), cancel: vi.fn(), place: vi.fn(), notify: vi.fn(), add: vi.fn(), modify: vi.fn(), remove: vi.fn(), bracket: vi.fn(),
+const m = vi.hoisted(() => ({ watch: vi.fn(), readHeld: vi.fn(), restoreProt: vi.fn(), stop: vi.fn(), cancel: vi.fn(), place: vi.fn(), notify: vi.fn(), add: vi.fn(), modify: vi.fn(), remove: vi.fn(), bracket: vi.fn(),
     marks: new Map<string, { buy: LadderMark[]; sell: LadderMark[] }>(), background: false, protectedQty: 0 }));
 const accounts: Account[] = [{ account_type: 'F', broker_id: 'BR', account_id: 'F5678', signed: true, person_id: '', username: '' }];
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts, selectedStock: undefined, selectedFutures: accounts[0] }) }));
 vi.mock('../hooks/use-stream', () => ({ useQuote: () => undefined, useTradingLive: () => true }));
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: { tick: { close: '100', volume: 1 } }, snapshot: { close: 100 }, book: undefined }) }));
 vi.mock('../hooks/use-flash-ladder', () => ({ useFlashLadder: () => ({ marks: m.marks, protectedQty: m.protectedQty, background: m.background }) }));
-vi.mock('../lib/flash-conditional', () => ({ flashAddTrigger: m.add, flashModifyTrigger: m.modify, flashRemoveTrigger: m.remove, flashPlaceBracket: m.bracket, flashStopProtections: m.stop }));
+vi.mock('../lib/flash-conditional', () => ({ flashAddTrigger: m.add, flashModifyTrigger: m.modify, flashRemoveTrigger: m.remove, flashPlaceBracket: m.bracket, flashStopProtections: m.stop,
+    flashReadHeld: m.readHeld, flashRestoreProtection: m.restoreProt }));
+vi.mock('../lib/flash-flatten-restore', async orig => ({ ...(await orig<typeof import('../lib/flash-flatten-restore')>()), restoreAfterUnfilledClose: m.watch }));
 vi.mock('../lib/shioaji', () => ({ cancelOrders: m.cancel }));
 vi.mock('../lib/trade', () => ({ notify: m.notify, placeQuickOrder: m.place, placeStockExitByShares: vi.fn() }));
 vi.mock('../lib/stream', () => ({ getAliasFor: () => undefined }));
@@ -70,7 +72,7 @@ beforeEach(() => {
     m.modify.mockResolvedValue(undefined);
     m.remove.mockResolvedValue(undefined);
     m.bracket.mockResolvedValue('placed');
-    m.stop.mockResolvedValue({ stopped: 0, blocked: [], failed: [] });
+    m.stop.mockResolvedValue({ stopped: 0, blocked: [], failed: [], restore: [] });
     m.cancel.mockResolvedValue([]);
     m.place.mockResolvedValue({ order: { id: 'o1' }, status: { status: 'Submitted' } });
 });
@@ -312,21 +314,38 @@ it('the protect settings: applying saves them on the panel and locks the ladder'
 
 it('平倉 ends this panel\'s 停損停利 first, then closes; an exit out or unknown blocks the close', async () => {
     const order: string[] = [];
-    m.stop.mockImplementation(async (scope: unknown) => { order.push('stop'); expect(scope).toEqual({ account: { account_type: 'F', broker_id: 'BR', account_id: 'F5678' }, codes: ['TXFR1'], odd: false }); return { stopped: 2, blocked: [], failed: [] }; });
+    m.stop.mockImplementation(async (scope: unknown) => { order.push('stop'); expect(scope).toEqual({ account: { account_type: 'F', broker_id: 'BR', account_id: 'F5678' }, codes: ['TXFR1'], odd: false }); return { stopped: 2, blocked: [], failed: [],
+        restore: [{ exitAction: 'Sell', stop: 95, take: 110, quantity: 2 }] }; });
     m.place.mockImplementation(async () => { order.push('close'); return { order: { id: 'c' }, status: { status: 'Submitted' } }; });
     const r = await mount({ order: PROTECT, net: 2 });
     await arm(r);
     await act(async () => { await button(r, '平倉')!.props.onClick(); });
     expect(order).toEqual(['stop', 'close']);
     expect(m.place.mock.calls[0]![4]).toMatchObject({ ocType: 'Cover' });
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('已先取消停損停利 2 張') }));
+    // quantities in the product's unit (口), not a count of protections
+    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('已先取消停損停利（2 口）') }));
+    // the unfilled-close watch: what was held, what was protected, put back as Cover OCO triggers
+    const [before, snaps, code, unit, deps] = m.watch.mock.calls[0]!;
+    expect([before, snaps, code, unit]).toEqual([2, [{ exitAction: 'Sell', stop: 95, take: 110, quantity: 2 }], 'TXFR1', '口']);
+    m.readHeld.mockResolvedValue(1);
+    expect(await deps.readHeld()).toBe(1);
+    expect(m.readHeld).toHaveBeenCalledWith(accounts[0], ['TXFR1'], false);
+    m.restoreProt.mockResolvedValue(true);
+    await deps.restore({ exitAction: 'Sell', stop: 95, take: 110, quantity: 1 });
+    const [legs] = m.restoreProt.mock.calls[0]!;
+    expect(legs).toEqual([
+        expect.objectContaining({ action: 'Sell', condition: 'below', price: 95, kind: 'stop', octype: 'Cover', quantity: 1, ocoMode: 'trigger' }),
+        expect.objectContaining({ action: 'Sell', condition: 'above', price: 110, kind: 'take', octype: 'Cover', quantity: 1, ocoMode: 'trigger' }),
+    ]);
+    expect(legs[0].role).toBeUndefined();
+    expect(legs[0].group).toBe(legs[1].group);
 
-    m.stop.mockResolvedValue({ stopped: 0, blocked: ['TXFR1 停損停利的出場單結果未知'], failed: [] });
+    m.stop.mockResolvedValue({ stopped: 0, blocked: ['TXFR1 停損停利的出場單結果未知'], failed: [], restore: [] });
     await act(async () => { await button(r, '平倉')!.props.onClick(); });
     expect(m.place).toHaveBeenCalledTimes(1);
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', title: '⚡ 平倉未送出', body: expect.stringContaining('結果未知') }));
 
-    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: ['主視窗沒有回應'] });
+    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: ['主視窗沒有回應'], restore: [] });
     await act(async () => { await button(r, '平倉')!.props.onClick(); });
     expect(m.place).toHaveBeenCalledTimes(1);
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', body: expect.stringContaining('取消未確認') }));
@@ -335,7 +354,7 @@ it('平倉 ends this panel\'s 停損停利 first, then closes; an exit out or un
 it('全刪 cancels the working orders and ends the 停損停利; enabled by protection alone', async () => {
     const trades = [{ account: accounts[0], contract: fut, order: { id: 'w1', account: accounts[0], price: 99, action: 'Buy', quantity: 1 },
         status: { status: 'Submitted', order_quantity: 1, deal_quantity: 0, cancel_quantity: 0, deals: [] } }];
-    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: [] });
+    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: [], restore: [] });
     let r!: ReactTestRenderer;
     await act(async () => { r = create(createElement(FlashOrder, { contract: fut, trades: trades as never, positions: [], orderOpts: PROTECT, onOrderOptsChange: vi.fn() }),
         { createNodeMock: () => ({ getBoundingClientRect: () => ({ top: 0 }), clientHeight: 462, addEventListener() {}, removeEventListener() {} }) }); });
@@ -345,7 +364,7 @@ it('全刪 cancels the working orders and ends the 停損停利; enabled by prot
     expect(m.cancel.mock.calls[0]![0]).toEqual(['w1']);
     expect(m.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '⚡ 全刪・停損停利', body: expect.stringContaining('已取消停損停利 1 張') }));
     // blocked protection: the orders are still cancelled, the protection is reported
-    m.stop.mockResolvedValue({ stopped: 0, blocked: ['TXFR1 停損停利的出場單正在送出或等待成交'], failed: [] });
+    m.stop.mockResolvedValue({ stopped: 0, blocked: ['TXFR1 停損停利的出場單正在送出或等待成交'], failed: [], restore: [] });
     await act(async () => { await button(r, '全刪')!.props.onClick(); });
     expect(m.cancel).toHaveBeenCalledTimes(2);
     expect(m.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'err', body: expect.stringContaining('停損停利未取消') }));

@@ -354,6 +354,8 @@ export interface WindowPlanLike {
     dismissed?: boolean;
     live: boolean;
     exit: { status: string; acknowledged?: boolean } | null;
+    /** its armed stop / take legs (prices to restore after an unfilled 平倉) */
+    legs?: readonly { kind: string; price: number; quantity: number; action: 'Buy' | 'Sell' }[];
 }
 
 export interface ExitLike {
@@ -375,6 +377,23 @@ export interface BackgroundViewLike {
     orderCode: string;
     state: string;
     canEnd: boolean;
+    side?: 'Buy' | 'Sell';
+    stop?: number | null;
+    take?: number | null;
+    position?: number;
+}
+
+/** A protection as it was when 平倉 ended it: what to put back for the lots
+ * still held when the close does not fill (fixed prices; a trailing stop's
+ * current price). */
+export interface ProtectionSnapshot {
+    /** the exit direction (a long's protection sells) */
+    exitAction: 'Buy' | 'Sell';
+    stop: number | null;
+    take: number | null;
+    quantity: number;
+    /** stocks: 盤中零股 (quantity in shares) */
+    odd?: boolean;
 }
 
 export interface ProtectionTargets {
@@ -382,6 +401,8 @@ export interface ProtectionTargets {
     background: { programId: string; levelId: string }[];
     /** why the protection cannot be ended now (an exit is out or its outcome unknown) */
     blocked: string[];
+    /** the protections being ended, for a restore after an unfilled 平倉 */
+    snapshots: ProtectionSnapshot[];
 }
 
 const sameAccount = (a: { account_type: string; broker_id: string; account_id: string }, s: ProtectionScope) =>
@@ -393,7 +414,7 @@ const exitOut = (status: string, acknowledged?: boolean) =>
  * An exit in flight or of unknown outcome is never raced: it blocks. */
 export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlanLike[], exits: readonly ExitLike[],
     views: readonly BackgroundViewLike[]): ProtectionTargets {
-    const out: ProtectionTargets = { window: [], background: [], blocked: [] };
+    const out: ProtectionTargets = { window: [], background: [], blocked: [], snapshots: [] };
     const inCodes = (...cs: string[]) => cs.some(c => s.codes.includes(c));
     for (const p of plans) {
         if (p.dismissed || !p.live || p.env !== s.env || !sameAccount(p.account, s) || !inCodes(p.quoteCode, p.orderCode)) continue;
@@ -404,6 +425,13 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
             continue;
         }
         out.window.push(p.id);
+        const legs = p.legs ?? [];
+        const stop = legs.find(l => l.kind === 'stop');
+        const take = legs.find(l => l.kind === 'take');
+        const quantity = Math.max(0, ...legs.map(l => l.quantity));
+        const action = (stop ?? take)?.action;
+        if (action && quantity > 0) out.snapshots.push({ exitAction: action, stop: stop?.price ?? null, take: take?.price ?? null, quantity,
+            ...(p.securityType === 'STK' && isOddLot(p.orderLot) ? { odd: true } : {}) });
     }
     // background brackets are whole lots / contracts only
     if (s.odd !== true) {
@@ -417,6 +445,9 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
                 continue;
             }
             out.background.push({ programId: v.programId, levelId: v.levelId });
+            if (v.side && (v.position ?? 0) > 0 && ((v.stop ?? null) !== null || (v.take ?? null) !== null)) {
+                out.snapshots.push({ exitAction: v.side === 'Buy' ? 'Sell' : 'Buy', stop: v.stop ?? null, take: v.take ?? null, quantity: v.position! });
+            }
         }
     }
     return out;

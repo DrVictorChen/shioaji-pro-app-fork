@@ -4,12 +4,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { protectionTargets, type BackgroundViewLike, type ProtectionScope, type WindowPlanLike } from './flash-trigger';
 
-const m = vi.hoisted(() => ({ plans: [] as unknown[], exits: [] as unknown[], programs: [] as unknown[], views: [] as unknown[],
+const m = vi.hoisted(() => ({ triggers: [] as unknown[], plans: [] as unknown[], exits: [] as unknown[], programs: [] as unknown[], views: [] as unknown[],
     dismiss: vi.fn(), handled: vi.fn(), stale: false, health: { state: 'live' } as unknown, env: 'http://x|simulation' as string | null }));
 vi.mock('./bracket', () => ({ getBrackets: () => m.plans, dismissBracket: m.dismiss, bracketSnapshotStale: () => m.stale }));
 vi.mock('./protection-env', () => ({ currentProtectionEnv: () => m.env }));
 vi.mock('./bracket-core', () => ({ isLive: (p: { live?: boolean }) => p.live !== false }));
-vi.mock('./trigger-engine', () => ({ getExits: () => m.exits }));
+vi.mock('./trigger-engine', () => ({ getExits: () => m.exits, getTriggers: () => m.triggers }));
 vi.mock('./execution/background', () => ({ getBackgroundPrograms: () => m.programs, markBackgroundHandled: m.handled, backgroundSupported: () => true,
     getBackgroundHealth: () => m.health }));
 vi.mock('./execution/bracket-contract', () => ({ bracketViews: () => m.views }));
@@ -27,7 +27,7 @@ describe('protectionTargets', () => {
         const t = protectionTargets(scope, [plan({}), plan({ id: 'p2', account: { ...A, account_id: '2' } }), plan({ id: 'p3', quoteCode: 'MXFR1', orderCode: 'MXFJ6' }),
             plan({ id: 'p4', dismissed: true }), plan({ id: 'p5', live: false })], [],
             [view({}), view({ programId: 'bkt-2', state: 'done' }), view({ programId: 'bkt-3', quoteCode: 'MXFR1', orderCode: 'MXFJ6' })]);
-        expect(t).toEqual({ window: ['p1'], background: [{ programId: 'bkt-1', levelId: 't0' }], blocked: [] });
+        expect(t).toEqual({ window: ['p1'], background: [{ programId: 'bkt-1', levelId: 't0' }], blocked: [], snapshots: [] });
         const S = { ...A, account_type: 'S' };
         const stock = { ...scope, account: S, codes: ['2330'] };
         const odd = plan({ id: 'o', account: S, quoteCode: '2330', orderCode: '2330', securityType: 'STK', orderLot: 'IntradayOdd' });
@@ -39,7 +39,7 @@ describe('protectionTargets', () => {
         expect(protectionTargets({ ...stock, odd: null }, [odd, lot], [], [bg])).toMatchObject({ window: ['o', 'l'], background: [{ programId: 'bkt-1' }] });
         // another server / mode is never touched
         expect(protectionTargets(scope, [plan({ env: 'http://x|production' })], [], [view({ env: 'http://x|production' })]))
-            .toEqual({ window: [], background: [], blocked: [] });
+            .toEqual({ window: [], background: [], blocked: [], snapshots: [] });
     });
 
     it('an exit out or unknown blocks: window plan exit, its trigger leg, background exiting / unknown / not endable', () => {
@@ -50,6 +50,23 @@ describe('protectionTargets', () => {
         for (const v of [view({ state: 'exiting' }), view({ state: 'unknown' }), view({ canEnd: false }), view({ state: 'unprotected', exitBusy: true })]) {
             expect(protectionTargets(scope, [], [], [v])).toMatchObject({ background: [], blocked: [expect.stringContaining('背景執行')] });
         }
+    });
+});
+
+describe('snapshots (what an unfilled 平倉 puts back)', () => {
+    it('a window bracket by its armed legs, a background bracket by its view; stocks mark odd lots', () => {
+        const t = protectionTargets(scope, [plan({ legs: [
+            { kind: 'stop', price: 95, quantity: 2, action: 'Sell' }, { kind: 'take', price: 110, quantity: 2, action: 'Sell' }] })], [],
+        [view({ side: 'Sell', stop: 120, take: 90, position: 1 }), view({ programId: 'bkt-9', side: 'Buy', stop: null, take: null, position: 1 })]);
+        expect(t.snapshots).toEqual([
+            { exitAction: 'Sell', stop: 95, take: 110, quantity: 2 },
+            { exitAction: 'Buy', stop: 120, take: 90, quantity: 1 },
+        ]);
+        const S = { ...A, account_type: 'S' };
+        const odd = plan({ id: 'o', account: S, quoteCode: '2330', orderCode: '2330', securityType: 'STK', orderLot: 'IntradayOdd',
+            legs: [{ kind: 'stop', price: 1000, quantity: 300, action: 'Sell' }] });
+        expect(protectionTargets({ ...scope, account: S, codes: ['2330'], odd: null }, [odd], [], []).snapshots)
+            .toEqual([{ exitAction: 'Sell', stop: 1000, take: null, quantity: 300, odd: true }]);
     });
 });
 
@@ -101,7 +118,7 @@ describe('flashStopProtections', () => {
         m.views = [{ ...view({}), actions: { markHandled: true } }];
         m.dismiss.mockImplementation(async () => { m.plans = [plan({ dismissed: true })]; return true; });
         m.handled.mockImplementation(async () => { m.views = [{ ...view({ state: 'handled' }), actions: { markHandled: false } }]; });
-        expect(await flashStopProtections(scope)).toEqual({ stopped: 2, blocked: [], failed: [] });
+        expect(await flashStopProtections(scope)).toEqual({ stopped: 2, blocked: [], failed: [], restore: [] });
         expect(m.dismiss).toHaveBeenCalledWith('p1');
         expect(m.handled).toHaveBeenCalledWith('bkt-1', 't0');
     });
@@ -119,6 +136,6 @@ describe('flashStopProtections', () => {
         m.plans = [];
         m.views = [{ ...view({}), actions: { markHandled: true } }];
         m.handled.mockRejectedValue(new Error('引擎沒有回應'));
-        expect(await flashStopProtections(scope)).toEqual({ stopped: 0, blocked: [], failed: ['背景執行：引擎沒有回應'] });
+        expect(await flashStopProtections(scope)).toEqual({ stopped: 0, blocked: [], failed: ['背景執行：引擎沒有回應'], restore: [] });
     });
 });
