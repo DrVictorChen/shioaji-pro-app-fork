@@ -103,7 +103,8 @@ describe('flashStopProtections', () => {
         m.handled.mockImplementation(async () => { m.views = [{ ...view({ state: 'handled' }), actions: { markHandled: false } }]; });
         expect(await flashStopProtections(scope)).toEqual({ stopped: 2, blocked: [], failed: [] });
         expect(m.dismiss).toHaveBeenCalledWith('p1');
-        expect(m.handled).toHaveBeenCalledWith('bkt-1', 't0');
+        // with the panel's account + product (a flash popout's end is scoped natively)
+        expect(m.handled).toHaveBeenCalledWith('bkt-1', 't0', { account: { accountType: 'F', brokerId: 'B', accountId: '1' }, codes: ['TXFR1', 'TXFJ6'] });
     });
 
     it('blocked: nothing is ended in either engine', async () => {
