@@ -80,15 +80,18 @@ export interface PanelBackgroundSpec {
     plan: BracketEntryPlan;
     tickTable: TickBand[];
     entry: { tradeId: string; seqno: string | null; ordno: string | null; sentAt: number }
-        | { trigger: { condition: 'below' | 'above'; price: number; send: TriggerSend; validity?: TriggerValidity } };
+        | { trigger: { condition: 'below' | 'above'; price: number; send: TriggerSend; validity?: TriggerValidity;
+            /** futures: the entry opens a new position only (#216 新倉) */
+            octype?: 'New' } };
 }
 
 /** The order a 觸價 entry sends, by its send style. */
-function triggerOrder(send: TriggerSend, stock: boolean): OrderSpec {
+function triggerOrder(send: TriggerSend, stock: boolean, octype?: 'New'): OrderSpec {
     const cash = stock ? { stockCond: 'Cash' as const, stockLot: 'Common' as const } : {};
-    if (send.type === 'MKP' && !stock) return { priceType: 'MKP', timeInForce: 'IOC' };
-    if (send.type === 'LMT') return { priceType: 'LMT', timeInForce: 'ROD', ...cash };
-    return { priceType: 'MKT', timeInForce: 'IOC', ...cash };
+    const oc = octype && !stock ? { octype } : {};
+    if (send.type === 'MKP' && !stock) return { priceType: 'MKP', timeInForce: 'IOC', ...oc };
+    if (send.type === 'LMT') return { priceType: 'LMT', timeInForce: 'ROD', ...cash, ...oc };
+    return { priceType: 'MKT', timeInForce: 'IOC', ...cash, ...oc };
 }
 
 export function panelBracketRequest(spec: PanelBackgroundSpec, id = newBracketId()): CreateBracketRequest | null {
@@ -111,7 +114,7 @@ export function panelBracketRequest(spec: PanelBackgroundSpec, id = newBracketId
         stop: null,
         take: null,
         ...('trigger' in e
-            ? { trigger: { condition: e.trigger.condition, price: e.trigger.price, order: triggerOrder(e.trigger.send, spec.securityType === 'STK'),
+            ? { trigger: { condition: e.trigger.condition, price: e.trigger.price, order: triggerOrder(e.trigger.send, spec.securityType === 'STK', e.trigger.octype),
                 ...(e.trigger.send.type === 'LMT' ? { limitTicks: e.trigger.send.ticks } : {}),
                 ...(e.trigger.validity ? { validity: { type: e.trigger.validity.type, until: e.trigger.validity.until } } : {}) } }
             : e.tradeId ? { entry: { tradeId: e.tradeId, seqno: blank(e.seqno), ordno: blank(e.ordno), sentAt: e.sentAt } } : {}),

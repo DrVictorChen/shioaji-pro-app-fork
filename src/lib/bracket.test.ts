@@ -560,6 +560,18 @@ describe('trigger execution (main window only)', () => {
         expect(planOf(other.id).entryClosed).toBe(true);
     });
 
+    it('#177: a read-back Cancelled row with fills missing is not final — 刪單待確認, not closed', async () => {
+        const plan = await armed(1);
+        await tick(47000);
+        const partial = cacheTrade('fixture-f1', F1, [{ seq: '000001', quantity: 1 }]);
+        // says 2 filled but lists 1: a fill is missing, the row proves nothing
+        partial.status = { ...partial.status, status: 'Cancelled', cancel_quantity: 1, deal_quantity: 2 };
+        m.cancel.mockResolvedValueOnce(partial);
+        await expect(bracket.cancelRemainingEntry(planOf(plan.id))).resolves.toBe('unconfirmed');
+        expect(planOf(plan.id).entryClosed).toBe(false);
+        expect(planOf(plan.id).entryCancel).toBe('unconfirmed');
+    });
+
     it('a reload during an entry cancel becomes 刪單待確認 and the done plan still reconciles', async () => {
         const plan = await armed(1);
         await tick(47000);

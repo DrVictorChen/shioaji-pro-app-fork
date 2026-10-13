@@ -1,6 +1,8 @@
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+vi.mock('../hooks/use-flash-ladder', () => ({ useFlashLadder: () => ({ marks: new Map(), protectedQty: 0, background: false }) }));
+vi.mock('../lib/flash-conditional', () => ({ flashStopProtections: async () => ({ stopped: 0, blocked: [], failed: [] }) }));
 import type { Account, AccountedPosition } from '../lib/types/portfolio';
 import type { ContractInfo } from '../lib/types/contract';
 import type { Action, Trade } from '../lib/types/order';
