@@ -362,11 +362,16 @@ export function OrderTicket({
             if (!isSelectedAccountUnchanged(orderAccount)) {
                 throw new Error(ACCOUNT_CHANGED_MESSAGE);
             }
+            // when the entry really leaves — after the confirmation and every
+            // gate, at the request itself (#184): the background engine files
+            // the entry under this time's trading session
+            let entrySentAt = 0;
             const dispatch = { beforeDispatch: () => {
                 if (!isContextCurrent()) throw Object.assign(new Error(ORDER_CONTEXT_CHANGED_MESSAGE), { tradingGateRejected: true });
                 if (!sameServerMode()) throw Object.assign(new Error(SERVER_MODE_CHANGED_MESSAGE), { tradingGateRejected: true });
                 assertDayTradeStillAllowed();
                 if (!isSelectedAccountUnchanged(orderAccount)) throw Object.assign(new Error(ACCOUNT_CHANGED_MESSAGE), { tradingGateRejected: true });
+                entrySentAt = Date.now();
             } };
             if (bracketOwner === 'background') {
                 // still taken over right before the entry leaves (the setting
@@ -377,7 +382,6 @@ export function OrderTicket({
                 }
             }
             dispatch.beforeDispatch();
-            const entrySentAt = Date.now();
             const trade = isFutures
                 ? await placeFuturesOrder(contract, {
                       action,
