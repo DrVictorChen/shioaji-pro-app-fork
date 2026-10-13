@@ -146,16 +146,25 @@ it('a pending trigger on the ladder: click deletes it, drag moves it, never acro
     const chip = () => byTestId(r, 'flash-trigger-mark')[0]!;
     expect(text(chip())).toBe('2');
     const ev = (clientY: number) => ({ button: 0, clientY, preventDefault() {}, stopPropagation() {} });
-    // a click (no movement) deletes it
+    // a click (no movement) deletes it: the browser sends pointerdown, pointerup, then click
+    const stop = vi.fn();
     await act(async () => { chip().props.onPointerDown(ev(5 * 22 + 5)); });
     await act(async () => { fire('pointerup', ev(5 * 22 + 5)); });
+    expect(m.remove).not.toHaveBeenCalled();
+    await act(async () => { chip().props.onClick({ stopPropagation: stop }); });
     expect(m.remove).toHaveBeenCalledWith('tg-9');
+    // the click never reaches the 觸價 column's place handler
+    expect(stop).toHaveBeenCalled();
+    expect(m.add).not.toHaveBeenCalled();
     // drag needs the ladder armed
     await arm(r);
     await act(async () => { chip().props.onPointerDown(ev(5 * 22 + 5)); });
     await act(async () => { fire('pointermove', ev(2 * 22 + 5)); });
     await act(async () => { fire('pointerup', ev(2 * 22 + 5)); }); // row 2 = 108
     expect(m.modify).toHaveBeenCalledWith('tg-9', { price: 108 });
+    // the click that ends the drag is not a delete
+    await act(async () => { chip().props.onClick({ stopPropagation() {} }); });
+    expect(m.remove).toHaveBeenCalledTimes(1);
     // across the traded price (100): refused, nothing changed
     await act(async () => { chip().props.onPointerDown(ev(5 * 22 + 5)); });
     await act(async () => { fire('pointermove', ev(12 * 22 + 5)); });
@@ -253,6 +262,7 @@ it('a failed deletion is never announced as deleted', async () => {
     const ev = { button: 0, clientY: 115, preventDefault() {}, stopPropagation() {} };
     await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onPointerDown(ev); });
     await act(async () => { fire('pointerup', ev); });
+    await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onClick({ stopPropagation() {} }); });
     expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', title: '⚡ 觸價單刪除未確認' }));
 });
 
@@ -385,4 +395,34 @@ it('a crowded 觸價 cell keeps every mark with short labels', async () => {
     const r = await mount();
     expect(text(byTestId(r, 'flash-trigger-mark')[0]!)).toBe('1');
     expect(text(byTestId(r, 'flash-take-mark')[0]!)).toBe('利');
+});
+
+it('the preview uses the same entry / exit classification as placing (QA 10/13)', async () => {
+    // long 3 with protection on: the 觸賣 column is a 停損 exit (no protection), the 觸買 column an entry with it
+    const r = await mount({ order: PROTECT, net: 3 });
+    await arm(r);
+    const col = (side: 'buy' | 'sell', price: number) => r.root.findAll(n => n.type === 'div' && n.props['data-trigger'] === side)[110 - price]!;
+    expect(col('sell', 95).props.title).toBe('觸價賣：成交價 ≤ 95.00 時市價賣出平倉（出場單，不附停損停利）（不是限價）');
+    expect(col('buy', 105).props.title).toBe('觸價買：成交價 ≥ 105.00 時市價買進（附停損停利）（不是限價）');
+    await trig(r, 'sell', 95);
+    expect(m.add.mock.calls[0]![0]).toMatchObject({ action: 'Sell', octype: 'Cover' });
+    expect(m.bracket).not.toHaveBeenCalled();
+});
+
+it('a view-only popout says so before any click: no arming, no 全刪, no trigger delete', async () => {
+    const popout = await import('../lib/popout-trading');
+    const spy = vi.spyOn(popout, 'popoutTradingBlocked').mockReturnValue(popout.POPOUT_VIEW_ONLY);
+    const mark: LadderMark = { id: 'tg-9', side: 'buy', price: 105, quantity: 1, kind: 'trigger', protects: false, paused: false, pending: false,
+        editable: true, background: false, condition: 'above', title: '觸價單' };
+    m.marks = new Map([['105.00', { buy: [mark], sell: [] }]]);
+    m.protectedQty = 1;
+    const r = await mount({ order: PROTECT });
+    expect(text(byTestId(r, 'flash-view-only')[0]!)).toBe(popout.POPOUT_VIEW_ONLY);
+    const armBtn = button(r, '彈出視窗僅供檢視')!;
+    expect(armBtn.props.disabled).toBe(true);
+    expect(button(r, '全刪')!.props.disabled).toBe(true);
+    await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onClick({ stopPropagation() {} }); });
+    expect(m.remove).not.toHaveBeenCalled();
+    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: popout.POPOUT_VIEW_ONLY }));
+    spy.mockRestore();
 });

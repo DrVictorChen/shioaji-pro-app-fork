@@ -27,6 +27,7 @@ import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, fla
 import type { TriggerValidity } from '../lib/trigger-engine';
 import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger, flashStopProtections } from '../lib/flash-conditional';
 import { FlashProtectStrip } from './flash-protect';
+import { popoutTradingBlocked } from '../lib/popout-trading';
 import {
     type ReactNode,
     memo,
@@ -86,7 +87,9 @@ interface MarkGroup {
 
 const markQty = (ms: LadderMark[]) => ms.reduce((n, m) => n + m.quantity, 0);
 
-function MarkChips({ side, price, marks, dragging, onMarkDown, inline = false }: {
+function MarkChips({ side, price, marks, dragging, onMarkDown, onMarkClick, inline = false }: {
+    /** a plain click (no drag): delete */
+    onMarkClick: (g: MarkGroup) => void;
     /** in the 觸價 column (centred) instead of on the volume cell's edge */
     inline?: boolean;
     side: 'buy' | 'sell';
@@ -110,7 +113,8 @@ function MarkChips({ side, price, marks, dragging, onMarkDown, inline = false }:
                 triggers.every(m => m.paused) ? styles.markPaused : ''} ${triggers.some(m => m.pending) ? styles.markPending : ''} ${dragging ? styles.markDragging : ''}`}
             title={triggers.map(m => m.title).join('\n')}
             onPointerDown={e => onMarkDown({ side, price, marks: triggers }, e)}
-            onClick={e => e.stopPropagation()}
+            // the click itself deletes (never the column's own place handler)
+            onClick={e => { e.stopPropagation(); onMarkClick({ side, price, marks: triggers }); }}
         >
             {!crowded && (triggers.some(m => m.protects) ? <ShieldCheck size={8} aria-hidden /> : <Crosshair size={8} aria-hidden />)}
             {markQty(triggers)}
@@ -187,14 +191,15 @@ interface RowProps {
     trigBlock: string | null;
     /** which way a trigger at this price fires (from the traded price); null: unknown */
     trigDir: 'above' | 'below' | null;
-    /** 「市價」「市價・附停損停利」: what a fired trigger sends */
-    trigNote: string;
+    /** what a fired trigger sends, per side (same classification as placing it) */
+    trigNote: { buy: string; sell: string };
     buyMarks: LadderMark[];
     sellMarks: LadderMark[];
     /** this row is where a dragged trigger would go */
     drop: 'ok' | 'bad' | null;
     dragSide: 'buy' | 'sell' | null;
     onMarkDown: (g: MarkGroup, e: { button: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
+    onMarkClick: (g: MarkGroup) => void;
 }
 
 const FlashRow = memo(function FlashRow({
@@ -228,6 +233,7 @@ const FlashRow = memo(function FlashRow({
     drop,
     dragSide,
     onMarkDown,
+    onMarkClick,
 }: RowProps) {
     const vol = compact ? fmtCompactInt : fmtInt;
     const exact = (v: number | undefined) => (compact && v !== undefined && v >= 10_000 ? `${fmtInt(v)} 股` : undefined);
@@ -235,7 +241,7 @@ const FlashRow = memo(function FlashRow({
     const op = trigDir === 'above' ? '≥' : '≤';
     const trigTitle = (side: 'buy' | 'sell') => !armed ? '先啟用閃電下單'
         : trigBlock ?? (trigDir === null ? '尚未收到成交價，或此價等於成交價（會立刻觸發），不能掛觸價'
-            : `觸價${side === 'buy' ? '買' : '賣'}：成交價 ${op} ${text} 時${trigNote}${side === 'buy' ? '買進' : '賣出'}（不是限價）`);
+            : `觸價${side === 'buy' ? '買' : '賣'}：成交價 ${op} ${text} 時${trigNote[side]}（不是限價）`);
     const trigCell = (side: 'buy' | 'sell', marks: LadderMark[]) => (
         <div
             className={`${styles.trigCell} ${armed && !trigBlock && trigDir !== null ? '' : styles.disabledCell}`}
@@ -244,7 +250,7 @@ const FlashRow = memo(function FlashRow({
             title={trigTitle(side)}
             onClick={() => onCell(side === 'buy' ? 'Buy' : 'Sell', price, true)}
         >
-            {marks.length > 0 && <MarkChips inline side={side} price={price} marks={marks} dragging={dragSide === side} onMarkDown={onMarkDown} />}
+            {marks.length > 0 && <MarkChips inline side={side} price={price} marks={marks} dragging={dragSide === side} onMarkDown={onMarkDown} onMarkClick={onMarkClick} />}
         </div>
     );
     const altHint = (side: 'buy' | 'sell') => (!columns && armed && !trigBlock ? `\nAlt＋點＝觸價${side === 'buy' ? '買' : '賣'}（成交價 ${op} ${text}）` : '');
@@ -286,7 +292,7 @@ const FlashRow = memo(function FlashRow({
                 <span className={styles.cellText} title={exact(bid)}>
                     {bid !== undefined ? vol(bid) : ''}
                 </span>
-                {!columns && buyMarks.length > 0 && <MarkChips side='buy' price={price} marks={buyMarks} dragging={dragSide === 'buy'} onMarkDown={onMarkDown} />}
+                {!columns && buyMarks.length > 0 && <MarkChips side='buy' price={price} marks={buyMarks} dragging={dragSide === 'buy'} onMarkDown={onMarkDown} onMarkClick={onMarkClick} />}
             </div>
             <div
                 className={`${styles.priceCell} ${
@@ -325,7 +331,7 @@ const FlashRow = memo(function FlashRow({
                 <span className={styles.cellText} title={exact(ask)}>
                     {ask !== undefined ? vol(ask) : ''}
                 </span>
-                {!columns && sellMarks.length > 0 && <MarkChips side='sell' price={price} marks={sellMarks} dragging={dragSide === 'sell'} onMarkDown={onMarkDown} />}
+                {!columns && sellMarks.length > 0 && <MarkChips side='sell' price={price} marks={sellMarks} dragging={dragSide === 'sell'} onMarkDown={onMarkDown} onMarkClick={onMarkClick} />}
             </div>
             <div className={styles.chipCell}>
                 {mySell > 0 && (
@@ -1027,7 +1033,23 @@ export function FlashOrder({
     // #216 觸價單與限價同時可點：外側觸買／觸賣欄（預設）或 Alt＋點買量／賣量
     const triggerLayout = panelOrder.triggerLayout ?? 'columns';
     const trigRef = triggerPriceRef.current;
-    const trigNote = `${triggerSendText(triggerSendSetting, { market, odd, mktPriceType })}${protect.on && !protectBlock ? '（附停損停利）' : ''}`;
+    // the same entry / exit classification as placing it (QA 10/13: the
+    // preview said 附停損停利 for what became a 停損 exit)
+    const trigNoteFor = (action: Action): string => {
+        const sendText = triggerSendText(triggerSendSetting, { market, odd, mktPriceType });
+        const word = action === 'Buy' ? '買進' : '賣出';
+        const held = heldRef.current;
+        const effect = positionEffect(held.held, action, Math.max(1, qty));
+        const intent = triggerIntent({ market, octype: clickOctype, effect, exitSafe: held.exitSafe });
+        if (intent.role === 'exit') return `${sendText}${word}平倉（出場單，不附停損停利）`;
+        const pEffect = protectEffect(effect, market, clickOctype);
+        if (protect.on && !protectBlock && pEffect === 'reverse') return `${sendText}${word}（自動停損停利開啟時反手不送）`;
+        return `${sendText}${word}${protect.on && !protectBlock && pEffect === 'open' ? '（附停損停利）' : ''}`;
+    };
+    const trigNoteBuy = trigNoteFor('Buy');
+    const trigNoteSell = trigNoteFor('Sell');
+    const trigNote = useMemo(() => ({ buy: trigNoteBuy, sell: trigNoteSell }), [trigNoteBuy, trigNoteSell]);
+    const viewOnly = popoutTradingBlocked();
     const trigWord = triggerBlock ? '觸價停用（信用條件）' : triggerLayout === 'columns' ? '點觸買／觸賣=觸價單' : 'Alt＋點=觸價單';
     const openProtectRef = useRef<(() => void) | null>(null);
     const ladderBackgroundRef = useRef(ladder.background);
@@ -1293,6 +1315,14 @@ export function FlashOrder({
     }, []);
 
     const [drag, setDrag] = useState<{ group: MarkGroup; over: number | null } | null>(null);
+    // the click that ends a drag is not a delete
+    const draggedAt = useRef(0);
+    const onMarkClick = useCallback((g: MarkGroup) => {
+        if (Date.now() - draggedAt.current < 400) return;
+        const blocked = popoutTradingBlocked();
+        if (blocked) { notify({ kind: 'err', title: '⚡ 觸價單未刪除', body: blocked }); return; }
+        void cancelMarks(g);
+    }, [cancelMarks]);
     const dragCleanupRef = useRef<(() => void) | null>(null);
     useEffect(() => () => dragCleanupRef.current?.(), []);
     const onMarkDown = useCallback((g: MarkGroup, e: { button: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => {
@@ -1322,7 +1352,9 @@ export function FlashOrder({
         const up = (ev: { clientY: number }) => {
             cleanup();
             setDrag(null);
-            if (!moved) { void cancelMarks(g); return; }
+            // a plain click is the button's own click (deletes); only a drag moves
+            if (!moved) return;
+            draggedAt.current = Date.now();
             const target = rowAt(ev.clientY);
             if (target !== null) void moveMarks(g, target);
         };
@@ -1356,6 +1388,8 @@ export function FlashOrder({
     const cancelAt = useCallback(async (action: Action, price: number) => {
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
+        const viewOnlyNow = popoutTradingBlocked();
+        if (viewOnlyNow) { notify({ kind: 'err', title: '⚡ 刪單未送出', body: viewOnlyNow }); return; }
         const code = contractRef.current.code;
         const targets = tradesRef.current.filter(
             (t) =>
@@ -1389,6 +1423,8 @@ export function FlashOrder({
     const cancelSymbol = useCallback(async () => {
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
+        const viewOnlyNow = popoutTradingBlocked();
+        if (viewOnlyNow) { notify({ kind: 'err', title: '⚡ 全刪未送出', body: viewOnlyNow }); return; }
         const code = contractRef.current.code;
         // the context is fixed at the click: a product switched meanwhile cancels nothing of it
         const guard = cancelGuard();
@@ -1698,11 +1734,14 @@ export function FlashOrder({
                 <span className={styles.rowBreak} aria-hidden />
                 <button
                     className={styles.armBtn[armedView ? 'on' : 'off']}
-                    disabled={!live || !activeAccount || !!paused}
+                    disabled={!live || !activeAccount || !!paused || !!viewOnly}
+                    title={viewOnly ?? undefined}
                     onClick={() => { armedAccountKey.current = accountKey; armedKey.current = armKey; armedMemQty.current = rememberedQty; setArmed(!armedView); }}
                 >
                     {!live ? (
                         '⚠ 行情或交易狀態未連線'
+                    ) : viewOnly ? (
+                        '彈出視窗僅供檢視'
                     ) : armedView ? (
                         <>
                             <Zap size={10} style={{ verticalAlign: '-1px' }} />{' '}
@@ -1749,8 +1788,8 @@ export function FlashOrder({
                 )}
                 <button
                     className={styles.cancelAllBtn}
-                    disabled={!!paused || (workingCount === 0 && otherLotOrders === 0 && ladder.protectedQty === 0)}
-                    title={ladder.protectedQty > 0 ? '刪除這個商品的委託，並取消這個面板的停損停利' : undefined}
+                    disabled={!!paused || !!viewOnly || (workingCount === 0 && otherLotOrders === 0 && ladder.protectedQty === 0)}
+                    title={viewOnly ?? (ladder.protectedQty > 0 ? '刪除這個商品的委託，並取消這個面板的停損停利' : undefined)}
                     onClick={() => void cancelSymbol()}
                 >
                     全刪{workingCount > 0 && !paused ? ` ${workingCount}` : ''}
@@ -1768,6 +1807,11 @@ export function FlashOrder({
                     />
                 )}
             </div>
+            {viewOnly && !paused && (
+                <div className={styles.creditBanner.bad} data-testid='flash-view-only'>
+                    <Ban size={10} aria-hidden /><span>{viewOnly}</span>
+                </div>
+            )}
             {pos && !paused && (
                 <div className={styles.posBar}>
                     <span className={pos.net > 0 ? styles.posLong : styles.posShort}
@@ -1888,6 +1932,7 @@ export function FlashOrder({
                             drop={drop}
                             dragSide={drag && keyOf(drag.group.price) === key ? drag.group.side : null}
                             onMarkDown={onMarkDown}
+                            onMarkClick={onMarkClick}
                         />
                     );
                 })}
