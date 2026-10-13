@@ -15,6 +15,8 @@ import {
     History,
     Info,
     ListChecks,
+    OctagonX,
+    Settings2,
     Pause,
     Pencil,
     Play,
@@ -50,13 +52,20 @@ import {
 } from '../lib/trigger-engine';
 import { accountTag, bgBracketRows, KIND_LABEL, rowRunner, rowsForTab, TABS, type CondRow, type CondTab } from '../lib/conditional/rows';
 import { useConditionalView, useStreamStatus, type ConditionalView } from '../lib/conditional/use-conditional';
+import { useConditionalSettings } from '../lib/conditional/settings';
+import { useBracketPolicy } from '../lib/conditional/bracket-policy';
+import { flattenSummary, pauseAll, pauseAllEligible, runFlatten } from '../lib/conditional/runtime';
+import { dismissFlattenLeftover } from '../lib/conditional/flatten-leftovers';
+import { currentProtectionEnv } from '../lib/protection-env';
+import { pauseAllButton } from '../lib/conditional/pause-all';
 import { useBackgroundPrograms, useBackgroundSetting } from '../lib/execution/background';
 import { bracketViews } from '../lib/execution/bracket-contract';
 import { fmtClock, fmtNum } from '../lib/conditional/session';
 import type { ContractInfo } from '../lib/types/contract';
 import { PendingConfirmItemCard } from './pending-confirm';
 import { BracketRearm } from './background-bracket-status';
-import { NewConditionalDialog, SendControl, sendOf, ValidityControl, validityOf, type SendState, type ValidityState } from './conditional-form';
+import { ConditionalSettingsDialog, FlattenDialog } from './conditional-dialogs';
+import { FORM_DEFAULTS, NewConditionalDialog, SendControl, sendOf, ValidityControl, validityOf, type SendState, type ValidityState } from './conditional-form';
 import { useLastPrice } from './conditional-ui';
 import * as styles from './conditional-panel.css';
 
@@ -186,7 +195,7 @@ function RunnerTag({ row }: { row: CondRow }) {
 
 // ---- actions ----
 
-type Step = 'cancel' | 'send' | 'handled';
+type Step = 'cancel' | 'send' | 'handled' | 'retry';
 
 function RowActions({ row, expanded, onToggle, compact }: {
     row: CondRow;
@@ -251,6 +260,18 @@ function RowActions({ row, expanded, onToggle, compact }: {
         confirm.arm(null);
         void run(() => resolvePendingTrigger(pendingId, 'send', { allowUnpast }));
     };
+    const retry = () => {
+        if (src.type !== 'leftover') return;
+        if (confirm.step !== 'retry') { confirm.arm('retry'); return; }
+        if (!confirm.settled()) return;
+        confirm.arm(null);
+        const o = src.leftover.order;
+        void run(async () => {
+            if (currentProtectionEnv() !== src.leftover.env) throw new Error('伺服器或模擬／正式模式與全平時不同，未送出');
+            const r = await runFlatten({ type: 'code', codes: [o.code], account: o.account });
+            if (r.remaining.length || r.notSent.length || r.cancelFailed.length) throw new Error(flattenSummary(r));
+        }, '已再次平倉');
+    };
     const cancelLabel = src.type === 'bracket' ? '再按一次：移除並撤銷保護' : src.type === 'bgBracket' ? '再按一次：移除' : '再按一次：取消';
     return (
         <div className={compact ? styles.cardActions : styles.actions}>
@@ -281,7 +302,7 @@ function RowActions({ row, expanded, onToggle, compact }: {
             {a.rearm && (
                 <button type='button' className={styles.button.primary} onClick={onToggle} aria-expanded={expanded}
                     title='重新查詢持倉、確認口數後，在這個盤別重新開始盯停損停利；不會立即送單'>
-                    在新盤別重新啟用…
+                    重新啟用…
                 </button>
             )}
             {a.handled && (
@@ -289,6 +310,13 @@ function RowActions({ row, expanded, onToggle, compact }: {
                     title='停止追蹤這張括號單（包含部位與保護），不會送出或刪除任何委託；仍在委託中的單與部位請自行處理'
                     onClick={handled}>
                     {confirm.step === 'handled' ? '再按一次：確認我已自行處理' : '我已自行處理'}
+                </button>
+            )}
+            {a.retry && (
+                <button type='button' className={confirm.step === 'retry' ? styles.button.danger : styles.button.primary} disabled={busy}
+                    title='重新查詢委託與持倉，刪除此商品未成交委託後再平倉剩餘部位'
+                    onClick={retry}>
+                    {confirm.step === 'retry' ? '再按一次：確認再平倉' : '再平倉剩餘部位'}
                 </button>
             )}
             {a.reconcile && row.attention && src.type === 'bracket' && (
@@ -301,8 +329,9 @@ function RowActions({ row, expanded, onToggle, compact }: {
             {a.acknowledge && (
                 <button type='button' className={styles.button.plain} disabled={busy}
                     title='已在委託與持倉確認結果；不會送出任何委託'
-                    onClick={() => void run(() => src.type === 'bracket' ? acknowledgeBracketExit(src.plan.id)
-                        : src.type === 'exit' ? acknowledgeExit(src.exit.id) : Promise.resolve())}>
+                    onClick={() => void run(async () => src.type === 'bracket' ? acknowledgeBracketExit(src.plan.id)
+                        : src.type === 'exit' ? acknowledgeExit(src.exit.id)
+                            : src.type === 'leftover' ? dismissFlattenLeftover(src.leftover.id) : undefined)}>
                     我已核對
                 </button>
             )}
@@ -565,12 +594,12 @@ function TableRow({ row, expanded, onToggle }: { row: CondRow; expanded: boolean
     return (
         <>
             <tr className={cls || undefined}>
-                <td><ProductCell row={row} /></td>
+                <td className={styles.nameCell} title={row.code}><ProductCell row={row} /></td>
                 <td>{KIND_LABEL[row.kind]}<RunnerTag row={row} /></td>
                 <td><SideText side={row.side} /></td>
                 <td className={styles.mono}>{row.condition}</td>
                 <td className={styles.colPrice}><PriceCell row={row} /></td>
-                <td className={styles.tone[row.status.tone]}>{row.status.text}</td>
+                <td className={`${styles.tone[row.status.tone]} ${styles.statusCell}`}>{row.status.text}</td>
                 <td className={`${styles.muted} ${styles.colValidity}`}>{row.validity}</td>
                 <td className={styles.colAccount}><AccountText row={row} /></td>
                 <td className={styles.opsCell}><RowActions row={row} expanded={expanded} onToggle={onToggle} /></td>
@@ -674,6 +703,17 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
     const [tab, setTab] = useState<CondTab>('all');
     const [expanded, setExpanded] = useState<string | null>(null);
     const [creating, setCreating] = useState(false);
+    const [dialog, setDialog] = useState<'settings' | 'flatten' | null>(null);
+    const settings = useConditionalSettings();
+    useBracketPolicy(); // keeps 全部暫停 in line with the engine's pauseStopsExits
+    // the same rule as 全部暫停 itself
+    const legsOf = (r: CondRow): TriggerOrder[] => r.source.type === 'trigger' ? [r.source.trigger] : r.source.type === 'oco' ? r.source.triggers : [];
+    const eligible = view.rows.filter(r => r.source.type === 'bgBracket' ? r.actions.pause
+        : legsOf(r).some(t => !t.paused && !t.pending && pauseAllEligible(t, settings.pauseStopsExits)));
+    const anyPaused = view.rows.some(r => r.paused || legsOf(r).some(t => t.paused) || (r.source.type === 'bgBracket' && r.actions.resume));
+    const anyRunning = eligible.length > 0;
+    const pauseButton = pauseAllButton(anyRunning, anyPaused);
+    const pa = useRun();
     const rows = useMemo(() => rowsForTab(view, tab), [view, tab]);
     const toggle = (id: string) => setExpanded(e => e === id ? null : id);
     const status = runStatus(view);
@@ -685,6 +725,9 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
             <span className={styles.grow} />
             <button type='button' className={styles.iconButton.plain} title='新增條件單' aria-label='新增條件單' onClick={() => setCreating(true)}>
                 <Plus size={13} aria-hidden />
+            </button>
+            <button type='button' className={styles.iconButton.plain} title='設定' aria-label='設定' onClick={() => setDialog('settings')}>
+                <Settings2 size={13} aria-hidden />
             </button>
         </div>
     ) : (
@@ -700,6 +743,26 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
             <button type='button' className={styles.button.primary} onClick={() => setCreating(true)}>
                 <Plus size={13} aria-hidden />新增條件單
             </button>
+            {!nothing && (
+                <>
+                    <button type='button' className={styles.button.plain} onClick={() => setDialog('settings')}>
+                        <Settings2 size={13} aria-hidden />設定
+                    </button>
+                    <button type='button' className={styles.button.plain} disabled={pa.busy || pauseButton.disabled}
+                        title={settings.pauseStopsExits ? '暫停全部條件單（含停損停利；暫停前已觸發、正在送出的平倉單照常送出）'
+                            : '暫停新進場的條件單；停損停利保護繼續執行（可在設定修改）'}
+                        onClick={() => void pa.run(async () => {
+                            const r = await pauseAll(pauseButton.mode === 'pause');
+                            if (r.failed.length) throw new Error(r.failed.join('；'));
+                        })}>
+                        {pauseButton.mode === 'pause' ? <><Pause size={13} aria-hidden />全部暫停</> : <><Play size={13} aria-hidden />全部恢復</>}
+                    </button>
+                    <button type='button' className={styles.button.danger} onClick={() => setDialog('flatten')}>
+                        <OctagonX size={13} aria-hidden />全平並取消
+                    </button>
+                </>
+            )}
+            {pa.message && <span className={styles.message[pa.message.tone]}>{pa.message.text}</span>}
         </div>
     );
     return (
@@ -732,7 +795,10 @@ export function ConditionalPanel({ contract }: { contract?: ContractInfo | null 
                     </>
                 )}
             </div>
-            {creating && <NewConditionalDialog contract={contract ?? null} onClose={() => setCreating(false)} />}
+            {creating && <NewConditionalDialog contract={contract ?? null} onClose={() => setCreating(false)} defaults={{ ...FORM_DEFAULTS,
+                send: settings.defaultSend, validity: settings.defaultValidity, ocoMode: settings.ocoMode, quickQty: settings.quickQty }} />}
+            {dialog === 'settings' && <ConditionalSettingsDialog onClose={() => setDialog(null)} />}
+            {dialog === 'flatten' && <FlattenDialog contract={contract ?? null} rows={view.rows} onClose={() => setDialog(null)} />}
         </div>
     );
 }
