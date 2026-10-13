@@ -1,6 +1,6 @@
-// A popped-out window with the Agent Harness on: the order goes to the main
-// window (relay), never to this window's native bridge or plain HTTP; the
-// relay's not-sent / unknown meanings reach the caller unchanged.
+// A popped-out window with the Agent Harness on: the order goes through the
+// popout's own native command, never the main-window signer or plain HTTP;
+// its not-sent / unknown meanings reach the caller unchanged.
 import { beforeEach, expect, it, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({ invoke: vi.fn(), relay: vi.fn() }));
@@ -9,7 +9,7 @@ vi.mock('./agent-harness-state', () => ({ isAgentHarnessEnabled: () => true }));
 vi.mock('./server-identity', () => ({ serverIdentityVerified: () => true }));
 vi.mock('./trading-mirror-lease', () => ({ getTradingMirrorFresh: () => true }));
 vi.mock('./main-window-commands', () => ({ isMainWindow: () => false }));
-vi.mock('./order-relay', () => ({ relayOrder: m.relay }));
+vi.mock('./popout-order', () => ({ popoutOrderPost: m.relay }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: m.invoke }));
 const { apiPost } = await import('./api');
 

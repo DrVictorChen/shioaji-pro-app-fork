@@ -15,7 +15,6 @@ import { startBackgroundExecution } from './lib/execution/background';
 import { startOddSpreadService } from './lib/odd-spread-service';
 import { startTriggerEngine } from './lib/trigger-engine';
 import { startConditionalRuntime } from './lib/conditional/runtime';
-import { startOrderRelay } from './lib/order-relay';
 
 initTheme();
 startAnalytics();
@@ -29,8 +28,6 @@ startOddSpreadService();
 startBackgroundExecution();
 // #226 收盤前平倉 time orders run 全平並取消 in the executing main window
 startConditionalRuntime();
-// 彈出視窗（Agent Harness 開啟時）的委託由主視窗代送；主視窗回答、彈出視窗發送
-startOrderRelay();
 bootstrap();
 // #201 ③ dev only: `?mockPendingConfirm` shows fake 委託待確認 cards until the
 // background engine implements the contract. Never part of a release build.

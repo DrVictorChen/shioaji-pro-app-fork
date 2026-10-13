@@ -7,7 +7,7 @@ import { getTradingMirrorFresh } from './trading-mirror-lease';
 import { getServerModeVersion } from './server-info-store';
 import { classifyHttpOrderError } from './order-outcome';
 import { isMainWindow } from './main-window-commands';
-import { relayOrder } from './order-relay';
+import { popoutOrderPost } from './popout-order';
 
 // resolved per request — the server port can move at runtime (e.g. the boot
 // flow discovers the default port occupied and starts on a fallback), and a
@@ -327,14 +327,13 @@ export async function apiPost<T>(
         const bodyText = JSON.stringify(body);
         let proxied: { status: number; body: string; headers?: Record<string, string> };
         if (!isMainWindow()) {
-            // a popped-out window: the main window signs and sends it (its
-            // order confirmation already happened here). Never resent; no
-            // answer → outcome unknown; main window absent → not sent.
+            // a popped-out window: its own narrower native command (flash
+            // popouts only, order endpoints only, one-time id, approved server
+            // mode — checked natively). Never resent; not sent / unknown kept.
             if (opts?.agentInitiated) {
                 throw Object.assign(new Error('這個操作只能在主視窗執行，這筆沒有送出'), { mutationNotStarted: true });
             }
-            // the caller's checks run after the main window answered the ping, right before it leaves
-            proxied = await relayOrder(path, bodyText, beforeDispatch);
+            proxied = await popoutOrderPost(path, bodyText, beforeDispatch);
             return finishProxied<T>(proxied, path, opts?.onResponse);
         }
         const { invoke } = await import('@tauri-apps/api/core');
