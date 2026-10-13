@@ -9,8 +9,7 @@
 <meta property="og:description" content="AI Agent × Shioaji，開創你的交易 Pro 世代｜每一筆下單都需要你的核可。">
 <meta property="og:image" content="https://sinotrade.github.io/shioaji-pro-app/og-shioaji-pro.png">
 <meta property="og:type" content="website">
-<meta name="theme-color" content="#F6F3EC" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#15213B" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F6F3EC">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="alternate icon" type="image/x-icon" href="favicon.ico">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -19,6 +18,8 @@
   var root = document.documentElement;
   root.classList.remove('no-js');
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches) { root.classList.add('mo'); setTimeout(function () { root.classList.add('go'); }, 1400); }
+  // 預設淺色；使用者切換過才用記住的設定
+  root.dataset.theme = 'light';
   try {
     var saved = localStorage.getItem('shioaji-pro-appearance');
     if (saved === 'dark' || saved === 'light') root.dataset.theme = saved;
