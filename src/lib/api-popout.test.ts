@@ -44,3 +44,8 @@ it('an Agent-initiated call never relays', async () => {
     await expect(apiPost('/api/v1/order/place_order', {}, { agentInitiated: true })).rejects.toMatchObject({ mutationNotStarted: true });
     expect(m.relay).not.toHaveBeenCalled();
 });
+
+it('an unreadable successful answer to a cancel is an unknown outcome, never "not sent"', async () => {
+    m.relay.mockResolvedValue({ status: 200, body: 'not json' });
+    await expect(apiPost('/api/v1/order/cancel_order', { trade_id: 't' })).rejects.toMatchObject({ mutationOutcomeUnknown: true });
+});

@@ -18,10 +18,15 @@ describe('popoutOrderPost', () => {
     });
 
     it('a window that is not a flash popout, a replayed id, another server mode: refused natively → not sent', async () => {
-        for (const reason of ['此視窗不能送出委託', '這筆請求已處理過，不會再送一次', '伺服器模式（模擬／正式）與彈出視窗確認時不同']) {
+        for (const reason of ['此視窗不能送出委託', '伺服器模式（模擬／正式）與彈出視窗確認時不同']) {
             const e = await popoutOrderPost('/p', '{}', undefined, deps(async () => { throw `ORDER_NOT_STARTED: ${reason}`; })).catch(x => x);
             expect(flags(e)).toEqual({ notStarted: true, unknown: false, message: reason });
         }
+    });
+
+    it('a duplicate id is never "not sent": the first one may be out', async () => {
+        const e = await popoutOrderPost('/p', '{}', undefined, deps(async () => { throw 'ORDER_DUPLICATE: 這筆請求已處理過，不會再送一次'; })).catch(x => x);
+        expect(flags(e)).toMatchObject({ notStarted: false, unknown: true });
     });
 
     it('a failure after the request may have left: outcome unknown, sent once, never retried', async () => {

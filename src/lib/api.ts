@@ -334,7 +334,15 @@ export async function apiPost<T>(
                 throw Object.assign(new Error('這個操作只能在主視窗執行，這筆沒有送出'), { mutationNotStarted: true });
             }
             proxied = await popoutOrderPost(path, bodyText, beforeDispatch);
-            return finishProxied<T>(proxied, path, opts?.onResponse);
+            try {
+                return await finishProxied<T>(proxied, path, opts?.onResponse);
+            } catch (error) {
+                // the request went out: an unreadable answer is an unknown outcome
+                // for every popout mutation (cancel / update too), never "not sent"
+                const e = error as Record<string, unknown> | null;
+                if (e && typeof e === 'object' && (e.mutationNotStarted === true || e.mutationOutcomeUnknown === true || typeof e.status === 'number')) throw error;
+                throw Object.assign(error instanceof Error ? error : new Error(String(error)), { mutationOutcomeUnknown: true as const });
+            }
         }
         const { invoke } = await import('@tauri-apps/api/core');
         beforeDispatch();

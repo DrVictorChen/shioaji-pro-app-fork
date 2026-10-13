@@ -15,6 +15,7 @@ import { knownServerInfo } from './server-info-store';
 export interface PopoutReply { status: number; body: string; headers?: Record<string, string> }
 
 export const NOT_STARTED_MARKER = 'ORDER_NOT_STARTED:';
+export const DUPLICATE_MARKER = 'ORDER_DUPLICATE:';
 export const POPOUT_UNKNOWN = '委託結果不確定（彈出視窗送出後沒有結果）；請到委託查詢核對，不要直接重送';
 export const POPOUT_UNSUPPORTED = '這個版本的 App 還不能從彈出視窗下單，這筆沒有送出；請在主視窗操作或更新 App';
 
@@ -46,6 +47,8 @@ export async function popoutOrderPost(path: string, body: string, beforeSend?: (
     } catch (error) {
         const message = String(error instanceof Error ? error.message : error);
         if (message.startsWith(NOT_STARTED_MARKER)) throw notStarted(message.slice(NOT_STARTED_MARKER.length).trim());
+        // the same id again (never sent by this code): it may already be out
+        if (message.startsWith(DUPLICATE_MARKER)) throw unknownOutcome(`${message.slice(DUPLICATE_MARKER.length).trim()}；委託結果不確定，請到委託查詢核對，不要直接重送`);
         // an App build without the command: the IPC refused it, nothing left
         if (/command flash_popout_order_post not found/i.test(message)) throw notStarted(POPOUT_UNSUPPORTED);
         throw unknownOutcome(`${POPOUT_UNKNOWN}（${message}）`);
