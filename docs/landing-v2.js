@@ -77,7 +77,7 @@
     String(body || '').split(/\r?\n/).forEach(function (line) {
       var m = /^###\s+(.+)$/.exec(line);
       if (!m) return;
-      var t = m[1].replace(/[（(]#[\d、,#\s]+[）)]/g, '').replace(/[`*_~\[\]<>#]/g, '').replace(/\s+/g, ' ').trim();
+      var t = m[1].replace(/[，,、]\s*#\d+(?=\s*[）)])/g, '').replace(/[（(]#[\d、,#\s]+[）)]/g, '').replace(/[`*_~\[\]<>#]/g, '').replace(/\s+/g, ' ').trim();
       if (!t || /驗證範圍/.test(t)) return;
       var key = t.split(/[：:]/)[0];
       if (seen[key]) return;

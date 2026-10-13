@@ -416,7 +416,7 @@
   <div class="wrap">
     <div class="sec-head">
       <h2 id="trade-h">看盤下單，本身就做得夠好</h2>
-      <p>就算不用 Agent，Shioaji Pro 也是一個完整的台股看盤下單 App：現股、零股、在 K 線上掛單，自選、持倉、委託放在旁邊。</p>
+      <p>就算不用 Agent，Shioaji Pro 也是一個完整的台股看盤下單 App：現股、零股、觸價與停損停利、條件單、在 K 線上掛單，自選、持倉、委託放在旁邊。</p>
     </div>
     <div class="feature">
       <div class="f-text">
@@ -462,6 +462,37 @@
           </div>
         </div>
       </figure>
+    </div>
+
+<div class="feature flip">
+      <div class="f-text">
+        <h3>觸價單、停損停利，一樣點價格就好<span class="tag">v0.1.53</span></h3>
+        <p>價格梯最外側多了「觸買」「觸賣」兩欄，點哪一格就在那個價位掛觸價單；梯子上會標出你的觸價單，點一下刪除、拖到別的價位就改價。打開「自動停損停利」，設好停損、停利各幾檔，也可以加移動停損，之後每一筆閃電進場成交，就依實際成交價自動掛上保護。</p>
+        <ul class="pts">
+          <li><svg class="i"><use href="#i-check"/></svg>按平倉或全刪，會先取消這筆保護，不留下多餘的出場單</li>
+          <li><svg class="i"><use href="#i-check"/></svg>數量、效期、倉別都收進齒輪，畫面更清爽</li>
+          <li><svg class="i"><use href="#i-check"/></svg>進場前照你的下單確認設定詢問，每一筆下單都需要你的核可</li>
+        </ul>
+      </div>
+      <figure class="fshot fshot-duo">
+        <div class="duo-imgs"><img src="images/release-0.1.53-flash-trigger-ladder.webp" width="632" height="1672" alt="閃電下單價格梯：最外側為觸買、觸賣欄，梯子上標出觸價單、停損與停利；帳號與持倉已遮蔽。" loading="lazy" decoding="async"><img src="images/release-0.1.53-flash-protect.webp" width="632" height="1672" alt="自動停損停利設定：停損 4 檔、停利 12 檔、勾選移動停損。" loading="lazy" decoding="async"></div>
+        <figcaption>左：觸價欄與停損（損）、停利（利）標記；右：自動停損停利設定（示範資料，已開隱私模式）</figcaption>
+      </figure>
+    </div>
+
+<div class="feature">
+      <div class="f-text">
+        <h3>條件單集中管理，關掉視窗也照常保護<span class="tag">v0.1.53</span></h3>
+        <p>新的「條件單管理」面板把觸價單、二擇一、括號單和時間條件放在一起，看得到現價離條件還差多少，可以修改、暫停或取消；已穿價、結果不明這類需要你決定的事會置頂提醒。條件成立時由 App 照你的設定送出，協助你交易；按「建立」就是核可這一筆，每一筆下單都需要你的核可。</p>
+        <ul class="pts">
+          <li><svg class="i"><use href="#i-check"/></svg><span><b>括號單</b>進場成交後自動掛停損，停利最多分三層，可加移動停損與保本</span></li>
+          <li><svg class="i"><use href="#i-check"/></svg><span><b>時間條件</b>指定時間送單，或收盤前幾分鐘全平並取消</span></li>
+          <li><svg class="i"><use href="#i-check"/></svg><span><b>全平並取消</b>先列出會取消、刪除、平倉的項目，確認後才執行，不會反手開倉</span></li>
+          <li><svg class="i"><use href="#i-check"/></svg><span><b>背景持續執行（實驗）</b>預設關閉；開啟後由 App 在背景盯價，關掉視窗也照常保護，結果不明的委託絕不自動重送</span></li>
+        </ul>
+      </div>
+      <figure class="fshot fshot-form"><img src="images/release-0.1.53-cond-bracket.webp" width="1072" height="1278" alt="新增括號單：限價進場買進 3 口、停損成交價減 20 檔、分批停利、移動停損與保本設定，下方註明按建立即核可這筆下單。" loading="lazy" decoding="async"><figcaption>新增括號單（示範資料）</figcaption></figure>
+      <figure class="fshot fshot-wide"><img src="images/release-0.1.53-cond-panel-1200.webp" srcset="images/release-0.1.53-cond-panel-1200.webp 1200w, images/release-0.1.53-cond-panel-2400.webp 2400w" sizes="(max-width: 1160px) 92vw, 1080px" width="1200" height="413" alt="條件單管理面板：上方「需要你處理」列出盤別已更換、結果不明、已穿價與異常成交，下方是執行中的觸價單與括號單；帳戶已遮蔽。" loading="lazy" decoding="async"><figcaption>條件單管理面板：需要你處理的事置頂（示範資料，已開隱私模式）</figcaption></figure>
     </div>
 
 <div class="feature flip">
@@ -620,7 +651,7 @@
     <div class="feature">
       <div class="f-text">
         <h3 id="layout-h">版面自己排</h3>
-        <p>從「新增面板」搜尋要的面板加進來，拖曳、調整大小；排好後在「版面庫」存成自己的版面，下次一鍵套用。App 也內建十多組版面，例如標準看盤、當沖交易、閃電矩陣、雙圖對照。多螢幕的話，把面板彈出成獨立視窗。</p>
+        <p>從「新增面板」搜尋要的面板加進來，拖曳、調整大小；排好後在「版面庫」存成自己的版面，下次一鍵套用。App 也內建十多組版面，例如標準看盤、當沖交易、閃電矩陣、雙圖對照；v0.1.53 再加六組：期貨當沖、期現對照、零股存股、條件單監控、選擇權組合、盤勢總覽。多螢幕的話，把面板彈出成獨立視窗；彈出的閃電下單視窗也能直接點價、平倉、刪單，確認也在同一個視窗完成。</p>
         <ol class="caps" data-for="ws">
           <li>按「新增面板」，搜尋「閃電」</li>
           <li>加入閃電下單，拖邊框調整大小</li>
@@ -949,9 +980,9 @@ codex plugin add shioaji@sinotrade</pre>
   <div class="wrap">
     <div class="sec-head"><h2 id="releases-h">最新版本</h2><p>App 會自動更新；這裡是最近一版改了什麼。</p></div>
     <article class="rel card" data-rel>
-      <header class="rel-h"><b class="rel-ver" data-rel-ver>v0.1.52</b><time class="rel-date" data-rel-date datetime="2026-10-09">2026-10-09</time></header>
-      <ul class="rel-list" data-rel-list><li>閃電下單：連動群組、對應商品與價差對照</li><li>送單前再次確認伺服器模式</li><li>K 線圖表下單：信用條件與期貨當沖</li><li>K 線開高低收讀值</li><li>自選清單漲跌停亮燈</li></ul>
-      <div class="rel-links"><a class="btn ghost small" data-rel-url href="https://github.com/Sinotrade/shioaji-pro-app/releases/tag/v0.1.52">看完整更新說明</a><a class="btn ghost small" href="changelog.html">更新紀錄</a><a class="rel-all" href="https://github.com/Sinotrade/shioaji-pro-app/releases">所有版本</a></div>
+      <header class="rel-h"><b class="rel-ver" data-rel-ver>v0.1.53</b><time class="rel-date" data-rel-date datetime="2026-10-13">2026-10-13</time></header>
+      <ul class="rel-list" data-rel-list><li>閃電下單：觸價單與自動停損停利</li><li>條件單管理面板</li><li>新增六組預設版面</li><li>背景持續執行（實驗）</li><li>內建 Shioaji 升到 1.7.8</li></ul>
+      <div class="rel-links"><a class="btn ghost small" data-rel-url href="https://github.com/Sinotrade/shioaji-pro-app/releases/tag/v0.1.53">看完整更新說明</a><a class="btn ghost small" href="changelog.html">更新紀錄</a><a class="rel-all" href="https://github.com/Sinotrade/shioaji-pro-app/releases">所有版本</a></div>
     </article>
   </div>
 </section>
