@@ -205,7 +205,7 @@ export function ScannerPanel({
                     ))}
                 </div>
             )}
-            <div className={panel.panelBody}>
+            <div className={`${panel.panelBody} ${styles.body}`}>
                 {items.length === 0 && !error && (
                     <div className={styles.errorBox}>
                         <AsyncStatus

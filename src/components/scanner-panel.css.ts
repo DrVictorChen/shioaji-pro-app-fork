@@ -1,6 +1,6 @@
 // src/components/scanner-panel.css.ts
 
-import { style, styleVariants } from '@vanilla-extract/css';
+import { createContainer, style, styleVariants } from '@vanilla-extract/css';
 import { vars } from '../theme.css';
 
 export const switcher = style({
@@ -36,11 +36,21 @@ export const sw = styleVariants({
     ],
 });
 
+// 窄面板：類股 chip 讓位，避免代號被蓋住、價格溢出右緣
+const list = createContainer();
+const NARROW = `${list} (max-width: 14rem)`;
+
+export const body = style({
+    containerName: list,
+    containerType: 'inline-size',
+});
+
 // two-line rows: code+name stacked tight on the left, price/pct and
 // volume stacked on the right — no dead space between code and name
 export const row = style({
     display: 'grid',
-    gridTemplateColumns: '1.2rem minmax(0, 1fr) auto auto',
+    // 4em：代號欄保底寬度（6 碼代號），不再被壓成 0
+    gridTemplateColumns: '1.2rem minmax(4em, 1fr) auto auto',
     alignItems: 'center',
     columnGap: vars.space.xs,
     padding: `3px ${vars.space.sm}`,
@@ -64,10 +74,14 @@ export const scCode = style({
 });
 
 export const valueBlock = style({
+    // 固定第 4 欄：chip 隱藏時不往左遞補
+    gridColumn: 4,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'flex-end',
     whiteSpace: 'nowrap',
+    // 極窄時價格／漲幅折成兩行，而不是溢出右緣
+    '@container': { [NARROW]: { whiteSpace: 'normal' } },
 });
 
 export const rowPicked = style({
@@ -90,11 +104,15 @@ export const sectorTag = style({
     borderRadius: vars.radius.sm,
     padding: '1px 5px',
     whiteSpace: 'nowrap',
+    // 空間不足時 chip 先以省略號縮短，讓出代號與價格
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
     cursor: 'pointer',
     ':hover': {
         color: vars.color.accent,
         borderColor: vars.color.accent,
     },
+    '@container': { [NARROW]: { display: 'none' } },
 });
 
 export const errorBox = style({
