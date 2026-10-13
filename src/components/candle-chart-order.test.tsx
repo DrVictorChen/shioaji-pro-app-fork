@@ -144,6 +144,19 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => view?.unmount()); vi.unstubAllGlobals(); });
 
+it('#249 a 409 OrderOutcomeUnknown shows 結果不確定 (never 失敗) and is not retried', async () => {
+    m.place.mockRejectedValueOnce(Object.assign(new Error('委託結果不確定（HTTP 409 OrderOutcomeUnknown）：no ack'), { mutationOutcomeUnknown: true, orderOutcomeUnknown: true }));
+    await mount({ contract: stk });
+    await act(async () => { button(view.root, '點價買').props.onClick(); });
+    await clickChart();
+    await flush();
+    expect(m.place).toHaveBeenCalledOnce();
+    const notice = m.notify.mock.calls.at(-1)![0];
+    expect(notice.title).toBe('圖表下單結果不確定');
+    expect(notice.title + notice.body).not.toContain('失敗');
+    expect(notice.body).toContain('請勿重新下單');
+});
+
 it.each(['symbol', 'switch back', 'unit', 'account', 'unmount'])(
     'refuses a pending chart order at dispatch after %s changes', async change => {
         let release!: () => void;

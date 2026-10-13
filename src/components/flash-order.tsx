@@ -1,4 +1,5 @@
 import { canTrade } from '../lib/account-tradable';
+import { reconcileAfterUnknownOutcome, reportOrderError } from '../lib/order-outcome';
 import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
 import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 // src/components/flash-order.tsx — 閃電下單 price ladder (DOM trader).
@@ -60,6 +61,7 @@ import { flashAccountLabels, flashSymbolLabel } from '../lib/flash-display';
 import { flashQtyMemoryText, flashQtySlot, rememberedFlashQty, sanitizeFlashQtySetting, validFlashQty, withRememberedFlashQty, type FlashQtySetting } from '../lib/flash-qty-memory';
 import { expiryTime, isStockFuture, lotsPerContract, spreadOf } from '../lib/flash-link';
 import * as styles from './flash-order.css';
+import { orderStatusWithNumber } from '../lib/order-status-label';
 
 const ROW_H = 22; // must match row height in flash-order.css.ts
 const EDGE = 2; // auto-recenter when last price gets this close to the edge
@@ -1190,13 +1192,13 @@ export function FlashOrder({
                 title: `⚡ ${oddLot ? '零股' : ''}${label ?? ''}${action === 'Buy' ? '買進' : '賣出'}已送出`,
                 body: `${capturedContract.code} ${q}${oddLot ? ' 股' : ''} @ ${
                     price === null ? '市價' : fmtPrice(price)
-                }${conditions ? ` · ${conditions}` : ''} (${trade.status.status})${
+                }${conditions ? ` · ${conditions}` : ''}（${orderStatusWithNumber(trade)}）${
                     prot.protect.on ? ' · 減倉，未附加停損停利' : ''}`,
             });
             onOrdersChangedRef.current?.();
         } catch (e) {
             if (accountChangedBeforeSend(e)) notifyAccountChangedBeforeSend();
-            else notify({ kind: 'err', title: '⚡ 閃電下單失敗', body: e instanceof Error ? e.message : String(e) });
+            else reportOrderError('⚡ 閃電下單', e, notify);
         } finally {
             inflightRef.current.delete(key);
             force();
@@ -1499,7 +1501,10 @@ export function FlashOrder({
             if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
             // 確定一筆都沒送出（例如確認期間伺服器模式變更）：照實說未送出
             else if ((error as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）', body: error instanceof Error ? error.message : String(error) });
-            else notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+            else {
+                notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+                reconcileAfterUnknownOutcome();
+            }
         } finally { inflightRef.current.delete(key); }
     }, [pos, stillPanelAccount, captureContext]);
 
@@ -1821,7 +1826,7 @@ export function FlashOrder({
                         title={market === 'S' && !privMoney ? `${Math.abs(pos.net).toLocaleString()} 股（含零股）` : undefined}>
                         {pos.net > 0 ? '多' : '空'} {maskMoney(market === 'S' ? fmtStockLots(Math.abs(pos.net)) : String(Math.abs(pos.net)), privMoney)}
                     </span>
-                    <span>@ {fmtPrice(pos.avg)}</span>
+                    <span>@ {maskMoney(fmtPrice(pos.avg), privMoney)}</span>
                     {(pos.mixed || pos.twoWay || pos.stale) && (
                         <span className={styles.posMixed} title={posNote(pos)}>
                             {posLabel(pos)}
@@ -1911,7 +1916,7 @@ export function FlashOrder({
                             mySell={mine?.sell ?? 0}
                             buyFill={fills?.buy ?? 0}
                             sellFill={fills?.sell ?? 0}
-                            avgMark={pos !== null && key === pos.avgKey}
+                            avgMark={pos !== null && !privMoney && key === pos.avgKey}
                             band={
                                 limitUp > 0 && key === keyOf(limitUp)
                                     ? 'up'

@@ -1,4 +1,5 @@
 import { RefreshButton } from './refresh-button';
+import { reportOrderError } from '../lib/order-outcome';
 import { useDisplayBook } from '../hooks/use-display-book';
 // src/components/combo-ticket.tsx — 期貨/選擇權組合單（managed 語意，issue #32）
 //
@@ -54,6 +55,7 @@ import * as css from './combo-ticket.css';
 import { DepthLadder } from './depth-ladder';
 import * as styles from './order-ticket.css';
 import * as panel from './panel.css';
+import { orderStatusLabel, orderStatusWithNumber } from '../lib/order-status-label';
 
 interface LegState {
     input: string;
@@ -560,15 +562,12 @@ export function ComboTicket() {
                 notify({
                     kind: 'ok',
                     title: `🎯 到價觸發第 ${attempts + 1} 次`,
-                    body: `${action === 'Buy' ? '買進' : '賣出'}組合（${dirSummary}）${qty} @ ${target}（${trade.status.status}）— 請確認成交，避免重複下單`,
+                    body: `${action === 'Buy' ? '買進' : '賣出'}組合（${dirSummary}）${qty} @ ${target}（${orderStatusWithNumber(trade)}）— 請確認成交，避免重複下單`,
                 });
                 // Active reports update normal orders; combo state can be reconciled manually.
             } catch (e) {
-                notify({
-                    kind: 'err',
-                    title: '到價下單失敗',
-                    body: e instanceof Error ? e.message : String(e),
-                });
+                // 結果不確定：停止到價監看，避免下一個報價再觸發一次（可能重複下單）
+                if (reportOrderError('組合單到價下單', e, notify) === 'unknown') setWatchOn(false);
             } finally {
                 watchRef.current.firing = false;
             }
@@ -624,15 +623,11 @@ export function ComboTicket() {
             notify({
                 kind: 'ok',
                 title: '🧩 組合單已送出',
-                body: `${trade.status.status} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,
+                body: orderStatusWithNumber(trade),
             });
             // Active reports update normal orders; combo state can be reconciled manually.
         } catch (e) {
-            notify({
-                kind: 'err',
-                title: '組合單失敗',
-                body: e instanceof Error ? e.message : String(e),
-            });
+            reportOrderError('組合單', e, notify);
         } finally {
             setBusy(false);
         }
@@ -1000,7 +995,7 @@ export function ComboTicket() {
                                 )
                                 .join(' ')}{' '}
                             {t.order.quantity} @ {fmtPrice(t.order.price)}（
-                            {t.status.status}）{' '}
+                            {orderStatusLabel(t.status.status)}）{' '}
                             <button
                                 className={dock.cancelBtn}
                                 onClick={() => void doCancel(t)}

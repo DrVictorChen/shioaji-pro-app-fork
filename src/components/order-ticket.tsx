@@ -2,6 +2,7 @@ import { canTrade } from '../lib/account-tradable';
 // src/components/order-ticket.tsx — buy/sell ticket with two-step EXECUTE.
 // Stock vs futures aware; price autofills from the live quote.
 
+import { classifyOrderError, OUTCOME_UNKNOWN_GUIDANCE, reconcileAfterUnknownOutcome, reportOrderError } from '../lib/order-outcome';
 import { Check, ChevronDown } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { ORDER_CONTEXT_CHANGED_MESSAGE, useOrderContext } from '../hooks/use-order-context';
@@ -66,6 +67,7 @@ import { fmtPrice } from '../lib/utils/format';
 import { roundToTick, stepPrice } from '../lib/utils/ticksize';
 import * as panel from './panel.css';
 import * as styles from './order-ticket.css';
+import { orderStatusWithNumber } from '../lib/order-status-label';
 
 const acctKey = (a: Account) => `${a.broker_id}-${a.account_id}`;
 
@@ -409,7 +411,7 @@ export function OrderTicket({
                   }, orderAccount, dispatch);
             setFeedback({
                 kind: 'ok',
-                text: `▸ ${trade.status.status} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,
+                text: `▸ ${orderStatusWithNumber(trade)}`,
             });
             if (bracketOn && entryAccount && bracketEnv && bracketOwner === 'background') {
                 const seq = trade.order.seqno || trade.order.id.slice(0, 8);
@@ -484,10 +486,17 @@ export function OrderTicket({
             }
             onPlaced();
         } catch (e) {
-            setFeedback({
-                kind: 'err',
-                text: `✕ ${e instanceof Error ? e.message : String(e)}`,
-            });
+            if (classifyOrderError(e) === 'unknown') {
+                // 委託可能已成立：不說失敗、不重送；提示對帳並自動更新委託一次
+                setFeedback({ kind: 'err', text: `⚠ 結果不確定：${OUTCOME_UNKNOWN_GUIDANCE}` });
+                reportOrderError('下單', e, notify);
+                onPlaced();
+            } else {
+                setFeedback({
+                    kind: 'err',
+                    text: `✕ ${e instanceof Error ? e.message : String(e)}`,
+                });
+            }
         } finally {
             setBusy(false);
         }
@@ -628,6 +637,7 @@ export function OrderTicket({
             }
             const ok: string[] = [];
             const fail: string[] = [];
+            const unknown: string[] = [];
             // 逐戶送出（sequential — deterministic order, per-order risk）
             for (const { account, qty: q } of allocation) {
                 const label = `${account.broker_id}-${maskAccountId(account.account_id, priv)}`;
@@ -693,31 +703,47 @@ export function OrderTicket({
                         `${label} ${q}${qtyUnit} #${trade.order.seqno || trade.order.id.slice(0, 8)}`,
                     );
                 } catch (e) {
+                    if (classifyOrderError(e) === 'unknown') {
+                        // 這一戶結果不確定：其餘帳戶不再送，先對帳（不重送）
+                        unknown.push(`${label}: 結果不確定（${e instanceof Error ? e.message : String(e)}）`);
+                        reconcileAfterUnknownOutcome();
+                        break;
+                    }
                     fail.push(
                         `${label}: ${e instanceof Error ? e.message : String(e)}`,
                     );
                     if ((e as { tradingGateRejected?: boolean })?.tradingGateRejected) break;
                 }
             }
+            const notSent = allocation.length - ok.length - fail.length - unknown.length;
+            const problems = [
+                ...unknown,
+                ...fail,
+                ...(unknown.length > 0 && notSent > 0 ? [`其餘 ${notSent} 戶未送出`] : []),
+            ];
+            const clean = problems.length === 0;
             notify({
-                kind: fail.length === 0 ? 'ok' : 'err',
-                title: `分倉${action === 'Buy' ? '買進' : '賣出'} ${contract.code}`,
+                kind: clean ? 'ok' : 'err',
+                title: unknown.length > 0
+                    ? `分倉${action === 'Buy' ? '買進' : '賣出'} ${contract.code} 結果不確定`
+                    : `分倉${action === 'Buy' ? '買進' : '賣出'} ${contract.code}`,
                 body:
                     `成功 ${ok.length}/${allocation.length} 戶` +
-                    (fail.length ? `\n${fail.join('\n')}` : ''),
+                    (problems.length ? `\n${problems.join('\n')}` : '') +
+                    (unknown.length > 0 ? `\n${OUTCOME_UNKNOWN_GUIDANCE}` : ''),
             });
             setFeedback(
-                fail.length === 0
+                clean
                     ? {
                           kind: 'ok',
                           text: `▸ 分倉完成 ${ok.length}/${allocation.length} 戶`,
                       }
                     : {
                           kind: 'err',
-                          text: `✕ 分倉 成功 ${ok.length}/${allocation.length} 戶\n${fail.join('\n')}`,
+                          text: `${unknown.length > 0 ? '⚠ 分倉結果不確定' : '✕ 分倉'} 成功 ${ok.length}/${allocation.length} 戶\n${problems.join('\n')}`,
                       },
             );
-            if (ok.length > 0) onPlaced();
+            if (ok.length > 0 || unknown.length > 0) onPlaced();
         } catch (e) {
             setFeedback({
                 kind: 'err',

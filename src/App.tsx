@@ -298,6 +298,10 @@ function BlockBody({
                         onShowOhlcChange={(show) =>
                             onSessionConfigChange(block.id, { chartOhlc: show ? undefined : false })
                         }
+                        showHighLow={block.chartHighLow !== false}
+                        onShowHighLowChange={(show) =>
+                            onSessionConfigChange(block.id, { chartHighLow: show ? undefined : false })
+                        }
                     />
                 </>
             ) : (

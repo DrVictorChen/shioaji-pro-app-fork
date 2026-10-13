@@ -119,6 +119,8 @@ export interface Block {
     chartOrder?: import('./chart-order-settings').ChartOrderPanelState;
     // K 棒讀值列（開高低收，#240）— false = 隱藏；缺省 = 顯示
     chartOhlc?: boolean;
+    // 可見範圍最高／最低標記（#240）— false = 隱藏；缺省 = 顯示
+    chartHighLow?: boolean;
 }
 
 export interface Workspace {
@@ -177,7 +179,7 @@ export function linkGroupSummary(w: Workspace): { id: LinkGroupId; code: string 
 }
 
 export type SessionConfigPatch = Partial<
-    Pick<Block, 'chartSession' | 'intradaySession' | 'chartOrder' | 'chartOhlc'>
+    Pick<Block, 'chartSession' | 'intradaySession' | 'chartOrder' | 'chartOhlc' | 'chartHighLow'>
 >;
 
 // 開彈出視窗時把面板的時段選擇帶進 URL（session=…）

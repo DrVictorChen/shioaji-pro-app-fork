@@ -5,7 +5,7 @@ const fixture = vi.hoisted(() => ({ accounts: ['A', 'B'].map(account_id => ({ ac
 vi.mock('../lib/account-store', () => ({ useAccounts: () => ({ accounts: fixture.accounts }), getAccountState: () => ({ accounts: fixture.accounts }) }));
 vi.mock('../lib/runtime', () => ({ getApiBase: () => 'http://account-pane-fixture.invalid' }));
 vi.mock('../lib/shioaji', () => ({ fetchInfo: async () => ({ simulation: false }), fetchProfitLoss: fixture.pnl, fetchProfitLossSummary: fixture.summary,
-    fetchSettlements: fixture.settlements, fetchTradingLimits: fixture.limits, fetchStockReserveSummary: fixture.reserve, fetchStockReserveDetail: fixture.reserve, fetchEarmarkingDetail: fixture.reserve, resolveContract: vi.fn() }));
+    fetchSettlements: fixture.settlements, fetchTradingLimits: fixture.limits, fetchStockReserveSummary: fixture.reserve, fetchStockReserveDetail: fixture.reserve, fetchEarmarkingDetail: fixture.reserve, resolveContract: vi.fn(), fetchFuturesRoots: vi.fn(async () => [{ root: 'NSF', name: '美國那斯達克100期貨' }]) }));
 import { AccountPane, type AccountRefreshControls } from './bottom-dock-account';
 let view: ReactTestRenderer | undefined;
 afterEach(async () => { await act(async () => view?.unmount()); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -79,4 +79,42 @@ it('#240 shows the contract name in realized rows even when the broker code is n
     await act(async () => { await Promise.resolve(); });
     expect(vi.mocked(resolveContract)).toHaveBeenCalledWith('REFJ6');
     expect(JSON.stringify(view!.toJSON())).toContain('測試期貨10');
+});
+it('#286 production realized rows (padded / long-form futures codes) show names and unresolved rows retry on refresh', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
+    vi.useFakeTimers();
+    fixture.accounts.forEach(a => { a.account_type = 'F'; a.account_id = `${a.account_id.split('-')[0]}-286`; });
+    const { resolveContract } = await import('../lib/shioaji');
+    let tmfOnline = false;
+    vi.mocked(resolveContract).mockReset().mockImplementation(async (code: string) => {
+        if (code === 'MXFJ6') return { code, name: '小型臺指期貨10' } as never;
+        if (code === 'TMFJ6' && tmfOnline) return { code, name: '微型臺指期貨10' } as never;
+        throw new Error(`404 ${code}`);
+    });
+    const fut = (id: number, code: string) => ({ id, code, pnl: 100 * id, quantity: -1, date: '20261012', direction: 'Sell', entry_price: 1, cover_price: 2, fee: 0, tax: 0 });
+    fixture.pnl.mockImplementation(async (_market, account) => account.account_id === 'A-286'
+        ? [fut(1, 'MXFJ6\u0000\u0000'), fut(2, 'TMF202610'), fut(3, 'NSFJ6 ')] : []);
+    fixture.summary.mockResolvedValue({ total: { pnl: 600 }, profitloss_sum: [] });
+    let controls: AccountRefreshControls | null = null;
+    const onRefreshControls = (value: AccountRefreshControls | null) => { controls = value; };
+    await act(async () => { view = create(createElement(AccountPane, { positions: [], market: 'F', scopeAccount: null, onRefreshControls })); });
+    const toggle = view!.root.findAll(node => node.type === 'button' && node.props.title === '展開明細')[0]!;
+    await act(async () => { toggle.props.onClick(); });
+    for (let i = 0; i < 5; i += 1) await act(async () => { await Promise.resolve(); });
+    let json = JSON.stringify(view!.toJSON());
+    expect(json).toContain('小型臺指期貨10');
+    expect(json).toContain('美國那斯達克100期貨');
+    expect(json).not.toContain('微型臺指期貨10');
+    // 查不到名稱的列滑過可看到券商原始代號（回報用）
+    expect(view!.root.findAll(node => node.type === 'span' && node.props.title === '原始代號 "TMF202610"')).toHaveLength(1);
+    expect(json).toContain('"MXFJ6"');
+    // 合約查詢恢復後，按重新整理（列內容不變）會補查還沒有名稱的列
+    tmfOnline = true;
+    vi.mocked(resolveContract).mockClear();
+    await act(async () => { vi.advanceTimersByTime(1600); await controls!.refresh(); });
+    for (let i = 0; i < 5; i += 1) await act(async () => { await Promise.resolve(); });
+    json = JSON.stringify(view!.toJSON());
+    expect(json).toContain('微型臺指期貨10');
+    expect(vi.mocked(resolveContract).mock.calls.map(c => c[0])).not.toContain('MXFJ6');
 });

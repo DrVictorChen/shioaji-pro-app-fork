@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
     positions: vi.fn(), trades: vi.fn(), balance: vi.fn(), margin: vi.fn(), subscribe: vi.fn(), health: vi.fn(),
     account: { account_type: 'S', broker_id: 'fixture', account_id: 'a', person_id: 'fixture', signed: true, username: 'fixture' },
 }));
-vi.mock('./account-store', () => ({ useAccounts: () => ({ accounts: [mocks.account, ...mocks.extraAccounts], selectedStock: mocks.account, selectedFutures: null }), getAccountState: () => ({ accounts: [mocks.account, ...mocks.extraAccounts] }), refreshAccounts: vi.fn() }));
+vi.mock('./account-store', () => ({ useAccounts: () => ({ accounts: [mocks.account, ...mocks.extraAccounts], selectedStock: mocks.account, selectedFutures: null }), getAccountState: () => ({ accounts: [mocks.account, ...mocks.extraAccounts] }), refreshAccounts: vi.fn(), subscribeAccounts: () => () => undefined }));
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://fixture.invalid' }));
 vi.mock('./boot', () => ({ subscribeTradeReports: mocks.subscribe }));
 vi.mock('./trade-observations', () => ({ onTradeResponse: (cb: typeof mocks.response) => { mocks.response = cb; return vi.fn(); } }));
@@ -132,6 +132,116 @@ it('mode discovery during an initial read waits for it and then queries newly tr
     expect(mocks.positions).toHaveBeenCalledWith('F', additional);
     expect(mocks.trades).toHaveBeenCalledWith('F', additional, { refresh: true });
     expect(mocks.margin).toHaveBeenCalledWith(additional);
+});
+
+it('#287 first mode discovery during the boot subscribe rereads instead of failing positions/orders', async () => {
+    // v0.1.52 boot: the early stream starts the first snapshot before boot's
+    // own /info check; the first known mode then lands while subscribe is in
+    // flight, so every account read was dropped in 0 ms and the startup
+    // timing settled as `failed: positions-loaded`.
+    const timing = await import('./startup-timing');
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    vi.advanceTimersByTime(1600);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReturnValueOnce(subscribed.promise);
+    mocks.positions.mockClear(); mocks.trades.mockClear(); mocks.balance.mockClear();
+    const before = store.getTradingState().queries.positions.updatedAt;
+    timing.beginTiming('restart', { replace: true });
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    const info = await import('./server-info-store');
+    // boot's own mode listener is mocked away: trading-state must reread itself
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    vi.advanceTimersByTime(10);
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    for (let i = 0; i < 10; i++) await flush();
+    const state = store.getTradingState();
+    for (const scope of ['positions', 'orders', 'account'] as const) {
+        expect(state.queries[scope].reasons).not.toContain('query-failed');
+        expect(state.queries[scope].error).toBeNull();
+    }
+    expect(state.queries.positions.updatedAt).not.toBe(before);
+    expect(mocks.positions).toHaveBeenCalledOnce();
+    expect(mocks.trades).toHaveBeenCalledOnce();
+    expect(mocks.balance).toHaveBeenCalledOnce();
+    const reads = timing.getActiveTiming()!.marks.filter(m => m.stage === 'account-read').map(m => m.detail ?? '');
+    expect(reads.join(' ')).not.toContain('failed');
+    expect(reads).toEqual(expect.arrayContaining(['S1 positions 0ms superseded', 'S1 positions 0ms']));
+    timing.endTiming('ok');
+});
+
+it.each(['ok', 'reread-fails'] as const)('#287 cold boot: positions-loaded waits for the reread instead of settling failed (%s)', async outcome => {
+    // fresh module graph, no snapshot yet (updatedAt === null)
+    vi.resetModules();
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReset().mockReturnValueOnce(subscribed.promise).mockResolvedValue(undefined);
+    mocks.positions.mockClear();
+    if (outcome === 'reread-fails') mocks.positions.mockReset().mockRejectedValue(new Error('500 broker'));
+    const cold = await import('./trading-state');
+    const timing = await import('./startup-timing');
+    const ready = await import('./frontend-ready');
+    const info = await import('./server-info-store');
+    expect(cold.getTradingState().queries.positions.updatedAt).toBeNull();
+    timing.beginTiming('restart', { replace: true });
+    const runId = timing.peekActiveTiming()!.id;
+    const positionsSignal = ready.appReadySignals().find(s => s.stage === 'positions-loaded')!;
+    ready.watchFrontendReady(runId, [positionsSignal]);
+    let run!: Promise<void>;
+    await act(async () => { run = cold.refreshTradingState(); });
+    // boot's listener and trading-state's own reread must coalesce into one
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    const bootReread = cold.refreshTradingStateForModeChange();
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    await act(async () => { await bootReread; });
+    for (let i = 0; i < 5; i++) await flush();
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(mocks.positions).toHaveBeenCalledOnce();
+    const ended = timing.getTimingHistory()[0]!;
+    expect(ended.id).toBe(runId);
+    if (outcome === 'ok') expect(ended.outcome).toBe('ok');
+    else {
+        expect(ended.outcome).toBe('partial');
+        expect(ended.detail).toContain('failed: positions-loaded');
+    }
+});
+
+it('#287 a boot subscribe dropped by the first mode discovery is resubscribed, not 回報未訂閱', async () => {
+    vi.advanceTimersByTime(1600);
+    let rejectSubscribe!: (e: Error) => void;
+    mocks.subscribe.mockReturnValueOnce(new Promise<undefined>((_, reject) => { rejectSubscribe = reject; }));
+    mocks.positions.mockClear();
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    rejectSubscribe(new Error('訂閱期間伺服器模式已變更，未送出請求；請重新訂閱'));
+    await act(async () => { await run; });
+    for (let i = 0; i < 10; i++) await flush();
+    const state = store.getTradingState();
+    expect(state.queries.positions.reasons).not.toContain('not-subscribed');
+    expect(state.queries.orders.reasons).not.toContain('not-subscribed');
+    expect(mocks.subscribe).toHaveBeenCalledTimes(3); // mount, dropped, reread
+    expect(mocks.positions).toHaveBeenCalledOnce();
+});
+
+it('a known-mode change during a read still records query-failed (only first discovery rereads)', async () => {
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+    vi.advanceTimersByTime(1600);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReturnValueOnce(subscribed.promise);
+    mocks.positions.mockClear();
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(store.getTradingState().queries.positions.reasons).toContain('query-failed');
+    expect(mocks.positions).not.toHaveBeenCalled();
 });
 
 it.each(['positions', 'orders', 'balance', 'margin'] as const)('discards an unsigned account %s response and stops later reads after a mode change', async stage => {

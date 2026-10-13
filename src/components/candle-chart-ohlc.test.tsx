@@ -215,4 +215,25 @@ describe('CandleChart K 棒讀值（#240）', () => {
         act(() => toggle(r).props.onClick());
         expect(field(r, 'row')).toBeUndefined();
     });
+
+    it('最高／最低標記（#240）：工具列開關跟面板設定，彈出視窗在元件內切換', async () => {
+        setNow('2026-10-08T09:16:00');
+        fetchMock.mockResolvedValue(DATA);
+        const hl = (r: ReactTestRenderer) =>
+            r.root.findAll((n) => n.type === 'button' && n.props['aria-label'] === '最高最低標記')[0]!;
+        let shown: boolean | undefined;
+        const onShowHighLowChange = (v: boolean) => (shown = v);
+        const r = mount({ contract: fut, showHighLow: true, onShowHighLowChange });
+        await flush();
+        expect(hl(r).props['aria-pressed']).toBe(true);
+        act(() => hl(r).props.onClick());
+        expect(shown).toBe(false);
+        act(() => r.update(createElement(CandleChart, { contract: fut, showHighLow: false, onShowHighLowChange } as any)));
+        expect(hl(r).props['aria-pressed']).toBe(false);
+        const popout = mount({ contract: fut });
+        await flush();
+        expect(hl(popout).props['aria-pressed']).toBe(true);
+        act(() => hl(popout).props.onClick());
+        expect(hl(popout).props['aria-pressed']).toBe(false);
+    });
 });

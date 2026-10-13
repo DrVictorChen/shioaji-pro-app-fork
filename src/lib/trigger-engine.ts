@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { reconcileAfterUnknownOutcome } from './order-outcome';
 import { createAccountQuery } from './account-query';
 // src/lib/trigger-engine.ts — client-side stop-loss / take-profit triggers.
 //
@@ -100,6 +101,7 @@ import { isOddLot, ODD_LOT_MAX_SHARES, oddLotMarketablePrice, SHARES_PER_LOT, sh
 import type { ContractBase } from './types/contract';
 import type { Account } from './types/portfolio';
 import type { Action, FuturesOCType, StockOrderLot, Trade } from './types/order';
+import { orderStatusLabel, orderStatusWithNumber } from './order-status-label';
 
 /** Why protection resumed with a first-tick check (#144). */
 /** `rearm`: a background trigger turned back on in a new session (#201). */
@@ -1550,13 +1552,14 @@ function exitSent(t: TriggerOrder, rec: ExitRecord, trade: Trade, lastPrice: num
         }
     }
     if (getConditionalSettings().notify) notify({ kind: 'ok', title: `${roleWord(t)}觸發`,
-        body: `${t.code} ${t.time ? '時間到' : `@${lastPrice}`} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)} (${trade.status.status})` });
+        body: `${t.code} ${t.time ? '時間到' : `@${lastPrice}`} → ${exitStyleLabel(t)}${t.action === 'Buy' ? '買' : '賣'} ${qtyText(t, rec.quantity)}（${orderStatusWithNumber(trade)}）` });
 }
 
 function exitUnknown(t: TriggerOrder, rec: ExitRecord, message: string) {
     updateExit(rec.id, x => ({ ...x, status: 'unknown', detail: `送單結果未知：${message}`, at: Date.now() }));
     notify({ kind: 'err', title: '觸價單結果未知',
         body: `${t.code} ${message} — 請至委託／持倉手動對帳；系統不會自動重送` });
+    reconcileAfterUnknownOutcome();
 }
 
 const notStarted = (e: unknown) => !!(e as { mutationNotStarted?: boolean })?.mutationNotStarted;
@@ -1750,7 +1753,7 @@ export function applyExitTrade(trade: Trade, opts: { settle?: boolean } = {}) {
                 || (opts.settle && trade.status.status === 'PartFilled');
             if (next.status === 'working' && ended) {
                 next = { ...next, status: 'incomplete', at: Date.now(),
-                    detail: `出場委託 ${trade.status.status}，剩餘 ${next.quantity - next.filled} 待確認；請按「對帳」確認` };
+                    detail: `出場委託${orderStatusLabel(trade.status.status)}，剩餘 ${next.quantity - next.filled} 待確認；請按「對帳」確認` };
             }
             return next;
         });

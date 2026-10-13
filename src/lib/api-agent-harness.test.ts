@@ -149,7 +149,11 @@ describe('agent harness native POST proxy', () => {
         const error = await apiPost('/api/v1/order/place_order', { code: '2330' }, {
             agentInitiated: true, agentCallId: 'call-2', agentAuto: true,
         }).catch((caught: unknown) => caught);
-        expect(error).toBe('UI trading proxy request failed: timeout');
+        // #249: wrapped as an Error with the same text, marked outcome-unknown, never not-started
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe('UI trading proxy request failed: timeout');
+        expect(error).toMatchObject({ mutationOutcomeUnknown: true });
+        expect((error as { mutationNotStarted?: boolean }).mutationNotStarted).toBeUndefined();
         expect(mocks.invoke).toHaveBeenCalledTimes(1);
     });
 

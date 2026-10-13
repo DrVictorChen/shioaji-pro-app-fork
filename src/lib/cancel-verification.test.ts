@@ -290,7 +290,7 @@ describe('1.7.6 simulation read-back fixture (de-identified, regression only)', 
         const row234 = fixture.reducedCancelledAfterRestart234!;
         expect(row234.status).toMatchObject({ status: 'Submitted', cancel_quantity: 2, deal_quantity: 0 });
         expect(isConfirmedCancellation(before, row234)).toBe(true);
-        expect(brokerStatusNote(row234)).toBe('券商狀態仍為 Submitted，取消量已涵蓋全部');
+        expect(brokerStatusNote(row234)).toBe('券商狀態仍為已委託，取消量已涵蓋全部');
         const d = deps({ cache: async () => [fixture.reducedCancelResponse!], refresh: async () => [row234] }, { cacheTrusted: () => false });
         await expect(verifyCancellation(before, fxAccount, d.value)).resolves.toMatchObject({ source: 'refresh', trade: { status: { status: 'Submitted' } } });
     });
