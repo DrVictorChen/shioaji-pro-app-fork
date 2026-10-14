@@ -244,12 +244,16 @@ export function ScannerPanel({
                             : it.total_volume > 0
                               ? fmtInt(it.total_volume)
                               : '';
+                    const cat = catByCode.get(it.code);
+                    // 窄面板隱藏產業類別，名稱與產業改由 title 提供
+                    const tip = cat ? `${it.name}・${sectorLabel(cat)}` : it.name;
                     return (
                         <div
                             key={it.code}
                             className={`${styles.row} ${
                                 picked === it.code ? styles.rowPicked : ''
                             }`}
+                            title={tip}
                             onClick={() => {
                                 setPicked(it.code);
                                 onPick(it.code);
@@ -262,27 +266,32 @@ export function ScannerPanel({
                                 <span className={styles.scCode}>
                                     {it.code}
                                 </span>
-                                <span className={styles.scName}>
+                                <span className={styles.scName} title={tip}>
                                     {it.name}
                                 </span>
                             </span>
-                            {catByCode.get(it.code) && (
+                            {cat && (
                                 <button
                                     className={styles.sectorTag}
                                     title='跳到此類股熱力圖'
                                     onClick={(e) => {
                                         e.stopPropagation();
-                                        focusSector(catByCode.get(it.code)!);
+                                        focusSector(cat);
                                     }}
                                 >
-                                    {sectorLabel(catByCode.get(it.code)!)}
+                                    {sectorLabel(cat)}
                                 </button>
                             )}
                             <span className={styles.valueBlock}>
                                 <span
                                     className={`${styles.scValue} ${panel.dirText[dir]}`}
                                 >
-                                    {fmtPrice(it.close)} {fmtPct(pct)}
+                                    <span className={styles.scPrice}>
+                                        {fmtPrice(it.close)}
+                                    </span>{' '}
+                                    <span className={styles.scPct}>
+                                        {fmtPct(pct)}
+                                    </span>
                                 </span>
                                 <span className={styles.scSub}>{sub}</span>
                             </span>
