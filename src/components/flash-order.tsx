@@ -46,6 +46,7 @@ import { useDisplayBook } from '../hooks/use-display-book';
 import type { Snapshot } from '../lib/types/market';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
 import { cancellationSummary } from '../lib/trade-mutations';
+import { noteOrderTraceEntry } from '../lib/order-trace';
 import { cancelOrders } from '../lib/shioaji';
 import { getAliasFor } from '../lib/stream';
 import { useTickBandsVersion } from '../lib/tick-bands';
@@ -66,6 +67,17 @@ const ROW_H = 22; // must match row height in flash-order.css.ts
 const EDGE = 2; // auto-recenter when last price gets this close to the edge
 
 const keyOf = (p: number) => p.toFixed(2);
+// #244 One rule for "this order is a chip on the ladder" — the chips and the
+// cancel they trigger (cell click, 全刪 per side) must name the same orders,
+// whoever placed them (this panel, the orders tab, iLeader).
+const ladderSide = (t: Trade): 'buy' | 'sell' | null => t.order.action === 'Buy' ? 'buy' : t.order.action === 'Sell' ? 'sell' : null;
+const ladderPrice = (t: Trade) => t.status.modified_price || t.order.price;
+function onLadder(t: Trade, code: string, stockOddLot: boolean | null): boolean {
+    return remainingWorkingOrderQuantity(t) > 0
+        && (t.contract.code === code || getAliasFor(t.contract.code) === code)
+        // stocks: only the shown unit (整股 or 零股, #204); null = not a stock
+        && (stockOddLot === null || isOddLot(t.order.order_lot) === stockOddLot);
+}
 const FOLLOW_GLOBAL = '__follow__';
 const ACCOUNT_CHANGED_DURING_CONFIRMATION = '確認期間帳戶已變更，請重新確認';
 const CONTRACT_EXPIRED = '合約已到期，這筆沒有送出';
@@ -934,25 +946,17 @@ export function FlashOrder({
     const myOrders = useMemo(() => {
         const m = new Map<string, { buy: number; sell: number }>();
         for (const t of trades) {
-            if (remainingWorkingOrderQuantity(t) <= 0) continue;
-            const tc = t.contract.code;
-            if (tc !== contract.code && getAliasFor(tc) !== contract.code) {
-                continue;
-            }
-            if (!lotShown(t)) continue;
+            const side = ladderSide(t);
+            if (!side || !onLadder(t, contract.code, market === 'S' ? odd : null)) continue;
             // HTTP status.order_quantity can be 0 (1.7.6) — use the shared
             // original-quantity rule.
-            const remaining = remainingWorkingOrderQuantity(t);
-            if (remaining <= 0) continue;
-            const price = t.status.modified_price || t.order.price;
-            const key = keyOf(price);
+            const key = keyOf(ladderPrice(t));
             const cur = m.get(key) ?? { buy: 0, sell: 0 };
-            if (t.order.action === 'Buy') cur.buy += remaining;
-            else cur.sell += remaining;
+            cur[side] += remainingWorkingOrderQuantity(t);
             m.set(key, cur);
         }
         return m;
-    }, [trades, contract.code, lotShown]);
+    }, [trades, contract.code, market, odd]);
 
     // today's fills aggregated per price level (from each trade's deals)
     const myFills = useMemo(() => {
@@ -1390,20 +1394,22 @@ export function FlashOrder({
         const capturedAccount = accountRef.current;
         if (!capturedAccount || pausedRef.current) return;
         const code = contractRef.current.code;
+        // the chip's own orders (same rule as the chips): 只刪目前單位的委託，
+        // 點 300 股的格子不可連帶刪掉同價的整股單（#204）
+        const side = action === 'Buy' ? 'buy' : 'sell';
+        const unit = contractRef.current.security_type === 'STK' ? oddRef.current : null;
         const targets = tradesRef.current.filter(
             (t) =>
                 accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, capturedAccount) &&
-                remainingWorkingOrderQuantity(t) > 0 &&
-                (t.contract.code === code ||
-                    getAliasFor(t.contract.code) === code) &&
-                t.order.action === action &&
-                // 只刪目前單位的委託：點 300 股的格子不可連帶刪掉同價的整股單（#204）
-                (contractRef.current.security_type !== 'STK' ||
-                    isOddLot(t.order.order_lot) === oddRef.current) &&
-                keyOf(t.status.modified_price || t.order.price) ===
-                    keyOf(price),
+                ladderSide(t) === side && onLadder(t, code, unit) &&
+                keyOf(ladderPrice(t)) === keyOf(price),
         );
-        if (targets.length === 0) return;
+        if (targets.length === 0) {
+            // never a silent click: the chip was there, say why nothing was sent
+            notify({ kind: 'err', title: '⚡ 刪單', body: `${code} @ ${fmtPrice(price)}：找不到這個價位可刪的委託（可能剛成交或已刪），沒有送出；請到委託分頁核對` });
+            return;
+        }
+        noteOrderTraceEntry(targets.map((t) => t.order.id), 'flash cell');
         const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
         const summary = cancellationSummary(results);
         notify({
@@ -1431,17 +1437,17 @@ export function FlashOrder({
             ? `停損停利未取消：${stop.blocked.join('；')}，請到條件單面板處理`
             : stop.failed.length ? `停損停利取消未確認：${stop.failed.join('；')}` : stop.stopped ? `已取消停損停利 ${stop.stopped} 張` : '';
         if (protectNote) notify({ kind: stop.blocked.length || stop.failed.length ? 'err' : 'info', title: '⚡ 全刪・停損停利', body: `${code}：${protectNote}` });
+        // both units of a stock (全刪), whoever placed the order
         const targets = tradesRef.current.filter(
             (t) =>
                 accountMatches((t as Trade & { account?: Account }).account ?? t.order.account, capturedAccount) &&
-                remainingWorkingOrderQuantity(t) > 0 &&
-                (t.contract.code === code ||
-                    getAliasFor(t.contract.code) === code),
+                onLadder(t, code, null),
         );
         if (targets.length === 0) {
             if (!protectNote) notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
+        noteOrderTraceEntry(targets.map((t) => t.order.id), 'flash 全刪');
         const results = await cancelOrders(targets.map((t) => t.order.id), undefined, guard);
         const summary = cancellationSummary(results);
         notify({
