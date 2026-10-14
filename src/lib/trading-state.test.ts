@@ -1383,3 +1383,51 @@ it('an account refresh does not discard a fresh tick for another account', async
     // a was re-marked by its own snapshot (100), newer than the tick.
     expect(store.getTradingState().positions.find(p => p.account?.account_id === 'a')).toMatchObject({ last_price: 100 });
 });
+
+// #244 An iLeader order (placed outside the App while it runs) is known only
+// from its New report until an authoritative read includes it.
+describe('orders known only from active reports (#244)', () => {
+    const ileader = () => normalizeOrderEvent({ state: 'FuturesOrder', data: { FuturesOrder: {
+        operation: { op_type: 'New', op_code: '00', op_msg: '' },
+        order: { id: 'ext1', seqno: 'S0001', ordno: 'kY001', account: mocks.account, action: 'Buy', price: 239.5, quantity: 1, price_type: 'LMT', order_type: 'ROD', oc_type: 'Auto' },
+        status: { id: 'ext1', exchange_ts: epoch + 2, order_quantity: 1, cancel_quantity: 0, modified_price: 0 },
+        contract: { code: 'KEF', full_code: 'KEFJ6', security_type: 'FUT', exchange: 'TAIFEX' },
+    } } })!;
+    const row = () => store.getTradingState().trades.find(t => t.order.id === 'ext1')!;
+    beforeEach(() => { mocks.account.account_type = 'F'; });
+    it('marks a New report of an unknown order report-only until an authoritative read includes it', async () => {
+        await emit(ileader());
+        expect(row()).toBeDefined();
+        expect(store.isReportOnlyTrade(row())).toBe(true);
+        const read = { ...row(), account: undefined, order: { ...row().order, account: mocks.account } };
+        mocks.trades.mockResolvedValueOnce([read]);
+        vi.advanceTimersByTime(1500);
+        await act(async () => { await store.refreshTradingState('orders'); });
+        expect(store.isReportOnlyTrade(row())).toBe(false);
+    });
+    it('a cache-only read does not count as reconciling it', async () => {
+        await emit(ileader());
+        store.noteTradeReconciled(mocks.account, 'other');
+        expect(store.isReportOnlyTrade(row())).toBe(true);
+        store.noteTradeReconciled(mocks.account, 'ext1');
+        expect(store.isReportOnlyTrade(row())).toBe(false);
+    });
+    it('an order this sidecar answered for (place response) is not report-only', async () => {
+        await emit(ileader());
+        await act(async () => { mocks.response!({ trade: { ...row(), order: { ...row().order } }, account: mocks.account }); vi.advanceTimersByTime(50); });
+        expect(store.isReportOnlyTrade(row())).toBe(false);
+    });
+    it('later reports of a known order do not mark it', async () => {
+        mocks.trades.mockResolvedValueOnce([{ ...ileaderRow(), account: undefined }]);
+        vi.advanceTimersByTime(1500);
+        await act(async () => { await store.refreshTradingState('orders'); });
+        expect(row()).toBeDefined();
+        await emit(ileader());
+        expect(store.isReportOnlyTrade(row())).toBe(false);
+    });
+    function ileaderRow() {
+        return { contract: { code: 'KEFJ6', security_type: 'FUT', exchange: 'TAIFEX', target_code: null },
+            order: { id: 'ext1', seqno: 'S0001', ordno: 'kY001', action: 'Buy', price: 239.5, quantity: 1, account: mocks.account },
+            status: { id: 'ext1', status: 'Submitted', status_code: '00', msg: '', order_ts: epoch + 2, order_quantity: 1, modified_price: 0, deals: [], deal_quantity: 0, cancel_quantity: 0 } } as unknown as import("./types/order").Trade;
+    }
+});
