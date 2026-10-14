@@ -15,6 +15,8 @@ import {
     ANCHOR_RADIUS,
     distanceToSegment,
     dragPoints,
+    drawingCrosshairTarget,
+    resolveDrawingAnchor,
     estimateBarSeconds,
     hitTest,
     logicalOfX,
@@ -574,6 +576,57 @@ describe('磁吸', () => {
 
     it('沒有 K 棒時原樣回傳', () => {
         expect(magnetAnchor({ time: 1, price: 2 }, [], y, 0)).toEqual({ time: 1, price: 2 });
+    });
+});
+
+describe('畫圖中的十字線＝端點（#313）', () => {
+    const bars = [
+        { time: 1000, open: 100, high: 110, low: 95, close: 105 },
+        { time: 1060, open: 105, high: 120, low: 100, close: 118 },
+    ];
+    // x = time − 900（1 秒 1px），y = 1000 − price
+    const projector: Projector = {
+        xOfTime: (t) => t - 900,
+        yOfPrice: (p) => 1000 - p,
+        timeOfX: (x) => x + 900,
+        priceOfY: (y) => 1000 - y,
+    };
+    const base = { drawings: [], bars, snapPrice: (p: number) => p, snapToDrawings: true };
+    // 游標在第二根 K 棒附近、價格 113.5（離收盤 118 與最高 120 都遠）
+    const pt = { x: 1058 - 900, y: 1000 - 113.5 };
+
+    it('磁吸關：端點與十字線都在游標價位，不被拉到收盤價', () => {
+        const end = resolveDrawingAnchor(projector, pt, { ...base, magnet: false })!;
+        expect(end).toEqual({ time: 1058, price: 113.5 });
+        // 直線貼最近一根 K 棒（同原生十字線），橫線／價格標籤＝端點價格
+        expect(drawingCrosshairTarget(end, bars)).toEqual({ time: 1060, price: 113.5 });
+    });
+
+    it('磁吸開：十字線就是吸附後的端點（最近的開高低收，不只收盤）', () => {
+        const end = resolveDrawingAnchor(projector, { x: pt.x, y: 1000 - 101 }, { ...base, magnet: true })!;
+        expect(end).toEqual({ time: 1060, price: 100 }); // 最低價，不是收盤 118
+        expect(drawingCrosshairTarget(end, bars)).toEqual(end);
+    });
+
+    it('磁吸開：既有端點優先，十字線同樣落在那個端點', () => {
+        const drawings = [{ id: 'a', hidden: false, anchors: [{ time: 1058, price: 113 }] }];
+        const end = resolveDrawingAnchor(projector, pt, { ...base, drawings, magnet: true })!;
+        expect(end).toEqual({ time: 1058, price: 113 });
+        expect(drawingCrosshairTarget(end, bars)?.price).toBe(113);
+        // 文字／量測不吸其他圖形端點，改吸開高低收
+        expect(resolveDrawingAnchor(projector, pt, { ...base, drawings, magnet: true, snapToDrawings: false })).toEqual({ time: 1060, price: 118 });
+    });
+
+    it('水平線取整到跳動價位時，十字線價格與端點一致', () => {
+        const end = resolveDrawingAnchor(projector, pt, { ...base, magnet: false, snapPrice: Math.round })!;
+        expect(end.price).toBe(114);
+        expect(drawingCrosshairTarget(end, bars)?.price).toBe(114);
+    });
+
+    it('端點在 K 棒範圍外（未來空白處）或沒有 K 棒：交給原生十字線', () => {
+        expect(drawingCrosshairTarget({ time: 2000, price: 110 }, bars)).toBeNull();
+        expect(drawingCrosshairTarget({ time: 1000, price: 110 }, [])).toBeNull();
+        expect(drawingCrosshairTarget(null, bars)).toBeNull();
     });
 });
 
