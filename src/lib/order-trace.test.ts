@@ -20,8 +20,8 @@ describe('order trace (#244 debug)', () => {
         vi.stubEnv('VITE_DEBUG_ORDER_TRACE', '1');
         const on = await import('./order-trace');
         expect(on.ORDER_TRACE_ENABLED).toBe(true);
-        expect(on.maskTraceText('CA not activated for: A123456789 acct 9876543210 seq 12345'))
-            .toBe('CA not activated for: *** acct *** seq 12345');
+        expect(on.maskTraceText('CA not activated for: A123456789 arc AB12345678 acct 1234567 seq 12345'))
+            .toBe('CA not activated for: *** arc *** acct *** seq 12345');
         on.noteOrderTraceEntry(['t2'], 'flash 全刪');
         const record = on.beginOrderTrace('cancel', 't2');
         on.traceSet(record, { account: on.accountShape({ broker_id: '9A95', account_id: '1234567', account_type: 'S', person_id: 'A123456789' }) });
@@ -69,17 +69,20 @@ describe('order trace across windows and reports (#244 QA: second cancel missing
         const posted: unknown[] = [];
         class Channel {
             constructor(public name: string) {}
-            addEventListener(_n: string, l: (e: { data: unknown }) => void) { listeners.push(l); }
-            postMessage(data: unknown) { posted.push(data); }
+            addEventListener(_n: string, l: (e: { data: unknown }) => void) { if (this.name === 'sj-order-trace') listeners.push(l); }
+            postMessage(data: unknown) { if (this.name === 'sj-order-trace') posted.push(data); }
         }
         vi.stubGlobal('BroadcastChannel', Channel);
         const t = await import('./order-trace');
         vi.spyOn(console, 'info').mockImplementation(() => {});
+        // listening from load: a popout's refused cancel arrives before any local activity
+        expect(listeners).toHaveLength(1);
+        listeners.forEach(l => l({ data: { record: { ts: 'w', window: 'popout-flash-1', kind: 'cancel', entry: 'flash cell', trade_id: 'early', summary: 'failed' } } }));
         const own = t.beginOrderTrace('cancel', 'a');
         await t.finishOrderTrace(own, Promise.resolve({ status: { status: 'Cancelled' } }));
         expect(posted).toHaveLength(1);
         listeners.forEach(l => l({ data: { record: { ts: 'x', window: 'popout-flash-1', kind: 'cancel', entry: 'flash cell', trade_id: '0094ef67', summary: 'ok (Cancelled)' } } }));
-        expect(t.getOrderTrace().map(r => [r.window, r.trade_id])).toEqual([['main', 'a'], ['popout-flash-1', '0094ef67']]);
+        expect(t.getOrderTrace().map(r => [r.window, r.trade_id])).toEqual([['popout-flash-1', 'early'], ['main', 'a'], ['popout-flash-1', '0094ef67']]);
         expect(t.orderTraceDiagnostics()).toContain('popout-flash-1');
         vi.unstubAllGlobals();
     });

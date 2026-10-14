@@ -336,30 +336,3 @@ it('cancelVerifiedOrder: beforeSend refusal sends nothing', async () => {
         .rejects.toMatchObject({ mutationNotStarted: true, message: '環境已切換' });
     expect(dispatch).not.toHaveBeenCalled();
 });
-
-// #244 Until Shioaji 1.7.9 the sidecar refuses to re-sign an order known only
-// from another program's New report. The refusal keeps its text and flags
-// (never resent) and tells the user what to do.
-describe('sidecar local refusal of an order placed in another program (#244)', () => {
-    const refusal = () => Object.assign(new Error('400 CA not activated for: '), { status: 400 });
-    it.each([
-        ['cancel', () => cancelOrder('fixture')],
-        ['price', () => updateOrderPrice('fixture', 490)],
-        ['quantity', () => updateOrderQty('fixture', 1)],
-    ] as const)('%s: shows the reason plus the hint, sends once, keeps the outcome flags', async (_n, call) => {
-        m.post.mockImplementation(async (p: string) => { if (p === '/api/v1/order/trades') return []; throw refusal(); });
-        const error = await call().catch(e => e) as Error & Record<string, unknown>;
-        expect(error.message).toBe('400 CA not activated for: ；這筆是其他軟體下的單，請先在委託分頁按更新再刪，或在原下單軟體刪除');
-        expect(error.status).toBe(400);
-        expect(error).not.toHaveProperty('mutationNotStarted');
-        expect(m.post.mock.calls.filter(c => c[0] !== '/api/v1/order/trades')).toHaveLength(1);
-    });
-    it('a Trade missing from the sidecar cache gets the hint too; other errors are untouched', async () => {
-        const { explainSidecarRefusal } = await import('./shioaji');
-        expect((explainSidecarRefusal(Object.assign(new Error('400 Trade abc not found in cache'), { status: 400 })) as Error).message).toContain('委託分頁按更新');
-        for (const other of [Object.assign(new Error('400 價格超過漲跌停'), { status: 400 }), Object.assign(new Error('500 CA not activated for: '), { status: 500 }), 'timeout']) {
-            expect(explainSidecarRefusal(other)).toBe(other);
-        }
-        expect((explainSidecarRefusal('400 CA not activated for: ') as Error).message).toContain('原下單軟體刪除');
-    });
-});

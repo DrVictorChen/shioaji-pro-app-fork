@@ -881,24 +881,6 @@ function tracedMutation(kind: OrderTraceKind, tradeId: string, run: (trace: Orde
     return finishOrderTrace(trace, observeTradeMutation(tradeId, () => run(trace)));
 }
 
-// #244 The sidecar refuses a change/cancel locally when its cached Trade came
-// only from the New report of an order placed in another program (Shioaji
-// <= 1.7.8 leaves that report's account without person_id, so re-signing
-// fails; the SDK fix is planned for 1.7.9). The refusal keeps its own text and
-// outcome flags; it only gains what the user can do about it.
-export const EXTERNAL_ORDER_HINT = '這筆是其他軟體下的單，請先在委託分頁按更新再刪，或在原下單軟體刪除';
-const SIDECAR_LOCAL_REFUSAL = /CA not activated for|not found in cache|cannot re-sign CA/i;
-export function explainSidecarRefusal(error: unknown): unknown {
-    const e = error as { status?: unknown; message?: unknown } | null;
-    const text = typeof error === 'string' ? error : typeof e?.message === 'string' ? e.message : '';
-    const status = typeof e === 'object' && e !== null && typeof e.status === 'number' ? e.status : null;
-    if ((status !== null && (status < 400 || status >= 500)) || !SIDECAR_LOCAL_REFUSAL.test(text) || text.includes(EXTERNAL_ORDER_HINT)) return error;
-    if (typeof error !== 'object' || error === null) return new Error(`${text}；${EXTERNAL_ORDER_HINT}`);
-    if (error instanceof Error) { error.message = `${text}；${EXTERNAL_ORDER_HINT}`; return error; }
-    return Object.assign(new Error(`${text}；${EXTERNAL_ORDER_HINT}`), error);
-}
-const withRefusalHint = <T>(pending: Promise<T>) => pending.catch((error: unknown) => { throw explainSidecarRefusal(error); });
-
 async function prepareOrderMutation(tradeId: string, trace: OrderTraceRecord | null = null): Promise<{ base: string; tradeId: string; trade: Trade; account: Account; tradingState: typeof import('./trading-state') }> {
     const base = getApiBase();
     const query = createAccountQuery();
@@ -1052,7 +1034,7 @@ function observeCancel(
         const { account } = target;
         const { cancelCacheTrusted, locallyCancelled } = target.tradingState;
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
-        await withRefusalHint(sendOrderMutation<Trade>(
+        await sendOrderMutation<Trade>(
             '/api/v1/order/cancel_order',
             { trade_id: target.tradeId },
             account,
@@ -1063,7 +1045,7 @@ function observeCancel(
                     throw Object.assign(e instanceof Error ? e : new Error(String(e)), { mutationNotStarted: true });
                 }
             } },
-        ));
+        );
         // Quantities come from the local order at the start; the id is the one
         // the current sidecar knows (re-resolved when there was no baseline).
         const before: Trade = { ...target.trade, order: { ...target.trade.order, id: target.tradeId } };
@@ -1100,10 +1082,10 @@ export function updateOrderPrice(tradeId: string, price: number) {
         // 零股委託只能減量（#204）— 任何改價路徑都在送出前擋下
         if (isOddLot(target.trade.order.order_lot)) throw Object.assign(new Error(ODD_LOT_NO_PRICE_UPDATE), { mutationNotStarted: true });
         noteMutationIntent(tradeId, { kind: 'price', price });
-        return withRefusalHint(sendOrderMutation<Trade>('/api/v1/order/update_price', {
+        return sendOrderMutation<Trade>('/api/v1/order/update_price', {
         trade_id: target.tradeId,
         price,
-    }, target.account, { onResponse: traceResponse(trace) })); });
+    }, target.account, { onResponse: traceResponse(trace) }); });
 }
 
 export function updateOrderQty(tradeId: string, quantity: number) {
@@ -1112,10 +1094,10 @@ export function updateOrderQty(tradeId: string, quantity: number) {
         traceEndpoint(trace, '/api/v1/order/update_qty');
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
         noteMutationIntent(tradeId, { kind: 'qty', quantity });
-        return withRefusalHint(sendOrderMutation<Trade>('/api/v1/order/update_qty', {
+        return sendOrderMutation<Trade>('/api/v1/order/update_qty', {
         trade_id: target.tradeId,
         quantity,
-    }, target.account, { onResponse: traceResponse(trace) })); });
+    }, target.account, { onResponse: traceResponse(trace) }); });
 }
 
 // Explicit account selector — omitted resolves the store's selected account.

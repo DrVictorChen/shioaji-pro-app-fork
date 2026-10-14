@@ -6,6 +6,7 @@
 import type { Trade } from './types/order';
 import type { OrderEventReport } from './order-report';
 import { currentWindowLabel, isChildWindow } from './window-role';
+import { maskIdentifiers } from './trade-mutations';
 
 export const ORDER_TRACE_ENABLED: boolean = import.meta.env.VITE_DEBUG_ORDER_TRACE === '1';
 
@@ -68,13 +69,17 @@ function traceChannel(): BroadcastChannel | null {
     } catch { channel = null; }
     return channel;
 }
+// listen from the start (enabled builds only): a popout's first refused
+// mutation leaves no report behind, so waiting for local activity loses it
+if (ORDER_TRACE_ENABLED) traceChannel();
 function share(record: OrderTraceRecord) {
     try { traceChannel()?.postMessage({ record }); } catch { /* best effort */ }
 }
 
-/** National ID / ARC shapes and 10+ digit runs become ***. */
+/** Same policy as the cancel notification (maskIdentifiers): national ID /
+ *  ARC shapes and 7+ digit runs (account numbers) become ***. */
 export function maskTraceText(text: string): string {
-    return text.replace(/[A-Z]\d{9}/g, '***').replace(/\d{10,}/g, '***');
+    return maskIdentifiers(text);
 }
 
 /** Callers that know their UI entry point tag the trade ids before cancelling. */
