@@ -1,6 +1,9 @@
 import { canTrade } from './account-tradable';
 import { createAccountQuery } from './account-query';
-import { getApiBase } from './runtime';
+import { getApiBase, isTauri } from './runtime';
+import { beginOrderTrace, finishOrderTrace, ORDER_TRACE_ENABLED, traceResponse, traceSet, traceTrade, type OrderTraceKind, type OrderTraceRecord } from './order-trace';
+import { isAgentHarnessEnabled } from './agent-harness-state';
+import { isMainWindow } from './main-window-commands';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { noteMutationIntent } from './mutation-intent';
 import { isOddLot, ODD_LOT_NO_PRICE_UPDATE, stockOrderProblem } from './odd-lot';
@@ -13,7 +16,7 @@ import { beginServerInfoRequest, observeServerInfo } from './server-info-store';
 // src/lib/shioaji.ts
 
 import { accountFor, getAccountState } from './account-store';
-import { apiDelete, apiGet, apiPost, apiPut } from './api';
+import { apiDelete, apiGet, apiPost, apiPut, shouldProxyAgentHarnessMutation } from './api';
 import {
     registerCapabilitySubscription,
     registerSubscription,
@@ -863,7 +866,22 @@ export function placeFuturesOrder(
 let tradingStateModule: Promise<typeof import('./trading-state')> | null = null;
 const loadTradingState = () => (tradingStateModule ??= import('./trading-state'));
 
-async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tradeId: string; trade: Trade; account: Account; tradingState: typeof import('./trading-state') }> {
+// Debug order trace (VITE_DEBUG_ORDER_TRACE=1 only): which transport an order mutation takes.
+function traceEndpoint(trace: OrderTraceRecord | null, path: string) {
+    if (!ORDER_TRACE_ENABLED || !trace) return;
+    traceSet(trace, {
+        endpoint: path,
+        transport: shouldProxyAgentHarnessMutation(isTauri, isAgentHarnessEnabled(), path)
+            ? (isMainWindow() ? 'native:agent_harness_post' : 'native:popout_order_post')
+            : `http ${getApiBase()}${path}`,
+    });
+}
+function tracedMutation(kind: OrderTraceKind, tradeId: string, run: (trace: OrderTraceRecord | null) => Promise<Trade>): Promise<Trade> {
+    const trace = beginOrderTrace(kind, tradeId);
+    return finishOrderTrace(trace, observeTradeMutation(tradeId, () => run(trace)));
+}
+
+async function prepareOrderMutation(tradeId: string, trace: OrderTraceRecord | null = null): Promise<{ base: string; tradeId: string; trade: Trade; account: Account; tradingState: typeof import('./trading-state') }> {
     const base = getApiBase();
     const query = createAccountQuery();
     const requestedMark = readMark();
@@ -890,6 +908,8 @@ async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tr
     // no-baseline path below: one authoritative read of its account started
     // after this request (shared by a batch), before anything is sent.
     const reportOnly = hasOrdersBaseline() && isReportOnlyTrade(trade);
+    traceTrade(trace, trade, reportOnly, trade.account ?? trade.order.account ?? account);
+    traceSet(trace, { reconcile: { ran: false } });
     if (hasOrdersBaseline() && !reportOnly) return { base, tradeId, trade, account: account!, tradingState };
     const seqno = trade.order.seqno?.trim();
     const ordno = trade.order.ordno?.trim();
@@ -924,6 +944,12 @@ async function prepareOrderMutation(tradeId: string): Promise<{ base: string; tr
     let found = resolveId(await read(lostMark));
     if (!found && lostMark < requestedMark) found = resolveId(await read(requestedMark));
     if (base !== getApiBase()) refuse('對帳期間伺服器已切換，未送出改刪單');
+    if (ORDER_TRACE_ENABLED) {
+        const after = (found?.order.account ?? null) as { person_id?: string } | null;
+        traceSet(trace, { reconcile: { ran: true, found_same_trade: !!found,
+            resolved_trade_id_changed: !!found && found.order.id !== tradeId,
+            person_id_present_after: !!after?.person_id } });
+    }
     if (!found) refuse('伺服器重新對帳後找不到可操作的同筆委託，未送出改刪單');
     if (reportOnly) tradingState.noteTradeReconciled(account!, tradeId);
     return { base, tradeId: found!.order.id, trade, account: account!, tradingState };
@@ -964,14 +990,16 @@ export function cancelVerifiedOrder(
     opts?: { beforeSend?: () => void; onResponse?: (res: Response) => void },
 ): Promise<Trade> {
     const tradeId = row.order.id;
-    return observeTradeMutation(tradeId, async () => {
+    return tracedMutation('cancel_verified', tradeId, async trace => {
+        traceTrade(trace, row, false, account);
+        traceEndpoint(trace, '/api/v1/order/cancel_order');
         const base = getApiBase();
         const refuse = (message: string): never => { throw Object.assign(new Error(message), { mutationNotStarted: true }); };
         if (!tradeId) refuse('缺少委託編號，未送出刪單');
         const type = account.account_type as 'S' | 'F';
         const query = createAccountQuery();
         await sendOrderMutation<Trade>('/api/v1/order/cancel_order', { trade_id: tradeId }, account, {
-            onResponse: opts?.onResponse,
+            onResponse: traceResponse(trace, opts?.onResponse),
             beforeDispatch: () => {
                 try {
                     opts?.beforeSend?.();
@@ -1013,8 +1041,9 @@ function observeCancel(
     batch: CancelBatchMember | undefined,
     beforeSend?: () => void,
 ) {
-    return observeTradeMutation(tradeId, async () => {
-        const target = await prepareOrderMutation(tradeId);
+    return tracedMutation('cancel', tradeId, async trace => {
+        const target = await prepareOrderMutation(tradeId, trace);
+        traceEndpoint(trace, '/api/v1/order/cancel_order');
         const { account } = target;
         const { cancelCacheTrusted, locallyCancelled } = target.tradingState;
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
@@ -1022,7 +1051,7 @@ function observeCancel(
             '/api/v1/order/cancel_order',
             { trade_id: target.tradeId },
             account,
-            { ...opts, beforeDispatch: () => {
+            { ...opts, onResponse: traceResponse(trace, opts.onResponse), beforeDispatch: () => {
                 try {
                     beforeSend?.();
                 } catch (e) {
@@ -1059,8 +1088,9 @@ function observeCancel(
 }
 
 export function updateOrderPrice(tradeId: string, price: number) {
-    return observeTradeMutation(tradeId, async () => {
-        const target = await prepareOrderMutation(tradeId);
+    return tracedMutation('update_price', tradeId, async trace => {
+        const target = await prepareOrderMutation(tradeId, trace);
+        traceEndpoint(trace, '/api/v1/order/update_price');
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
         // 零股委託只能減量（#204）— 任何改價路徑都在送出前擋下
         if (isOddLot(target.trade.order.order_lot)) throw Object.assign(new Error(ODD_LOT_NO_PRICE_UPDATE), { mutationNotStarted: true });
@@ -1068,18 +1098,19 @@ export function updateOrderPrice(tradeId: string, price: number) {
         return sendOrderMutation<Trade>('/api/v1/order/update_price', {
         trade_id: target.tradeId,
         price,
-    }, target.account); });
+    }, target.account, { onResponse: traceResponse(trace) }); });
 }
 
 export function updateOrderQty(tradeId: string, quantity: number) {
-    return observeTradeMutation(tradeId, async () => {
-        const target = await prepareOrderMutation(tradeId);
+    return tracedMutation('update_qty', tradeId, async trace => {
+        const target = await prepareOrderMutation(tradeId, trace);
+        traceEndpoint(trace, '/api/v1/order/update_qty');
         if (target.base !== getApiBase()) throw Object.assign(new Error('伺服器已切換，未送出改刪單'), { mutationNotStarted: true });
         noteMutationIntent(tradeId, { kind: 'qty', quantity });
         return sendOrderMutation<Trade>('/api/v1/order/update_qty', {
         trade_id: target.tradeId,
         quantity,
-    }, target.account); });
+    }, target.account, { onResponse: traceResponse(trace) }); });
 }
 
 // Explicit account selector — omitted resolves the store's selected account.

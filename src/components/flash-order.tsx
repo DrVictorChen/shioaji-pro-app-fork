@@ -46,6 +46,7 @@ import { useDisplayBook } from '../hooks/use-display-book';
 import type { Snapshot } from '../lib/types/market';
 import { maskMoney, usePrivacyMoney } from '../lib/privacy';
 import { cancellationSummary } from '../lib/trade-mutations';
+import { noteOrderTraceEntry } from '../lib/order-trace';
 import { cancelOrders } from '../lib/shioaji';
 import { getAliasFor } from '../lib/stream';
 import { useTickBandsVersion } from '../lib/tick-bands';
@@ -1408,6 +1409,7 @@ export function FlashOrder({
             notify({ kind: 'err', title: '⚡ 刪單', body: `${code} @ ${fmtPrice(price)}：找不到這個價位可刪的委託（可能剛成交或已刪），沒有送出；請到委託分頁核對` });
             return;
         }
+        noteOrderTraceEntry(targets.map((t) => t.order.id), 'flash cell');
         const results = await cancelOrders(targets.map((t) => t.order.id), undefined, cancelGuard());
         const summary = cancellationSummary(results);
         notify({
@@ -1445,6 +1447,7 @@ export function FlashOrder({
             if (!protectNote) notify({ kind: 'info', title: '⚡ 全刪', body: '沒有可刪的委託' });
             return;
         }
+        noteOrderTraceEntry(targets.map((t) => t.order.id), 'flash 全刪');
         const results = await cancelOrders(targets.map((t) => t.order.id), undefined, guard);
         const summary = cancellationSummary(results);
         notify({
