@@ -266,7 +266,7 @@ export function ScannerPanel({
                                 <span className={styles.scCode}>
                                     {it.code}
                                 </span>
-                                <span className={styles.scName} title={tip}>
+                                <span className={`${styles.scName} ${styles.rowName}`} title={tip}>
                                     {it.name}
                                 </span>
                             </span>

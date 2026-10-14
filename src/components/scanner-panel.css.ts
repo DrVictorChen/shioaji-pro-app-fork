@@ -36,67 +36,55 @@ export const sw = styleVariants({
     ],
 });
 
-// 窄面板：產業類別 chip 讓位，每列固定兩行、各欄上下對齊；預設寬度不受影響
-//   第 1 行：名次｜代號｜價格｜漲跌幅
-//   第 2 行：　　｜名稱｜量（跨價格＋漲跌幅，右緣對齊）
-// 極窄時（代號欄放不下 6 字）漲跌幅改到第 2 行取代量，所有列一起換。
-// 欄寬用 ch（列字型為 mono）：價格最長 6 字（≥500 不帶小數），漲跌幅 7 字。
+// 排行列：每列固定兩行，所有列共用同一組欄寬，各欄上下對齊。
+//   寬面板：名次｜代號／名稱｜產業｜價格｜漲跌幅（量在第 2 行跨價格＋漲跌幅）
+//   窄面板（放不下產業欄）：產業隱藏，其餘不變
+//   極窄（代號欄放不下 6 字）：漲跌幅改到第 2 行取代量，量隱藏
+// 數字欄用 ch（列字型為 mono）：價格最長 6 字（≥500 不帶小數），漲跌幅 7 字；
+// 代號欄保底 6 字（6 碼 ETF）。產業欄寬 = 最長「電子零組件」5 字 + padding/border。
+// 門檻依欄寬加總（2ch + 6ch + 產業 + 6ch + 7ch + gaps + padding）量測取整：
+//   寬面板最少需約 14.4rem，極窄門檻約 10.6rem。
 const list = createContainer();
-const NARROW = `${list} (max-width: 14rem)`;
-// 1.2rem + 6ch + 6ch + 7ch + 3 gaps + padding ≈ 11rem
-const COMPACT = `${list} (max-width: 11rem)`;
+const NARROW = `${list} (max-width: 14.4rem)`;
+const COMPACT = `${list} (max-width: 10.75rem)`;
+const TAG_FONT = '0.6rem';
+const TAG_PAD_X = '4px';
+const TAG_COL = `calc(5 * ${TAG_FONT} + 2 * ${TAG_PAD_X} + 2px)`;
 
 export const body = style({
     containerName: list,
     containerType: 'inline-size',
 });
 
-// two-line rows: code+name stacked tight on the left, price/pct and
-// volume stacked on the right — no dead space between code and name
 export const row = style({
     display: 'grid',
-    gridTemplateColumns: '1.2rem minmax(0, 1fr) auto auto',
+    gridTemplateColumns: `2ch minmax(6ch, 1fr) ${TAG_COL} 6ch 7ch`,
+    gridTemplateRows: 'auto auto',
     alignItems: 'center',
     columnGap: vars.space.xs,
     padding: `3px ${vars.space.sm}`,
     fontFamily: vars.font.mono,
     fontSize: '0.7rem',
     fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
     cursor: 'pointer',
-    borderBottom: `1px solid rgba(34, 43, 55, 0.45)`,
+    borderBottom: `1px solid ${vars.color.border}`,
     ':hover': { background: vars.color.muted },
     '@container': {
-        [NARROW]: {
-            gridTemplateColumns: '1.2rem minmax(6ch, 1fr) 6ch 7ch',
-            gridTemplateRows: 'auto auto',
-            borderBottomColor: vars.color.border,
-        },
-        [COMPACT]: { gridTemplateColumns: '1.2rem minmax(6ch, 1fr) 7ch' },
+        [NARROW]: { gridTemplateColumns: '2ch minmax(6ch, 1fr) 6ch 7ch' },
+        [COMPACT]: { gridTemplateColumns: '2ch minmax(6ch, 1fr) 7ch' },
     },
 });
 
-export const idBlock = style({
-    display: 'flex',
-    flexDirection: 'column',
-    minWidth: 0,
-    // 窄面板：拆開讓代號、名稱直接排進列的 grid
-    '@container': { [NARROW]: { display: 'contents' } },
-});
+// 代號／名稱、價格／量的外框不參與排版，子元素直接排進列的 grid
+export const idBlock = style({ display: 'contents' });
+export const valueBlock = style({ display: 'contents' });
 
 export const scCode = style({
+    gridRow: 1,
+    gridColumn: 2,
     fontWeight: 600,
     color: vars.color.foreground,
-    '@container': { [NARROW]: { gridRow: 1, gridColumn: 2 } },
-});
-
-export const valueBlock = style({
-    // 固定第 4 欄：chip 隱藏時不往左遞補
-    gridColumn: 4,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-end',
-    whiteSpace: 'nowrap',
-    '@container': { [NARROW]: { display: 'contents' } },
 });
 
 export const rowPicked = style({
@@ -104,24 +92,33 @@ export const rowPicked = style({
 });
 
 export const scSub = style({
+    gridRow: 2,
+    gridColumn: '4 / 6',
     textAlign: 'right',
     color: vars.color.mutedForeground,
     fontSize: '0.62rem',
     '@container': {
-        [NARROW]: { gridRow: 2, gridColumn: '3 / 5' },
+        [NARROW]: { gridColumn: '3 / 5' },
         [COMPACT]: { display: 'none' },
     },
 });
 
-// clickable 類別 chip that jumps the heatmap to this stock's sector
+// clickable 類別 chip that jumps the heatmap to this stock's sector —
+// 固定寬度欄、欄內靠左，所有列左緣對齊；沒有產業的列留空
 export const sectorTag = style({
-    fontSize: '0.6rem',
+    gridRow: '1 / 3',
+    gridColumn: 3,
+    justifySelf: 'start',
+    maxWidth: '100%',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    fontSize: TAG_FONT,
     fontFamily: vars.font.body,
     color: vars.color.mutedForeground,
     background: vars.color.muted,
     border: `1px solid ${vars.color.border}`,
     borderRadius: vars.radius.sm,
-    padding: '1px 5px',
+    padding: `1px ${TAG_PAD_X}`,
     whiteSpace: 'nowrap',
     cursor: 'pointer',
     ':hover': {
@@ -154,7 +151,8 @@ export const rank = style({
     color: vars.color.mutedForeground,
     fontSize: '0.64rem',
     fontWeight: 600,
-    '@container': { [NARROW]: { gridRow: 1, gridColumn: 1 } },
+    gridRow: 1,
+    gridColumn: 1,
 });
 
 export const scName = style({
@@ -164,25 +162,31 @@ export const scName = style({
     color: vars.color.mutedForeground,
     fontFamily: vars.font.body,
     fontSize: '0.66rem',
-    '@container': { [NARROW]: { gridRow: 2, gridColumn: 2 } },
 });
+
+// 排行列的名稱（第 2 行，截斷＋…）
+export const rowName = style({ gridRow: 2, gridColumn: 2 });
 
 export const scValue = style({
+    display: 'contents',
     textAlign: 'right',
     fontWeight: 600,
-    '@container': { [NARROW]: { display: 'contents' } },
 });
 
-// 價格／漲跌幅：寬面板仍是同一行的兩段文字，窄面板各占一欄右對齊
+// 價格／漲跌幅各占一個固定寬度欄、右對齊
 export const scPrice = style({
-    '@container': {
-        [NARROW]: { gridRow: 1, gridColumn: 3, justifySelf: 'end' },
-    },
+    gridRow: 1,
+    gridColumn: 4,
+    justifySelf: 'end',
+    '@container': { [NARROW]: { gridColumn: 3 } },
 });
 
 export const scPct = style({
+    gridRow: 1,
+    gridColumn: 5,
+    justifySelf: 'end',
     '@container': {
-        [NARROW]: { gridRow: 1, gridColumn: 4, justifySelf: 'end' },
+        [NARROW]: { gridColumn: 4 },
         [COMPACT]: { gridRow: 2, gridColumn: 3 },
     },
 });
