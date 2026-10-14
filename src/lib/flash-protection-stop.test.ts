@@ -4,12 +4,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { protectionTargets, type BackgroundViewLike, type ProtectionScope, type WindowPlanLike } from './flash-trigger';
 
-const m = vi.hoisted(() => ({ triggers: [] as unknown[], plans: [] as unknown[], exits: [] as unknown[], programs: [] as unknown[], views: [] as unknown[],
+const m = vi.hoisted(() => ({ display: [] as unknown[], removeTrigger: vi.fn(), group: vi.fn(), triggers: [] as unknown[], plans: [] as unknown[], exits: [] as unknown[], programs: [] as unknown[], views: [] as unknown[],
     dismiss: vi.fn(), handled: vi.fn(), stale: false, health: { state: 'live' } as unknown, env: 'http://x|simulation' as string | null }));
 vi.mock('./bracket', () => ({ getBrackets: () => m.plans, dismissBracket: m.dismiss, bracketSnapshotStale: () => m.stale }));
 vi.mock('./protection-env', () => ({ currentProtectionEnv: () => m.env }));
 vi.mock('./bracket-core', () => ({ isLive: (p: { live?: boolean }) => p.live !== false }));
-vi.mock('./trigger-engine', () => ({ getExits: () => m.exits, getTriggers: () => m.triggers }));
+vi.mock('./trigger-engine', () => ({ getExits: () => m.exits, getTriggers: () => m.triggers, getDisplayTriggers: () => m.display,
+    removeTriggerStrict: m.removeTrigger, setTriggerGroup: m.group }));
 vi.mock('./execution/background', () => ({ getBackgroundPrograms: () => m.programs, markBackgroundHandled: m.handled, backgroundSupported: () => true,
     getBackgroundHealth: () => m.health }));
 vi.mock('./execution/bracket-contract', () => ({ bracketViews: () => m.views }));
@@ -70,12 +71,31 @@ describe('snapshots (what an unfilled 平倉 puts back)', () => {
     });
 });
 
+describe('plain protective triggers (a 觸價欄 exit, a restore after an unfilled 平倉)', () => {
+    const t = (o: Record<string, unknown>) => ({ id: 'tg-1', code: 'TXFR1', orderCode: 'TXFJ6', env: ENV, account: A, kind: 'stop', action: 'Sell', price: 95, quantity: 2, ...o });
+    it('are ended too (singles and 二擇一 groups), with snapshots; entries, bracket legs and other accounts are not', () => {
+        const r = protectionTargets(scope, [], [], [], [
+            t({}), t({ id: 'g1', group: 'G', kind: 'stop', price: 94 }), t({ id: 'g2', group: 'G', kind: 'take', price: 112 }),
+            t({ id: 'e', role: 'entry' }), t({ id: 'b', bracketId: 'p1' }), t({ id: 'x', account: { ...A, account_id: '2' } }),
+        ] as never);
+        expect(r.triggers).toEqual({ single: ['tg-1'], groups: [['g1', 'g2']] });
+        expect(r.snapshots).toEqual([
+            { exitAction: 'Sell', stop: 95, take: null, quantity: 2 },
+            expect.objectContaining({ exitAction: 'Sell', stop: 94, take: 112, quantity: 2 }),
+        ]);
+    });
+    it('a pending one blocks', () => {
+        expect(protectionTargets(scope, [], [], [], [t({ pending: { price: 1, at: 1 } })] as never).blocked).toHaveLength(1);
+    });
+});
+
 describe('flashStopProtections', () => {
     beforeEach(() => {
         m.dismiss.mockReset().mockResolvedValue(true);
         m.handled.mockReset().mockResolvedValue(undefined);
         m.exits = [];
         m.programs = [];
+        m.display = [];
         m.stale = false;
         m.health = { state: 'live' };
         m.env = ENV;
@@ -118,7 +138,7 @@ describe('flashStopProtections', () => {
         m.views = [{ ...view({}), actions: { markHandled: true } }];
         m.dismiss.mockImplementation(async () => { m.plans = [plan({ dismissed: true })]; return true; });
         m.handled.mockImplementation(async () => { m.views = [{ ...view({ state: 'handled' }), actions: { markHandled: false } }]; });
-        expect(await flashStopProtections(scope)).toEqual({ stopped: 2, blocked: [], failed: [], restore: [] });
+        expect(await flashStopProtections(scope)).toEqual({ stopped: 2, blocked: [], failed: [], restore: [], env: ENV });
         expect(m.dismiss).toHaveBeenCalledWith('p1');
         // with the panel's account + product (a flash popout's end is scoped natively)
         expect(m.handled).toHaveBeenCalledWith('bkt-1', 't0', { account: { accountType: 'F', brokerId: 'B', accountId: '1' }, codes: ['TXFR1', 'TXFJ6'] });
@@ -137,6 +157,6 @@ describe('flashStopProtections', () => {
         m.plans = [];
         m.views = [{ ...view({}), actions: { markHandled: true } }];
         m.handled.mockRejectedValue(new Error('引擎沒有回應'));
-        expect(await flashStopProtections(scope)).toEqual({ stopped: 0, blocked: [], failed: ['背景執行：引擎沒有回應'], restore: [] });
+        expect(await flashStopProtections(scope)).toEqual({ stopped: 0, blocked: [], failed: ['背景執行：引擎沒有回應'], restore: [], env: ENV });
     });
 });

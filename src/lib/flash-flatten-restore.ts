@@ -65,13 +65,24 @@ export function restoreTriggers(leg: RestoreLeg, c: { code: string; futures: boo
     return out.length > 1 ? out.map(t => ({ ...t, group: c.group, ocoMode: 'trigger' as const })) : out;
 }
 
-export const READBACK_DELAYS_MS = [1500, 2500, 4000];
+export const READBACK_DELAYS_MS = [1500, 2500, 4000, 6000];
+
+/** The close order as the App knows it now; null: not readable. */
+export interface CloseState {
+    /** Filled / Cancelled / Failed (never PendingSubmit / Inactive / Submitted) */
+    final: boolean;
+    filled: number;
+}
 
 export interface WatchDeps {
+    /** the close order's state (cache read, no broker call) */
+    readClose: () => Promise<CloseState | null>;
     /** signed held quantity in the order unit now (null: could not read) */
     readHeld: () => Promise<number | null>;
-    /** the traded price now (crossed legs are not put back) */
-    last: () => number | null;
+    /** the traded price of THIS product now (null: unknown) */
+    last: () => number | null | Promise<number | null>;
+    /** the protection environment is still the one the close was sent in */
+    envOk: () => boolean | Promise<boolean>;
     /** puts one leg back; false / throw: not confirmed */
     restore: (leg: RestoreLeg) => Promise<boolean>;
     notify: (n: { kind: 'ok' | 'err' | 'info'; title: string; body: string }) => void;
@@ -81,25 +92,57 @@ export interface WatchDeps {
 
 export type WatchOutcome = 'closed' | 'restored' | 'partly' | 'failed' | 'unknown' | 'none';
 
-/** After a 平倉 was sent: wait for the position, then put back (once) what
- * is still held. `before` is the signed position the close was sent for. */
+const UNPROTECTED_TAIL = '請到委託與持倉確認，必要時自行設定停損停利';
+
+/** After a 平倉: wait until the close order is final, re-read the position,
+ * then put back (once) the protection for what is still held. `before` is
+ * the signed position the close was sent for (order units). Nothing is put
+ * back while the close may still fill, in another environment, or without a
+ * price of this product to check crossed legs against. */
 export async function restoreAfterUnfilledClose(before: number, snapshots: readonly ProtectionSnapshot[], code: string, unit: string,
     deps: WatchDeps): Promise<WatchOutcome> {
     if (!snapshots.length || before === 0) return 'none';
     const sleep = deps.sleep ?? (ms => new Promise<void>(r => setTimeout(r, ms)));
-    let held: number | null = null;
+    const say = (title: string, body: string) => deps.notify({ kind: 'err', title, body });
+    // 1. the close must be final first (a working close may still fill)
+    let close: CloseState | null = null;
     for (const d of deps.delays ?? READBACK_DELAYS_MS) {
+        try { close = await deps.readClose(); } catch { close = null; }
+        if (close?.final) break;
         await sleep(d);
-        try { held = await deps.readHeld(); } catch { held = null; }
-        // flat, or the other way round (never protect a position we did not hold)
-        if (held !== null && (held === 0 || Math.sign(held) !== Math.sign(before))) return 'closed';
     }
-    if (held === null) {
-        deps.notify({ kind: 'err', title: '⚡ 平倉結果無法確認，停損停利未恢復', body: `${code}：無法重新查詢持倉，平倉前取消的停損停利沒有恢復（未受保護）。請到持倉確認，必要時自行設定停損停利` });
+    if (!close?.final) {
+        say('⚡ 平倉結果尚未確定，停損停利未恢復', `${code}：平倉單還沒有最終結果，平倉前取消的停損停利沒有恢復（未受保護）。${UNPROTECTED_TAIL}`);
         return 'unknown';
     }
-    const remaining = Math.min(Math.abs(held), Math.abs(before));
-    const plan = restorePlan(snapshots, remaining, deps.last());
+    if (close.filled >= Math.abs(before)) return 'closed';
+    // 2. the position after the final close (a short wait for it to catch up)
+    let held: number | null = null;
+    for (const d of [0, ...(deps.delays ?? READBACK_DELAYS_MS).slice(0, 2)]) {
+        if (d) await sleep(d);
+        try { held = await deps.readHeld(); } catch { held = null; }
+        if (held !== null) break;
+    }
+    if (held === null) {
+        say('⚡ 平倉未完全成交，停損停利未恢復', `${code}：無法重新查詢持倉，平倉前取消的停損停利沒有恢復（未受保護）。${UNPROTECTED_TAIL}`);
+        return 'unknown';
+    }
+    // flat, or the other way round: never protect a position we did not hold
+    if (held === 0 || Math.sign(held) !== Math.sign(before)) return 'closed';
+    const remaining = Math.min(Math.abs(held), Math.abs(before) - close.filled);
+    if (remaining <= 0) return 'closed';
+    if (!(await deps.envOk())) {
+        say('⚡ 平倉未成交，停損停利未恢復（未受保護）', `${code} 仍持有 ${remaining} ${unit}；伺服器或模擬／正式模式已切換，沒有恢復。${UNPROTECTED_TAIL}`);
+        return 'failed';
+    }
+    const last = await deps.last();
+    if (last === null) {
+        say('⚡ 平倉未成交，停損停利未恢復（未受保護）', `${code} 仍持有 ${remaining} ${unit}；沒有即時成交價可確認停損停利是否已穿價，沒有恢復。${UNPROTECTED_TAIL}`);
+        return 'failed';
+    }
+    // only protections that close what is held (a long's protection sells)
+    const exit = held > 0 ? 'Sell' : 'Buy';
+    const plan = restorePlan(snapshots.filter(s => s.exitAction === exit), remaining, last);
     let restored = 0;
     const failed: string[] = [];
     for (const leg of plan.legs) {
@@ -114,14 +157,54 @@ export async function restoreAfterUnfilledClose(before: number, snapshots: reado
     const notes = [...plan.skipped, ...(failed.length ? [`恢復未確認：${failed.join('、')}`] : [])];
     const unprotected = remaining - restored;
     if (restored > 0 && unprotected <= 0 && !notes.length) {
-        deps.notify({ kind: 'err', title: '⚡ 平倉未成交，已恢復停損停利', body: `${code} 仍持有 ${remaining} ${unit}：已恢復 ${what}（固定價格，不含移動停損）。不會自動再平倉` });
+        say('⚡ 平倉未成交，已恢復停損停利', `${code} 仍持有 ${remaining} ${unit}：已恢復 ${what}（固定價格，不含移動停損）。不會自動再平倉`);
         return 'restored';
     }
     if (restored > 0) {
-        deps.notify({ kind: 'err', title: '⚡ 平倉未成交，停損停利只恢復一部分', body: `${code} 仍持有 ${remaining} ${unit}：已恢復 ${restored} ${unit}（${what}）${
-            unprotected > 0 ? `；未受保護 ${unprotected} ${unit}` : ''}。${notes.join('；')}；請自行補上沒有恢復的部分` });
+        say('⚡ 平倉未成交，停損停利只恢復一部分', `${code} 仍持有 ${remaining} ${unit}：已恢復 ${restored} ${unit}（${what}）${
+            unprotected > 0 ? `；未受保護 ${unprotected} ${unit}` : ''}。${notes.join('；')}；請自行補上沒有恢復的部分`);
         return 'partly';
     }
-    deps.notify({ kind: 'err', title: '⚡ 平倉未成交，停損停利未恢復（未受保護）', body: `${code} 仍持有 ${remaining} ${unit}，沒有停損停利。${notes.join('；') || '恢復未確認'}；請自行處理` });
+    say('⚡ 平倉未成交，停損停利未恢復（未受保護）', `${code} 仍持有 ${remaining} ${unit}，沒有停損停利。${notes.join('；') || '恢復未確認'}；請自行處理`);
     return 'failed';
+}
+
+/** Stocks: nothing is put back (a sell trigger without the shares could open
+ * a short); when shares are still held after the close, say they are no
+ * longer protected. `beforeShares` is the share count the close was for. */
+export async function warnIfStillHeld(beforeShares: number, code: string, deps: Pick<WatchDeps, 'readHeld' | 'notify' | 'sleep' | 'delays'>): Promise<boolean> {
+    const sleep = deps.sleep ?? (ms => new Promise<void>(r => setTimeout(r, ms)));
+    let held: number | null = null;
+    for (const d of deps.delays ?? READBACK_DELAYS_MS) {
+        await sleep(d);
+        try { held = await deps.readHeld(); } catch { held = null; }
+        if (held !== null && (held === 0 || Math.sign(held) !== Math.sign(beforeShares))) return false;
+    }
+    deps.notify({ kind: 'err', title: '⚡ 平倉未完全成交，停損停利已取消（未受保護）', body: held === null
+        ? `${code}：無法確認平倉後的持倉；平倉前取消的停損停利不會自動恢復。${UNPROTECTED_TAIL}`
+        : `${code} 仍持有 ${Math.abs(held).toLocaleString()} 股；平倉前取消的停損停利不會自動恢復（股票）。${UNPROTECTED_TAIL}` });
+    return true;
+}
+
+// ---- one 平倉 at a time per account + product, across windows ----
+
+const localHeld = new Set<string>();
+/** Runs `fn` holding the account + product's 平倉 lock (also across windows
+ * with Web Locks); false when another 平倉 of it is still running or watching. */
+export async function withFlattenLock(key: string, fn: () => Promise<void>): Promise<boolean> {
+    if (localHeld.has(key)) return false;
+    localHeld.add(key);
+    try {
+        const locks = typeof navigator !== 'undefined' ? (navigator as Navigator & { locks?: LockManager }).locks : undefined;
+        if (!locks?.request) { await fn(); return true; }
+        let ran = false;
+        await locks.request(`sj-flash-flatten:${key}`, { ifAvailable: true }, async lock => {
+            if (!lock) return;
+            ran = true;
+            await fn();
+        });
+        return ran;
+    } finally {
+        localHeld.delete(key);
+    }
 }

@@ -10,7 +10,7 @@ import type { ContractInfo } from '../lib/types/contract';
 import type { LadderMark } from '../lib/flash-trigger';
 import type { FlashOrderOpts } from '../lib/flash-account';
 
-const m = vi.hoisted(() => ({ watch: vi.fn(), readHeld: vi.fn(), restoreProt: vi.fn(), stop: vi.fn(), cancel: vi.fn(), place: vi.fn(), notify: vi.fn(), add: vi.fn(), modify: vi.fn(), remove: vi.fn(), bracket: vi.fn(),
+const m = vi.hoisted(() => ({ readClose: vi.fn(), watch: vi.fn(), readHeld: vi.fn(), restoreProt: vi.fn(), stop: vi.fn(), cancel: vi.fn(), place: vi.fn(), notify: vi.fn(), add: vi.fn(), modify: vi.fn(), remove: vi.fn(), bracket: vi.fn(),
     marks: new Map<string, { buy: LadderMark[]; sell: LadderMark[] }>(), background: false, protectedQty: 0 }));
 const accounts: Account[] = [{ account_type: 'F', broker_id: 'BR', account_id: 'F5678', signed: true, person_id: '', username: '' }];
 vi.mock('../lib/account-store', () => ({ ensureAccounts: () => undefined, useAccounts: () => ({ loaded: true, accounts, selectedStock: undefined, selectedFutures: accounts[0] }) }));
@@ -18,7 +18,7 @@ vi.mock('../hooks/use-stream', () => ({ useQuote: () => undefined, useTradingLiv
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: { tick: { close: '100', volume: 1 } }, snapshot: { close: 100 }, book: undefined }) }));
 vi.mock('../hooks/use-flash-ladder', () => ({ useFlashLadder: () => ({ marks: m.marks, protectedQty: m.protectedQty, background: m.background }) }));
 vi.mock('../lib/flash-conditional', () => ({ flashAddTrigger: m.add, flashModifyTrigger: m.modify, flashRemoveTrigger: m.remove, flashPlaceBracket: m.bracket, flashStopProtections: m.stop,
-    flashReadHeld: m.readHeld, flashRestoreProtection: m.restoreProt }));
+    flashReadHeld: m.readHeld, flashRestoreProtection: m.restoreProt, flashReadClose: m.readClose, flashLastPrice: async () => 100, flashEnvIs: async () => true }));
 vi.mock('../lib/flash-flatten-restore', async orig => ({ ...(await orig<typeof import('../lib/flash-flatten-restore')>()), restoreAfterUnfilledClose: m.watch }));
 vi.mock('../lib/shioaji', () => ({ cancelOrders: m.cancel }));
 vi.mock('../lib/trade', () => ({ notify: m.notify, placeQuickOrder: m.place, placeStockExitByShares: vi.fn() }));
@@ -339,6 +339,10 @@ it('平倉 ends this panel\'s 停損停利 first, then closes; an exit out or un
     ]);
     expect(legs[0].role).toBeUndefined();
     expect(legs[0].group).toBe(legs[1].group);
+    // it waits for the close order itself (by its id) to be final
+    m.readClose.mockResolvedValue({ final: true, filled: 0 });
+    expect(await deps.readClose()).toEqual({ final: true, filled: 0 });
+    expect(m.readClose).toHaveBeenCalledWith(accounts[0], 'c');
 
     m.stop.mockResolvedValue({ stopped: 0, blocked: ['TXFR1 停損停利的出場單結果未知'], failed: [], restore: [] });
     await act(async () => { await button(r, '平倉')!.props.onClick(); });
@@ -436,3 +440,24 @@ it('the preview uses the same entry / exit classification as placing (QA 10/13)'
     expect(m.bracket).not.toHaveBeenCalled();
 });
 
+
+it('a close refused right away (nothing went out) after the protection was ended: it is put back at once', async () => {
+    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: [], restore: [{ exitAction: 'Sell', stop: 95, take: 110, quantity: 2 }], env: 'e' });
+    m.place.mockRejectedValue(Object.assign(new Error('券商拒絕'), { mutationNotStarted: true }));
+    const r = await mount({ order: PROTECT, net: 2 });
+    await arm(r);
+    await act(async () => { await button(r, '平倉')!.props.onClick(); });
+    expect(m.watch).toHaveBeenCalledTimes(1);
+    const deps = m.watch.mock.calls[0]![4];
+    expect(await deps.readClose()).toEqual({ final: true, filled: 0 });
+});
+
+it('an unknown close outcome: the protection is not put back, and the panel says it is unprotected', async () => {
+    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: [], restore: [{ exitAction: 'Sell', stop: 95, take: 110, quantity: 2 }], env: 'e' });
+    m.place.mockRejectedValue(new Error('timeout'));
+    const r = await mount({ order: PROTECT, net: 2 });
+    await arm(r);
+    await act(async () => { await button(r, '平倉')!.props.onClick(); });
+    expect(m.watch).not.toHaveBeenCalled();
+    expect(m.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '⚡ 停損停利已取消（未受保護）' }));
+});
