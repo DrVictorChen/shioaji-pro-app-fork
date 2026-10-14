@@ -1487,19 +1487,22 @@ export function FlashOrder({
         const net = pos.net;
         // one 平倉 of this account + product at a time (also across windows),
         // held until its unfilled-close check has finished
-        const ran = await withFlattenLock(`${account.account_type}:${account.broker_id}:${account.account_id}:${contract.code}`, async () => {
+        // keyed by the tradable contract (TXFR1 → TXFJ6): an alias panel and a direct one share it
+        const ran = await withFlattenLock(`${account.account_type}:${account.broker_id}:${account.account_id}:${contract.target_code || contract.code}`, async () => {
             let stop: Awaited<ReturnType<typeof flashStopProtections>> | null = null;
             // what an unfilled close puts back (futures only: a stock sell trigger without the shares could open a short)
             const restoreFor = () => (stop && !stock ? stop.restore : []);
             const watch = (readClose: () => Promise<{ final: boolean; filled: number } | null>) => {
-                const group = `restore-${Date.now().toString(36)}`;
+                const group = `restore-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+                let n = 0;
                 return restoreAfterUnfilledClose(net, restoreFor(), contract.code, unit, {
                     readClose,
                     readHeld: () => flashReadHeld(account, codes, false),
                     last: () => flashLastPrice(contract.code),
                     envOk: () => flashEnvIs(stop?.env),
+                    // every restored protection its own OCO group (one firing never cancels another's legs)
                     restore: leg => flashRestoreProtection(restoreTriggers(leg, { code: contract.code, futures: true, odd: false,
-                        group: `${group}-${leg.stop ?? ''}-${leg.take ?? ''}` }), contract, account),
+                        group: `${group}-${++n}` }), contract, account),
                     notify,
                 });
             };
@@ -1512,6 +1515,10 @@ export function FlashOrder({
                     notify({ kind: 'err', title: '⚡ 平倉未送出', body: stop.blocked.length
                         ? `${stop.blocked.join('；')}。為避免重複出場，這筆沒有送出；請到條件單面板處理後再平倉`
                         : `停損停利取消未確認（${stop.failed.join('；')}）。為避免重複出場，這筆沒有送出` });
+                    // some were ended before another failed: those lots are unprotected now
+                    if (stop.stopped > 0) {
+                        notify({ kind: 'err', title: '⚡ 部分停損停利已取消（未受保護）', body: `${contract.code}：已取消 ${stop.stopped} 張停損停利、其他取消未確認，平倉沒有送出，已取消的保護沒有恢復。請到條件單面板確認，必要時重新設定停損停利` });
+                    }
                     return;
                 }
                 let closeId: string | null = null;

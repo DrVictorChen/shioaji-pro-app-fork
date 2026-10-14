@@ -84,6 +84,13 @@ describe('plain protective triggers (a 觸價欄 exit, a restore after an unfill
             expect.objectContaining({ exitAction: 'Sell', stop: 94, take: 112, quantity: 2 }),
         ]);
     });
+    it('an exit a plain protective trigger already sent (the trigger is gone) blocks; another account\'s does not', () => {
+        const exit = { triggerId: 'tg-7', account: A, orderCode: 'TXFJ6', status: 'working' };
+        expect(protectionTargets(scope, [], [exit], [], []).blocked[0]).toContain('正在送出或等待成交');
+        expect(protectionTargets(scope, [], [{ ...exit, status: 'unknown' }], [], []).blocked[0]).toContain('結果未知');
+        expect(protectionTargets(scope, [], [{ ...exit, status: 'unknown', acknowledged: true }], [], []).blocked).toEqual([]);
+        expect(protectionTargets(scope, [], [{ ...exit, account: { ...A, account_id: '2' } }], [], []).blocked).toEqual([]);
+    });
     it('a pending one blocks', () => {
         expect(protectionTargets(scope, [], [], [], [t({ pending: { price: 1, at: 1 } })] as never).blocked).toHaveLength(1);
     });

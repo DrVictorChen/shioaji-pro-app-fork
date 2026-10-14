@@ -98,6 +98,28 @@ describe('restoreAfterUnfilledClose', () => {
         expect(price.restore).not.toHaveBeenCalled();
     });
 
+    it('a read that never answers counts as unreadable (the flow ends, flagged unprotected)', async () => {
+        vi.useFakeTimers();
+        const notify = vi.fn();
+        const p = restoreAfterUnfilledClose(2, [snap], 'TXFR1', '口', { readClose: () => new Promise(() => undefined), readHeld: async () => 2,
+            last: () => 100, envOk: () => true, restore: async () => true, notify, sleep: noSleep, delays: [0] });
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(await p).toBe('unknown');
+        expect(notify).toHaveBeenCalledWith(expect.objectContaining({ title: '⚡ 平倉結果尚未確定，停損停利未恢復' }));
+        vi.useRealTimers();
+    });
+
+    it('the environment is checked before every leg: a switch midway stops the rest', async () => {
+        let ok = true;
+        const restore = vi.fn(async () => { ok = false; return true; });
+        const notify = vi.fn();
+        const out = await restoreAfterUnfilledClose(3, [snap, { ...snap, stop: 96, quantity: 1 }], 'TXFR1', '口', { readClose: async () => ({ final: true, filled: 0 }),
+            readHeld: async () => 3, last: () => 100, envOk: () => ok, restore, notify, sleep: noSleep });
+        expect(out).toBe('partly');
+        expect(restore).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('模擬／正式模式已切換') }));
+    });
+
     it('the restore is refused: flagged unprotected, not retried', async () => {
         const restore = vi.fn(async () => { throw new Error('主視窗沒有回應'); });
         const r = run({ restore });

@@ -92,6 +92,12 @@ export interface WatchDeps {
 
 export type WatchOutcome = 'closed' | 'restored' | 'partly' | 'failed' | 'unknown' | 'none';
 
+export const READ_TIMEOUT_MS = 5_000;
+/** A read that does not answer in time counts as unreadable (never holds the flow). */
+function bounded<T>(p: Promise<T>, ms = READ_TIMEOUT_MS): Promise<T | null> {
+    return Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), ms))]).catch(() => null);
+}
+
 const UNPROTECTED_TAIL = '請到委託與持倉確認，必要時自行設定停損停利';
 
 /** After a 平倉: wait until the close order is final, re-read the position,
@@ -107,7 +113,7 @@ export async function restoreAfterUnfilledClose(before: number, snapshots: reado
     // 1. the close must be final first (a working close may still fill)
     let close: CloseState | null = null;
     for (const d of deps.delays ?? READBACK_DELAYS_MS) {
-        try { close = await deps.readClose(); } catch { close = null; }
+        close = await bounded(deps.readClose());
         if (close?.final) break;
         await sleep(d);
     }
@@ -120,7 +126,7 @@ export async function restoreAfterUnfilledClose(before: number, snapshots: reado
     let held: number | null = null;
     for (const d of [0, ...(deps.delays ?? READBACK_DELAYS_MS).slice(0, 2)]) {
         if (d) await sleep(d);
-        try { held = await deps.readHeld(); } catch { held = null; }
+        held = await bounded(deps.readHeld());
         if (held !== null) break;
     }
     if (held === null) {
@@ -146,6 +152,8 @@ export async function restoreAfterUnfilledClose(before: number, snapshots: reado
     let restored = 0;
     const failed: string[] = [];
     for (const leg of plan.legs) {
+        // each leg binds the environment current when it is created: checked per leg
+        if (!(await deps.envOk())) { failed.push(`${leg.quantity} ${unit}（伺服器或模擬／正式模式已切換）`); continue; }
         try {
             if (await deps.restore(leg)) restored += leg.quantity;
             else failed.push(`${leg.quantity} ${unit}`);
@@ -177,7 +185,7 @@ export async function warnIfStillHeld(beforeShares: number, code: string, deps: 
     let held: number | null = null;
     for (const d of deps.delays ?? READBACK_DELAYS_MS) {
         await sleep(d);
-        try { held = await deps.readHeld(); } catch { held = null; }
+        held = await bounded(deps.readHeld());
         if (held !== null && (held === 0 || Math.sign(held) !== Math.sign(beforeShares))) return false;
     }
     deps.notify({ kind: 'err', title: '⚡ 平倉未完全成交，停損停利已取消（未受保護）', body: held === null

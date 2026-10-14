@@ -461,3 +461,27 @@ it('an unknown close outcome: the protection is not put back, and the panel says
     expect(m.watch).not.toHaveBeenCalled();
     expect(m.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '⚡ 停損停利已取消（未受保護）' }));
 });
+
+it('each restored protection gets its own OCO group; an alias panel shares the product lock', async () => {
+    m.stop.mockResolvedValue({ stopped: 2, blocked: [], failed: [], restore: [{ exitAction: 'Sell', stop: 95, take: 110, quantity: 1 }, { exitAction: 'Sell', stop: 95, take: 110, quantity: 1 }], env: 'e' });
+    m.place.mockResolvedValue({ order: { id: 'c' }, status: { status: 'Submitted' } });
+    const r = await mount({ order: PROTECT, net: 2 });
+    await arm(r);
+    await act(async () => { await button(r, '平倉')!.props.onClick(); });
+    const deps = m.watch.mock.calls[0]![4];
+    m.restoreProt.mockResolvedValue(true);
+    await deps.restore({ exitAction: 'Sell', stop: 95, take: 110, quantity: 1 });
+    await deps.restore({ exitAction: 'Sell', stop: 95, take: 110, quantity: 1 });
+    const g1 = m.restoreProt.mock.calls[0]![0][0].group;
+    const g2 = m.restoreProt.mock.calls[1]![0][0].group;
+    expect(g1).not.toBe(g2);
+});
+
+it('some protections ended before another failed: no close, and the ended ones are said to be unprotected', async () => {
+    m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: ['主視窗沒有回應'], restore: [], env: 'e' });
+    const r = await mount({ order: PROTECT, net: 2 });
+    await arm(r);
+    await act(async () => { await button(r, '平倉')!.props.onClick(); });
+    expect(m.place).not.toHaveBeenCalled();
+    expect(m.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '⚡ 部分停損停利已取消（未受保護）' }));
+});

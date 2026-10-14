@@ -360,6 +360,7 @@ export interface WindowPlanLike {
 
 export interface ExitLike {
     bracketId?: string;
+    triggerId?: string;
     account: { account_type: string; broker_id: string; account_id: string };
     orderCode: string;
     status: string;
@@ -439,6 +440,14 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
     views: readonly BackgroundViewLike[], triggers: readonly ExitTriggerLike[] = []): ProtectionTargets {
     const out: ProtectionTargets = { window: [], background: [], blocked: [], snapshots: [] };
     const inCodes = (...cs: string[]) => cs.some(c => s.codes.includes(c));
+    // an exit a plain protective trigger already sent (the trigger is gone
+    // then): never close on top of it
+    for (const e of exits) {
+        if (e.bracketId || !sameAccount(e.account, s) || !inCodes(e.orderCode)) continue;
+        if (exitOut(e.status, e.acknowledged)) {
+            out.blocked.push(`${e.orderCode} 停損停利觸價單的出場單${e.status === 'unknown' ? '結果未知' : '正在送出或等待成交'}`);
+        }
+    }
     // plain protective stop / take triggers of this account + product (+ unit)
     const groups = new Map<string, ExitTriggerLike[]>();
     const single: string[] = [];
