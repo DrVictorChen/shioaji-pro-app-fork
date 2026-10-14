@@ -13,6 +13,7 @@ import { fetchAccountBalance, fetchMargin, fetchPositions, fetchTradeCacheHealth
 import { ensureStream, getStreamStatus, isStreamOwner, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
 import { applyPositionFill, markPosition, positionFill, reportBody } from './portfolio-projection';
 import { projectOrderReport, projectTradeDeal } from './order-projection';
+import { noteOrderReport } from './order-trace';
 import { onOrderCodeHintsChanged, orderCodeHint } from './order-code-hints';
 import { parseEventId, reportLedger } from './report-ledger';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
@@ -242,14 +243,6 @@ let baselineLostMark = 0;
 const nextRefreshAt: Record<TradingQueryScope, number> = { positions: 0, orders: 0, account: 0 };
 let eventSequence = 0;
 const accountKey = (a: { broker_id: string; account_id: string; account_type: string }) => `${a.account_type}:${a.broker_id}:${a.account_id}`;
-// #244 Orders this App knows only from active reports — placed elsewhere
-// (iLeader, another program) while the App was running, never in one of its
-// authoritative reads nor a place response of this sidecar. Shioaji 1.7.6+
-// builds such a Trade in the sidecar cache from the New report alone (no
-// signing material, partial metadata) until update_status reconciles it, so
-// a change/cancel first reconciles it (prepareOrderMutation).
-const reportOnly = new Set<string>();
-const tradeKey = (account: { broker_id: string; account_id: string; account_type: string }, id: string) => `${accountKey(account)}|${id}`;
 const reportKey = (report: OrderEventReport) => report.eventId ? `event:${report.eventId}` : JSON.stringify(report.raw);
 
 const positionQuotes = new Map<string, { release?: () => void }>();
@@ -312,16 +305,7 @@ function mergeOrders(account: Account, trades: Trade[], accounts: Account[], pro
     }
     if (replayFailed) problems.push(['projection-failed', '委託更新期間有無法銜接的回報，保留本地資料待確認']);
     const applied = !queryOverflow && !replayFailed;
-    if (applied) {
-        // An authoritative read reconciled its rows in the sidecar too; a row
-        // only a replayed report created is still report-only. A cache read
-        // (upsert) reconciles nothing.
-        const read = new Set(incoming.map(t => t.order.id));
-        const before = new Set(state.trades.filter(t => matches(t.account)).map(t => t.order.id));
-        if (mode === 'replace') for (const id of read) reportOnly.delete(tradeKey(account, id));
-        for (const t of merged) if (matches(t.account) && !read.has(t.order.id) && !before.has(t.order.id)) reportOnly.add(tradeKey(account, t.order.id));
-        state = { ...state, trades: merged };
-    }
+    if (applied) state = { ...state, trades: merged };
     return applied;
 }
 
@@ -891,8 +875,6 @@ function start() {
         const account = getAccountState().accounts.find(a => canTrade(a) && a.account_type === ref?.account_type
             && a.account_id === ref?.account_id && a.broker_id === ref?.broker_id);
         if (!account) return;
-        // this sidecar answered for the order: its cache holds the full Trade
-        reportOnly.delete(tradeKey(account, trade.order.id));
         const old = state.trades.find(t => t.order.id === trade.order.id && t.account && accountKey(t.account) === accountKey(account));
         // A response may arrive after newer reports. Keep their quantities,
         // prices/status and only enrich metadata missing from the event schema.
@@ -966,16 +948,11 @@ function start() {
         else {
             const ref = (reportBody(report)?.order as { account?: { broker_id?: string; account_id?: string } })?.account;
             const key = `${report.market}:${ref?.broker_id}:${ref?.account_id}:${report.id}`;
+            noteOrderReport(report); // debug trace only (VITE_DEBUG_ORDER_TRACE=1)
             if (report.ts && report.ts < (orderTimes.get(key) ?? 0)) return;
             if (queryEvents && queryEvents.length < 1000) queryEvents.push(report);
-            const ownRow = (rows: AccountedTrade[]) => rows.find(t => t.order.id === report.id && t.account?.broker_id === ref?.broker_id
-                && t.account?.account_id === ref?.account_id && t.account?.account_type === (report.market === 'stock' ? 'S' : 'F'));
-            const existed = !!ownRow(state.trades);
             const trades = projectOrderReport(state.trades, report, getAccountState().accounts, orderCodeHint(report.id, ref));
             if (trades) {
-                // a New report of an order nobody here placed or read (#244)
-                const created = existed ? undefined : ownRow(trades);
-                if (created?.account) reportOnly.add(tradeKey(created.account, created.order.id));
                 state = { ...state, trades };
                 if (report.ts) orderTimes.set(key, report.ts);
                 releasePendingDeals(report.id);
@@ -1060,15 +1037,6 @@ function start() {
 }
 
 export const getTradingState = () => state;
-/** #244 This window knows the order only from active reports (see
- *  reportOnly). Mirrors always reconcile before a mutation, so false there. */
-export function isReportOnlyTrade(trade: { order: { id: string }; account?: { broker_id: string; account_id: string; account_type: string } }) {
-    return !isMirror && !!trade.account && reportOnly.has(tradeKey(trade.account, trade.order.id));
-}
-/** The order was just found in an authoritative read of its account. */
-export function noteTradeReconciled(account: { broker_id: string; account_id: string; account_type: string }, tradeId: string) {
-    reportOnly.delete(tradeKey(account, tradeId));
-}
 /** Whether cancel confirmation may read the sidecar cache (refresh:false):
  *  the same continuity as tradeCacheContinuous (health is not required — a
  *  cache row only ever confirms, a stale cache can only fail to confirm).

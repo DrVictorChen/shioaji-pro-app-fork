@@ -36,3 +36,51 @@ describe('order trace (#244 debug)', () => {
         expect(info).toHaveBeenCalledWith('[order-trace]', expect.any(String));
     });
 });
+
+describe('order trace across windows and reports (#244 QA: second cancel missing)', () => {
+    it('records who changed an order: reports say whether this App had a mutation running', async () => {
+        vi.stubEnv('VITE_DEBUG_ORDER_TRACE', '1');
+        vi.stubGlobal('BroadcastChannel', undefined);
+        const t = await import('./order-trace');
+        vi.spyOn(console, 'info').mockImplementation(() => {});
+        const { normalizeOrderEvent } = await import('./order-report');
+        const cancel = (id: string) => normalizeOrderEvent({ state: 'StockOrder', data: { StockOrder: {
+            operation: { op_type: 'Cancel', op_code: '00', op_msg: '' },
+            order: { id, seqno: '475UKT', ordno: 'kY001', account: { account_type: 'S', broker_id: '9A95', account_id: '1234567' }, action: 'Buy', price: 43.85, quantity: 1, order_lot: 'Common', order_cond: 'Cash', price_type: 'LMT', order_type: 'ROD' },
+            status: { exchange_ts: 1789200000, order_quantity: 0, cancel_quantity: 1, modified_price: 0 },
+            contract: { code: '2890', security_type: 'STK', exchange: 'TSE' },
+        } } })!;
+        // nobody here was cancelling it
+        t.noteOrderReport(cancel('0094ef67'));
+        // cancelled by this window
+        const record = t.beginOrderTrace('cancel', 'mine');
+        t.noteOrderReport(cancel('mine'));
+        await t.finishOrderTrace(record, Promise.resolve({ status: { status: 'Cancelled' } }));
+        const reports = t.getOrderTrace().filter(r => r.kind === 'report');
+        expect(reports.map(r => [r.trade_id, r.seqno, r.report?.op_type, r.report?.app_mutation_in_flight])).toEqual([
+            ['0094ef67', '475UKT', 'Cancel', false], ['mine', '475UKT', 'Cancel', true]]);
+        expect(reports[0]!.report?.app_mutation_ms_ago).toBeNull();
+        expect(t.getOrderTrace().every(r => r.window === 'main')).toBe(true);
+        vi.unstubAllGlobals();
+    });
+    it('records from a popout window reach the main window diagnostics', async () => {
+        vi.stubEnv('VITE_DEBUG_ORDER_TRACE', '1');
+        const listeners: Array<(e: { data: unknown }) => void> = [];
+        const posted: unknown[] = [];
+        class Channel {
+            constructor(public name: string) {}
+            addEventListener(_n: string, l: (e: { data: unknown }) => void) { listeners.push(l); }
+            postMessage(data: unknown) { posted.push(data); }
+        }
+        vi.stubGlobal('BroadcastChannel', Channel);
+        const t = await import('./order-trace');
+        vi.spyOn(console, 'info').mockImplementation(() => {});
+        const own = t.beginOrderTrace('cancel', 'a');
+        await t.finishOrderTrace(own, Promise.resolve({ status: { status: 'Cancelled' } }));
+        expect(posted).toHaveLength(1);
+        listeners.forEach(l => l({ data: { record: { ts: 'x', window: 'popout-flash-1', kind: 'cancel', entry: 'flash cell', trade_id: '0094ef67', summary: 'ok (Cancelled)' } } }));
+        expect(t.getOrderTrace().map(r => [r.window, r.trade_id])).toEqual([['main', 'a'], ['popout-flash-1', '0094ef67']]);
+        expect(t.orderTraceDiagnostics()).toContain('popout-flash-1');
+        vi.unstubAllGlobals();
+    });
+});

@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Account } from './types/portfolio';
 import type { AccountedTrade } from './types/order';
-const m = vi.hoisted(() => ({ base: 'fixture', rows: [] as AccountedTrade[], accounts: [] as Account[], post: vi.fn(), trusted: true, baseline: true, lostMark: 0, reportOnly: new Set<string>(), reconciled: [] as string[],
+const m = vi.hoisted(() => ({ base: 'fixture', rows: [] as AccountedTrade[], accounts: [] as Account[], post: vi.fn(), trusted: true, baseline: true, lostMark: 0,
     readback: null as null | ((body: Record<string, unknown>) => unknown) }));
 vi.mock('./runtime', async original => ({ ...await original<object>(), getApiBase: () => m.base }));
 vi.mock('./api', () => ({ apiPost: m.post, apiGet: vi.fn(), apiPut: vi.fn(), apiDelete: vi.fn() }));
 vi.mock('./account-store', () => ({ accountFor: vi.fn(() => { throw new Error('no selected fallback'); }), getAccountState: () => ({ accounts: m.accounts }) }));
-vi.mock('./trading-state', () => ({ getTradingState: () => ({ trades: m.rows }), cancelCacheTrusted: () => m.trusted, locallyCancelled: () => false, hasOrdersBaseline: () => m.baseline, ordersBaselineLostMark: () => m.lostMark,
-    isReportOnlyTrade: (t: AccountedTrade) => m.reportOnly.has(t.order.id), noteTradeReconciled: (_a: unknown, id: string) => { m.reconciled.push(id); m.reportOnly.delete(id); } }));
+vi.mock('./trading-state', () => ({ getTradingState: () => ({ trades: m.rows }), cancelCacheTrusted: () => m.trusted, locallyCancelled: () => false, hasOrdersBaseline: () => m.baseline, ordersBaselineLostMark: () => m.lostMark }));
 import { cancelOrder, cancelOrders, fetchTradeCacheHealth, fetchTrades, updateOrderPrice, updateOrderQty } from './shioaji';
 import { beginServerInfoRequest, observeServerInfo } from './server-info-store';
 const account: Account = { account_type: 'F', broker_id: 'fixture', account_id: 'owner', signed: true, username: '', person_id: '' };
@@ -15,7 +14,7 @@ const row = (): AccountedTrade => ({ account, contract: { code: 'QEFI6', securit
 beforeEach(async () => {
     // Baseline lost "now": no earlier authoritative read may be shared.
     m.lostMark = (await import('./cancel-verification')).readMark();
-    vi.clearAllMocks(); m.base = `fixture-${Math.random()}`; m.accounts = [account]; m.rows = [row()]; m.trusted = true; m.baseline = true; m.reportOnly = new Set(); m.reconciled = [];
+    vi.clearAllMocks(); m.base = `fixture-${Math.random()}`; m.accounts = [account]; m.rows = [row()]; m.trusted = true; m.baseline = true;
     // cancel_order answers like 1.7.6 (still Submitted); the cache read-back
     // shows the projected Cancel for the same order and account.
     m.readback = () => [{ ...row(), account: undefined, status: { ...row().status, status: 'Cancelled', cancel_quantity: 3, order_quantity: 0 } }];
@@ -338,78 +337,29 @@ it('cancelVerifiedOrder: beforeSend refusal sends nothing', async () => {
     expect(dispatch).not.toHaveBeenCalled();
 });
 
-// #244 An order placed in SinoPac iLeader while the App runs reaches the App
-// (and the Shioaji 1.7.6+ sidecar cache) only through its New report: no
-// custom_field, ordno/seqno present, the sidecar Trade built from the report
-// alone until update_status reconciles it. The flash panel and the orders tab
-// both cancel through cancelOrder; with a baseline they used to send it
-// straight away against that report-only cache entry.
-describe('order known only from active reports (iLeader, #244)', () => {
-    const external = (status: Partial<AccountedTrade['status']> = {}): AccountedTrade => ({ ...row(),
-        contract: { code: 'KEFJ6', security_type: 'FUT', exchange: 'TAIFEX', target_code: null },
-        order: { id: 'ext1', action: 'Buy', price: 239.5, seqno: 'S0001', ordno: 'kY001', quantity: 1, account, price_type: 'LMT', order_type: 'ROD' },
-        status: { ...row().status, id: 'ext1', order_quantity: 1, ...status } } as AccountedTrade);
-    beforeEach(() => { m.rows = [external()]; m.reportOnly = new Set(['ext1']); });
-    it('reconciles the owner account (refresh:true) before the cancel is sent, then sends it once', async () => {
-        vi.useFakeTimers();
-        try {
-            let reads = 0;
-            m.post.mockImplementation(async (p: string, body: Record<string, unknown>) => p !== '/api/v1/order/trades' ? external()
-                : body.refresh === true && reads++ === 0 ? [{ ...external(), account: undefined }]
-                : [{ ...external({ status: 'Cancelled', cancel_quantity: 1, order_quantity: 0 }), account: undefined }]);
-            const settled = cancelOrder('ext1');
-            await vi.advanceTimersByTimeAsync(5_000);
-            await expect(settled).resolves.toMatchObject({ order: { id: 'ext1' }, status: { status: 'Cancelled' } });
-            const calls = m.post.mock.calls.map(c => [c[0], c[1].refresh]);
-            expect(calls[0]).toEqual(['/api/v1/order/trades', true]);
-            expect(m.post.mock.calls[0]![1]).toMatchObject({ account_type: 'F', broker_id: 'fixture', account_id: 'owner' });
-            expect(calls[1]).toEqual(['/api/v1/order/cancel_order', undefined]);
-            expect(m.post.mock.calls[1]![1]).toEqual({ trade_id: 'ext1' });
-            expect(calls.filter(([p]) => p === '/api/v1/order/cancel_order')).toHaveLength(1);
-            expect(m.reconciled).toEqual(['ext1']);
-        } finally { vi.useRealTimers(); }
-    });
-    it('a 全刪 batch of report-only orders shares one pre-send refresh:true', async () => {
-        vi.useFakeTimers();
-        try {
-            const ids = ['ext1', 'ext2', 'ext3'];
-            const rows = ids.map((id, i) => ({ ...external(), order: { ...external().order, id, seqno: `S${i}`, ordno: `k${i}` }, status: { ...external().status, id } }));
-            m.rows = rows; m.reportOnly = new Set(ids);
-            let sent = 0;
-            m.post.mockImplementation(async (p: string) => {
-                if (p === '/api/v1/order/cancel_order') { sent += 1; return external(); }
-                if (p === '/api/v1/order/trades') return rows.map(r => sent < ids.length ? { ...r, account: undefined }
-                    : { ...r, account: undefined, status: { ...r.status, status: 'Cancelled', cancel_quantity: 1 } });
-                return { state: 'Healthy', reasons: [] };
-            });
-            const settled = cancelOrders(ids);
-            await vi.advanceTimersByTimeAsync(10_000);
-            expect((await settled).map(r => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
-            const first = m.post.mock.calls.findIndex(c => c[0] === '/api/v1/order/cancel_order');
-            expect(m.post.mock.calls.slice(0, first).filter(c => c[0] === '/api/v1/order/trades' && c[1].refresh === true)).toHaveLength(1);
-        } finally { vi.useRealTimers(); }
-    });
+// #244 Until Shioaji 1.7.9 the sidecar refuses to re-sign an order known only
+// from another program's New report. The refusal keeps its text and flags
+// (never resent) and tells the user what to do.
+describe('sidecar local refusal of an order placed in another program (#244)', () => {
+    const refusal = () => Object.assign(new Error('400 CA not activated for: '), { status: 400 });
     it.each([
-        ['missing from the reconcile', () => []],
-        ['already gone', () => [{ ...external({ status: 'Cancelled', cancel_quantity: 1 }), account: undefined }]],
-        ['read failure', () => { throw new Error('429 Too Many Requests'); }],
-    ] as const)('sends nothing when the order is %s', async (_n, rows) => {
-        m.post.mockImplementation(async (p: string) => p === '/api/v1/order/trades' ? rows() : external());
-        await expect(cancelOrder('ext1')).rejects.toMatchObject({ mutationNotStarted: true });
-        expect(m.post.mock.calls.map(c => c[0])).toEqual(['/api/v1/order/trades']);
-        expect(m.reconciled).toEqual([]);
+        ['cancel', () => cancelOrder('fixture')],
+        ['price', () => updateOrderPrice('fixture', 490)],
+        ['quantity', () => updateOrderQty('fixture', 1)],
+    ] as const)('%s: shows the reason plus the hint, sends once, keeps the outcome flags', async (_n, call) => {
+        m.post.mockImplementation(async (p: string) => { if (p === '/api/v1/order/trades') return []; throw refusal(); });
+        const error = await call().catch(e => e) as Error & Record<string, unknown>;
+        expect(error.message).toBe('400 CA not activated for: ；這筆是其他軟體下的單，請先在委託分頁按更新再刪，或在原下單軟體刪除');
+        expect(error.status).toBe(400);
+        expect(error).not.toHaveProperty('mutationNotStarted');
+        expect(m.post.mock.calls.filter(c => c[0] !== '/api/v1/order/trades')).toHaveLength(1);
     });
-    it('an order this App placed (not report-only) still goes straight out', async () => {
-        m.reportOnly = new Set();
-        m.post.mockImplementation(async (p: string) => p === '/api/v1/order/trades'
-            ? [{ ...external({ status: 'Cancelled', cancel_quantity: 1 }), account: undefined }] : external());
-        await cancelOrder('ext1');
-        expect(m.post.mock.calls[0]![0]).toBe('/api/v1/order/cancel_order');
-        expect(m.post.mock.calls.some(c => c[0] === '/api/v1/order/trades' && c[1].refresh === true)).toBe(false);
-    });
-    it('price and quantity changes reconcile it first too', async () => {
-        m.post.mockImplementation(async (p: string) => p === '/api/v1/order/trades' ? [{ ...external(), account: undefined }] : external());
-        await updateOrderPrice('ext1', 240);
-        expect(m.post.mock.calls.map(c => c[0])).toEqual(['/api/v1/order/trades', '/api/v1/order/update_price']);
+    it('a Trade missing from the sidecar cache gets the hint too; other errors are untouched', async () => {
+        const { explainSidecarRefusal } = await import('./shioaji');
+        expect((explainSidecarRefusal(Object.assign(new Error('400 Trade abc not found in cache'), { status: 400 })) as Error).message).toContain('委託分頁按更新');
+        for (const other of [Object.assign(new Error('400 價格超過漲跌停'), { status: 400 }), Object.assign(new Error('500 CA not activated for: '), { status: 500 }), 'timeout']) {
+            expect(explainSidecarRefusal(other)).toBe(other);
+        }
+        expect((explainSidecarRefusal('400 CA not activated for: ') as Error).message).toContain('原下單軟體刪除');
     });
 });
