@@ -1219,7 +1219,10 @@ export function useChartDrawings(opts: {
             const layer = layerOf();
             const pt = layer?.pointOf(e);
             const projector = layer?.projector();
-            if (!chart || !series || !pt || !projector) return;
+            if (!chart || !series || !layer || !pt || !projector) return;
+            // 只管 K 線 pane：指標 pane、價格／時間軸上的十字線維持原生行為
+            const { width, height } = layer.paneSize;
+            if (pt.x < 0 || pt.y < 0 || pt.x >= width || pt.y >= height) return;
             const target = drawingCrosshairTarget(crosshairAnchorAt(projector, pt), getBarsRef.current?.());
             if (!target) return;
             try {
