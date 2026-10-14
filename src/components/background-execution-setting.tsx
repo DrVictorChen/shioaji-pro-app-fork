@@ -52,13 +52,13 @@ export function BackgroundExecutionSetting() {
                     aria-pressed={on}
                     // turning it off always works; on needs a running engine
                     disabled={busy || (!on && !health)}
-                    title={on ? '關閉：之後新建的觸價單回到原本的方式' : '開啟：之後新建的期貨與選擇權觸價單在背景執行'}
+                    title={on ? '關閉：之後新建的觸價單回到原本的方式' : '開啟：之後新建的條件單在背景執行'}
                     onClick={toggle}
                 />
             </div>
             <span className={hud.emptyHint}>
-                預設關閉。開啟後，之後新建的期貨與選擇權停損、停利觸價單，會由 App 在背景盯價與送單；
-                重新整理或關掉視窗也不會中斷。股票、零股和到價警示照舊。
+                預設關閉。開啟後，之後新建的觸價單、停損停利、二擇一、括號單與時間條件（期貨、選擇權與股票），
+                會由 App 在背景盯價與送單；重新整理或關掉視窗也不會中斷。到價警示照舊在本視窗。
                 已經存在的觸價單維持原本的方式到結束，不會重複送單。關閉只影響之後新建的單，
                 已在背景的單會繼續執行到結束。送出結果不明的委託不會自動重送，會列在「委託待確認」請你核對。
                 <br />
