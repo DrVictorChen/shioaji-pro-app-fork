@@ -84,3 +84,35 @@ it('flash 全刪 shows why a cancel failed (#244)', async () => {
         expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ body: expect.stringContaining('未送出 1 筆（此視窗無法送出交易指令）') });
     } finally { await act(async () => view?.unmount()); vi.unstubAllGlobals(); }
 });
+// #244 An order placed in iLeader: no custom_field, ordno/seqno from the
+// exchange, modified_price 0. Its ladder chip cancels exactly that order
+// through the same cancel the orders tab uses, and a chip whose order is gone
+// says so instead of doing nothing.
+it('the ladder chip of an iLeader order cancels that order; a stale chip explains itself (#244)', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
+    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    mocks.selected = 'A'; mocks.cancel.mockReset(); mocks.notify.mockReset();
+    accounts.forEach(account => { account.account_type = 'F'; });
+    const contract = { code: 'KEFJ6', security_type: 'FUT', reference: 100 } as ContractInfo;
+    const ileader = (id: string, action: 'Buy' | 'Sell') => ({ account: accounts[0], contract: { code: 'KEFJ6', security_type: 'FUT', exchange: 'TAIFEX', target_code: null },
+        order: { id, seqno: `S-${id}`, ordno: `k-${id}`, account: accounts[0], price: 100, action, quantity: 1, price_type: 'LMT', order_type: 'ROD' },
+        status: { id, status: 'Submitted', order_quantity: 1, deal_quantity: 0, cancel_quantity: 0, modified_price: 0, deals: [] } });
+    const trades = [ileader('ext-buy', 'Buy'), ileader('ext-sell', 'Sell')] as unknown as Trade[];
+    mocks.cancel.mockImplementation(async (id: string) => ({ ...trades.find(t => t.order.id === id)!, status: { status: 'Cancelled', cancel_quantity: 1, deal_quantity: 0 } }));
+    let view!: ReactTestRenderer;
+    const chip = (title: string) => view.root.findAllByType('button').find(b => typeof b.props.title === 'string' && b.props.title.startsWith(title));
+    try {
+        await act(async () => { view = create(createElement(FlashOrder, { contract, trades, positions: [] })); });
+        await act(async () => { await chip('刪除 100.00 買單')!.props.onClick(); });
+        expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual(['ext-buy']);
+        await act(async () => { await chip('刪除 100.00 賣單')!.props.onClick(); });
+        expect(mocks.cancel.mock.calls.map(c => c[0])).toEqual(['ext-buy', 'ext-sell']);
+        // the order left before the click landed: nothing is sent, and the user is told
+        const stale = chip('刪除 100.00 買單')!.props.onClick;
+        await act(async () => { view.update(createElement(FlashOrder, { contract, trades: [], positions: [] })); });
+        await act(async () => { await stale(); });
+        expect(mocks.cancel).toHaveBeenCalledTimes(2);
+        expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', title: '⚡ 刪單', body: expect.stringContaining('沒有送出') });
+    } finally { await act(async () => view?.unmount()); vi.unstubAllGlobals(); }
+});

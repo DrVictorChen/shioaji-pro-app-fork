@@ -1,6 +1,7 @@
 import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 import { canUpdateOrderPrice, isOddLot, lotLabel } from '../lib/odd-lot';
 import { cancellationSummary } from '../lib/trade-mutations';
+import { noteOrderTraceEntry } from '../lib/order-trace';
 import { isCancelUnconfirmed } from '../lib/cancel-verification';
 // src/components/bottom-dock-orders.tsx — 委託 tab：成交進度圈、狀態篩選、
 // 分帳戶區段、批次刪單（arm-lock 防誤觸）；inline 改價/減量沿用
@@ -166,6 +167,7 @@ export function OrderEditor({
             return;
         }
         if (valid) {
+            noteOrderTraceEntry([trade.order.id], 'orders tab');
             const req =
                 field === 'qty'
                     ? updateOrderQty(trade.order.id, remaining - n)
@@ -350,6 +352,7 @@ export function OrdersPane({
         if (cancelling !== null || busy !== null) return;
         setCancelling(id);
         try {
+            noteOrderTraceEntry([id], 'orders tab');
             const trade = await cancelOrder(id);
             notify({ title: '刪單結果', ...cancellationSummary([{ status: 'fulfilled', value: trade }]) });
             onChanged();
@@ -367,6 +370,7 @@ export function OrdersPane({
     const runBatchCancel = async (ids: string[]) => {
         if (ids.length === 0 || busy || cancelling) return;
         setBusy({ done: 0, total: ids.length });
+        noteOrderTraceEntry(ids, 'orders tab');
         const results: PromiseSettledResult<Trade>[] = await cancelOrders(ids,
             () => setBusy((b) => (b ? { done: b.done + 1, total: b.total } : b)));
         setBusy(null);

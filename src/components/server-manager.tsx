@@ -29,6 +29,7 @@ import { getPrivacyMode, maskAccountId } from '../lib/privacy';
 import { EXPECTED_SERVER_VERSION } from '../lib/runtime';
 import { diagnoseOutput, errorLines, validateDesktopSettings } from '../lib/server-diagnostics';
 import { clearStoredSpawnKeyHash } from '../lib/spawn-keys';
+import { orderTraceDiagnostics } from '../lib/order-trace';
 import {
     STALE_RUN_MS,
     applyScenario,
@@ -325,6 +326,7 @@ export function ServerManager({
             } · autostart: ${settings.autoStart ? 'on' : 'off'}`,
             lastOutput ? `--- log ---\n${lastOutput}` : '',
             timingDiagnostics(),
+            orderTraceDiagnostics(),
         ].filter(Boolean);
         try {
             await navigator.clipboard.writeText(lines.join('\n'));
