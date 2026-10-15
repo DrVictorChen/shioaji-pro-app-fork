@@ -11,7 +11,16 @@ const m = vi.hoisted(() => ({
     holdStream: vi.fn(),
     releaseStream: vi.fn(),
     startTrading: vi.fn(),
+    // the persisted foreign-port block each time boot released reads
+    blockedAtRelease: [] as (string | null)[],
 }));
+vi.mock('./server-read-gate', async (orig) => {
+    const real = await orig<typeof import('./server-read-gate')>();
+    return { ...real, releaseServerReads: () => {
+        m.blockedAtRelease.push(localStorage.getItem('sj-pro-foreign-port'));
+        real.releaseServerReads();
+    } };
+});
 vi.mock('./runtime', async (orig) => ({ ...(await orig<object>()), isTauri: true }));
 vi.mock('./window-role', () => ({ isChildWindow: () => m.child }));
 vi.mock('./features', () => ({ agentModule: undefined }));
@@ -88,6 +97,7 @@ beforeEach(() => {
     m.navType = 'reload';
     m.ensureStream.mockClear();
     m.startTrading.mockClear();
+    m.blockedAtRelease = [];
     m.holdStream.mockClear();
     m.releaseStream.mockClear();
     vi.spyOn(console, 'info').mockImplementation(() => undefined);
@@ -351,9 +361,10 @@ describe('early stream at bootstrap', () => {
         });
         const runtime = await import('./runtime');
         const gate = await import('./server-read-gate');
-        // synchronously at bootstrap: reads are held and nothing is blocked
-        expect(runtime.foreignServerPortBlocked()).toBeNull();
         await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
+        // the moment reads were released, the stale block was already gone
+        expect(m.blockedAtRelease.length).toBeGreaterThan(0);
+        expect(m.blockedAtRelease[0]).toBeNull();
         expect(gate.serverReadsHeld()).toBeNull();
         expect(runtime.foreignServerPortBlocked()).toBeNull();
     });
@@ -377,6 +388,25 @@ describe('early stream at bootstrap', () => {
         await vi.waitFor(() => expect(tauri.serverStart).toHaveBeenCalledTimes(1));
         const runtime = await import('./runtime');
         expect(runtime.foreignServerPortBlocked()).toBeNull();
+    });
+
+    it('another program\'s server still on the App\'s port stays blocked when reads are released', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            store.set('sj-pro-foreign-port', '21322');
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: false, apiKey: 'k', secretKey: 's', production: false,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce(prodElsewhere);
+            vi.mocked(tauri.ownsServer).mockResolvedValueOnce(false);
+            vi.mocked(tauri.foreignServerCheck).mockResolvedValueOnce(refusal);
+        });
+        const runtime = await import('./runtime');
+        expect(runtime.foreignServerPortBlocked()).toBe(21322); // never dropped in between
+        const adoption = await import('./server-adoption');
+        await vi.waitFor(() => expect(adoption.getServerAttachment()).toMatchObject({ kind: 'refused', port: 21322 }));
+        expect(runtime.foreignServerPortBlocked()).toBe(21322);
     });
 
     // #285 customer report (v0.1.53): the user's own same-version CLI server

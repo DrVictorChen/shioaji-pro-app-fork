@@ -1160,6 +1160,10 @@ export async function serverStart(opts: {
         // the ownership check and find_free_port dodges them below
         for (const p of new Set(getDevServerPort() ? [preferredPort] : [getApiPort(), DEFAULT_PORT])) {
             if (foreign && p === foreign.port) continue; // another program's server
+            // only a port this App spawned on is ever reclaimed: another
+            // App's sidecar that is merely slow to answer is not a zombie
+            // of ours (#285) — find_free_port below dodges it instead
+            if (!getDevServerPort() && getSpawnPort() !== p) continue;
             // a server that answers is never a zombie: it is someone's (#285)
             if (await probeInfoEither(p)) continue;
             await invoke('kill_shioaji', {

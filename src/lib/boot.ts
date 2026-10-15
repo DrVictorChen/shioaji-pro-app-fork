@@ -112,6 +112,17 @@ function noteAdopted(status: ServerStatus, own: boolean) {
     }
 }
 
+// #285: the block of another program's server is re-decided by every main
+// window boot BEFORE it releases any read: whatever an earlier run persisted
+// (that server may be gone, or this App's own server may answer on that port
+// now) is replaced by this run's verdict. A server this App started is never
+// blocked; nothing else on the App's port that is not used is always blocked.
+function decideForeignBlock(status: ServerStatus | null | undefined, own: boolean, usable: boolean) {
+    const port = status?.running && status.port && !own && !usable && getApiPort() === status.port
+        ? status.port : null;
+    blockForeignServerPort(port);
+}
+
 // #285: another program's server that is not used — say so, and keep this
 // page from reading it while it still points there
 function noteRefused(port: number, simulation: boolean | undefined, text: string,
@@ -205,11 +216,6 @@ export function bootstrap() {
     // stream to a server that may not be up (released on every path that
     // keeps this page; expires on its own after 30 s)
     else if (isTauri && !isChildWindow() && !pageWasReloaded()) holdStream();
-    // #285: a block of another program's server is the main window's
-    // decision for THIS boot only: drop whatever an earlier run persisted
-    // (that server may be gone, or this App's own server may answer on that
-    // port now) — this run re-decides before it releases any read
-    if (isTauri && !isChildWindow()) blockForeignServerPort(null);
     // #285: the main window reads nothing until boot has checked the server
     // on its port (not on the reload right after this App's own check)
     if (isTauri && !isChildWindow() && !shouldOpenStreamEarly()) holdServerReads();
@@ -270,9 +276,7 @@ async function run() {
                 const own = await ownsServer(status);
                 // another program's server that is not used: nothing on this
                 // page reads it, from now on (#285)
-                if (status?.running && status.port && !own && !matches && getApiPort() === status.port) {
-                    blockForeignServerPort(status.port);
-                }
+                decideForeignBlock(status, own, matches);
                 releaseServerReads();
                 markStage('probe', 'identity checked');
                 // identity match: right mode, right listener scheme, right
@@ -395,8 +399,10 @@ async function run() {
                 const status = await serverStatus();
                 const foreign = status?.running ? await foreignServerCheck(status, settings) : null;
                 const own = await ownsServer(status);
-                if (status?.healthy && !foreign && await matchesServerIdentity(status, settings) &&
-                    await serverCaReady(status, settings)) {
+                const adopt = !!status?.healthy && !foreign && await matchesServerIdentity(status, settings) &&
+                    await serverCaReady(status, settings);
+                decideForeignBlock(status, own, adopt);
+                if (adopt && status) {
                     noteAdopted(status, own);
                     releaseServerReads();
                     const portMoved = status.port ? setApiPort(status.port) : false;

@@ -685,6 +685,17 @@ function handleOrderEvent(raw: string) {
     orderEventListeners.forEach((l) => l(report));
 }
 
+// #285: a stream that is already open (e.g. a reload that skipped the boot
+// hold) is closed the moment boot refuses the server it points at
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('sj-pro-api-base-changed', () => {
+        if (es && serverUrlBlocked(getStreamBase()) !== null) {
+            setStatus('down');
+            scheduleReconnect(NORMAL_RETRY_MAX_MS);
+        }
+    });
+}
+
 function connect() {
     // Only the Web Locks owner may create an EventSource, including retries
     // queued before ownership was handed to another window.
