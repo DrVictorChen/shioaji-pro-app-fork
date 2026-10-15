@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // 閃電下單整股面板的信用條件：現股／融資／融券＋現股當沖先賣。記在面板上
 // （跟單位一樣），換股票保留；零股停用並說明、期貨不顯示；融券只能賣、
 // 當沖先賣只限可當沖股票；credit_enquire 確定不可（成數或單位 0）才擋兩邊，
@@ -151,7 +153,7 @@ it('融券 can only sell: the buy side is faded and never sends', async () => {
     await flush();
     expect(mocks.place.mock.calls[0]![1]).toBe('Sell');
     expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderCond: 'ShortSelling' });
-    expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('⚡ 融券賣出已送出');
+    expect(operationNotice(mocks.notify, '⚡ 融券賣出已送出').title).toBe('⚡ 融券賣出已送出');
 });
 
 it('現股當沖先賣: sell is a 現沖 sell, buy stays a cash buy; 市價現沖賣', async () => {
@@ -348,7 +350,7 @@ it('a server switch while the credit check is pending refuses the order (never s
     await act(async () => { release(enquire('2330')); });
     await flush();
     expect(mocks.place).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].kind).toBe('err');
+    expect(operationNotice(mocks.notify, '⚡ 閃電下單失敗').kind).toBe('err');
 });
 
 it('the dispatch guard refuses a pending (confirming) order once the credit condition changes, even back again', async () => {
@@ -420,7 +422,7 @@ it('借券／借券豁免 can only sell: buy faded, sell sends the SBL condition
         await act(async () => { cell(r, 'sell').props.onClick(); });
         await flush();
         expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderCond: cond });
-        expect(mocks.notify.mock.calls.at(-1)![0].title).toBe(`⚡ ${tagText}賣出已送出`);
+        expect(operationNotice(mocks.notify, `⚡ ${tagText}賣出已送出`).title).toBe(`⚡ ${tagText}賣出已送出`);
         expect(mocks.post).not.toHaveBeenCalled();
     }
 });
@@ -489,8 +491,8 @@ it('after the confirmation, a fresh credit check runs before dispatch; a new 0 b
     await flush();
     expect(captured.afterConfirm).toBeTypeOf('function');
     expect(mocks.post).toHaveBeenCalledTimes(2);
-    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err' });
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('目前不能融資');
+    expect(operationNotice(mocks.notify, '⚡ 閃電下單失敗')).toMatchObject({ kind: 'err' });
+    expect(operationNotice(mocks.notify, '⚡ 閃電下單失敗').body).toContain('目前不能融資');
 });
 
 it('a 現沖 sell confirmation left open past Taipei midnight is refused at dispatch', async () => {
@@ -517,7 +519,7 @@ it('a flatten refused before anything went out says 未送出, not "maybe partly
     await arm(r);
     await act(async () => { button(r, '平倉')!.props.onClick(); });
     await flush();
-    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）' });
+    expect(operationNotice(mocks.notify, '⚡ 平倉未成立（未送出或被券商拒絕）')).toMatchObject({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）' });
 });
 
 it('the post-confirmation re-check never blocks a 融資賣出 (repayment)', async () => {
@@ -530,7 +532,7 @@ it('the post-confirmation re-check never blocks a 融資賣出 (repayment)', asy
     mocks.post.mockImplementation(async () => enquire('2330', { margin_unit: 0 }));
     await act(async () => { cell(r, 'sell').props.onClick(); });
     await flush();
-    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'ok', title: '⚡ 融資賣出已送出' });
+    expect(operationNotice(mocks.notify, '⚡ 融資賣出已送出')).toMatchObject({ kind: 'ok', title: '⚡ 融資賣出已送出' });
 });
 
 it('the server mode is captured at the click, before the credit check: a mode change meanwhile refuses', async () => {

@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // issue #139 — grid lay-out and dynamic-follow use the account captured
 // before confirmation / when follow starts, never a later selection
 import { createElement } from 'react';
@@ -68,7 +70,7 @@ it('lay-out aborts when the selection changes during confirmation', async () => 
     await render();
     await act(async () => { await btn('鋪 ').props.onClick(); });
     expect(m.future).not.toHaveBeenCalled();
-    expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '鋪單未送出' });
+    expect(operationNotice(m.notify, '鋪單未送出')).toMatchObject({ title: '鋪單未送出' });
 });
 
 it('stops the batch when simulation becomes production after the first order', async () => {
@@ -105,7 +107,7 @@ it('follow stops and notifies when its account becomes unusable', async () => {
     m.dropped = true;
     await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
     expect(m.future).not.toHaveBeenCalled();
-    expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '鋪單跟隨已停止' });
+    expect(operationNotice(m.notify, '鋪單跟隨已停止')).toMatchObject({ title: '鋪單跟隨已停止' });
     expect(text(btn('動態跟隨'))).toBe('動態跟隨現價');
 });
 
@@ -115,7 +117,7 @@ it('follow refills respect the risk kill switch', async () => {
     m.blocked = '風控鎖啟動中 — 所有下單已封鎖';
     await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
     expect(m.future).not.toHaveBeenCalled();
-    expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '鋪單跟隨已停止', body: expect.stringContaining('風控鎖') });
+    expect(operationNotice(m.notify, '鋪單跟隨已停止')).toMatchObject({ title: '鋪單跟隨已停止', body: expect.stringContaining('風控鎖') });
 });
 
 it('shows the pinned follow account, masked in privacy mode', async () => {

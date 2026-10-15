@@ -1,3 +1,5 @@
+import { reconcileOrdersOnce } from '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // 整零價差面板：設計稿數字、按鈕啟用規則、確認後重新驗證、點價拆單、執行狀態列
 import { createElement } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
@@ -243,7 +245,7 @@ it('虧損第二次確認後仍依設定跳委託確認，期間價差改變則�
     await rerender({ feed: { ...lossFeed, odd: { ...lossFeed.odd, bids: [{ price: 1075, vol: 5000 }] } } });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間價差、數量或費用已變動');
+    expect(operationNotice(mocks.notify, '整零價差未送出').body).toContain('確認期間價差、數量或費用已變動');
 });
 
 it('執行：把點擊當下的商品、帳戶與計畫交給主視窗服務', async () => {
@@ -274,16 +276,18 @@ it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async
     await rerender({ account: otherAccount });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間帳戶已變更');
+    expect(operationNotice(mocks.notify, '整零價差未送出').body).toContain('確認期間帳戶已變更');
 
+    let noticeStart = mocks.notify.mock.calls.length;
     pending();
     await rerender({ account });
     await act(async () => { button('以 1 張執行').props.onClick(); });
     await rerender({ contract: { ...contract, code: '2317' } as ContractInfo });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間商品已切換');
+    expect(operationNotice(mocks.notify, '整零價差未送出', noticeStart).body).toContain('確認期間商品已切換');
 
+    noticeStart = mocks.notify.mock.calls.length;
     pending();
     await rerender({ contract });
     await act(async () => { button('以 1 張執行').props.onClick(); });
@@ -291,15 +295,16 @@ it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async
     await rerender({ feed: { ...feed, odd: { ...feed.odd, bids: [{ price: 1080, vol: 5000 }] } } });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間行情或庫存已變動');
+    expect(operationNotice(mocks.notify, '整零價差未送出', noticeStart).body).toContain('確認期間行情或庫存已變動');
 
+    noticeStart = mocks.notify.mock.calls.length;
     pending();
     await rerender({ feed });
     await act(async () => { button('以 1 張執行').props.onClick(); });
     await rerender({ inventoryShares: 500 });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('庫存不足');
+    expect(operationNotice(mocks.notify, '整零價差未送出', noticeStart).body).toContain('庫存不足');
 
     // 都沒變 → 送出確認過的那一份
     pending();
@@ -323,7 +328,7 @@ it('點價下單：未啟用不送；1,000 股拆 999＋1，後一筆失敗時�
         ['Buy', 999, 'IntradayOdd'],
         ['Buy', 1, 'IntradayOdd'],
     ]);
-    const n = mocks.notify.mock.calls.at(-1)![0];
+    const n = operationNotice(mocks.notify, '零股拆單只送出部分');
     expect(n.title).toBe('零股拆單只送出部分');
     expect(n.body).toContain('已送出 999 股');
     expect(n.body).toContain('零股 第 2/2 筆 1 股結果未確認（可能已送出）');
@@ -441,12 +446,17 @@ it('拆單第一筆就逾時（結果不明）：送出前加持久化鎖、失�
     await act(async () => { button('啟用點價').props.onClick(); });
     const cell = () => view.root.findAll(n => n.type === 'span' && String(n.props.title ?? '').startsWith('零股限價買'))[0];
     await act(async () => { cell()!.props.onClick(); });
+    // Drain the actual order-outcome dynamic import. It must reach the mocked
+    // reconciliation service, without boot subscribing against account mocks.
+    await vi.dynamicImportSettled();
+    expect(reconcileOrdersOnce).toHaveBeenCalledOnce();
+    expect(mocks.notify.mock.calls.map(([notice]) => notice.title)).toEqual(['點價委託結果未確認']);
     expect(mocks.place).toHaveBeenCalledTimes(1);
     expect(mocks.addLock).toHaveBeenCalledTimes(1);
     expect(mocks.addLock.mock.calls[0]!.slice(0, 2)).toEqual(['2330', account]);
     expect(mocks.clearLock).not.toHaveBeenCalled();
     expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', '2330 買 @ 1,100：零股 第 1/2 筆 999 股結果未確認（可能已送出）；第 2～2 筆未送');
-    expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('點價委託結果未確認');
+    expect(operationNotice(mocks.notify, '點價委託結果未確認').title).toBe('點價委託結果未確認');
     expect(button('啟用點價')).toBeDefined();
 });
 
@@ -459,7 +469,7 @@ it('拆單只送出部分、其餘確定未送：同樣鎖定，說明哪幾筆�
     await act(async () => { cell.props.onClick(); });
     expect(mocks.clearLock).not.toHaveBeenCalled();
     expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', '2330 買 @ 1,100：已送出 999 股；零股 第 2/2 筆 1 股未送出');
-    expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('零股拆單只送出部分');
+    expect(operationNotice(mocks.notify, '零股拆單只送出部分').title).toBe('零股拆單只送出部分');
 });
 
 it('有點價鎖時：顯示原因、不能啟用點價；核對後解除', async () => {
@@ -500,16 +510,21 @@ it('同商品有多筆需要處理的執行：每筆各自顯示與操作', asyn
     expect(mocks.dismiss).toHaveBeenCalledWith('os-new');
 });
 
-it('環境在按下時綁定：確認期間切換伺服器或模擬／正式 → 不送', async () => {
+it.each(['before', 'after'] as const)('環境在按下時綁定：確認期間切換伺服器或模擬／正式 → 不送（無關通知 %s）', async noticeAt => {
     mocks.risk.confirmManualOrders = true;
     let approve!: (v: boolean) => void;
     mocks.confirm.mockImplementationOnce(() => new Promise(r => { approve = r; }));
     await render();
     await act(async () => { button('以 1 張執行').props.onClick(); });
     mocks.envOk.value = false; // 確認視窗開著時切到正式
+    const unrelatedNotice = () => mocks.notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
+    if (noticeAt === 'before') unrelatedNotice();
     await act(async () => { approve(true); });
+    if (noticeAt === 'after') unrelatedNotice();
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間伺服器或模擬／正式環境已切換');
+    expect(operationNotice(mocks.notify, /^整零價差/)).toMatchObject({
+        kind: 'err', title: '整零價差未送出', body: expect.stringContaining('確認期間伺服器或模擬／正式環境已切換'),
+    });
 });
 
 it('模擬／正式未知時不開始', async () => {
@@ -543,7 +558,7 @@ it('補單確認：以確認當下的數量與價格送；缺口已變則不送�
     await render({ execs: [exec] });
     await act(async () => { button('以最新價補單').props.onClick(); });
     expect(mocks.accept).toHaveBeenCalledWith('os-1', { version: 3, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] });
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間缺口或環境已變更');
+    expect(operationNotice(mocks.notify, '整零價差：補單未送出').body).toContain('確認期間缺口或環境已變更');
     // 建議委託總量與缺口不符 → 不送
     mocks.refresh.mockReturnValue([{ price: 1100, quantity: 2 }]);
     mocks.accept.mockClear();

@@ -1,5 +1,8 @@
 # 圖表信用下單測試偶發失敗調查（2026-10-15）
 
+後續已追到不完整帳戶 mock 與未隔離背景對帳的共同來源，並修正其他同型測試；
+見[共同來源調查](flaky-notification-source-2026-10-15.md)。下文保留上一輪的調查與驗證紀錄。
+
 ## 結論：測試問題
 
 `src/components/candle-chart-order.test.tsx` 的 `post-confirmation re-check`

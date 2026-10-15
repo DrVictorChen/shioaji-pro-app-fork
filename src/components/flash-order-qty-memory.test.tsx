@@ -1,3 +1,4 @@
+import { operationNotice } from '../test/operation-notice';
 // 閃電下單「記住數量」：每個面板一個開關（預設開，新面板與升級前的面板都開），
 // 開啟時張／股／口各記一個數量，跟面板設定一起存；關閉時清掉。還原前重新檢查
 // 單位上限，不合法回到 1 並提示；還原或換單位後點價下單仍是解除狀態。
@@ -230,7 +231,7 @@ it('an invalid remembered quantity gives exactly one notice (StrictMode re-runs 
     roots.push(r);
     expect(qty(r).props.value).toBe(1);
     expect(mocks.notify).toHaveBeenCalledTimes(1);
-    expect(String(mocks.notify.mock.calls[0]![0].body)).toContain('5000 股');
+    expect(String(operationNotice(mocks.notify, '記住的數量已改為 1').body)).toContain('5000 股');
     expect(o.state.qtyMemory).toEqual({ Common: 3 });
 });
 

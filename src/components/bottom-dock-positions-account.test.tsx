@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -58,7 +60,7 @@ it.each([true, false, undefined])('allows unsigned position exits only when simu
 it('does not infer an unknown owner from the selected account', async () => {
     await mount({ ...position, account: undefined }); await click('平');
     expect(mocks.place).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('帳戶歸屬不明');
+    expect(operationNotice(mocks.notify, '平倉未完整確認').body).toContain('帳戶歸屬不明');
 });
 it.each(['Submitted', 'PartFilled', 'timeout'])('submits exactly one owner-scoped Auto reverse order for %s', async status => {
     if (status === 'timeout') mocks.place.mockRejectedValueOnce(new Error('timeout'));
@@ -66,7 +68,7 @@ it.each(['Submitted', 'PartFilled', 'timeout'])('submits exactly one owner-scope
     await mount(position); await click('反');
     expect(mocks.place).toHaveBeenCalledTimes(1);
     expect(mocks.place.mock.calls[0]!.slice(1)).toEqual(['Sell', null, 6, { account: owner, ocType: 'Auto' }]);
-    if (status === 'timeout') expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('反手未完整確認');
+    if (status === 'timeout') expect(operationNotice(mocks.notify, '反手未完整確認').title).toBe('反手未完整確認');
 });
 it('does not send a second reverse order even when the HTTP response is Filled', async () => {
     mocks.place.mockResolvedValueOnce({ status: { status: 'Filled', deal_quantity: 6 } });
