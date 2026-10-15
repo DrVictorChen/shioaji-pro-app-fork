@@ -30,6 +30,7 @@ import { programFinished } from './background-view';
 import {
     BRACKET_COMMAND,
     BRACKET_NOTICE_TEXT,
+    noticeBody,
     DEFAULT_BRACKET_POLICY,
     parseBracketPolicy,
     type BracketPolicy,
@@ -389,7 +390,25 @@ export async function replaceBackgroundBracket(programId: string, request: Creat
  * it is out, in one engine step). */
 export async function markBackgroundHandled(programId: string, levelId?: string,
     scope?: { account: { accountType: string; brokerId: string; accountId: string }; codes: string[] }): Promise<void> {
-    await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null, ...(scope ? { scope } : {}) });
+    // only 平倉 (flash panel) sends a scope: its `handled` notice says so
+    if (scope) endedByFlatten.set(programId, Date.now() + FLATTEN_NOTE_MS);
+    try {
+        await command(BRACKET_COMMAND.markHandled, { programId, levelId: levelId ?? null, ...(scope ? { scope } : {}) });
+    } catch (e) {
+        endedByFlatten.delete(programId);
+        throw e;
+    }
+}
+
+const FLATTEN_NOTE_MS = 60_000;
+/** programId -> until when its `handled` notice is one ended by 平倉 */
+const endedByFlatten = new Map<string, number>();
+/** The `handled` notice of `programId` came from 平倉 (consumed once). */
+function takeEndedByFlatten(programId: string | null | undefined): boolean {
+    if (!programId) return false;
+    const until = endedByFlatten.get(programId);
+    endedByFlatten.delete(programId);
+    return until !== undefined && until >= Date.now();
 }
 
 /** 「在新盤別重新啟用」 (nothing is sent then). */
@@ -673,7 +692,8 @@ export function startBackgroundExecution(): void {
                     const bracket = (owner?.kind === 'bracket' && !entryLevel)
                         || n.code.startsWith('bracket.') || n.code === 'protectedAgain';
                     const title = bracket ? (BRACKET_NOTICE_TEXT[n.code] ?? BRACKET_FIRED_TEXT[n.code]) : NOTICE_TEXT[n.code];
-                    if (title) notify({ kind: INFO_NOTICES.has(n.code) ? 'info' : 'err', title, body: n.detail });
+                    const byFlatten = n.code === 'handled' && takeEndedByFlatten(n.programId);
+                    if (title) notify({ kind: INFO_NOTICES.has(n.code) ? 'info' : 'err', title, body: noticeBody(n.code, n.detail, byFlatten) ?? '' });
                 }
             });
         }
