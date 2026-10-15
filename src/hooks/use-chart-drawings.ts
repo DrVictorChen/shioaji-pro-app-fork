@@ -11,7 +11,7 @@
 // - Delete／復原只在鍵盤焦點真的在這張圖上時作用
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { IChartApi, ISeriesApi } from 'lightweight-charts';
+import { CrosshairMode, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts';
 import {
     addDrawing,
     applyDrawingHistory,
@@ -57,12 +57,11 @@ import {
 import {
     dragPoints,
     formatSpan,
-    ANCHOR_SNAP_PX,
-    magnetAnchor,
-    nearestDrawingAnchor,
+    drawingCrosshairTarget,
     measureStats,
     pickDrawing,
     projectAnchors,
+    resolveDrawingAnchor,
     shapeOf,
     unprojectPoint,
     type DragPlan,
@@ -493,7 +492,40 @@ export function useChartDrawings(opts: {
         };
     }, [seriesRef]);
 
+    // ── 畫圖中的十字線（#313）─────────────────────────────────────────
+    // 圖表預設的 Magnet 十字線把橫線吸到收盤價，跟畫圖的磁吸設定無關，
+    // 十字線與價格標籤就預告不了端點會落在哪。武裝工具、繪製中、量測中
+    // 或拖曳物件時改成 Normal（游標在哪就在哪），再由滑鼠 effect 把十字線
+    // 擺到端點實際會落的位置；結束後還原圖表原本的模式。
+    const crosshairSavedRef = useRef<{ chart: IChartApi; mode: CrosshairMode } | null>(null);
+    const syncCrosshairMode = useCallback(() => {
+        const chart = chartRef.current;
+        const saved = crosshairSavedRef.current;
+        if (saved && saved.chart !== chart) crosshairSavedRef.current = null; // 圖表已重建
+        if (!chart) return;
+        const s = stateRef.current;
+        const active =
+            !s.tradeArmed &&
+            (!!s.tool ||
+                !!draftRef.current ||
+                (!!measureRef.current && !measureDoneRef.current) ||
+                dragIdsRef.current.length > 0);
+        try {
+            if (active && !crosshairSavedRef.current) {
+                crosshairSavedRef.current = { chart, mode: chart.options().crosshair.mode };
+                chart.applyOptions({ crosshair: { mode: CrosshairMode.Normal } });
+            } else if (!active && crosshairSavedRef.current) {
+                const mode = crosshairSavedRef.current.mode;
+                crosshairSavedRef.current = null;
+                chart.applyOptions({ crosshair: { mode } });
+            }
+        } catch {
+            // 圖表已銷毀
+        }
+    }, [chartRef]);
+
     const pushState = useCallback(() => {
+        syncCrosshairMode();
         const layer = layerRef.current;
         if (layer) {
             layer.themeMode = stateRef.current.themeMode;
@@ -511,7 +543,10 @@ export function useChartDrawings(opts: {
             measure: measureRef.current,
             editingId: stateRef.current.editingTextId,
         });
-    }, []);
+    }, [syncCrosshairMode]);
+
+    // 工具武裝／收起、量測開始／結束（含 Esc、交易模式接手）都要同步十字線模式
+    useEffect(syncCrosshairMode, [syncCrosshairMode, tool, measuring, tradeArmed]);
 
     // 資料／選取變動時重繪；draft 變動時由事件處理器自己呼叫 pushState
     useEffect(pushState, [pushState, drawings, selectedIds, editingTextId, themeMode, live.chartBackground]);
@@ -679,38 +714,23 @@ export function useChartDrawings(opts: {
                 ? roundToTick(stateRef.current.contract, price)
                 : price;
 
-        // 每個事件只建一次 projector（呼叫端傳進來），不在每個小函式裡重建
+        // 每個事件只建一次 projector（呼叫端傳進來），不在每個小函式裡重建。
+        // 端點與畫圖中的十字線（#313）共用 resolveDrawingAnchor。
         const anchorAt = (
             projector: Projector,
             pt: Point,
             t: DrawingToolId,
             excludeDrawingId?: string,
-        ): DrawingAnchor | null => {
-            const anchor = unprojectPoint(projector, pt);
-            if (!anchor) return null;
-            const bars = getBarsRef.current?.();
-            if (stateRef.current.settings.magnet) {
-                // 既有端點優先，才能在相同位置精確接續另一條線。文字與量測
-                // 不吸到別的圖形端點（文字要放在游標處、量測照舊貼 K 棒）。
-                const existing =
-                    t === 'text' || t === 'measure'
-                        ? null
-                        : nearestDrawingAnchor(
-                              stateRef.current.drawings,
-                              projector,
-                              pt,
-                              ANCHOR_SNAP_PX,
-                              excludeDrawingId,
-                          );
-                // 水平線仍要落在合法跳動價位上
-                if (existing) return { time: existing.time, price: snapPrice(t, existing.price) };
-                if (bars?.length) {
-                    // 再貼齊最近 K 棒的開高低收（本來就是合法價位）。
-                    return magnetAnchor(anchor, bars, (p) => projector.yOfPrice(p), pt.y);
-                }
-            }
-            return { time: anchor.time, price: snapPrice(t, anchor.price) };
-        };
+        ): DrawingAnchor | null =>
+            resolveDrawingAnchor(projector, pt, {
+                magnet: stateRef.current.settings.magnet,
+                // 文字與量測不吸到別的圖形端點（文字要放在游標處、量測照舊貼 K 棒）
+                snapToDrawings: t !== 'text' && t !== 'measure',
+                drawings: stateRef.current.drawings,
+                excludeDrawingId,
+                bars: getBarsRef.current?.(),
+                snapPrice: (price) => snapPrice(t, price),
+            });
 
         const pick = (projector: Projector, pt: Point) => {
             const layer = layerOf();
@@ -1007,6 +1027,7 @@ export function useChartDrawings(opts: {
             historyRef.current.begin(key, getDrawingHistoryStart());
             drag = { items, before: getDrawings(key), key, context: stateRef.current.contextKey, startAt: pt, moved: false };
             dragIdsRef.current = items.map((item) => item.id);
+            syncCrosshairMode();
 
             const move = (ev: MouseEvent) => {
                 if (!drag) return;
@@ -1051,6 +1072,7 @@ export function useChartDrawings(opts: {
                 dragIdsRef.current = [];
                 cancelDragRef.current = null;
                 setChartInteractive(true);
+                syncCrosshairMode();
             };
             document.addEventListener('mousemove', move, true);
             document.addEventListener('mouseup', up, true);
@@ -1079,6 +1101,7 @@ export function useChartDrawings(opts: {
                     }
                 }
                 setChartInteractive(true);
+                syncCrosshairMode();
             };
         };
 
@@ -1104,6 +1127,8 @@ export function useChartDrawings(opts: {
         };
 
         const hover = (e: MouseEvent) => {
+            // capture 階段、圖表自己的 mousemove 之前：先切好十字線模式
+            syncCrosshairMode();
             if (drag || stateRef.current.tradeArmed || onOverlay(e)) return;
             if (stateRef.current.tool && toolContextRef.current !== stateRef.current.contextKey) {
                 cancelInteractionsRef.current();
@@ -1168,21 +1193,62 @@ export function useChartDrawings(opts: {
             }
         };
 
+        // 畫圖中十字線擺到端點實際會落的位置（#313）：與端點同一個
+        // anchorAt，磁吸開＝吸附後的開高低收／既有端點，關＝游標價位（水平
+        // 線、量測取整到跳動價位）。掛在冒泡階段，排在圖表自己的 mousemove
+        // （它會把十字線設回游標處）之後。
+        const crosshairAnchorAt = (projector: Projector, pt: Point): DrawingAnchor | null => {
+            if (drag) {
+                const item = drag.items.length === 1 ? drag.items[0]! : null;
+                const hit = item?.plan.hit;
+                if (!item || hit?.kind !== 'anchor' || !drag.moved) return null;
+                const moved = dragPoints(item.plan, pt)[hit.index];
+                return moved ? anchorAt(projector, moved, item.tool, item.id) : null;
+            }
+            const m = measureRef.current;
+            if (m && !measureDoneRef.current) return anchorAt(projector, pt, 'measure');
+            const draft = draftRef.current;
+            if (draft) return anchorAt(projector, pt, draft.tool);
+            const armed = stateRef.current.tool;
+            return armed ? anchorAt(projector, pt, armed) : null;
+        };
+        const placeCrosshair = (e: MouseEvent) => {
+            if (!crosshairSavedRef.current || stateRef.current.tradeArmed || onOverlay(e)) return;
+            const chart = chartRef.current;
+            const series = seriesRef.current;
+            const layer = layerOf();
+            const pt = layer?.pointOf(e);
+            const projector = layer?.projector();
+            if (!chart || !series || !layer || !pt || !projector) return;
+            // 只管 K 線 pane：指標 pane、價格／時間軸上的十字線維持原生行為
+            const { width, height } = layer.paneSize;
+            if (pt.x < 0 || pt.y < 0 || pt.x >= width || pt.y >= height) return;
+            const target = drawingCrosshairTarget(crosshairAnchorAt(projector, pt), getBarsRef.current?.());
+            if (!target) return;
+            try {
+                chart.setCrosshairPosition(target.price, target.time as UTCTimestamp, series);
+            } catch {
+                // 資料替換中、時間軸還沒有點
+            }
+        };
+
         host.addEventListener('mousedown', down, true);
         host.addEventListener('mousemove', hover, true);
+        host.addEventListener('mousemove', placeCrosshair);
         host.addEventListener('dblclick', dbl, true);
         return () => {
             cancelInteractionsRef.current();
             cancelDragRef.current = null;
             host.removeEventListener('mousedown', down, true);
             host.removeEventListener('mousemove', hover, true);
+            host.removeEventListener('mousemove', placeCrosshair);
             host.removeEventListener('dblclick', dbl, true);
             if (activeMove) document.removeEventListener('mousemove', activeMove, true);
             if (activeUp) document.removeEventListener('mouseup', activeUp, true);
             if (frame !== null) cancelRaf(frame);
             if (drag) setChartInteractive(true); // 拖曳中被卸載 — 別讓圖表卡住
         };
-    }, [hostRef, chartRef, pushState, token, clearMeasure, beginOperation, bumpHistory, writer, cancelText, enterDrawingMode]);
+    }, [hostRef, chartRef, seriesRef, pushState, token, clearMeasure, beginOperation, bumpHistory, writer, cancelText, enterDrawingMode, syncCrosshairMode]);
 
     // 交易模式武裝時收起畫圖工具、量測並取消選取：兩者不會同時吃同一下
     // 點擊，武裝點價買賣時按 Delete 也不會刪到剛才選著的畫圖物件
