@@ -37,8 +37,9 @@ export const sw = styleVariants({
 });
 
 // 排行列：每列固定兩行，所有列共用同一組欄寬，各欄上下對齊。
-//   寬面板：名次｜代號／名稱｜產業｜價格｜漲跌幅（量在第 2 行跨價格＋漲跌幅）
-//   窄面板（放不下產業欄）：產業隱藏，其餘不變
+//   寬面板 第 1 行：名次｜代號 6ch｜產業（欄寬≥標籤寬＋彈性空白，標籤靠左）｜價格｜漲跌幅
+//          第 2 行：　　｜名稱（跨代號＋產業＋空白，截斷…）｜量（跨價格＋漲跌幅）
+//   窄面板（放不下產業欄）：產業隱藏，代號／名稱占彈性欄，其餘不變
 //   極窄（代號欄放不下 6 字）：漲跌幅改到第 2 行取代量，量隱藏
 // 數字欄用 ch（列字型為 mono）：價格最長 6 字（≥500 不帶小數），漲跌幅 7 字；
 // 代號欄保底 6 字（6 碼 ETF）。產業欄寬 = 最長「電子零組件」5 字 + padding/border。
@@ -58,7 +59,7 @@ export const body = style({
 
 export const row = style({
     display: 'grid',
-    gridTemplateColumns: `2ch minmax(6ch, 1fr) ${TAG_COL} 6ch 7ch`,
+    gridTemplateColumns: `2ch 6ch minmax(${TAG_COL}, 1fr) 6ch 7ch`,
     gridTemplateRows: 'auto auto',
     alignItems: 'center',
     columnGap: vars.space.xs,
@@ -106,9 +107,11 @@ export const scSub = style({
 // clickable 類別 chip that jumps the heatmap to this stock's sector —
 // 固定寬度欄、欄內靠左，所有列左緣對齊；沒有產業的列留空
 export const sectorTag = style({
-    gridRow: '1 / 3',
+    gridRow: 1,
     gridColumn: 3,
     justifySelf: 'start',
+    // 行高壓低，標籤不撐高第 1 行（有無標籤的列等高）
+    lineHeight: 1.25,
     maxWidth: '100%',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
@@ -165,7 +168,11 @@ export const scName = style({
 });
 
 // 排行列的名稱（第 2 行，截斷＋…）
-export const rowName = style({ gridRow: 2, gridColumn: 2 });
+export const rowName = style({
+    gridRow: 2,
+    gridColumn: '2 / 4',
+    '@container': { [NARROW]: { gridColumn: 2 } },
+});
 
 export const scValue = style({
     display: 'contents',
