@@ -131,6 +131,15 @@ export function setServerPid(pid: number | null) {
     }
 }
 
+// #285: the block of another program's server lives in the dependency-free
+// server-read-gate (api.ts / stream.ts check it on every request)
+export {
+    blockForeignServerPort,
+    foreignServerBlockedError,
+    foreignServerPortBlocked,
+    serverUrlBlocked,
+} from './server-read-gate';
+
 // In Tauri the frontend is served from tauri://localhost — API calls must
 // target the local shioaji server explicitly. The host stays 127.0.0.1;
 // with 本機 HTTPS enabled the mkcert certificate covers it alongside
@@ -141,7 +150,8 @@ export function getApiBase(): string {
         throw new Error('隔離 dev 服務與 VITE_API_BASE 不一致，拒絕連線');
     }
     if (env) return env;
-    return isTauri ? `${getApiScheme()}://127.0.0.1:${getApiPort()}` : '';
+    if (!isTauri) return '';
+    return `${getApiScheme()}://127.0.0.1:${getApiPort()}`;
 }
 
 // Since shioaji 1.7.2 every event family rides ONE aggregate SSE

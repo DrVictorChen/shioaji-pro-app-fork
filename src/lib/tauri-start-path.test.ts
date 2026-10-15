@@ -20,6 +20,7 @@ let listening: Set<number>; // ports a sidecar answers on
 let bound: Set<number>; // ports find_free_port sees as taken
 
 import * as tauri from './tauri';
+import { EXPECTED_SERVER_VERSION } from './runtime';
 
 // resolve the mocked native modules once up front: concurrent FIRST dynamic
 // imports of a mocked module (tauri.ts fans probes out) can race past the
@@ -133,6 +134,154 @@ describe('serverStart start path', () => {
         const res = await tauri.serverStart(settings);
         expect(res.port).toBe(21322);
         expect(calls('find_free_port').filter(a => a.preferred === 21322).length).toBeGreaterThan(1);
+    });
+});
+
+// #285 — a server this App did not start (no spawn record for its port)
+describe('serverStart and another program\'s server', () => {
+    // 21322 answers as another App's server: environment and account per test
+    function foreignOn21322(info: { simulation: boolean }, personId?: string) {
+        listening.add(21322); bound.add(21322);
+        native.fetch.mockImplementation(async (url: string) => {
+            const port = Number(/:(\d+)\//.exec(url)![1]);
+            if (!listening.has(port) || url.startsWith('https')) throw new Error('connection refused');
+            if (url.endsWith('/info')) return new Response(JSON.stringify({ version: EXPECTED_SERVER_VERSION, simulation: port === 21322 ? info.simulation : true }));
+            if (url.endsWith('/auth/accounts')) return new Response(JSON.stringify(port === 21322 && personId ? [{ person_id: personId }] : []));
+            return new Response(JSON.stringify({ status: 'healthy' }));
+        });
+    }
+
+    it('another App\'s production server is neither used nor stopped: this App starts its own on a free port', async () => {
+        foreignOn21322({ simulation: false });
+        const res = await tauri.serverStart(settings); // simulation
+        expect(res).toMatchObject({ ok: true, attached: false, port: 21323,
+            foreign: { port: 21322, simulation: false, text: expect.stringContaining('正式伺服器與本 App 設定（模擬）不符') } });
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(false);
+        expect(calls('spawn_server')[0]).toMatchObject({ port: 21323 });
+    });
+
+    it('the same environment on an account that cannot be confirmed is not used either', async () => {
+        foreignOn21322({ simulation: true }, 'B987654321');
+        const res = await tauri.serverStart(settings);
+        expect(res.attached).toBe(false);
+        expect(res.foreign?.text).toContain('無法確認是同一個帳號');
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(false);
+    });
+
+    it('another account is not used', async () => {
+        const { hashCredentials } = await import('./spawn-keys');
+        const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
+        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        foreignOn21322({ simulation: true }, 'B987654321');
+        const res = await tauri.serverStart(settings);
+        expect(res.attached).toBe(false);
+        expect(res.foreign?.text).toContain('登入的是另一個帳號');
+    });
+
+    it('the same environment and the account this App\'s own server had: used, and said so', async () => {
+        const { hashCredentials } = await import('./spawn-keys');
+        const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
+        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        foreignOn21322({ simulation: true }, 'A123456789');
+        const res = await tauri.serverStart(settings);
+        expect(res.foreign).toBeUndefined();
+        expect(res).toMatchObject({ ok: true, attached: true, attachedExternal: true, port: 21322 });
+        expect(res.output).toContain('另一個程式啟動的模擬伺服器');
+        expect(calls('spawn_server')).toHaveLength(0);
+    });
+
+    it('a spawn record left by a sidecar that exited does not make another App\'s server ours', async () => {
+        storage.set('sj-pro-server-port', '21322');
+        storage.set('sj-pro-server-pid', '4242'); // gone (process_alive → false)
+        foreignOn21322({ simulation: false });
+        const owned = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) =>
+            cmd === 'agent_harness_sidecar_owned' ? false : owned(cmd, args));
+        const res = await tauri.serverStart(settings);
+        expect(res.attached).toBe(false);
+        expect(res.foreign?.port).toBe(21322);
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(false);
+        expect(calls('spawn_server')[0]).toMatchObject({ port: 21323 });
+    });
+
+    it('reclaim never kills a server that answers, on any of its ports', async () => {
+        storage.set('sj-pro-api-port', '21323'); // last port: another program's server answers there too
+        foreignOn21322({ simulation: false });
+        listening.add(21323); bound.add(21323);
+        const res = await tauri.serverStart(settings);
+        expect(calls('kill_shioaji').filter(k => k.port === 21322 || k.port === 21323)).toEqual([]);
+        expect(res.port).toBe(21324);
+    });
+
+    it('this App\'s own server in the wrong mode is still stopped and replaced', async () => {
+        storage.set('sj-pro-server-port', '21322');
+        foreignOn21322({ simulation: false });
+        const invoke = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+            if (cmd === 'kill_shioaji' && args.port === 21322) { listening.delete(21322); bound.delete(21322); return true; }
+            return invoke(cmd, args);
+        });
+        await tauri.serverStart(settings);
+        expect(calls('kill_shioaji').some(k => k.port === 21322)).toBe(true);
+    });
+});
+
+// #285 customer report (v0.1.53): the user's own `shioaji server start`
+// (CLI 1.7.8, same version as the bundled sidecar) on 8080, Agent Harness on.
+// Pro used to try to stop it, get refused, and never start its own server.
+describe('customer: same-version CLI server on 8080 with Agent Harness on', () => {
+    function cliOn8080(personId: string) {
+        listening.add(8080); bound.add(8080);
+        native.fetch.mockImplementation(async (url: string) => {
+            const port = Number(/:(\d+)\//.exec(url)![1]);
+            if (!listening.has(port) || url.startsWith('https')) throw new Error('connection refused');
+            if (url.endsWith('/info')) return new Response(JSON.stringify({ version: EXPECTED_SERVER_VERSION, simulation: true, agent_harness_enabled: false }));
+            if (url.endsWith('/auth/accounts')) return new Response(JSON.stringify([{ person_id: personId }]));
+            return new Response(JSON.stringify({ status: 'healthy' }));
+        });
+        const base = native.invoke.getMockImplementation()!;
+        // the native shell owns only what it spawned (never the CLI on 8080)
+        native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) =>
+            cmd === 'agent_harness_sidecar_owned' ? args.port !== 8080 && listening.has(args.port as number) : base(cmd, args));
+    }
+
+    it('even on the same account: never stops 8080, starts its own on 21322 and says why', async () => {
+        const { hashCredentials } = await import('./spawn-keys');
+        const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
+        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        cliOn8080('A123456789');
+        const status = await tauri.serverStatus();
+        expect(EXPECTED_SERVER_VERSION).not.toBe('');
+        expect(status).toMatchObject({ running: true, port: 8080, version: EXPECTED_SERVER_VERSION });
+        const res = await tauri.serverStart({ ...settings, agentHarnessEnabled: true, knownStatus: status });
+        expect(res).toMatchObject({ ok: true, attached: false, port: 21322,
+            foreign: { port: 8080, simulation: true } });
+        // a clear message in Traditional Chinese, no product brand names
+        expect(res.foreign!.text).toContain(':8080 上另一個程式啟動的伺服器');
+        expect(res.foreign!.text).toContain('不會停止它');
+        expect(res.foreign!.text).not.toMatch(/claude|codex|openai|anthropic/i);
+        expect(res.output).toContain('本 App 的伺服器改在 port 21322');
+        // 8080 was never touched
+        expect(calls('kill_shioaji').some(k => k.port === 8080)).toBe(false);
+        expect(calls('spawn_server')).toHaveLength(1);
+        expect(calls('spawn_server')[0]).toMatchObject({ port: 21322, agentHarnessEnabled: true });
+        expect(listening.has(8080)).toBe(true);
+    });
+
+    it('stopping from the App refuses 8080 without any kill', async () => {
+        cliOn8080('A123456789');
+        const res = await tauri.serverStop();
+        expect(res.ok).toBe(false);
+        expect(res.output).toContain('不是本 App 啟動的');
+        expect(calls('kill_shioaji')).toEqual([]);
+    });
+
+    it('21322 already taken by something else: its own server goes to the next free port', async () => {
+        cliOn8080('A123456789');
+        bound.add(21322); // bound, not a shioaji server
+        const res = await tauri.serverStart({ ...settings, agentHarnessEnabled: true });
+        expect(res).toMatchObject({ ok: true, port: 21323, foreign: { port: 8080 } });
+        expect(calls('kill_shioaji').some(k => k.port === 8080)).toBe(false);
     });
 });
 
