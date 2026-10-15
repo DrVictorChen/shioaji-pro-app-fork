@@ -1,3 +1,4 @@
+import { operationNotice } from '../test/operation-notice';
 // 整零價差主視窗服務：唯一標記對帳、結果不明、環境綁定、晚到成交保留、本機保存、刪單失敗
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ContractInfo } from './types/contract';
@@ -263,7 +264,7 @@ it('環境綁定：切到別的伺服器或正式／模擬不同時暫停送單�
     spreadExecAction(id, { type: 'cancel' });
     await flush();
     expect(mocks.cancel).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('環境已切換，執行暫停');
+    expect(operationNotice(mocks.notify, '整零價差').body).toContain('環境已切換，執行暫停');
     mocks.info = { simulation: true };
     mocks.base = 'http://127.0.0.1:21323';
     mocks.infoListener?.();

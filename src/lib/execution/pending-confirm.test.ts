@@ -1,3 +1,4 @@
+import { operationNotice } from '../../test/operation-notice';
 // src/lib/execution/pending-confirm.test.ts — 待確認 store, notifications,
 // mock backend and the Tauri adapter (#201 ③). Nothing here places orders.
 
@@ -47,9 +48,9 @@ describe('pending confirm store', () => {
         const state = store.getPendingConfirmState();
         expect(state.snapshot?.items.map(i => i.id)).toEqual(['a', 'b']);
         expect(m.notify).toHaveBeenCalledTimes(2);
-        expect(m.notify.mock.calls[0]![0]).toMatchObject({ kind: 'err', title: '委託待確認' });
-        expect(m.notify.mock.calls[0]![0].body).toContain('不會自動重送');
-        expect(m.notify.mock.calls[1]![0]).toMatchObject({ kind: 'info', title: '委託已失效' });
+        expect(operationNotice(m.notify, '委託待確認')).toMatchObject({ kind: 'err', title: '委託待確認' });
+        expect(operationNotice(m.notify, '委託待確認').body).toContain('不會自動重送');
+        expect(operationNotice(m.notify, '委託已失效')).toMatchObject({ kind: 'info', title: '委託已失效' });
         await store.refreshPendingConfirm();
         expect(m.notify).toHaveBeenCalledTimes(2);
     });
@@ -302,7 +303,7 @@ describe('ordering and transport changes', () => {
             items: [mockPendingConfirmItem({ id: 's', order: { ...mockPendingConfirmItem().order, code: '2330', quantity: 30, quantityUnit: 'share' } })],
         })));
         await flush();
-        expect(m.notify.mock.calls[0]![0].body).toContain('30 股');
+        expect(operationNotice(m.notify, '委託待確認').body).toContain('30 股');
     });
 });
 

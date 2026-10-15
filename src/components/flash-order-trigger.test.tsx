@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // #216 閃電下單的觸價單與自動停損停利：觸價模式在點的價位掛觸價單（方向由
 // 成交價決定、反向在持倉內＝出場）、鎖定一起關閉；梯形上的觸價單點一下刪除、
 // 拖曳改價（不能拖過成交價）；自動停損停利讓每筆進場走括號單、減倉照送、
@@ -110,7 +112,7 @@ it('opposite and within the position: a protective stop that closes (Cover, no e
     expect(m.add.mock.calls[0]![0].role).toBeUndefined();
     await trig(r, 'sell', 100);
     expect(m.add).toHaveBeenCalledTimes(1);
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ title: '⚡ 觸價單未建立', body: expect.stringContaining('立刻觸發') }));
+    expect(operationNotice(m.notify, '⚡ 觸價單未建立')).toMatchObject({ title: '⚡ 觸價單未建立', body: expect.stringContaining('立刻觸發') });
 });
 
 it('a limit send style goes out toward a fill (sell −N ticks)', async () => {
@@ -172,7 +174,7 @@ it('a pending trigger on the ladder: click deletes it, drag moves it, never acro
     await act(async () => { fire('pointermove', ev(12 * 22 + 5)); });
     await act(async () => { fire('pointerup', ev(12 * 22 + 5)); }); // 98
     expect(m.modify).toHaveBeenCalledTimes(1);
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('不能拖過') }));
+    expect(operationNotice(m.notify, '⚡ 觸價單未改價')).toMatchObject({ body: expect.stringContaining('不能拖過') });
     // Esc ends a drag without moving it
     await act(async () => { chip().props.onPointerDown(ev(5 * 22 + 5)); });
     await act(async () => { fire('pointermove', ev(1 * 22 + 5)); });
@@ -213,7 +215,7 @@ it('自動停損停利: a limit click goes through the panel bracket with the pa
     expect(req).toMatchObject({ action: 'Buy', entry: { type: 'LMT', price: 99 }, refPrice: 99,
         plan: { tiers: [{ quantity: 1, takeTicks: 16 }], stopTicks: 8 },
         order: { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT', confirmNote: '附自動停損停利（損 8・利 16 檔・背景執行）' } });
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'ok', title: expect.stringContaining('附停損停利') }));
+    expect(operationNotice(m.notify, '⚡ 買進已送出・附停損停利')).toMatchObject({ kind: 'ok', title: expect.stringContaining('附停損停利') });
     // the market button: a market entry priced from the traded price
     await act(async () => { await button(r, '市價賣')!.props.onClick(); });
     expect(m.bracket.mock.calls[1]![0]).toMatchObject({ action: 'Sell', entry: { type: 'MKT' }, refPrice: 100 });
@@ -225,14 +227,14 @@ it('自動停損停利: reducing is sent plainly, reversing is not sent, an unsu
     await click(r, 'sell', 101);
     expect(m.bracket).not.toHaveBeenCalled();
     expect(m.place).toHaveBeenCalledTimes(1);
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('減倉，未附加停損停利') }));
+    expect(operationNotice(m.notify, '⚡ 賣出已送出')).toMatchObject({ body: expect.stringContaining('減倉，未附加停損停利') });
     // qty 3 against a long 2: a reversal
     await act(async () => { r.root.findAll(n => n.type === 'input' && n.props['aria-label'] === '數量')[0]!.props.onChange({ target: { value: '3' } }); });
     if (button(r, '啟用閃電下單')) await arm(r);
     await click(r, 'sell', 101);
     expect(m.place).toHaveBeenCalledTimes(1);
     expect(m.bracket).not.toHaveBeenCalled();
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('反手') }));
+    expect(operationNotice(m.notify, '⚡ 閃電下單失敗')).toMatchObject({ body: expect.stringContaining('反手') });
 
     const cover = await mount({ order: { ...PROTECT, octype: 'Cover' } });
     expect(byTestId(cover, 'flash-protect')[0]!.props.title).toContain('新倉');
@@ -260,7 +262,7 @@ it('自動停損停利: a 新倉 order is protected even against a position; a r
     });
     await arm(view);
     await click(view, 'sell', 101);
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', body: expect.stringContaining('持倉已變動') }));
+    expect(operationNotice(m.notify, '⚡ 閃電下單失敗')).toMatchObject({ kind: 'err', body: expect.stringContaining('持倉已變動') });
 });
 
 it('a failed deletion is never announced as deleted', async () => {
@@ -273,7 +275,7 @@ it('a failed deletion is never announced as deleted', async () => {
     await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onPointerDown(ev); });
     await act(async () => { fire('pointerup', ev); });
     await act(async () => { byTestId(r, 'flash-trigger-mark')[0]!.props.onClick({ stopPropagation() {} }); });
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', title: '⚡ 觸價單刪除未確認' }));
+    expect(operationNotice(m.notify, '⚡ 觸價單刪除未確認')).toMatchObject({ kind: 'err', title: '⚡ 觸價單刪除未確認' });
 });
 
 it('自動停損停利 + 觸價欄: a trigger entry that brackets its fill', async () => {
@@ -286,7 +288,7 @@ it('自動停損停利 + 觸價欄: a trigger entry that brackets its fill', asy
     expect(m.add).not.toHaveBeenCalled();
     expect(m.bracket.mock.calls[0]![0]).toMatchObject({ action: 'Buy', refPrice: 104,
         entry: { type: 'touch', price: 104, condition: 'above', send: { type: 'MKT' }, validity: { type: 'today' } } });
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ title: expect.stringContaining('背景執行') }));
+    expect(operationNotice(m.notify, '⚡ 觸價單已掛・附停損停利（背景執行）')).toMatchObject({ title: expect.stringContaining('背景執行') });
 });
 
 it('the protect settings: applying saves them on the panel and locks the ladder', async () => {
@@ -323,7 +325,7 @@ it('平倉 ends this panel\'s 停損停利 first, then closes; an exit out or un
     expect(order).toEqual(['stop', 'close']);
     expect(m.place.mock.calls[0]![4]).toMatchObject({ ocType: 'Cover' });
     // quantities in the product's unit (口), not a count of protections
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: expect.stringContaining('已先取消停損停利（2 口）') }));
+    expect(operationNotice(m.notify, '⚡ 平倉已送出')).toMatchObject({ body: expect.stringContaining('已先取消停損停利（2 口）') });
     // the unfilled-close watch: what was held, what was protected, put back as Cover OCO triggers
     const [before, snaps, code, unit, deps] = m.watch.mock.calls[0]!;
     expect([before, snaps, code, unit]).toEqual([2, [{ exitAction: 'Sell', stop: 95, take: 110, quantity: 2 }], 'TXFR1', '口']);
@@ -347,12 +349,13 @@ it('平倉 ends this panel\'s 停損停利 first, then closes; an exit out or un
     m.stop.mockResolvedValue({ stopped: 0, blocked: ['TXFR1 停損停利的出場單結果未知'], failed: [], restore: [] });
     await act(async () => { await button(r, '平倉')!.props.onClick(); });
     expect(m.place).toHaveBeenCalledTimes(1);
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', title: '⚡ 平倉未送出', body: expect.stringContaining('結果未知') }));
+    expect(operationNotice(m.notify, '⚡ 平倉未送出')).toMatchObject({ kind: 'err', title: '⚡ 平倉未送出', body: expect.stringContaining('結果未知') });
 
+    const beforeCancelFailure = m.notify.mock.calls.length;
     m.stop.mockResolvedValue({ stopped: 1, blocked: [], failed: ['主視窗沒有回應'], restore: [] });
     await act(async () => { await button(r, '平倉')!.props.onClick(); });
     expect(m.place).toHaveBeenCalledTimes(1);
-    expect(m.notify).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'err', body: expect.stringContaining('取消未確認') }));
+    expect(operationNotice(m.notify, '⚡ 平倉未送出', beforeCancelFailure)).toMatchObject({ kind: 'err', body: expect.stringContaining('取消未確認') });
 });
 
 it('全刪 cancels the working orders and ends the 停損停利; enabled by protection alone', async () => {

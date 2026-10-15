@@ -1,3 +1,4 @@
+import { operationNotice } from '../test/operation-notice';
 // Restore confirmation for triggers already past their price when the
 // executor (re)starts (#144). All broker I/O is mocked: no order is sent.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -364,15 +365,16 @@ describe('restore confirmation (#144)', () => {
         await restoredStop();
         await tick(47900);
         expect(only().pending?.reason).toBe('restart');
-        expect(m.notify.mock.calls.at(-1)![0].body).toContain('沒有自動送單'); // the reason itself is shown in the panel
+        expect(operationNotice(m.notify, '觸價單待確認（未自動送出）').body).toContain('沒有自動送單'); // the reason itself is shown in the panel
 
+        const beforeDisconnect = m.notify.mock.calls.length;
         await boot();
         await addStop();
         await tick(48300);
         await outage(61_000);
         await tick(47900);
         expect(only().pending?.reason).toBe('disconnect');
-        expect(m.notify.mock.calls.at(-1)![0].body).toContain('沒有自動送單'); // the reason itself is shown in the panel
+        expect(operationNotice(m.notify, '觸價單待確認（未自動送出）', beforeDisconnect).body).toContain('沒有自動送單'); // the reason itself is shown in the panel
 
         await boot();
         await addStop();

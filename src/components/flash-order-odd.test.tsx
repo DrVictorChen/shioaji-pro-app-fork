@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // #204 閃電下單盤中零股：單位切換、只限價、委託與持倉以正確單位顯示
 import { createElement } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
@@ -75,7 +77,7 @@ it.each(['symbol', 'switch back', 'unit', 'unmount'])(
         }
         await act(async () => { release(); });
         expect(dispatched).not.toHaveBeenCalled();
-        expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '⚡ 閃電下單失敗' });
+        expect(operationNotice(mocks.notify, '⚡ 閃電下單失敗')).toMatchObject({ title: '⚡ 閃電下單失敗' });
     },
 );
 
@@ -121,7 +123,7 @@ it('switches to 盤中零股: unit 股, limit-only, sends IntradayOdd shares and
     expect(mocks.place).toHaveBeenCalledTimes(1);
     expect(mocks.place.mock.calls[0]!.slice(1, 4)).toEqual(['Buy', price, 250]);
     expect(mocks.place.mock.calls[0]![4]).toMatchObject({ orderLot: 'IntradayOdd', account: accounts[0] });
-    expect(mocks.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '⚡ 零股買進已送出', body: expect.stringContaining('250 股') });
+    expect(operationNotice(mocks.notify, '⚡ 零股買進已送出')).toMatchObject({ title: '⚡ 零股買進已送出', body: expect.stringContaining('250 股') });
     // back to whole lots: quantity resets (250 股 must never become 250 張) and orders carry no odd lot
     await setUnit('Common');
     expect(view.root.findAll(n => n.type === 'input' && n.props['aria-label'] === '數量')[0]!.props.value).toBe(1);

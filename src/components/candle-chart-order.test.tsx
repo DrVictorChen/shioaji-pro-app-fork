@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // #204 K 線圖下單設定：工具列一顆按鈕（數量＋單位）、彈出面板只列適用選項、
 // 點價與停損停利實際使用這組設定（帳號、單位、數量、委託、開平倉）
 import { createElement, useState } from 'react';
@@ -151,7 +153,7 @@ it('#249 a 409 OrderOutcomeUnknown shows 結果不確定 (never 失敗) and is n
     await clickChart();
     await flush();
     expect(m.place).toHaveBeenCalledOnce();
-    const notice = m.notify.mock.calls.at(-1)![0];
+    const notice = operationNotice(m.notify, '圖表下單結果不確定');
     expect(notice.title).toBe('圖表下單結果不確定');
     expect(notice.title + notice.body).not.toContain('失敗');
     expect(notice.body).toContain('請勿重新下單');
@@ -187,7 +189,7 @@ it.each(['symbol', 'switch back', 'unit', 'account', 'unmount'])(
         await act(async () => { release(); });
         await flush();
         expect(dispatched).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗' });
+        expect(operationNotice(m.notify, '圖表下單失敗')).toMatchObject({ title: '圖表下單失敗' });
     },
 );
 
@@ -724,7 +726,7 @@ describe('chart order settings button', () => {
         await act(async () => { button(view.root, '點價買').props.onClick(); });
         await clickChart();
         expect(m.place).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('固定帳號已不可用') });
+        expect(operationNotice(m.notify, '圖表下單未送出')).toMatchObject({ kind: 'err', body: expect.stringContaining('固定帳號已不可用') });
     });
 
     it('odd-lot stop/take pick their side from the odd-lot price, not the round-lot one', async () => {
@@ -750,7 +752,7 @@ describe('chart order settings button', () => {
         await act(async () => { button(view.root, '停損').props.onClick(); });
         await clickChart();
         expect(m.addTrigger).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('等待零股行情') });
+        expect(operationNotice(m.notify, '無法掛觸價單')).toMatchObject({ kind: 'err', body: expect.stringContaining('等待零股行情') });
     });
 
     it('another chart saving 設為預設 does not change an existing chart that never customised its settings', async () => {
@@ -818,7 +820,7 @@ describe('chart order credit conditions', () => {
         await clickChart();
         expect(m.place).toHaveBeenCalledOnce();
         expect(m.place.mock.calls[0]![4]).toMatchObject({ orderCond: 'MarginTrading', afterConfirm: expect.any(Function) });
-        expect(m.notify.mock.calls.at(-1)![0].title).toContain('融資買進已送出');
+        expect(operationNotice(m.notify, '📈 圖表融資買進已送出').title).toContain('融資買進已送出');
         await act(async () => { modeBtn('點價賣').props.onClick(); });
         await clickChart();
         // 融資賣出（償還）不查可否融資
@@ -877,17 +879,26 @@ describe('chart order credit conditions', () => {
         expect(m.place.mock.calls[0]![1]).toBe('Sell');
     });
 
-    it('the post-confirmation re-check refuses a 融資買進 that became 0 meanwhile', async () => {
-        m.place.mockImplementation(async (_c, _a, _p, _q, opts) => { await opts.afterConfirm(); opts.beforeSend(); return { status: { status: 'Submitted' } }; });
+    it.each(['before', 'after'] as const)('the post-confirmation re-check refuses a 融資買進 that became 0 meanwhile (unrelated notice %s)', async noticeAt => {
+        const dispatched = vi.fn();
+        m.place.mockImplementation(async (_c, _a, _p, _q, opts) => { await opts.afterConfirm(); opts.beforeSend(); dispatched(); return { status: { status: 'Submitted' } }; });
         await mount({ contract: stkDT, orderSettings: { S: { qty: 1, lot: 'Common', orderType: 'ROD', octype: 'Auto', credit: { cond: 'MarginTrading', daytradeShort: false } } }, onOrderSettingsChange: vi.fn() });
         await act(async () => { modeBtn('點價買').props.onClick(); });
         // 面板已查到可以（快取）；確認之後的重查才變成 0
         await flush();
         expect(m.creditPost).toHaveBeenCalledOnce();
         m.creditPost.mockResolvedValue([{ stock_id: '2330', system: 'ALL', update_time: '', margin_unit: 0, short_unit: 50, margin_loan_ratio: 60, short_margin_ratio: 90 }]);
+        const unrelatedNotice = () => m.notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
+        if (noticeAt === 'before') unrelatedNotice();
         await clickChart();
         expect(m.place).toHaveBeenCalledOnce();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗', body: expect.stringContaining('不能融資買進') });
+        expect(m.creditPost).toHaveBeenCalledTimes(2);
+        expect(dispatched).not.toHaveBeenCalled();
+        // 回報訂閱也會非同步通知；只檢查這次圖表下單的結果，不依賴全域通知順序。
+        if (noticeAt === 'after') unrelatedNotice();
+        expect(operationNotice(m.notify, /^圖表下單/)).toMatchObject({
+            kind: 'err', title: '圖表下單失敗', body: expect.stringContaining('不能融資買進'),
+        });
     });
 
     it('odd lot suspends credit (orders are cash) and back to 張 restores 融資', async () => {
@@ -979,7 +990,7 @@ describe('chart order credit conditions', () => {
         await act(async () => { release(); });
         await flush();
         expect(dispatched).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗' });
+        expect(operationNotice(m.notify, '圖表下單失敗')).toMatchObject({ title: '圖表下單失敗' });
     });
 
     it('working order lines name a non-cash condition', async () => {

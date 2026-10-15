@@ -1,3 +1,5 @@
+import '../test/mock-order-reconciliation';
+import { operationNotice } from '../test/operation-notice';
 // #204 鋪單盤中零股：每檔以股計、送出 IntradayOdd 限價 ROD、跟隨只管同單位的網格單
 import { createElement } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
@@ -281,7 +283,7 @@ it('全撤 uses the account selected at click time and cancels nothing without a
     h.selected = null;
     await act(async () => { await btn('全撤').props.onClick(); });
     expect(m.cancelMany).not.toHaveBeenCalled();
-    expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('沒有可用的下單帳戶') });
+    expect(operationNotice(m.notify, '鋪單全撤未執行')).toMatchObject({ kind: 'err', body: expect.stringContaining('沒有可用的下單帳戶') });
     // back to A: exactly this panel's five orders
     h.selected = h.account;
     await act(async () => { view.update(createElement(GridTicket, { panelId: 'p1', contract, trades })); });
