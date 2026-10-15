@@ -470,7 +470,7 @@
         <h3>觸價單、停損停利，一樣點價格就好<span class="tag">v0.1.53</span></h3>
         <p>價格梯最外側多了「觸買」「觸賣」兩欄，點哪一格就在那個價位掛觸價單；梯子上會標出你的觸價單，點一下刪除、拖到別的價位就改價。打開「自動停損停利」，設好停損、停利各幾檔，也可以加移動停損，之後每一筆閃電進場成交，就依實際成交價自動掛上保護。</p>
         <ul class="pts">
-          <li><svg class="i"><use href="#i-check"/></svg>按平倉或全刪，會先取消這筆保護，不留下多餘的出場單</li>
+          <li><svg class="i"><use href="#i-check"/></svg>按平倉或全刪，會先取消這筆保護，不留下多餘的出場單；期貨平倉沒有成交、部位還在時，會在原本的停損停利價重新掛回保護</li>
           <li><svg class="i"><use href="#i-check"/></svg>數量、效期、倉別都收進齒輪，畫面更清爽</li>
           <li><svg class="i"><use href="#i-check"/></svg>進場前照你的下單確認設定詢問，每一筆下單都需要你的核可</li>
         </ul>
@@ -981,9 +981,9 @@ codex plugin add shioaji@sinotrade</pre>
   <div class="wrap">
     <div class="sec-head"><h2 id="releases-h">最新版本</h2><p>App 會自動更新；這裡是最近一版改了什麼。</p></div>
     <article class="rel card" data-rel>
-      <header class="rel-h"><b class="rel-ver" data-rel-ver>v0.1.53</b><time class="rel-date" data-rel-date datetime="2026-10-13">2026-10-13</time></header>
-      <ul class="rel-list" data-rel-list><li>閃電下單：觸價單與自動停損停利</li><li>條件單管理面板</li><li>新增六組預設版面</li><li>背景持續執行（實驗）</li><li>內建 Shioaji 升到 1.7.8</li></ul>
-      <div class="rel-links"><a class="btn ghost small" data-rel-url href="https://github.com/Sinotrade/shioaji-pro-app/releases/tag/v0.1.53">看完整更新說明</a><a class="btn ghost small" href="changelog.html">更新紀錄</a><a class="rel-all" href="https://github.com/Sinotrade/shioaji-pro-app/releases">所有版本</a></div>
+      <header class="rel-h"><b class="rel-ver" data-rel-ver>v0.1.54</b><time class="rel-date" data-rel-date datetime="2026-10-15">2026-10-15</time></header>
+      <ul class="rel-list" data-rel-list><li>閃電下單：ETF 期貨也能對應個股期</li><li>閃電梯形刪單：格子、全刪與數量顯示同一套規則</li><li>閃電平倉沒有成交時恢復停損停利</li><li>排行榜各欄對齊、窄面板不再蓋住代號</li><li>K 線畫線：十字線與價位提示跟著落點</li></ul>
+      <div class="rel-links"><a class="btn ghost small" data-rel-url href="https://github.com/Sinotrade/shioaji-pro-app/releases/tag/v0.1.54">看完整更新說明</a><a class="btn ghost small" href="changelog.html">更新紀錄</a><a class="rel-all" href="https://github.com/Sinotrade/shioaji-pro-app/releases">所有版本</a></div>
     </article>
   </div>
 </section>
