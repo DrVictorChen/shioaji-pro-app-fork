@@ -40,7 +40,8 @@ export type BracketIssueCode =
     | 'lookup-failed' // cache/refresh lookup failed or trade not found
     | 'no-baseline' // cache-only read without an authoritative, continuous baseline
     | 'report-mismatch' // report for this order with wrong account/code/action or no fill identity
-    | 'overfill'; // fills exceed the entry quantity
+    | 'overfill' // fills exceed the entry quantity
+    | 'fill-after-close'; // a fill after the entry was known closed (never protected, #177)
 
 export interface BracketIssue {
     code: BracketIssueCode;
@@ -90,13 +91,77 @@ export interface BracketPlan {
     fills: Record<string, number>;
     fillTs?: Record<string, number>; // fill identity → exchange ts (epoch s)
     filled: number;
+    /** #177: entry fills that came after the entry was known closed — an
+     * anomaly: shown 未受保護, never protected (same rule as the background
+     * engine's fillAfterClose) */
+    lateFilled?: number;
+    /** fill identities of those late fills — never part of the cost basis */
+    lateKeys?: string[];
     entryClosed: boolean;
     entryCancel?: 'sending' | 'unconfirmed'; // user-requested cancel of the working rest
     exit: BracketExit | null;
     issues: BracketIssue[];
     dismissed?: boolean;
+    /** #226: user edits of stop / take (history). */
+    edits?: { at: number; text: string }[];
+    /** #226 分批停利: this plan is tier `index` (0-based) of `count` on one
+     * entry order; it protects the entry's fills after `offset` lots, up to
+     * its `quantity`. `entryQuantity` is the whole entry order. */
+    tier?: { index: number; count: number; offset: number; entryQuantity: number };
+    /** #226 stop / take set from the actual fill price (ticks) instead of
+     * fixed prices; `base` is frozen at the first protected fill. */
+    rules?: BracketRules;
+    base?: number;
+    /** the basis came from the order / last price (no fill price yet): the
+     * first fill price replaces it */
+    baseProvisional?: boolean;
+    /** 保本 became due before this tier had its prices */
+    beArmed?: boolean;
+    /** fill identity → price (entry fills), for the cost basis */
+    fillPx?: Record<string, number>;
+    /** a price for the cost basis when fills carry none (limit / last) */
+    refPrice?: number;
     createdAt: number;
     updatedAt: number;
+}
+
+/** #226 rules of a 括號單 made in the management panel. */
+export interface BracketRules {
+    stopTicks: number;
+    /** null: no fixed take (this tier leaves by 移動停損 / stop) */
+    takeTicks: number | null;
+    trail: { activateTicks: number; distanceTicks: number; stepTicks: number } | null;
+    /** 保本: after tier `afterTier` (1-based) has taken profit, the stop
+     * moves to cost + offset ticks */
+    breakeven: { afterTier: number; offsetTicks: number } | null;
+}
+
+/** Entry fills this plan protects (a tier: its share, in order). Fills
+ * after the entry was known closed never count (#177). */
+export function allocatedFill(p: Pick<BracketPlan, 'filled' | 'quantity' | 'tier' | 'lateFilled'>): number {
+    const filled = Math.max(0, p.filled - (p.lateFilled ?? 0));
+    if (!p.tier) return Math.min(filled, p.quantity);
+    return Math.max(0, Math.min(Math.min(filled, p.tier.entryQuantity) - p.tier.offset, p.quantity));
+}
+
+/** Fills after the entry closed, shown once per entry order (tier 0 / a
+ * plain bracket) — the tiers of one entry share them. */
+export function lateFillQuantity(p: Pick<BracketPlan, 'lateFilled' | 'tier'>): number {
+    return p.tier && p.tier.index > 0 ? 0 : p.lateFilled ?? 0;
+}
+
+/** Volume-weighted entry fill price (null when no fill carries a price). */
+export function averageFillPrice(p: Pick<BracketPlan, 'fills' | 'fillPx' | 'lateKeys'>): number | null {
+    let q = 0;
+    let v = 0;
+    for (const [key, qty] of Object.entries(p.fills)) {
+        if (p.lateKeys?.includes(key)) continue; // after the close: never priced from (#177)
+        const px = p.fillPx?.[key];
+        if (px === undefined || !(px > 0)) continue;
+        q += qty;
+        v += qty * px;
+    }
+    return q > 0 ? v / q : null;
 }
 
 export type BracketPhase = 'waiting' | 'protected' | 'exiting' | 'done' | 'closed';
@@ -106,7 +171,7 @@ export function bracketPhase(p: BracketPlan): BracketPhase {
         if (p.exit.status === 'sending' || p.exit.status === 'working') return 'exiting';
         return 'done';
     }
-    if (p.filled > 0) return 'protected';
+    if (allocatedFill(p) > 0) return 'protected';
     return p.entryClosed ? 'closed' : 'waiting';
 }
 
@@ -123,17 +188,20 @@ export function isLive(p: BracketPlan): boolean {
 /** Quantity the OCO triggers should hold right now. */
 export function protectionQuantity(p: BracketPlan): number {
     if (p.exit) return 0;
-    return Math.min(p.filled, p.quantity);
+    // a rules bracket protects nothing until its prices exist
+    if (p.rules && p.base === undefined) return 0;
+    return allocatedFill(p);
 }
 
 /** Filled entry quantity no longer covered: late fills after an exit was
  * dispatched, a capped/refused exit, or an exit that ended unfilled. An
  * `unknown` exit counts as covering its quantity but is flagged separately. */
 export function unprotectedQuantity(p: BracketPlan): number {
-    if (!p.exit) return 0;
+    const late = lateFillQuantity(p);
+    if (!p.exit) return late;
     const counted = p.exit.status === 'not-sent' ? 0
         : p.exit.status === 'incomplete' ? p.exit.filled : p.exit.quantity;
-    return Math.max(0, Math.min(p.filled, p.quantity) - counted);
+    return late + Math.max(0, allocatedFill(p) - counted);
 }
 
 /** Entry quantity still working after the exit fired: any later fill of it
@@ -141,7 +209,7 @@ export function unprotectedQuantity(p: BracketPlan): number {
 export function workingEntryAfterExit(p: BracketPlan): number {
     // counts until the entry is confirmed closed (a pending cancel is not enough)
     if (!p.exit || p.entryClosed) return 0;
-    return Math.max(0, p.quantity - p.filled);
+    return Math.max(0, p.quantity - allocatedFill(p));
 }
 
 export function needsAttention(p: BracketPlan): boolean {
@@ -161,6 +229,7 @@ export interface FillEvidence {
     quantity: number;
     ts?: number; // exchange fill time (epoch s): pairs an event-only fill with its cache row
     flagged?: BracketIssueCode; // counted but could not be fully verified
+    price?: number; // #226 fill price (cost basis of panel brackets)
 }
 
 const text = (v: unknown) => typeof v === 'string' ? v : '';
@@ -204,9 +273,10 @@ export function matchDeal(report: OrderEventReport, orderId: string, account: Ac
     if (report.action !== action) return { kind: 'mismatch', detail: '成交回報買賣別與委託不符，未計入' };
     if (!Number.isSafeInteger(report.quantity) || report.quantity <= 0) return { kind: 'mismatch', detail: '成交回報數量無效，未計入' };
     const seq = text(reportBody(report)?.exchange_seq);
-    if (seq) return { kind: 'fill', fill: { orderId, key: `${orderId}:${seq}`, quantity: report.quantity, ts: report.ts } };
+    const price = report.price > 0 ? { price: report.price } : {};
+    if (seq) return { kind: 'fill', fill: { orderId, key: `${orderId}:${seq}`, quantity: report.quantity, ts: report.ts, ...price } };
     if (report.eventId) {
-        return { kind: 'fill', fill: { orderId, key: `event:${report.eventId}`, quantity: report.quantity, ts: report.ts, flagged: 'report-mismatch' } };
+        return { kind: 'fill', fill: { orderId, key: `event:${report.eventId}`, quantity: report.quantity, ts: report.ts, flagged: 'report-mismatch', ...price } };
     }
     return { kind: 'mismatch', detail: '成交回報沒有成交序號與事件 ID，無法去重，未計入' };
 }
@@ -214,9 +284,12 @@ export function matchDeal(report: OrderEventReport, orderId: string, account: Ac
 /** Fills recorded on a Trade from `/order/trades` (cache-only or refreshed). */
 export function fillsFromTrade(trade: Trade): FillEvidence[] {
     return (trade.status.deals ?? [])
-        .filter(d => typeof d.seq === 'string' && d.seq && Number.isSafeInteger(d.quantity) && d.quantity > 0)
-        .map(d => ({ orderId: trade.order.id, key: `${trade.order.id}:${d.seq}`, quantity: d.quantity,
-            ts: typeof d.ts === 'number' && Number.isFinite(d.ts) ? d.ts : undefined }));
+        // quantities as the background engine reads them (an integer, or a whole-number string)
+        .map(d => ({ d, qty: exactQuantity(d.quantity as unknown, true) }))
+        .filter(({ d, qty }) => typeof d.seq === 'string' && d.seq && qty !== null)
+        .map(({ d, qty }) => ({ orderId: trade.order.id, key: `${trade.order.id}:${d.seq}`, quantity: qty!,
+            ts: typeof d.ts === 'number' && Number.isFinite(d.ts) ? d.ts : undefined,
+            ...(typeof d.price === 'number' && d.price > 0 ? { price: d.price } : {}) }));
 }
 
 export function tradeMatchesPlan(trade: Trade, p: Pick<BracketPlan, 'account' | 'orderId' | 'orderCode' | 'action'>): boolean {
@@ -261,11 +334,27 @@ export function mergeFill(fills: Record<string, number>, fillTs: Record<string, 
 export function applyEntryFill(p: BracketPlan, fill: FillEvidence, now: number): BracketPlan {
     if (fill.orderId !== p.orderId) return p;
     const merged = mergeFill(p.fills, p.fillTs, fill);
-    if (!merged) return p;
+    if (!merged) {
+        // the same fill seen again (e.g. the order listing) may bring its price
+        if (fill.price !== undefined && p.fills[fill.key] !== undefined && p.fillPx?.[fill.key] === undefined) {
+            return { ...p, fillPx: { ...(p.fillPx ?? {}), [fill.key]: fill.price }, updatedAt: now };
+        }
+        return p;
+    }
     let next: BracketPlan = { ...p, fills: merged.fills, fillTs: merged.fillTs, filled: p.filled + merged.added, updatedAt: now };
+    if (p.entryClosed && merged.added > 0) {
+        // the entry was reported closed (cancel succeeded / final in a
+        // refreshed listing): this fill is an anomaly — never protected
+        next.lateFilled = (p.lateFilled ?? 0) + merged.added;
+        next.lateKeys = [...(p.lateKeys ?? []), fill.key];
+        next = addIssue(next, 'fill-after-close',
+            '委託已結束後仍收到成交（資料異常），已記為未受保護，不會自動補保護；請到委託與持倉核對', now);
+    }
+    if (fill.price !== undefined && merged.fills[fill.key] !== undefined) next.fillPx = { ...(p.fillPx ?? {}), [fill.key]: fill.price };
     if (merged.conflict) next = addIssue(next, 'report-mismatch', '成交回報與委託快取無法對應為同一筆（可能重複計算）；請對帳', now);
     if (fill.flagged) next = addIssue(next, fill.flagged, '成交回報缺少成交序號，僅以事件 ID 去重；請對帳確認', now);
-    if (next.filled > next.quantity) next = addIssue(next, 'overfill', `成交累計 ${next.filled} 超過委託量 ${next.quantity}，保護量以委託量為上限`, now);
+    const cap = next.tier?.entryQuantity ?? next.quantity;
+    if (next.filled > cap) next = addIssue(next, 'overfill', `成交累計 ${next.filled} 超過委託量 ${cap}，保護量以委託量為上限`, now);
     // Protection is only extended while no exit has started; after that a
     // late fill shows up in unprotectedQuantity().
     return next;
@@ -275,23 +364,111 @@ export function applyEntryFill(p: BracketPlan, fill: FillEvidence, now: number):
 export function applyEntryOrderReport(p: BracketPlan, report: OrderEventReport, now: number): BracketPlan {
     if (report.kind !== 'order' || report.id !== p.orderId || report.market !== p.market) return p;
     if (reportAccountMatches(report, p.account) === false) return p;
-    if ((report.opType === 'New' && report.failed) || (report.opType === 'Cancel' && !report.failed)) {
+    // a Cancel closes it only when it explicitly succeeded (op_code 00): a
+    // report without a code is no evidence (#177)
+    if ((report.opType === 'New' && report.failed) || (report.opType === 'Cancel' && report.opCode === '00')) {
         return p.entryClosed ? p : { ...p, entryClosed: true, entryCancel: undefined, updatedAt: now };
     }
     return p;
 }
 
-export function applyEntryTrade(p: BracketPlan, trade: Trade, now: number): BracketPlan {
+/**
+ * An entry's row from `/order/trades`. Its fills always count; the entry is
+ * closed only by a final row of a listing refreshed now (`refresh:true`,
+ * update_status) — never by a cache-only read — with the background engine's
+ * rule for a final row (#177, `listingRowFinality`). Inactive is still
+ * working: in the SDK it is the placeholder before the broker answered.
+ */
+export function applyEntryTrade(p: BracketPlan, trade: Trade, now: number, source: 'cache' | 'refreshed'): BracketPlan {
     let next = p;
     for (const fill of fillsFromTrade(trade)) next = applyEntryFill(next, fill, now);
     const listed = fillsFromTrade(trade).reduce((s, f) => s + f.quantity, 0);
     if (trade.status.deal_quantity > listed) {
         next = addIssue(next, 'lookup-failed', `委託顯示成交 ${trade.status.deal_quantity}，但成交明細只有 ${listed}；請對帳`, now);
     }
-    if (['Cancelled', 'Failed', 'Filled', 'Inactive'].includes(trade.status.status) && !next.entryClosed) {
-        next = { ...next, entryClosed: true, updatedAt: now };
+    if (source !== 'refreshed' || next.entryClosed) return next;
+    const finality = listingRowFinality(trade);
+    if (finality === 'ended' || finality === 'filled') return { ...next, entryClosed: true, updatedAt: now };
+    if (finality === 'inconsistent') {
+        next = addIssue(next, 'report-mismatch', '對帳結果的委託數量彼此不一致，未據此判斷委託已結束；請至委託分頁確認', now);
     }
     return next;
+}
+
+export type ListingFinality = 'working' | 'ended' | 'filled' | 'inconsistent';
+
+const MAX_SAFE_QUANTITY = Number.MAX_SAFE_INTEGER;
+
+/** An exact quantity: an integer, or a string whose fraction is all zeros. */
+function exactQuantity(v: unknown, positive: boolean): number | null {
+    let n: number;
+    if (typeof v === 'number') {
+        if (!Number.isSafeInteger(v)) return null;
+        n = v;
+    } else if (typeof v === 'string') {
+        const m = /^\+?(\d{1,16})(?:\.(0*))?$/.exec(v.trim());
+        if (!m) return null;
+        n = Number(m[1]);
+    } else {
+        return null;
+    }
+    return (positive ? n > 0 : n >= 0) && n <= MAX_SAFE_QUANTITY ? n : null;
+}
+
+/** absent / null → undefined; present but inexact → null */
+function optionalQuantity(v: unknown): number | undefined | null {
+    return v === undefined || v === null ? undefined : exactQuantity(v, false);
+}
+
+/**
+ * Is a listing row's order final? The background engine's rule
+ * (src-tauri execution/sidecar.rs `row_evidence`), pinned by the shared
+ * cases in `bracket-finality-scenarios.json`:
+ * - Filled: every lot filled (or filled what a reduction left, all counted);
+ * - Cancelled: only with every count stated and accounting for every lot;
+ *   Failed: ended;
+ * - any status with every lot accounted for: filled / ended;
+ * - PendingSubmit / PreSubmitted / Submitted / PartFilled / Inactive / a new
+ *   status: still working;
+ * - counts that contradict each other: inconsistent (no evidence).
+ */
+export function listingRowFinality(row: unknown): ListingFinality {
+    const r = (row ?? {}) as { order?: { quantity?: unknown }; status?: Record<string, unknown> };
+    const st = r.status ?? {};
+    const qty = exactQuantity(r.order?.quantity, true);
+    const cancelled = optionalQuantity(st.cancel_quantity);
+    const dealt = optionalQuantity(st.deal_quantity);
+    const ordered = optionalQuantity(st.order_quantity);
+    if (qty === null || cancelled === null || dealt === null || ordered === null) return 'inconsistent';
+    if (ordered !== undefined && ordered > qty) return 'inconsistent';
+    const rawDeals = st.deals;
+    const counted = cancelled !== undefined && dealt !== undefined && Array.isArray(rawDeals);
+    const deals: { seq: string; qty: number }[] = [];
+    if (Array.isArray(rawDeals)) {
+        for (const d of rawDeals as Record<string, unknown>[]) {
+            const seq = typeof d?.seq === 'string' && d.seq ? d.seq : null;
+            const q = exactQuantity(d?.quantity, true);
+            if (seq === null || q === null) return 'inconsistent';
+            deals.push({ seq, qty: q });
+        }
+    } else if (rawDeals !== undefined && rawDeals !== null) {
+        return 'inconsistent';
+    }
+    const filled = deals.reduce((s, d) => s + d.qty, 0);
+    const gone = filled + (cancelled ?? 0);
+    if ((dealt !== undefined && dealt !== filled) || gone > qty || new Set(deals.map(d => d.seq)).size !== deals.length) {
+        return 'inconsistent';
+    }
+    const status = st.status;
+    if (status === 'Filled') {
+        if (filled === qty || (counted && filled > 0 && gone === qty)) return 'filled';
+        return 'inconsistent';
+    }
+    if (status === 'PartFilled' && filled === 0) return 'inconsistent';
+    if (status === 'Cancelled') return counted && gone === qty ? 'ended' : 'inconsistent';
+    if (status === 'Failed') return 'ended';
+    if (counted && gone === qty) return filled === qty ? 'filled' : 'ended';
+    return 'working';
 }
 
 /** Exit fills (from the exit order id). Idempotent by fill identity. */

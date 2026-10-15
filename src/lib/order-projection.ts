@@ -14,7 +14,9 @@ function statusOf(quantity: number, deals: number, cancelled: number): OrderStat
 
 // Display projection from documented raw reports; native trading continues to
 // validate against broker state. Null means insufficient/ambiguous evidence.
-export function projectOrderReport(rows: AccountedTrade[], report: OrderEventReport, accounts: Account[]): AccountedTrade[] | null {
+/** `codeHint`: the full code of an order this window did not send (the
+ * background engine's), used only for a New report without full_code. */
+export function projectOrderReport(rows: AccountedTrade[], report: OrderEventReport, accounts: Account[], codeHint?: string | null): AccountedTrade[] | null {
     if (report.kind !== 'order') return null;
     const body = reportBody(report);
     const order = rec(body?.order);
@@ -28,7 +30,8 @@ export function projectOrderReport(rows: AccountedTrade[], report: OrderEventRep
         || typeof contract.code !== 'string' || !['STK', 'FUT', 'OPT', 'WRT'].includes(String(contract.security_type))) return null;
     const old = rows.find(t => t.order.id === report.id && t.account?.account_type === account.account_type && t.account?.account_id === account.account_id && t.account?.broker_id === account.broker_id);
     const code = report.market === 'futures'
-        ? (typeof contract.full_code === 'string' && contract.full_code ? contract.full_code : old?.contract.target_code || old?.contract.code)
+        ? (typeof contract.full_code === 'string' && contract.full_code ? contract.full_code
+            : old?.contract.target_code || old?.contract.code || (report.opType === 'New' ? codeHint ?? undefined : undefined))
         : contract.code;
     if (!code || (old && (old.contract.target_code || old.contract.code) !== code)) return null;
     if (report.failed && report.opType !== 'New') return rows; // rejected cancel/change must not erase a working order

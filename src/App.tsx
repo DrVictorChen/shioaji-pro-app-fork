@@ -21,6 +21,8 @@ import { DepthLadder } from './components/depth-ladder';
 import { DepthMap } from './components/depth-map';
 import { EventToasts } from './components/event-toasts';
 import { PendingTriggers } from './components/pending-triggers';
+import { ConditionalPanel, OPEN_CONDITIONAL_PANEL_EVENT } from './components/conditional-panel';
+import { PendingConfirmPanel } from './components/pending-confirm';
 import { FeatureGate } from './components/feature-gate';
 import { FlashOrder } from './components/flash-order';
 import { GridTicket } from './components/grid-ticket';
@@ -296,6 +298,10 @@ function BlockBody({
                         onShowOhlcChange={(show) =>
                             onSessionConfigChange(block.id, { chartOhlc: show ? undefined : false })
                         }
+                        showHighLow={block.chartHighLow !== false}
+                        onShowHighLowChange={(show) =>
+                            onSessionConfigChange(block.id, { chartHighLow: show ? undefined : false })
+                        }
                     />
                 </>
             ) : (
@@ -455,6 +461,8 @@ function BlockBody({
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
             );
+        case 'conditional':
+            return <ConditionalPanel contract={contract} />;
         case 'heatmap':
             return <SectorHeatmap onPick={onSelectCode} />;
         case 'pulse':
@@ -853,6 +861,7 @@ function PopoutView({
             <EventToasts />
             <OrderConfirmHost />
             <PendingTriggers compact />
+            <PendingConfirmPanel compact />
             <section className={panel.panel} style={{ flex: 1, margin: 6 }}>
                 <PanelChrome
                     title={meta.label}
@@ -969,8 +978,9 @@ function MainApp() {
             0,
         );
         const settle = marginState.data?.future_settle_profitloss ?? 0;
-        reportDailyPnl(unrealized + settle);
-    }, [positionsState.data, marginState.data]);
+        // known only once positions and margin were actually read (before that it is a starting zero)
+        reportDailyPnl(unrealized + settle, trading.queries.positions.updatedAt !== null && marginState.data !== undefined);
+    }, [positionsState.data, marginState.data, trading.queries.positions.updatedAt]);
 
     // select & link a symbol WITHOUT adding it to the watchlist
     const selectByCode = useCallback(
@@ -1218,6 +1228,23 @@ function MainApp() {
                 1300,
             );
         });
+    }, []);
+
+    // 「查看條件單管理」 from the order ticket's bracket cards: jump to the
+    // panel, or open it (singleton) when the workspace has none
+    const openConditionalRef = useRef<() => void>(() => undefined);
+    openConditionalRef.current = () => {
+        const existing = workspace.blocks.find((b) => b.type === 'conditional');
+        if (existing) locateBlock(existing.id);
+        else {
+            const id = addBlock('conditional');
+            if (id) locateBlock(id);
+        }
+    };
+    useEffect(() => {
+        const open = () => openConditionalRef.current();
+        window.addEventListener(OPEN_CONDITIONAL_PANEL_EVENT, open);
+        return () => window.removeEventListener(OPEN_CONDITIONAL_PANEL_EVENT, open);
     }, []);
 
     // Persistent research links are owned by the backtest panel. The App
@@ -1598,6 +1625,7 @@ function MainApp() {
 <EventToasts />
             <OrderConfirmHost />
             <PendingTriggers />
+            <PendingConfirmPanel />
             <CommandPalette
                 open={paletteOpen}
                 onClose={() => setPaletteOpen(false)}

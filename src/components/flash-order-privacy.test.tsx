@@ -11,7 +11,7 @@ vi.mock('../hooks/use-stream', () => ({ useQuote: () => undefined, useTradingLiv
 vi.mock('../hooks/use-display-book', () => ({ useDisplayBook: () => ({ quote: undefined, snapshot: { close: 2400 }, book: undefined }) }));
 vi.mock('../lib/shioaji', () => ({ cancelOrder: vi.fn(), cancelOrders: vi.fn() }));
 vi.mock('../lib/trade', () => ({ notify: mocks.notify, placeQuickOrder: vi.fn(), placeStockExitByShares: vi.fn() }));
-vi.mock('../lib/stream', () => ({ getAliasFor: () => undefined }));
+vi.mock('../lib/stream', () => ({ getAliasFor: () => undefined, getStreamStatus: () => 'disconnected', isStreamOwner: () => false, subscribeStatusStore: () => () => {}, subscribeStreamOwner: () => () => {} }));
 vi.mock('../lib/tick-bands', () => ({ useTickBandsVersion: () => 0 }));
 vi.mock('../lib/utils/ticksize', () => ({ roundToTick: (_c: unknown, p: number) => p, stepPrice: (_c: unknown, p: number, step: number) => p + step }));
 vi.mock('../lib/privacy', async (orig) => ({ ...(await orig<typeof import('../lib/privacy')>()), usePrivacyMode: () => true, usePrivacyMoney: () => true }));

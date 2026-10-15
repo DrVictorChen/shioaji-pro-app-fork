@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    BLOCK_META,
     DEFAULT_WORKSPACE,
     GRID_COLS,
     GRID_LEGACY_COLS,
@@ -142,5 +143,101 @@ describe('popout session param', () => {
         expect(q('all')).toEqual({ chartSession: 'all', intradaySession: undefined });
         expect(q('foo')).toEqual({ chartSession: undefined, intradaySession: undefined });
         expect(popoutSessionFromQuery(new URLSearchParams())).toEqual({ chartSession: undefined, intradaySession: undefined });
+    });
+});
+
+describe('built-in layout presets', () => {
+    const NEW_PRESETS = ['期貨當沖', '期現對照', '零股存股', '條件單監控', '選擇權組合', '盤勢總覽'];
+    const BANNED = ['原生', '免費', '交易終端', 'Claude', 'Codex'];
+    const overlaps = (a: { x: number; y: number; w: number; h: number }, b: typeof a) =>
+        a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+    it('names are unique and avoid banned wording', () => {
+        const names = LAYOUT_PRESETS.map((p) => p.name);
+        expect(new Set(names).size).toBe(names.length);
+        for (const p of LAYOUT_PRESETS) {
+            for (const word of BANNED) {
+                expect(p.name).not.toContain(word);
+                expect(p.desc).not.toContain(word);
+            }
+        }
+    });
+
+    it('ships the new panel combinations and keeps the existing ones', () => {
+        const names = LAYOUT_PRESETS.map((p) => p.name);
+        for (const n of NEW_PRESETS) expect(names).toContain(n);
+        for (const n of ['標準看盤', '當沖交易', '雙圖對照', '選擇權', '衍生商品探索', '鋪單交易', '閃電矩陣', '熱力選股', '市場脈動', '盤中雷達', 'AI 副駕', '分析研究']) {
+            expect(names).toContain(n);
+        }
+    });
+
+    for (const p of LAYOUT_PRESETS) {
+        it(`「${p.name}」is a valid workspace`, () => {
+            const ws = p.workspace;
+            const ids = ws.blocks.map((b) => b.id);
+            expect(new Set(ids).size).toBe(ids.length);
+            // 每個面板恰好一個格子，沒有孤兒格子
+            expect(ws.layout.map((l) => l.i).sort()).toEqual([...ids].sort());
+            for (const b of ws.blocks) {
+                const meta = BLOCK_META[b.type];
+                expect(meta, b.type).toBeDefined();
+                // 不可釘選的面板不能帶代碼
+                if (!meta.pinnable) expect(b.pin, b.id).toBeNull();
+                if (meta.singleton) expect(ws.blocks.filter((x) => x.type === b.type).length, b.type).toBe(1);
+                // 連動群組只給閃電，且群組必須有代碼
+                if (b.linkGroup) {
+                    expect(b.type).toBe('flash');
+                    expect(b.pin).toBeNull();
+                    expect(ws.linkGroups?.[b.linkGroup]).toBeTruthy();
+                }
+            }
+            for (const l of ws.layout) {
+                expect(l.x).toBeGreaterThanOrEqual(0);
+                expect(l.y).toBeGreaterThanOrEqual(0);
+                expect(l.x + l.w).toBeLessThanOrEqual(GRID_COLS);
+            }
+            for (let i = 0; i < ws.layout.length; i++) {
+                for (let j = i + 1; j < ws.layout.length; j++) {
+                    expect(overlaps(ws.layout[i]!, ws.layout[j]!), `${ws.layout[i]!.i} × ${ws.layout[j]!.i}`).toBe(false);
+                }
+            }
+        });
+    }
+
+    for (const name of NEW_PRESETS) {
+        it(`「${name}」fills the 24×24 screen and respects panel minimum sizes`, () => {
+            const p = LAYOUT_PRESETS.find((x) => x.name === name)!;
+            const ws = p.workspace;
+            const typeOf = new Map(ws.blocks.map((b) => [b.id, b.type]));
+            let area = 0;
+            for (const l of ws.layout) {
+                const min = BLOCK_META[typeOf.get(l.i)!].defaultSize;
+                expect(l.w, l.i).toBeGreaterThanOrEqual(min.minW * GRID_LEGACY_SCALE);
+                expect(l.h, l.i).toBeGreaterThanOrEqual(min.minH);
+                expect(l.minW).toBe(min.minW * GRID_LEGACY_SCALE);
+                expect(l.minH).toBe(min.minH);
+                expect(l.y + l.h).toBeLessThanOrEqual(24);
+                area += l.w * l.h;
+            }
+            // 無重疊＋面積剛好 = 整個畫面鋪滿，沒有空洞
+            expect(area).toBe(GRID_COLS * 24);
+        });
+    }
+
+    it('期現對照 drives a stock ladder and a stock-futures ladder from one selection', () => {
+        const ws = LAYOUT_PRESETS.find((x) => x.name === '期現對照')!.workspace;
+        const flashes = ws.blocks.filter((b) => b.type === 'flash');
+        expect(flashes.map((b) => b.flashLink?.kind).sort()).toEqual(['future', 'stock']);
+        // 兩條梯都跟自選選取（同一個來源），不釘選也不進群組
+        for (const b of flashes) {
+            expect(b.pin).toBeNull();
+            expect(b.linkGroup).toBeUndefined();
+        }
+    });
+
+    it('期貨當沖 keeps every quote panel on the same futures contract', () => {
+        const ws = LAYOUT_PRESETS.find((x) => x.name === '期貨當沖')!.workspace;
+        const pins = ws.blocks.filter((b) => BLOCK_META[b.type].pinnable).map((b) => b.pin);
+        expect(new Set(pins)).toEqual(new Set(['TXFR1']));
     });
 });

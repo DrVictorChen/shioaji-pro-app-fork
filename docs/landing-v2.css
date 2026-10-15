@@ -1435,3 +1435,17 @@ footer { padding: 56px 0 48px; border-top: 1px solid var(--line); font-size: 14p
 .rel-all { font-size: 14px; }
 .chg { display: grid; gap: 20px; max-width: 860px; }
 .chg .rel { max-width: none; }
+/* 靜態截圖（v0.1.53 起的功能段落） */
+.fshot { margin: 0; }
+.fshot img { display: block; width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line-2); box-shadow: var(--shadow); }
+.fshot figcaption { margin-top: 10px; font-size: 13px; color: var(--muted); }
+.fshot-duo .duo-imgs { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 460px; margin-inline: auto; }
+.fshot-duo figcaption { text-align: center; }
+.fshot-wide { grid-column: 1 / -1; }
+.pts { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 10px; color: var(--text-2); }
+.pts li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; }
+.pts .i { width: 18px; height: 18px; margin-top: .2em; color: var(--accent); }
+.pts b { color: var(--text); margin-right: .5em; }
+@media (max-width: 900px) { .fshot-duo .duo-imgs { max-width: 400px; } }
+.fshot-form img { max-width: 480px; margin-inline: auto; }
+.fshot-form figcaption { text-align: center; }

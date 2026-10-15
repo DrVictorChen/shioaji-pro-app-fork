@@ -19,6 +19,7 @@ import {
     isLive,
     protectionQuantity,
     unprotectedQuantity,
+    lateFillQuantity,
     workingEntryAfterExit,
 } from '../lib/bracket-core';
 import { maskAccountId, usePrivacyMode } from '../lib/privacy';
@@ -103,8 +104,11 @@ function Row({ plan, envNow, feedMissing, executing, stale }: {
             {workingEntry > 0 && (
                 <div className={styles.note.err}>進場單仍有 {workingEntry} 未成交委託在場上；出場已觸發，之後的成交不受保護</div>
             )}
-            {unprotected > 0 && (
-                <div className={styles.note.err}>可能未保護 {unprotected}（待確認）：請先按「對帳」確認實際成交，勿直接另下出場單；系統不會自動重送</div>
+            {lateFillQuantity(plan) > 0 && (
+                <div className={styles.note.err}>未受保護 {lateFillQuantity(plan)}：進場單結束後才收到的成交（資料異常），不會自動補保護；請到委託與持倉核對後自行處理</div>
+            )}
+            {unprotected - lateFillQuantity(plan) > 0 && (
+                <div className={styles.note.err}>可能未保護 {unprotected - lateFillQuantity(plan)}（待確認）：請先按「對帳」確認實際成交，勿直接另下出場單；系統不會自動重送</div>
             )}
             {isLive(plan) && elsewhere && (
                 <div className={styles.note.warn}>

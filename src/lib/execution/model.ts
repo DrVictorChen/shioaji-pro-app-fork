@@ -50,7 +50,8 @@ export interface Binding {
 }
 
 export interface OrderSpec {
-    priceType: 'MKT' | 'LMT';
+    /** MKP: futures range market (background engine, #226). */
+    priceType: 'MKT' | 'LMT' | 'MKP';
     timeInForce?: 'ROD' | 'IOC' | 'FOK';
     /** Futures position effect (bracket/grid exits use Cover). */
     octype?: 'Auto' | 'New' | 'Cover' | 'DayTrade';
@@ -68,15 +69,50 @@ export type TouchCondition = 'below' | 'above'; // fire when last <= / >= price
 export const PRICE_SCALE = 10_000;
 
 /** How a level opens its position. */
+/** #226 the price a touch condition watches: absent = last trade; a sell
+ * watches the best bid, a buy the best ask (對手價). */
+/** `odd`: 盤中零股 trades (a 零股 condition, stocks). */
+export type Feed = 'bid' | 'ask' | 'odd';
+
+/** #226 有效期 (`until` epoch ms; 本盤 also ends with its trading session). */
+export interface Validity { type: 'session' | 'today' | 'date'; until: number }
+
+/** One band of a tick-size table: `tick` for `min <= price < max`. */
+export interface TickBand { min: number; max: number | null; tick: number }
+
 export type EntryRule =
-    /** Virtual level: watch price, send `order` when it touches (觸價). */
-    | { type: 'touch'; condition: TouchCondition; price: number; order: OrderSpec }
+    /** Virtual level: watch price, send `order` when it touches (觸價).
+     * Background engine (#226): `cross` 上穿／下穿 (a new crossing after
+     * every create / restart / reconnect / resume), `feed` 對手價,
+     * `limitTicks` 觸價後限價 (LMT order at the trigger price ± N ticks of the
+     * program's `tickTable`), `validity`. */
+    | { type: 'touch'; condition: TouchCondition; price: number; order: OrderSpec; cross?: boolean; feed?: Feed;
+        limitTicks?: number; validity?: Validity }
     /** Resting limit order at `price`; submitted once price is on the
      * non-marketable side (buy: last > price, sell: last < price). */
     | { type: 'limit'; price: number; order: OrderSpec }
     /** Entry order placed outside the program (bracket entry sent by the
      * order ticket); the program only tracks its reports. */
-    | { type: 'external'; orderId: string };
+    | { type: 'external'; orderId: string }
+    /** A position already held when the program starts (a bracket turned
+     * back on in a new trading session, background engine only): no entry
+     * order; `session` is the session it protects in. */
+    | { type: 'position'; session?: string | null }
+    /** #226 時間條件 (background engine): `order` goes out at `at`, or with
+     * `flatten` 全平並取消 of this account / product starts then; missed by
+     * more than a minute it lapses (never late). */
+    | { type: 'time'; at: number; order: OrderSpec; flatten?: 'code' | 'account' }
+    /** #226 分批停利 (background engine): one tier protecting level `of`'s
+     * entry lots from `offset` on (fill order), up to its `qty`. */
+    | { type: 'tier'; of: string; offset: number; index: number; session?: string | null };
+
+/** #226 a tier's rules in legal ticks from the actual fill price. */
+export interface TierRules {
+    stopTicks: number;
+    takeTicks: number | null;
+    trail?: { activateTicks: number; distanceTicks: number; stepTicks: number };
+    breakeven?: { afterTier: number; offsetTicks: number };
+}
 
 /** A touch leg of an exit (stop or take). Fires a market-style order. */
 export interface TouchLeg {
@@ -141,6 +177,16 @@ export interface OrderSlot {
     detail: string | null;
     acknowledged: boolean;
     cancel: CancelState | null;
+    /** Background engine: the broker said no fill can follow (a successful
+     * Cancel order report, or a final status in a refreshed listing) —
+     * never a cancel request's answer. A later fill is unexpected data. */
+    closed?: boolean;
+    /** Background engine: final in a complete listing with every fill. */
+    listed?: boolean;
+    /** Background engine: fill prices, and the lots a bracket's tiers never
+     * protect (after the order was reported closed / of another session). */
+    fillPx?: Record<string, number>;
+    excluded?: number;
 }
 
 export type RestoreReason = 'restart' | 'disconnect' | 'env' | 'resume' | 'unknownNotSent';
@@ -185,6 +231,22 @@ export interface Level {
     unprotected: number;
     cycles: number;
     detail: string | null;
+    /** Background engine, of `unprotected`: entry lots filled after the
+     * order was reported closed — anomalies, notified only, never protected
+     * by itself. */
+    anomalous?: number;
+    /** #226 二擇一 成交後刪對應口數 (background): the level whose order this
+     * one waits for (not watched meanwhile)... */
+    ocoLock?: string;
+    /** ...and that order's fills already taken off this level's quantity. */
+    ocoApplied?: { level: string; filled: number };
+    /** #226 tier (background): its rules, the cost it was priced from (frozen),
+     * the 移動停損 state, 保本 flags. */
+    rules?: TierRules;
+    base?: number;
+    trail?: { active: boolean };
+    beArmed?: boolean;
+    beDone?: boolean;
 }
 
 // ---- generators & policies (parameters; levels are materialised) ----
@@ -254,7 +316,7 @@ export interface StrategyHook {
     hysteresisBars: number | null;
 }
 
-export type ProgramKind = 'trigger' | 'bracket' | 'grid' | 'custom';
+export type ProgramKind = 'trigger' | 'bracket' | 'grid' | 'custom' | 'flatten';
 export type ProgramStatus = 'running' | 'paused' | 'stopping' | 'stopped';
 /** Why a running program is not sending right now (not a user state). */
 export type ProgramHold = 'envMismatch' | 'disconnected' | 'unknownEnv' | null;
@@ -291,6 +353,26 @@ export interface OrderProgram {
     issues: ProgramIssue[];
     createdAt: number;
     updatedAt: number;
+    /** Bracket behaviour (background engine); absent = the defaults (all off). */
+    policy?: BracketPolicy;
+    /** #226 an order that opens a position: its entries pass the App's risk
+     * checks (background engine). Absent: protective. */
+    opens?: boolean;
+    /** The contract's tick-size table (prices computed in ticks). */
+    tickTable?: TickBand[];
+    /** #226 二擇一 (with `ocoLevels`, background): 'fill' — the other legs wait
+     * for the fired order's final fills and lose exactly what filled;
+     * absent = the first leg that fires ends the others. */
+    ocoMode?: 'trigger' | 'fill';
+}
+
+/** Bracket (括號單) options, background engine (#201 ②). All off by default:
+ * protection is turned back on by the user in a new session, a late entry
+ * fill after protection ended is shown 未受保護, pause stops new entries only. */
+export interface BracketPolicy {
+    autoRearm: boolean;
+    autoProtectLateFill: boolean;
+    pauseStopsExits: boolean;
 }
 
 // ---- engine-level state ----
@@ -337,7 +419,11 @@ export interface EngineState {
  * is connected now" — so a late simulation tick can never drive production. */
 export interface Source { env: Env; serverId: string }
 
-export interface TickEvent extends Source { type: 'tick'; ts: number; code: string; price: number; simtrade?: boolean }
+export interface TickEvent extends Source { type: 'tick'; ts: number; code: string; price: number; simtrade?: boolean;
+    /** a best bid / ask update (background engine), not a trade */
+    feed?: Feed }
+/** Background engine: time passed with an expiry / time rule due. */
+export interface ClockEvent extends Source { type: 'clock'; ts: number }
 export interface HeartbeatEvent extends Source { type: 'heartbeat'; ts: number }
 export interface ConnectionEvent { type: 'connection'; ts: number; live: boolean; env: Env | null; serverId: string | null }
 export interface IntentResultEvent extends Source {
@@ -369,6 +455,9 @@ export interface ReconciledOrder {
     status: 'working' | 'filled' | 'ended';
     qty: number;
     deals: { seq: string; qty: number; price: number; ts?: number }[];
+    /** Background engine: the final status is the engine's own, the row
+     * still lists it working (not evidence that every fill is in). */
+    assumed?: boolean;
 }
 export interface ReconcileEvent {
     type: 'reconcile'; ts: number;
@@ -389,12 +478,16 @@ export type UserCommand =
     | { op: 'remove'; programId: string; version: number }
     | { op: 'resolvePending'; programId: string; version: number; levelId: string;
         choice: 'send' | 'cancel' | 'keep'; allowUnpast?: boolean }
-    | { op: 'ackUnknown'; programId: string; version: number; levelId: string };
+    | { op: 'ackUnknown'; programId: string; version: number; levelId: string }
+    /** 「我已自行處理」 (background engine only): stop tracking, send nothing. */
+    | { op: 'markHandled'; programId: string; version: number; levelId?: string; note?: string }
+    /** #226 修改 (background engine): the untouched trigger becomes `program` in one step. */
+    | { op: 'replace'; programId: string; version: number; program: OrderProgram };
 
 export interface CommandEvent { type: 'command'; ts: number; id: string; command: UserCommand }
 
 export type ExecEvent =
-    | TickEvent | HeartbeatEvent | ConnectionEvent | IntentResultEvent | OrderEvent
+    | TickEvent | ClockEvent | HeartbeatEvent | ConnectionEvent | IntentResultEvent | OrderEvent
     | DealEvent | ReconcileEvent | RestoreEvent | CommandEvent;
 
 // ---- intents out ----
@@ -417,6 +510,8 @@ export interface PlaceIntent {
     qty: number;
     price: number | null; // null for MKT
     order: OrderSpec;
+    /** The condition's validity end: never sent at or after it (background engine). */
+    expiresAt?: number;
 }
 
 export interface CancelIntent {

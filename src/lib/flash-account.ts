@@ -1,4 +1,5 @@
 import { FUTURES_OCTYPES, ORDER_TYPES } from './order-conditions';
+import { normalizeFlashProtect, normalizeTriggerSend, type FlashProtect, type FlashTriggerSend } from './flash-trigger';
 import type { FuturesOCType, OrderType } from './types/order';
 import { canTrade } from './account-tradable';
 import { sanitizeFlashQtySetting, type FlashQtySetting } from './flash-qty-memory';
@@ -86,7 +87,17 @@ export function normalizeFlashCredit(v: unknown): FlashCredit | undefined {
 // 閃電下單面板自己的委託條件（同下單面板的清單）：點價限價單的效期、
 // 期貨倉別、期貨市價鈕的價別。換商品不變；不適用的商品類別（零股只能
 // ROD、股票沒有倉別與範圍市價）時暫不套用，回來恢復。
-export interface FlashOrderOpts { orderType: OrderType; octype: FuturesOCType; futuresPriceType: 'MKT' | 'MKP' }
+export interface FlashOrderOpts {
+    orderType: OrderType;
+    octype: FuturesOCType;
+    futuresPriceType: 'MKT' | 'MKP';
+    /** #216 自動停損停利 (absent: off, defaults) */
+    protect?: FlashProtect;
+    /** #216 觸價單觸發後的送出方式 (absent: 市價) */
+    triggerSend?: FlashTriggerSend;
+    /** #216 how triggers are placed: outer 觸買／觸賣 columns (absent) or Alt＋點 */
+    triggerLayout?: 'columns' | 'modifier';
+}
 export const DEFAULT_ORDER_OPTS: FlashOrderOpts = { orderType: 'ROD', octype: 'Auto', futuresPriceType: 'MKT' };
 
 /** 讀存檔的委託條件：缺的或不認得的欄位用預設 */
@@ -97,6 +108,9 @@ export function normalizeFlashOrderOpts(v: unknown): FlashOrderOpts | undefined 
         orderType: ORDER_TYPES.includes(o.orderType as OrderType) ? o.orderType as OrderType : 'ROD',
         octype: FUTURES_OCTYPES.some(x => x.value === o.octype) ? o.octype as FuturesOCType : 'Auto',
         futuresPriceType: o.futuresPriceType === 'MKP' ? 'MKP' : 'MKT',
+        ...(normalizeFlashProtect(o.protect) ? { protect: normalizeFlashProtect(o.protect) } : {}),
+        ...(normalizeTriggerSend(o.triggerSend) ? { triggerSend: normalizeTriggerSend(o.triggerSend) } : {}),
+        ...(o.triggerLayout === 'modifier' ? { triggerLayout: 'modifier' as const } : {}),
     };
 }
 

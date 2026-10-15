@@ -6,6 +6,9 @@ import { isAgentHarnessEnabled } from './agent-harness-state';
 import { serverIdentityVerified } from './server-identity';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
 import { getServerModeVersion } from './server-info-store';
+import { classifyHttpOrderError } from './order-outcome';
+import { isMainWindow } from './main-window-commands';
+import { popoutOrderPost } from './popout-order';
 
 // resolved per request — the server port can move at runtime (e.g. the boot
 // flow discovers the default port occupied and starts on a fallback), and a
@@ -200,8 +203,18 @@ async function runWithTimeout<T>(
 // shioaji errors come back as JSON: {"code":400,"message":"...","details":...}
 // surface that message instead of a bare "400 Bad Request" — the message is
 // what tells you it's CA / unsigned account / bad params (issue #1 support)
-async function throwApiError(res: Response): Promise<never> {
+//
+// Order mutations (#249): the gateway answers 409 OrderOutcomeUnknown when the
+// order was written but not acknowledged (it may exist), 503 NotConnected when
+// it was never sent. Shioaji 1.7.8+ passes those through with
+// details.error_code; 1.7.7 turns 409 into 400 with the code in the message.
+// Mark them here so every caller sees the same outcome flags. An unknown
+// outcome deliberately carries no 4xx `status` and its message does not start
+// with the status digits: callers that read "4xx = rejected, safe to resend"
+// (e.g. the Agent idempotency classifier) must not treat it as not sent.
+async function throwApiError(res: Response, path?: string): Promise<never> {
     let detail = '';
+    let errorCode: string | undefined;
     try {
         const data = (await res.json()) as {
             message?: string;
@@ -211,15 +224,71 @@ async function throwApiError(res: Response): Promise<never> {
             data.message ??
             (typeof data.details === 'string' ? data.details : '');
         if (data.details && typeof data.details !== 'string') {
+            const code = (data.details as { error_code?: unknown }).error_code;
+            if (typeof code === 'string') errorCode = code;
             detail += ` ${JSON.stringify(data.details)}`;
         }
     } catch {
         // non-JSON body — fall back to status text
     }
+    const text = (detail || res.statusText).trim();
+    const outcome = path && ORDER_OUTCOME_PATHS.has(path)
+        ? classifyHttpOrderError(res.status, errorCode, text)
+        : null;
+    if (outcome === 'unknown') {
+        throw Object.assign(
+            new Error(`委託結果不確定（HTTP ${res.status}${errorCode ? ` ${errorCode}` : ''}）：${text}`),
+            { httpStatus: res.status, errorCode, mutationOutcomeUnknown: true as const, orderOutcomeUnknown: true as const },
+        );
+    }
     throw Object.assign(
-        new Error(`${res.status} ${detail || res.statusText}`.trim()),
-        { status: res.status },
+        new Error(`${res.status} ${text}`.trim()),
+        {
+            status: res.status,
+            ...(errorCode ? { errorCode } : {}),
+            ...(outcome === 'not-sent' ? { mutationNotStarted: true as const, orderNotConnected: true as const } : {}),
+        },
     );
+}
+
+/** The native proxy's answer (this window's or the main window's) as a response. */
+async function finishProxied<T>(proxied: { status: number; body: string; headers?: Record<string, string> }, path: string,
+    onResponse?: (res: Response) => void): Promise<T> {
+    const headers = new Headers(proxied.headers);
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    const res = new Response(proxied.body, { status: proxied.status, headers });
+    onResponse?.(res);
+    if (!res.ok) await throwApiError(res, path);
+    return parseDispatchedBody<T>(res, path);
+}
+
+// Order-sending paths whose HTTP errors are classified (#249).
+const ORDER_OUTCOME_PATHS = new Set([
+    '/api/v1/order/place_order',
+    '/api/v1/order/place_comboorder',
+]);
+
+// 2xx 但 body 讀不完／解析失敗：委託可能已成立 → 結果不確定
+async function parseDispatchedBody<T>(res: Response, path: string): Promise<T> {
+    try {
+        return (await res.json()) as T;
+    } catch (error) {
+        throw markDispatchedOrderError(error, path, true);
+    }
+}
+
+// After the request may have left (beforeDispatch passed), a transport error
+// on an order-sending path is ambiguous: the order may exist. Errors from the
+// pre-dispatch gates are rethrown untouched.
+function markDispatchedOrderError(error: unknown, path: string, dispatched: boolean): unknown {
+    if (!dispatched || !ORDER_OUTCOME_PATHS.has(path)) return error;
+    // 原生橋接可能丟字串（例如 'UI trading proxy request failed: timeout'）
+    if (typeof error !== 'object' || error === null) {
+        return Object.assign(new Error(String(error)), { mutationOutcomeUnknown: true as const });
+    }
+    const e = error as Record<string, unknown>;
+    if (e.mutationNotStarted === true || e.mutationOutcomeUnknown === true || typeof e.status === 'number') return error;
+    return Object.assign(error, { mutationOutcomeUnknown: true as const });
 }
 
 export async function apiGet<T>(path: string, opts?: { signal?: AbortSignal; headers?: HeadersInit }): Promise<T> {
@@ -277,9 +346,28 @@ export async function apiPost<T>(
     // or disabled; it never falls back to an unsigned protected mutation.
     if (shouldProxyAgentHarnessMutation(isTauri, harnessEnabled, path)) {
         const bodyText = JSON.stringify(body);
-        const { invoke } = await import('@tauri-apps/api/core');
         let proxied: { status: number; body: string; headers?: Record<string, string> };
+        if (!isMainWindow()) {
+            // a popped-out window: its own narrower native command (flash
+            // popouts only, order endpoints only, one-time id, approved server
+            // mode — checked natively). Never resent; not sent / unknown kept.
+            if (opts?.agentInitiated) {
+                throw Object.assign(new Error('這個操作只能在主視窗執行，這筆沒有送出'), { mutationNotStarted: true });
+            }
+            proxied = await popoutOrderPost(path, bodyText, beforeDispatch);
+            try {
+                return await finishProxied<T>(proxied, path, opts?.onResponse);
+            } catch (error) {
+                // the request went out: an unreadable answer is an unknown outcome
+                // for every popout mutation (cancel / update too), never "not sent"
+                const e = error as Record<string, unknown> | null;
+                if (e && typeof e === 'object' && (e.mutationNotStarted === true || e.mutationOutcomeUnknown === true || typeof e.status === 'number')) throw error;
+                throw Object.assign(error instanceof Error ? error : new Error(String(error)), { mutationOutcomeUnknown: true as const });
+            }
+        }
+        const { invoke } = await import('@tauri-apps/api/core');
         beforeDispatch();
+        let dispatched = true;
         try {
             proxied = await invoke<typeof proxied>(
                 'agent_harness_post',
@@ -294,6 +382,7 @@ export async function apiPost<T>(
             const message = String(error);
             const marker = 'AGENT_MUTATION_NOT_STARTED:';
             if (message.startsWith(marker)) {
+                dispatched = false;
                 throw Object.assign(
                     new Error(message.slice(marker.length).trim()),
                     { mutationNotStarted: true },
@@ -303,34 +392,33 @@ export async function apiPost<T>(
             // other window first, before any HTTP (#244: a popout flash
             // panel's cancel showed only "失敗或結果未知").
             if (message === NATIVE_MAIN_WINDOW_ONLY) {
+                dispatched = false;
                 throw Object.assign(
-                    new Error(`此視窗不能送出交易指令（${message}），未送出；請改在主視窗操作`),
+                    new Error('彈出視窗目前不能下單或刪單，這筆沒有送出；請在主視窗操作'),
                     { mutationNotStarted: true },
                 );
             }
-            throw error;
+            throw markDispatchedOrderError(error, path, dispatched);
         }
-        const headers = new Headers(proxied.headers);
-        if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-        const res = new Response(proxied.body, {
-            status: proxied.status,
-            headers,
-        });
-        opts?.onResponse?.(res);
-        if (!res.ok) await throwApiError(res);
-        return res.json() as Promise<T>;
+        return finishProxied<T>(proxied, path, opts?.onResponse);
     }
     const timedMutation = path === '/api/v1/order/place_order' || path === '/api/v1/order/cancel_order';
     return runWithTimeout(async signal => {
-        const res = await doFetch(base() + path, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal,
-        }, beforeDispatch);
+        let dispatched = false;
+        let res: Response;
+        try {
+            res = await doFetch(base() + path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal,
+            }, () => { beforeDispatch(); dispatched = true; });
+        } catch (error) {
+            throw markDispatchedOrderError(error, path, dispatched);
+        }
         opts?.onResponse?.(res);
-        if (!res.ok) await throwApiError(res);
-        return res.json() as Promise<T>;
+        if (!res.ok) await throwApiError(res, path);
+        return parseDispatchedBody<T>(res, path);
     }, opts?.timeoutMs ?? (timedMutation ? 3000 : undefined), timedMutation);
 }
 

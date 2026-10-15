@@ -1,4 +1,5 @@
 import { canTrade } from '../lib/account-tradable';
+import { reportOrderError } from '../lib/order-outcome';
 import { RefreshButton } from './refresh-button';
 import { fetchChartHistory, nextChartHistoryRevision } from '../lib/chart-history';
 // src/components/candle-chart.tsx — K-bar candlestick + volume chart
@@ -24,6 +25,7 @@ import {
     ArrowDown,
     ArrowUp,
     Bell,
+    ArrowUpDown,
     ChartCandlestick,
     Copy,
     Crosshair,
@@ -135,12 +137,15 @@ import {
 } from '../lib/utils/kbars';
 import { roundToTick, tickDecimals, tickSizeFor } from '../lib/utils/ticksize';
 import { createOhlcStore } from '../lib/ohlc-legend';
+import { HighLowLayer, type HighLowStyle } from '../lib/chart-highlow';
+import type { ChartColors } from '../lib/theme-store';
 import { OhlcLegend } from './ohlc-legend';
 import * as styles from './candle-chart.css';
 import { ChartDrawingOverlays, ChartDrawingTools, ChartObjectList } from './chart-drawing-tools';
 import { toolDef } from '../lib/chart-drawings';
 import { AsyncStatus } from './async-status';
 import * as panel from './panel.css';
+import { orderStatusWithNumber } from '../lib/order-status-label';
 
 // NOTE: the kbars API only serves 1-minute bars, so 1D aggregates a huge
 // payload (a year of TXF ≈ 280k bars / 18MB) — keep the range tight enough
@@ -182,6 +187,8 @@ export function CandleChart({
     onOrderSettingsChange,
     showOhlc: showOhlcProp,
     onShowOhlcChange,
+    showHighLow: showHighLowProp,
+    onShowHighLowChange,
 }: {
     panelId?: string;
     contract: ContractBase;
@@ -200,6 +207,9 @@ export function CandleChart({
     // 跟版面一起存；沒有時（彈出視窗）只在元件內。缺省 = 顯示
     showOhlc?: boolean;
     onShowOhlcChange?: (show: boolean) => void;
+    // 可見範圍最高／最低標記（#240）：存法同 K 棒讀值。缺省 = 顯示
+    showHighLow?: boolean;
+    onShowHighLowChange?: (show: boolean) => void;
 }) {
     const hostRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
@@ -228,6 +238,13 @@ export function CandleChart({
         setLocalShowOhlc(!showOhlc);
         onShowOhlcChange?.(!showOhlc);
     };
+    const [localShowHighLow, setLocalShowHighLow] = useState(showHighLowProp ?? true);
+    const showHighLow = onShowHighLowChange ? showHighLowProp !== false : localShowHighLow;
+    const toggleHighLow = () => {
+        setLocalShowHighLow(!showHighLow);
+        onShowHighLowChange?.(!showHighLow);
+    };
+    const highLowRef = useRef<HighLowLayer | null>(null);
     // 讀值列自己訂閱這個 store：讀值變動只重繪讀值列
     const ohlcStore = useMemo(createOhlcStore, []);
     const [hostWidth, setHostWidth] = useState(0);
@@ -387,10 +404,10 @@ export function CandleChart({
             notify({
                 kind: 'ok',
                 title: `📈 圖表${label}${action === 'Buy' ? '買進' : '賣出'}已送出`,
-                body: `${c.code} ${qty}${odd ? ' 股（零股）' : ''} @ ${fmtPrice(price)}${conditions ? ` · ${conditions}` : ''} (${trade.status.status})`,
+                body: `${c.code} ${qty}${odd ? ' 股（零股）' : ''} @ ${fmtPrice(price)}${conditions ? ` · ${conditions}` : ''}（${orderStatusWithNumber(trade)}）`,
             });
         } catch (e) {
-            notify({ kind: 'err', title: '圖表下單失敗', body: e instanceof Error ? e.message : String(e) });
+            reportOrderError('圖表下單', e, notify);
         }
     };
     const sendPointOrderRef = useRef(sendPointOrder);
@@ -607,6 +624,10 @@ export function CandleChart({
         chartRef.current = chart;
         candleSeriesRef.current = candles;
         volSeriesRef.current = vol;
+        // 可見範圍最高／最低標記（#240）：樣式與顯示由下方 effect 套用
+        const highLow = new HighLowLayer({ ...highLowColors(c), visible: false, format: (p) => String(p) });
+        candles.attachPrimitive(highLow);
+        highLowRef.current = highLow;
 
         chart.subscribeClick((param) => {
             // 第二道防線：畫圖選取／草稿／拖曳／文字／量測均不能進入下單路徑。
@@ -739,6 +760,7 @@ export function CandleChart({
             chartRef.current = null;
             candleSeriesRef.current = null;
             volSeriesRef.current = null;
+            highLowRef.current = null;
         };
     }, []);
 
@@ -816,6 +838,19 @@ export function CandleChart({
                 : tickDecimals(tickSizeFor(contract, price)),
         [contract],
     );
+
+    // 最高／最低標記：顯示開關、主題配色、價格小數位（與 K 棒讀值一致）
+    useEffect(() => {
+        highLowRef.current?.setStyle({
+            ...highLowColors(colors),
+            visible: showHighLow,
+            format: (price: number) => {
+                const d = Math.max(0, Math.min(8, ohlcDecimals(price)));
+                return price.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+            },
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [showHighLow, themeKey, ohlcDecimals]);
 
     // load kbars on symbol/timeframe change; pages of older history are
     // pulled on demand by the visible-range subscription (loadMoreRef)
@@ -2010,6 +2045,15 @@ export function CandleChart({
                 >
                     <ChartCandlestick size={12} />
                 </button>
+                <button
+                    className={styles.iconBtnToggle[showHighLow ? 'on' : 'off']}
+                    onClick={toggleHighLow}
+                    title={showHighLow ? '最高／最低標記（目前畫面範圍）：顯示中 — 點擊隱藏' : '最高／最低標記（目前畫面範圍）：已隱藏 — 點擊顯示'}
+                    aria-label='最高最低標記'
+                    aria-pressed={showHighLow}
+                >
+                    <ArrowUpDown size={12} />
+                </button>
                 <span className={styles.toolbarDivider} />
                 {TRADE_MODES.filter(
                     // 組合商品只能用組合單下單 — 圖上僅保留警示，
@@ -2291,4 +2335,10 @@ function drawingPnlPerPoint(
     }
     if (market === 'S') return s.qty * (s.lot === 'IntradayOdd' ? 1 : 1000);
     return null;
+}
+
+// 最高標記用漲色、最低用跌色（跟著紅漲綠跌／綠漲紅跌設定）；字樣與底色
+// 用圖表標籤的配色，壓在 K 棒上也看得清楚
+function highLowColors(c: ChartColors): Pick<HighLowStyle, 'highColor' | 'lowColor' | 'labelBg' | 'border' | 'mutedText'> {
+    return { highColor: c.up, lowColor: c.down, labelBg: c.labelBg, border: c.border, mutedText: c.text };
 }

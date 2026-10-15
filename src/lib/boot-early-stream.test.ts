@@ -117,7 +117,7 @@ describe('early stream at bootstrap', () => {
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
                 running: true, healthy: true, port: 21322,
-                simulation: true, version: '1.7.7', scheme: 'http',
+                simulation: true, version: '1.7.8', scheme: 'http',
             });
         });
         await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
@@ -217,7 +217,7 @@ describe('early stream at bootstrap', () => {
             vi.mocked(tauri.serverStatus)
                 .mockResolvedValueOnce({ running: false })
                 .mockResolvedValueOnce({ running: true, healthy: true, port: 21322,
-                    simulation: true, version: '1.7.7', scheme: 'http' });
+                    simulation: true, version: '1.7.8', scheme: 'http' });
             vi.mocked(tauri.serverStart).mockResolvedValueOnce({
                 ok: false, output: 'spawn failed', port: 21322,
                 attached: false, portChanged: false,
@@ -237,7 +237,7 @@ describe('early stream at bootstrap', () => {
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
                 running: true, healthy: true, port: 21322, simulation: false,
-                version: '1.7.7', scheme: 'http',
+                version: '1.7.8', scheme: 'http',
             });
             vi.mocked(tauri.serverStart).mockResolvedValueOnce({
                 ok: false, output: 'CA inactive', port: 21322,
