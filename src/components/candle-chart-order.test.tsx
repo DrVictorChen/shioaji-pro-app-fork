@@ -877,17 +877,26 @@ describe('chart order credit conditions', () => {
         expect(m.place.mock.calls[0]![1]).toBe('Sell');
     });
 
-    it('the post-confirmation re-check refuses a 融資買進 that became 0 meanwhile', async () => {
-        m.place.mockImplementation(async (_c, _a, _p, _q, opts) => { await opts.afterConfirm(); opts.beforeSend(); return { status: { status: 'Submitted' } }; });
+    it.each(['before', 'after'] as const)('the post-confirmation re-check refuses a 融資買進 that became 0 meanwhile (unrelated notice %s)', async noticeAt => {
+        const dispatched = vi.fn();
+        m.place.mockImplementation(async (_c, _a, _p, _q, opts) => { await opts.afterConfirm(); opts.beforeSend(); dispatched(); return { status: { status: 'Submitted' } }; });
         await mount({ contract: stkDT, orderSettings: { S: { qty: 1, lot: 'Common', orderType: 'ROD', octype: 'Auto', credit: { cond: 'MarginTrading', daytradeShort: false } } }, onOrderSettingsChange: vi.fn() });
         await act(async () => { modeBtn('點價買').props.onClick(); });
         // 面板已查到可以（快取）；確認之後的重查才變成 0
         await flush();
         expect(m.creditPost).toHaveBeenCalledOnce();
         m.creditPost.mockResolvedValue([{ stock_id: '2330', system: 'ALL', update_time: '', margin_unit: 0, short_unit: 50, margin_loan_ratio: 60, short_margin_ratio: 90 }]);
+        const unrelatedNotice = () => m.notify({ kind: 'err', title: '委託回報訂閱失敗', body: '資料可能過期；請使用委託分頁右側的更新圖示重試。' });
+        if (noticeAt === 'before') unrelatedNotice();
         await clickChart();
         expect(m.place).toHaveBeenCalledOnce();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗', body: expect.stringContaining('不能融資買進') });
+        expect(m.creditPost).toHaveBeenCalledTimes(2);
+        expect(dispatched).not.toHaveBeenCalled();
+        // 回報訂閱也會非同步通知；只檢查這次圖表下單的結果，不依賴全域通知順序。
+        if (noticeAt === 'after') unrelatedNotice();
+        expect(m.notify.mock.calls.map(([notice]) => notice).filter(n => n.title.startsWith('圖表下單'))).toEqual([
+            expect.objectContaining({ kind: 'err', title: '圖表下單失敗', body: expect.stringContaining('不能融資買進') }),
+        ]);
     });
 
     it('odd lot suspends credit (orders are cash) and back to 張 restores 融資', async () => {
