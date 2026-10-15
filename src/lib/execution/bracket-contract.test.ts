@@ -143,3 +143,18 @@ describe('#226 panel bracket tiers', () => {
         expect(bracketViews([p])).toEqual([]);
     });
 });
+
+describe('notice body', () => {
+    it('never shows the engine note as is', async () => {
+        const { noticeBody } = await import('./bracket-contract');
+        expect(noticeBody('handled', 'handledByUser')).toBe('不再追蹤這筆的停損停利；不會送出或刪除任何委託');
+        expect(noticeBody('handled', 'handledByUser', true)).toBe('平倉前先結束這筆的停損停利');
+        expect(noticeBody('handled', 'rearmed')).toBe('已在新盤別重新啟用，由新的括號單接手');
+        expect(noticeBody('handled', 'someFutureCode')).toBeUndefined();
+        expect(noticeBody('handledFill', 'handledByUser')).not.toContain('handledByUser');
+        expect(noticeBody('handled', '')).toBeUndefined();
+        // other notices keep their (human) detail
+        expect(noticeBody('notSent', '保證金不足')).toBe('保證金不足');
+        expect(noticeBody('fired', 'TXFJ6 觸價 22000')).toBe('TXFJ6 觸價 22000');
+    });
+});

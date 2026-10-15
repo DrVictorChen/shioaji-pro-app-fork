@@ -177,6 +177,25 @@ export const BRACKET_NOTICE_TEXT: Record<string, string> = {
     'issue.fillAfterClose': '委託已回報刪單成功後仍收到成交（資料異常），已記為未受保護，不會自動補保護；請到委託與持倉核對',
 };
 
+/** A notice's detail is the engine's note (`handledByUser`, `rearmed`, …):
+ * an internal code, never shown as is. */
+export const NOTICE_DETAIL_TEXT: Record<string, string> = {
+    handledByUser: '不再追蹤這筆的停損停利；不會送出或刪除任何委託',
+    rearmed: '已在新盤別重新啟用，由新的括號單接手',
+};
+
+/** Body for an execution notice: `handled` / `handledFill` details are
+ * engine codes (shown in Chinese, or left out when unknown); an end done by
+ * 平倉 (flash panel) says so. */
+export function noticeBody(code: string, detail: string | null | undefined, byFlatten = false): string | undefined {
+    if (code === 'handled' && byFlatten) return '平倉前先結束這筆的停損停利';
+    if (!detail) return undefined;
+    const known = NOTICE_DETAIL_TEXT[detail];
+    if (known) return known;
+    if ((code === 'handled' || code === 'handledFill') && /^[A-Za-z][\w.:-]*$/.test(detail)) return undefined;
+    return detail;
+}
+
 /** Where a bracket stands, one value for the UI to key on. */
 export type BracketState =
     | 'waitingEntry' // entry working, nothing filled yet

@@ -26,7 +26,8 @@ import { getConditionalSettings } from '../lib/conditional/settings';
 import { clickCondition, DEFAULT_PROTECT, DEFAULT_TRIGGER_SEND, dragProblem, flashProtectPlan, flashProtectText, positionEffect,
     protectConditionProblem, protectEffect, triggerConditionProblem, triggerIntent, triggerKind, triggerSendOf, triggerSendText, type LadderMark } from '../lib/flash-trigger';
 import type { TriggerValidity } from '../lib/trigger-engine';
-import { flashAddTrigger, flashModifyTrigger, flashPlaceBracket, flashRemoveTrigger, flashStopProtections } from '../lib/flash-conditional';
+import { flashAddTrigger, flashEnvIs, flashLastPrice, flashModifyTrigger, flashPlaceBracket, flashReadClose, flashReadHeld, flashRemoveTrigger, flashRestoreProtection, flashStopProtections } from '../lib/flash-conditional';
+import { restoreAfterUnfilledClose, restoreTriggers, warnIfStillHeld, withFlattenLock } from '../lib/flash-flatten-restore';
 import { FlashProtectStrip } from './flash-protect';
 import {
     type ReactNode,
@@ -1034,6 +1035,8 @@ export function FlashOrder({
     // 觸價方向只看真正的成交價（零股看零股成交），不拿參考價充數
     const triggerPriceRef = useRef<number | null>(null);
     triggerPriceRef.current = odd ? (oddQuote?.tick ? Number(oddQuote.tick.close) : null) : tradedLast;
+    const lastTradeRef = useRef<number | null>(null);
+    lastTradeRef.current = tradedLast;
     const ladder = useFlashLadder({ code: contract.code, odd, account: activeAccount }, market === 'F');
     // #216 觸價單與限價同時可點：外側觸買／觸賣欄（預設）或 Alt＋點買量／賣量
     const triggerLayout = panelOrder.triggerLayout ?? 'columns';
@@ -1478,31 +1481,87 @@ export function FlashOrder({
             if (!accountMatches(accountRef.current, account)) throw new Error('帳戶已變更，已停止後續下單');
         };
         const action = pos.net > 0 ? 'Sell' : 'Buy';
+        const stock = account.account_type === 'S';
+        const unit = stock ? '張' : '口';
+        const codes = [contract.code, contract.target_code].filter((x): x is string => !!x);
+        const net = pos.net;
+        // one 平倉 of this account + product at a time (also across windows),
+        // held until its unfilled-close check has finished
+        // keyed by the tradable contract (TXFR1 → TXFJ6): an alias panel and a direct one share it
+        const ran = await withFlattenLock(`${account.account_type}:${account.broker_id}:${account.account_id}:${contract.target_code || contract.code}`, async () => {
+            let stop: Awaited<ReturnType<typeof flashStopProtections>> | null = null;
+            // what an unfilled close puts back (futures only: a stock sell trigger without the shares could open a short)
+            const restoreFor = () => (stop && !stock ? stop.restore : []);
+            const watch = (readClose: () => Promise<{ final: boolean; filled: number } | null>) => {
+                const group = `restore-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+                let n = 0;
+                return restoreAfterUnfilledClose(net, restoreFor(), contract.code, unit, {
+                    readClose,
+                    readHeld: () => flashReadHeld(account, codes, false),
+                    last: () => flashLastPrice(contract.code),
+                    envOk: () => flashEnvIs(stop?.env),
+                    // every restored protection its own OCO group (one firing never cancels another's legs)
+                    restore: leg => flashRestoreProtection(restoreTriggers(leg, { code: contract.code, futures: true, odd: false,
+                        group: `${group}-${++n}` }), contract, account),
+                    notify,
+                });
+            };
+            const stockWatch = () => (stop?.restore.length ? warnIfStillHeld(net, contract.code, { readHeld: () => flashReadHeld(account, codes, false), notify }) : Promise.resolve(false));
+            try {
+                // #216 停損停利 first: ended before the close goes out, so no exit can
+                // fire on top of it; an exit that is out or unknown blocks the close
+                stop = await flashStopProtections(protectionScopeOf(account, true));
+                if (stop.blocked.length || stop.failed.length) {
+                    notify({ kind: 'err', title: '⚡ 平倉未送出', body: stop.blocked.length
+                        ? `${stop.blocked.join('；')}。為避免重複出場，這筆沒有送出；請到條件單面板處理後再平倉`
+                        : `停損停利取消未確認（${stop.failed.join('；')}）。為避免重複出場，這筆沒有送出` });
+                    // some were ended before another failed: those lots are unprotected now
+                    if (stop.stopped > 0) {
+                        notify({ kind: 'err', title: '⚡ 部分停損停利已取消（未受保護）', body: `${contract.code}：已取消 ${stop.stopped} 張停損停利、其他取消未確認，平倉沒有送出，已取消的保護沒有恢復。請到條件單面板確認，必要時重新設定停損停利` });
+                    }
+                    return;
+                }
+                let closeId: string | null = null;
+                if (stock) {
+                    await placeStockExitByShares(contract, action, Math.abs(net), account, { isAccountCurrent: stillPanelAccount(account), beforeSend });
+                } else {
+                    const trade = await placeQuickOrder(contract, action, null, Math.abs(net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account), beforeSend });
+                    closeId = trade?.order?.id ?? null;
+                }
+                // quantities in the product's unit (口／張／股), not a count of orders
+                const lots = stop.restore.filter(r => !r.odd).reduce((n, r) => n + r.quantity, 0);
+                const shares = stop.restore.filter(r => r.odd).reduce((n, r) => n + r.quantity, 0);
+                const protectedText = stock && shares
+                    ? `已先取消停損停利（${lots} 張、${shares} 股）；`
+                    : lots > 0 ? `已先取消停損停利（${lots} ${unit}）；` : stop.stopped ? '已先取消停損停利；' : '';
+                notify({ kind: 'info', title: '⚡ 平倉已送出', body: `${protectedText}請以委託與成交回報確認結果${
+                    restoreFor().length ? '；若沒有成交，會對剩餘部位恢復停損停利' : stock && stop.restore.length ? '；股票的停損停利不會自動恢復' : ''}` });
+                onOrdersChangedRef.current?.();
+                if (stock) await stockWatch();
+                else if (restoreFor().length) {
+                    // the close may not fill (IOC): once it is final, put the protection back for what is still held
+                    await watch(() => (closeId ? flashReadClose(account, closeId) : Promise.resolve(null)));
+                }
+            } catch (error) {
+                const notStarted = !!(error as { mutationNotStarted?: boolean } | null)?.mutationNotStarted;
+                if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
+                // 確定一筆都沒送出（例如確認期間伺服器模式變更）：照實說未送出
+                else if (notStarted) notify({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）', body: error instanceof Error ? error.message : String(error) });
+                else {
+                    notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
+                    reconcileAfterUnknownOutcome();
+                }
+                // protections were ended but the close did not go out (or was refused): put them back
+                if (stop && (notStarted || accountChangedBeforeSend(error)) && stop.restore.length) {
+                    if (stock) await stockWatch();
+                    else await watch(() => Promise.resolve({ final: true, filled: 0 }));
+                } else if (stop && stop.restore.length) {
+                    notify({ kind: 'err', title: '⚡ 停損停利已取消（未受保護）', body: `${contract.code}：平倉結果不明，平倉前取消的停損停利沒有恢復。請到委託與持倉確認，必要時自行設定停損停利` });
+                }
+            }
+        });
         try {
-            // #216 停損停利 first: ended before the close goes out, so no exit can
-            // fire on top of it; an exit that is out or unknown blocks the close
-            const stop = await flashStopProtections(protectionScopeOf(account, true));
-            if (stop.blocked.length || stop.failed.length) {
-                notify({ kind: 'err', title: '⚡ 平倉未送出', body: stop.blocked.length
-                    ? `${stop.blocked.join('；')}。為避免重複出場，這筆沒有送出；請到條件單面板處理後再平倉`
-                    : `停損停利取消未確認（${stop.failed.join('；')}）。為避免重複出場，這筆沒有送出` });
-                return;
-            }
-            if (account.account_type === 'S') {
-                await placeStockExitByShares(contract, action, Math.abs(pos.net), account, { isAccountCurrent: stillPanelAccount(account), beforeSend });
-            } else {
-                await placeQuickOrder(contract, action, null, Math.abs(pos.net), { account, ocType: 'Cover', isAccountCurrent: stillPanelAccount(account), beforeSend });
-            }
-            notify({ kind: 'info', title: '⚡ 平倉已送出', body: `${stop.stopped ? `已先取消停損停利 ${stop.stopped} 張；` : ''}請以委託與成交回報確認結果` });
-            onOrdersChangedRef.current?.();
-        } catch (error) {
-            if (accountChangedBeforeSend(error)) notifyAccountChangedBeforeSend();
-            // 確定一筆都沒送出（例如確認期間伺服器模式變更）：照實說未送出
-            else if ((error as { mutationNotStarted?: boolean } | null)?.mutationNotStarted) notify({ kind: 'err', title: '⚡ 平倉未成立（未送出或被券商拒絕）', body: error instanceof Error ? error.message : String(error) });
-            else {
-                notify({ kind: 'err', title: '⚡ 平倉未完整確認', body: `可能已有部分委託送出或結果未知，請手動核對委託，勿直接重送。${error instanceof Error ? error.message : String(error)}` });
-                reconcileAfterUnknownOutcome();
-            }
+            if (!ran) notify({ kind: 'err', title: '⚡ 平倉未送出', body: '這個商品前一次平倉的結果還在確認中（可能在其他視窗），請稍候再試' });
         } finally { inflightRef.current.delete(key); }
     }, [pos, stillPanelAccount, captureContext]);
 

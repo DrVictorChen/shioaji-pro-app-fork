@@ -354,10 +354,13 @@ export interface WindowPlanLike {
     dismissed?: boolean;
     live: boolean;
     exit: { status: string; acknowledged?: boolean } | null;
+    /** its armed stop / take legs (prices to restore after an unfilled 平倉) */
+    legs?: readonly { kind: string; price: number; quantity: number; action: 'Buy' | 'Sell' }[];
 }
 
 export interface ExitLike {
     bracketId?: string;
+    triggerId?: string;
     account: { account_type: string; broker_id: string; account_id: string };
     orderCode: string;
     status: string;
@@ -375,13 +378,55 @@ export interface BackgroundViewLike {
     orderCode: string;
     state: string;
     canEnd: boolean;
+    side?: 'Buy' | 'Sell';
+    stop?: number | null;
+    take?: number | null;
+    position?: number;
+}
+
+/** A protection as it was when 平倉 ended it: what to put back for the lots
+ * still held when the close does not fill (fixed prices; a trailing stop's
+ * current price). */
+export interface ProtectionSnapshot {
+    /** the exit direction (a long's protection sells) */
+    exitAction: 'Buy' | 'Sell';
+    stop: number | null;
+    take: number | null;
+    quantity: number;
+    /** stocks: 盤中零股 (quantity in shares) */
+    odd?: boolean;
+}
+
+/** A plain protective stop / take trigger (not a bracket leg, not an entry):
+ * one a flash 觸價欄 exit or a restore after an unfilled 平倉 created. */
+export interface ExitTriggerLike {
+    id: string;
+    code: string;
+    orderCode?: string;
+    env?: string;
+    account?: { account_type: string; broker_id: string; account_id: string };
+    kind: string;
+    role?: string;
+    bracketId?: string;
+    time?: unknown;
+    group?: string;
+    pending?: unknown;
+    ocoLock?: string;
+    action: 'Buy' | 'Sell';
+    price: number;
+    quantity: number;
+    orderLot?: string;
 }
 
 export interface ProtectionTargets {
+    /** plain protective triggers to remove: single ids and 二擇一 groups (all legs together) */
+    triggers?: { single: string[]; groups: string[][] };
     window: string[];
     background: { programId: string; levelId: string }[];
     /** why the protection cannot be ended now (an exit is out or its outcome unknown) */
     blocked: string[];
+    /** the protections being ended, for a restore after an unfilled 平倉 */
+    snapshots: ProtectionSnapshot[];
 }
 
 const sameAccount = (a: { account_type: string; broker_id: string; account_id: string }, s: ProtectionScope) =>
@@ -392,9 +437,34 @@ const exitOut = (status: string, acknowledged?: boolean) =>
 /** The protections 平倉／全刪 end for this panel, and what stops them.
  * An exit in flight or of unknown outcome is never raced: it blocks. */
 export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlanLike[], exits: readonly ExitLike[],
-    views: readonly BackgroundViewLike[]): ProtectionTargets {
-    const out: ProtectionTargets = { window: [], background: [], blocked: [] };
+    views: readonly BackgroundViewLike[], triggers: readonly ExitTriggerLike[] = []): ProtectionTargets {
+    const out: ProtectionTargets = { window: [], background: [], blocked: [], snapshots: [] };
     const inCodes = (...cs: string[]) => cs.some(c => s.codes.includes(c));
+    // an exit a plain protective trigger already sent (the trigger is gone
+    // then): never close on top of it
+    for (const e of exits) {
+        if (e.bracketId || !sameAccount(e.account, s) || !inCodes(e.orderCode)) continue;
+        if (exitOut(e.status, e.acknowledged)) {
+            out.blocked.push(`${e.orderCode} 停損停利觸價單的出場單${e.status === 'unknown' ? '結果未知' : '正在送出或等待成交'}`);
+        }
+    }
+    // plain protective stop / take triggers of this account + product (+ unit)
+    const groups = new Map<string, ExitTriggerLike[]>();
+    const single: string[] = [];
+    for (const t of triggers) {
+        if (t.bracketId || t.role === 'entry' || t.time || (t.kind !== 'stop' && t.kind !== 'take')) continue;
+        if (!t.account || !sameAccount(t.account, s) || !inCodes(t.code, t.orderCode ?? '') || (t.env && t.env !== s.env)) continue;
+        if (s.odd !== null && isOddLot(t.orderLot) !== s.odd) continue;
+        if (t.pending || t.ocoLock) { out.blocked.push(`${t.code} 停損停利觸價單待確認或另一邊已觸發`); continue; }
+        if (t.group) groups.set(t.group, [...(groups.get(t.group) ?? []), t]); else single.push(t.id);
+        const snap: ProtectionSnapshot = { exitAction: t.action, stop: t.kind === 'stop' ? t.price : null, take: t.kind === 'take' ? t.price : null,
+            quantity: t.quantity, ...(isOddLot(t.orderLot) ? { odd: true } : {}) };
+        // a 二擇一's two legs are one protection
+        const twin = t.group ? out.snapshots.find(x => (x as ProtectionSnapshot & { group?: string }).group === t.group) : undefined;
+        if (twin) { twin.stop ??= snap.stop; twin.take ??= snap.take; twin.quantity = Math.max(twin.quantity, snap.quantity); }
+        else out.snapshots.push(t.group ? Object.assign(snap, { group: t.group }) : snap);
+    }
+    if (single.length || groups.size) out.triggers = { single, groups: [...groups.values()].map(g => g.map(t => t.id)) };
     for (const p of plans) {
         if (p.dismissed || !p.live || p.env !== s.env || !sameAccount(p.account, s) || !inCodes(p.quoteCode, p.orderCode)) continue;
         if (p.securityType === 'STK' && s.odd !== null && isOddLot(p.orderLot) !== s.odd) continue;
@@ -404,6 +474,13 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
             continue;
         }
         out.window.push(p.id);
+        const legs = p.legs ?? [];
+        const stop = legs.find(l => l.kind === 'stop');
+        const take = legs.find(l => l.kind === 'take');
+        const quantity = Math.max(0, ...legs.map(l => l.quantity));
+        const action = (stop ?? take)?.action;
+        if (action && quantity > 0) out.snapshots.push({ exitAction: action, stop: stop?.price ?? null, take: take?.price ?? null, quantity,
+            ...(p.securityType === 'STK' && isOddLot(p.orderLot) ? { odd: true } : {}) });
     }
     // background brackets are whole lots / contracts only
     if (s.odd !== true) {
@@ -417,6 +494,9 @@ export function protectionTargets(s: ProtectionScope, plans: readonly WindowPlan
                 continue;
             }
             out.background.push({ programId: v.programId, levelId: v.levelId });
+            if (v.side && (v.position ?? 0) > 0 && ((v.stop ?? null) !== null || (v.take ?? null) !== null)) {
+                out.snapshots.push({ exitAction: v.side === 'Buy' ? 'Sell' : 'Buy', stop: v.stop ?? null, take: v.take ?? null, quantity: v.position! });
+            }
         }
     }
     return out;
