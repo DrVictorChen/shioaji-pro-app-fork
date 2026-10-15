@@ -1,7 +1,7 @@
 // src/lib/api.ts
 
 import { getApiBase, isTauri } from './runtime';
-import { serverReadsHeld } from './server-read-gate';
+import { foreignServerBlockedError, serverReadsHeld, serverUrlBlocked } from './server-read-gate';
 import { isAgentHarnessEnabled } from './agent-harness-state';
 import { serverIdentityVerified } from './server-identity';
 import { getTradingMirrorFresh } from './trading-mirror-lease';
@@ -135,6 +135,10 @@ async function doFetch(url: string, init?: RequestInit, beforeDispatch?: () => v
         // the decision may have moved or blocked the server meanwhile
         url = rebase(url);
     }
+    // #285: another program's server this App did not adopt is never read
+    // — fail here at once (never hand the transport an unroutable address)
+    const blocked = serverUrlBlocked(url);
+    if (blocked !== null) throw foreignServerBlockedError(blocked);
     if (isTauri) {
         // Info is read-only and frequently requested in parallel by watchlists.
         // The WebView can reach the loopback sidecar directly, avoiding the
@@ -345,6 +349,8 @@ export async function apiPost<T>(
     // these exact bytes. The native bridge fails closed when Harness is absent
     // or disabled; it never falls back to an unsigned protected mutation.
     if (shouldProxyAgentHarnessMutation(isTauri, harnessEnabled, path)) {
+        const blockedPort = serverUrlBlocked(base());
+        if (blockedPort !== null) throw foreignServerBlockedError(blockedPort);
         const bodyText = JSON.stringify(body);
         let proxied: { status: number; body: string; headers?: Record<string, string> };
         if (!isMainWindow()) {

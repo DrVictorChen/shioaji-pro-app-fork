@@ -131,56 +131,14 @@ export function setServerPid(pid: number | null) {
     }
 }
 
-// #285: another program's server answering on the App's port that this App
-// did not adopt (wrong environment / another account / unverified). Until the
-// App moves to its own server, nothing in any of its windows talks to it —
-// every request goes to an unroutable address instead of showing its data.
-// Persisted so popouts / the tray panel follow the main window's decision.
-const BLOCKED_PORT_KEY = 'sj-pro-foreign-port';
-
-export function blockForeignServerPort(port: number | null) {
-    const changed = foreignServerPortBlocked() !== port;
-    try {
-        if (port === null) localStorage.removeItem(BLOCKED_PORT_KEY);
-        else localStorage.setItem(BLOCKED_PORT_KEY, String(port));
-    } catch {
-        // storage unavailable
-    }
-    if (changed && typeof window !== 'undefined') window.dispatchEvent(new Event('sj-pro-api-base-changed'));
-}
-
-export function foreignServerPortBlocked(): number | null {
-    try {
-        const p = Number(localStorage.getItem(BLOCKED_PORT_KEY));
-        if (Number.isInteger(p) && p > 0 && p < 65536) return p;
-    } catch {
-        // storage unavailable
-    }
-    return null;
-}
-
-const portOf = (url: string): number | null => {
-    try {
-        const u = new URL(url);
-        return Number(u.port || (u.protocol === 'https:' ? 443 : 80));
-    } catch {
-        return null;
-    }
-};
-
-/** A base that points at the blocked server goes nowhere (port 0 is refused
- * by every client: requests fail fast, nothing is read). */
-function unlessBlocked(base: string): string {
-    const blocked = foreignServerPortBlocked();
-    if (blocked === null || !base || portOf(base) !== blocked) return base;
-    try {
-        const u = new URL(base);
-        u.port = '0';
-        return u.toString().replace(/\/$/, '');
-    } catch {
-        return base;
-    }
-}
+// #285: the block of another program's server lives in the dependency-free
+// server-read-gate (api.ts / stream.ts check it on every request)
+export {
+    blockForeignServerPort,
+    foreignServerBlockedError,
+    foreignServerPortBlocked,
+    serverUrlBlocked,
+} from './server-read-gate';
 
 // In Tauri the frontend is served from tauri://localhost — API calls must
 // target the local shioaji server explicitly. The host stays 127.0.0.1;
@@ -191,9 +149,9 @@ export function getApiBase(): string {
     if (getDevServerPort() && env && env !== `${getApiScheme()}://127.0.0.1:${getDevServerPort()}`) {
         throw new Error('隔離 dev 服務與 VITE_API_BASE 不一致，拒絕連線');
     }
-    if (env) return unlessBlocked(env);
+    if (env) return env;
     if (!isTauri) return '';
-    return unlessBlocked(`${getApiScheme()}://127.0.0.1:${getApiPort()}`);
+    return `${getApiScheme()}://127.0.0.1:${getApiPort()}`;
 }
 
 // Since shioaji 1.7.2 every event family rides ONE aggregate SSE
@@ -207,6 +165,6 @@ export function getStreamBase(): string {
         const sameOrigin = typeof location !== 'undefined' ? location.origin : undefined;
         if (env !== direct && env !== sameOrigin) throw new Error('隔離 dev 服務與 SSE 目的地不一致，拒絕連線');
     }
-    if (env) return unlessBlocked(env);
+    if (env) return env;
     return getApiBase();
 }

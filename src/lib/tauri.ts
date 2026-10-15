@@ -1104,8 +1104,8 @@ export async function serverStart(opts: {
                 schemeMismatch ? `連線協定不符（server ${stScheme}，需 ${wantScheme}）`
                     : versionMismatch ? `版本不符（server ${st.version}，需 ${EXPECTED_SERVER_VERSION}）`
                     : !caOk ? 'CA 未啟用，正式環境無法下單'
-                    : harnessMismatch ? 'Agent Harness 金鑰不屬於此 App instance'
-                    : '狀態不健康'}），未連上`;
+                    : harnessMismatch ? '已開啟 Agent Harness，本 App 只使用自己啟動的伺服器'
+                    : '狀態不健康'}），未連上，也不會停止它`;
             if (!ownRecord) {
                 foreign = { port: st.port, simulation: st.simulation, text: why };
                 markStage('attach', `foreign server not used, port=${st.port}`);

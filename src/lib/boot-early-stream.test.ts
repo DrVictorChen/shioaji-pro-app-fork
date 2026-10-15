@@ -34,7 +34,8 @@ vi.mock('./tauri', () => ({
     localTlsCertExists: vi.fn(async () => false),
     nativeOwnsHarnessSidecar: vi.fn(async () => false),
     caActive: vi.fn(async () => false),
-    harnessOwnershipCompatible: () => true,
+    // the real rule: Harness on needs a sidecar the native shell owns
+    harnessOwnershipCompatible: (enabled?: boolean, owned?: boolean) => !enabled || !!owned,
     // #285: by default the server is this App's own spawn
     foreignServerCheck: vi.fn(async () => null),
     ownsServer: vi.fn(async () => true),
@@ -252,7 +253,7 @@ describe('early stream at bootstrap', () => {
 
     // #285 — another program's server is used only in the right environment
     // and on the same account; otherwise never adopted, never read
-    const prodElsewhere = { running: true, healthy: true, port: 21322, simulation: false, version: '1.7.7', scheme: 'http' as const };
+    const prodElsewhere = { running: true, healthy: true, port: 21322, simulation: false, version: '1.7.8', scheme: 'http' as const };
     const refusal = { reason: 'mode' as const, text: ':21322 上另一個程式啟動的正式伺服器與本 App 設定（模擬）不符，未連上' };
 
     it('autostart: another App\'s production server is not adopted; this App starts its own elsewhere', async () => {
@@ -332,5 +333,84 @@ describe('early stream at bootstrap', () => {
         expect(adoption.getServerAttachment()).toEqual({ kind: 'own', port: 21322 });
         const tauri = await import('./tauri');
         expect(tauri.learnOwnIdentity).toHaveBeenCalledWith(prodElsewhere);
+    });
+    // #285 regression (QA build, Agent Harness on): a block persisted by an
+    // earlier run must never outlive this boot's decision — with it, every
+    // read went to a dead address (watchlist names, positions, rankings)
+    it('a foreign-port block left by an earlier run is dropped before any read is released', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            store.set('sj-pro-foreign-port', '21322');
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: false,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
+                running: true, healthy: true, port: 21322, simulation: true, version: '1.7.8', scheme: 'http',
+            });
+        });
+        const runtime = await import('./runtime');
+        const gate = await import('./server-read-gate');
+        // synchronously at bootstrap: reads are held and nothing is blocked
+        expect(runtime.foreignServerPortBlocked()).toBeNull();
+        await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
+        expect(gate.serverReadsHeld()).toBeNull();
+        expect(runtime.foreignServerPortBlocked()).toBeNull();
+    });
+
+    it('this App\'s own server is never blocked, even when its identity does not match', async () => {
+        m.navType = 'navigate';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: false, agentHarnessEnabled: true,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            // own orphan from the previous launch: Harness mismatch → restarted
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
+                running: true, healthy: true, port: 21322, simulation: true, version: '1.7.8', scheme: 'http',
+            });
+            vi.mocked(tauri.serverStart).mockReset().mockResolvedValueOnce({
+                ok: true, output: '', port: 21322, attached: false, portChanged: false,
+            });
+        });
+        const tauri = await import('./tauri');
+        await vi.waitFor(() => expect(tauri.serverStart).toHaveBeenCalledTimes(1));
+        const runtime = await import('./runtime');
+        expect(runtime.foreignServerPortBlocked()).toBeNull();
+    });
+
+    // #285 customer report (v0.1.53): the user's own same-version CLI server
+    // on 8080 while Agent Harness is on
+    it('customer: CLI server on 8080 + Harness on → this App starts its own on 21322 and says so', async () => {
+        m.navType = 'navigate';
+        const cli = { running: true, healthy: true, port: 8080, simulation: true, version: '1.7.8', scheme: 'http' as const };
+        const text = ':8080 上另一個程式啟動的伺服器（已開啟 Agent Harness，本 App 只使用自己啟動的伺服器），未連上，也不會停止它';
+        await boot(null, async () => {
+            const tauri = await import('./tauri');
+            vi.mocked(tauri.loadDesktopSettings).mockResolvedValueOnce({
+                autoStart: true, apiKey: 'k', secretKey: 's', production: false, agentHarnessEnabled: true,
+            } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
+            vi.mocked(tauri.serverStatus).mockResolvedValueOnce(cli);
+            vi.mocked(tauri.ownsServer).mockResolvedValue(false);
+            vi.mocked(tauri.serverStart).mockReset().mockResolvedValueOnce({
+                ok: true, output: '', port: 21322, attached: false, portChanged: false,
+                foreign: { port: 8080, simulation: true, text },
+            });
+            vi.mocked(tauri.reloadWhenHealthy).mockResolvedValueOnce(true);
+        });
+        const tauri = await import('./tauri');
+        const trade = await import('./trade');
+        await vi.waitFor(() => expect(tauri.serverStart).toHaveBeenCalledTimes(1));
+        expect(vi.mocked(tauri.serverStart).mock.calls[0]![0]).toMatchObject({ knownStatus: cli, agentHarnessEnabled: true });
+        await vi.waitFor(() => expect(trade.notify).toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'info', title: '未使用另一個程式的伺服器', body: `${text}；本 App 的伺服器改在 port 21322 啟動` })));
+        for (const [n] of vi.mocked(trade.notify).mock.calls) {
+            expect(`${n.title} ${n.body ?? ''}`).not.toMatch(/claude|codex|openai|anthropic/i);
+        }
+        // the App's own port stays readable; the reload lands on its own server
+        const runtime = await import('./runtime');
+        expect(runtime.foreignServerPortBlocked()).toBeNull();
+        await vi.waitFor(() => expect(tauri.reloadWhenHealthy).toHaveBeenCalled());
+        vi.mocked(tauri.ownsServer).mockResolvedValue(true);
     });
 });

@@ -205,6 +205,11 @@ export function bootstrap() {
     // stream to a server that may not be up (released on every path that
     // keeps this page; expires on its own after 30 s)
     else if (isTauri && !isChildWindow() && !pageWasReloaded()) holdStream();
+    // #285: a block of another program's server is the main window's
+    // decision for THIS boot only: drop whatever an earlier run persisted
+    // (that server may be gone, or this App's own server may answer on that
+    // port now) — this run re-decides before it releases any read
+    if (isTauri && !isChildWindow()) blockForeignServerPort(null);
     // #285: the main window reads nothing until boot has checked the server
     // on its port (not on the reload right after this App's own check)
     if (isTauri && !isChildWindow() && !shouldOpenStreamEarly()) holdServerReads();
