@@ -14,6 +14,10 @@ export function diagnoseOutput(output: string): string | null {
         return '金鑰格式錯誤 — 請確認 API Key／Secret Key 完整貼上（沒有多餘空白或漏字）';
     if (/ca.*(password|passwd)|pfx/i.test(output))
         return '憑證載入失敗 — 請確認 Sinopac.pfx 與憑證密碼';
+    // 主機回「Sign data is timeout」是電腦時間和標準時間有落差、登入簽章被判
+    // 逾時，不是網路問題；要在網路類之前判，否則 "timeout" 會被當成連線逾時（#326）
+    if (/sign data is timeout/i.test(output))
+        return '電腦時間不準，登入簽章被判定逾時（與網路、金鑰無關）— 請開啟系統的「自動設定時間」並立即同步，時區選台北（UTC+8），確認誤差在 1～2 秒內後再按啟動';
     // 網路類要先判 — 上游把 Solace 連線逾時也包成
     // "Authentication failed: Shioaji connect error"，若先比對登入失敗
     // 會在斷網時誤導使用者去檢查金鑰/簽署（實際只是連不到主機）

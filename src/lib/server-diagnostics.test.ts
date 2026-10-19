@@ -22,6 +22,15 @@ describe('diagnoseOutput', () => {
         expect(diagnoseOutput(log)).toMatch(/約定書/);
     });
 
+    it('sign data timeout → clock message, not network (#326)', () => {
+        const log = [
+            '2026-10-18T17:03:54.132364Z ERROR shioaji::cli::server: Failed to initialize server state: Authentication failed: Shioaji error Request #P2P/v:bcsolace01/x/PYAPI/x/1018/170353/889277500/LOGINING/_ error code: 400, detail: Sign data is timeout.',
+            'Error: Authentication failed: Shioaji error Request #P2P/v:bcsolace01/x/PYAPI/x/1018/170353/889277500/LOGINING/_ error code: 400, detail: Sign data is timeout.',
+        ].join('\n');
+        expect(diagnoseOutput(log)).toMatch(/電腦時間/);
+        expect(diagnoseOutput(log)).not.toMatch(/網路連線逾時/);
+    });
+
     it('connection refused → network message', () => {
         expect(
             diagnoseOutput('Error: Connection refused (os error 61)'),
