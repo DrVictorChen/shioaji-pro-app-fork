@@ -30,6 +30,7 @@ describe('diagnoseOutput', () => {
         expect(diagnoseOutput(log)).toMatch(/登入簽章逾時/);
         expect(diagnoseOutput(log)).toMatch(/電腦時間/);
         expect(diagnoseOutput(log)).toMatch(/網路延遲/);
+        expect(diagnoseOutput(log)).toMatch(/主機端/);
         expect(diagnoseOutput(log)).not.toMatch(/無法連線至永豐主機/);
     });
 
