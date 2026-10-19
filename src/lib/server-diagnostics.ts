@@ -14,10 +14,12 @@ export function diagnoseOutput(output: string): string | null {
         return '金鑰格式錯誤 — 請確認 API Key／Secret Key 完整貼上（沒有多餘空白或漏字）';
     if (/ca.*(password|passwd)|pfx/i.test(output))
         return '憑證載入失敗 — 請確認 Sinopac.pfx 與憑證密碼';
-    // 主機回「Sign data is timeout」是電腦時間和標準時間有落差、登入簽章被判
-    // 逾時，不是網路問題；要在網路類之前判，否則 "timeout" 會被當成連線逾時（#326）
+    // 主機回「Sign data is timeout」：token 服務驗證時的時間與登入簽章時間相差
+    // 超過 receive_window（sidecar 固定 5 秒；Python 預設 30 秒）。電腦時間不準、
+    // 網路延遲、主機端時鐘偏差或處理較慢都會觸發；要在網路類之前判，否則 "timeout"
+    // 會被當成連不到主機（#326）
     if (/sign data is timeout/i.test(output))
-        return '電腦時間不準，登入簽章被判定逾時（與網路、金鑰無關）— 請開啟系統的「自動設定時間」並立即同步，時區選台北（UTC+8），確認誤差在 1～2 秒內後再按啟動';
+        return '登入簽章逾時（與金鑰設定無關）— 主機驗證時，登入簽章的時間已超過允許範圍（約 5 秒）。常見原因是電腦時間不準，也可能是網路延遲，或主機端時間偏差、處理較慢。請先開啟「自動設定時間」並立即同步、時區選台北（UTC+8），確認誤差在 1～2 秒內再按啟動；時間正確仍發生時請稍後重試，持續失敗請複製錯誤訊息回報';
     // 網路類要先判 — 上游把 Solace 連線逾時也包成
     // "Authentication failed: Shioaji connect error"，若先比對登入失敗
     // 會在斷網時誤導使用者去檢查金鑰/簽署（實際只是連不到主機）
