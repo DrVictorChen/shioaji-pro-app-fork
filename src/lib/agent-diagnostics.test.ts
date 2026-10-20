@@ -4,6 +4,21 @@ import { agentRuntimeDiagnostics, recordAgentRuntimeFailure, redactAgentRuntimeD
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Agent runtime copied diagnostics', () => {
+    it('masks case variants of UNC paths while retaining the following cause in text and JSON', () => {
+        for (const path of [
+            String.raw`\\server\share\FixtureUser\project`,
+            ...['UNC', 'unc', 'UnC'].map(prefix => `\\\\?\\${prefix}\\server\\share\\FixtureUser\\project`),
+        ]) {
+            const detail = `open ${path} failed: EACCES`;
+            const redacted = redactAgentRuntimeDetail(detail);
+            expect(redacted).not.toContain('server');
+            expect(redacted).not.toContain('FixtureUser');
+            expect(redacted).toContain('failed: EACCES');
+            const json = JSON.parse(redactAgentRuntimeDetail(JSON.stringify({ message: detail })));
+            expect(json.message).toBe(redacted);
+        }
+    });
+
     it('masks proxy accounts with or without passwords', () => {
         for (const proxy of ['http://fixture-user@proxy.test:80', 'socks5://fixture-user@proxy.test:1080', 'http://fixture-user:@proxy.test:80']) {
             expect(redactAgentRuntimeDetail(proxy)).not.toContain('fixture-user');
