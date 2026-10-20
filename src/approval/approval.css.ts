@@ -30,9 +30,9 @@ export const empty = style({
 export const error = style({
     padding: '8px 10px',
     fontSize: '0.72rem',
-    color: vars.color.down,
+    color: vars.color.danger,
     background: vars.color.panelRaised,
-    border: `1px solid ${vars.color.down}`,
+    border: `1px solid ${vars.color.danger}`,
     borderRadius: vars.radius.sm,
 });
 

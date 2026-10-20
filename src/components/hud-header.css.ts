@@ -94,7 +94,7 @@ const ledBase = style({
 });
 
 export const led = styleVariants({
-    live: [ledBase, { background: vars.color.down }],
+    live: [ledBase, { background: vars.color.success }],
     connecting: [
         ledBase,
         {
@@ -105,7 +105,7 @@ export const led = styleVariants({
     down: [
         ledBase,
         {
-            background: vars.color.up,
+            background: vars.color.danger,
             animation: `${blink} 0.6s infinite`,
         },
     ],
