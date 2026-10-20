@@ -2,6 +2,7 @@
 
 日期：2026-10-20。分支 `feat/193-os-credential-store`。
 對應私有 desktop 同名分支；本次不改 `DESKTOP_MODULES_REF`、不 push、不開 PR。
+第二次複審結果見下方「第二回合修正」；其餘驗證數字為各輪歷史紀錄。
 
 ## 前端資料與指令契約
 
@@ -73,7 +74,7 @@ settings 只保存非秘密索引。新增／遷移先寫 pending journal，秘�
 macOS／Windows 不退回檔案；Linux 缺 Secret Service 時新 profile 可退回獨立 0600 檔案。
 已存在的 system／fallback profile 維持原 backend，避免雙份秘密或靜默降級。
 renderer 無 shioaji spawn／execute 權限；原有 status fallback 改用固定參數的
-`sidecar_server_status`。通用 plugin-store 權限亦撤銷，Agent 的兩個資料檔改走
+`sidecar_server_status`。通用 plugin-store 權限亦撤銷，Agent 的 sessions、預設／trade／local idempotency 四個資料檔改走
 限定檔名的 `renderer_store`；fs deny `native-secrets` 目錄。
 
 本次雙 review 修正的逐項判定、測試與剩餘 P3，見 private
@@ -81,6 +82,24 @@ renderer 無 shioaji spawn／execute 權限；原有 status fallback 改用固�
 修正回合驗證：`pnpm tsc -b`、`pnpm vite build`、UTC／Asia/Taipei 完整 Vitest
 各 328 檔／5,784 項通過；native `cargo test --lib` 562 passed／14 ignored，
 clippy `--all-targets -- -D warnings`、fmt 通過。未啟動使用者 App／Shioaji 服務或操作既有 Keychain。
+
+## 第二回合修正
+
+- 首次設定頁在 `migrationError` 時提供二次確認的「登出並清除」及取消入口。
+  先呼叫 `serverStop({stopAgents:true})`，成功後才 `logoutCredentialProfile`，再清除舊 spawn revision。
+  停機失敗顯示原因並保留資料；外部伺服器繼續由既有 ownership guard 保護。
+- 首次設定的切換／刪除 active 以及儲存並套用也遵循停機順序；儲存與目標 CA 驗證先於停機，select 先於啟動。
+- `.env` 單檔與候選匯入直接顯示 native 的固定字串錯誤；非字串的未知例外保留通用訊息，不揭露例外內容。
+- 配對 native 修正四檔白名單並保留原檔名及待對帳資料；Agent shell 在 spawn 前遮斷繼承的全部 `SJ_*`。
+  Linux 僅在 D-Bus 成功確認無運行／可啟用 Secret Service 時允許 fallback，存取錯誤不降級、不替換已有系統 HMAC。
+  dev config 清空 updater endpoints，避免 QA bundle 更新成正式版。
+- 最新驗證：`pnpm tsc -b` 通過；Asia/Taipei／UTC 完整 Vitest 各 330 檔／5,797 項通過；
+  native `cargo test --lib` 567 passed／14 ignored、clippy `--all-targets -- -D warnings`、fmt 通過；`pnpm vite build` 通過。
+- sidecar 維持 pipe 先遮蔽再寫 log。App 異常退出可能讓 Unix orphan sidecar 寫入 EPIPE；
+  改回直接寫原始檔還需收斂 renderer 所有讀取權限與跨 generation 遮蔽，這輪保留並記錄風險。
+  renderer 任意 `agent-sh`／`agent-cmd` shell 權限為已知限制，撤銷另案處理。
+- 本輪無 push、未修改 `DESKTOP_MODULES_REF`、未讀使用者 `.env`、未操作 Keychain、未啟動伺服器或使用者 App，未用 pkill／killall。
+  完整逐項證據與限制見 private `docs/design/credential-store-193-review2-fixes.md`。
 
 ## 修改檔案
 

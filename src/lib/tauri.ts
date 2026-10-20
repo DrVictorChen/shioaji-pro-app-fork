@@ -1348,7 +1348,9 @@ async function readEnvKeys(path: string, fileName: string, environment: Credenti
         const profileId = settings.profiles.at(-1)?.id;
         if (!profileId) return { kind: 'error', error: '匯入後找不到帳號設定。' };
         return { kind: 'imported', fileName, settings, profileId };
-    } catch {
+    } catch (error) {
+        // Native credentials_import_env returns fixed, secret-free strings.
+        if (typeof error === 'string') return { kind: 'error', error };
         return { kind: 'error', error: '無法匯入 .env；請確認金鑰格式與系統憑證庫。' };
     }
 }

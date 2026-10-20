@@ -99,9 +99,9 @@ describe('.env import', () => {
             kind: 'error', error: '資料夾裡沒有 .env 檔案。已檢查檔案：notes.conf、readme.txt',
         });
         mocks.open.mockResolvedValue('/tmp/project/s_multi.env');
-        mocks.invoke.mockRejectedValueOnce(new Error('invalid credentials'));
+        mocks.invoke.mockRejectedValueOnce('API Key／Secret Key 格式錯誤，請使用完整的 base58 金鑰');
         expect(await pickEnvFile('file')).toEqual({
-            kind: 'error', error: '無法匯入 .env；請確認金鑰格式與系統憑證庫。',
+            kind: 'error', error: 'API Key／Secret Key 格式錯誤，請使用完整的 base58 金鑰',
         });
         mocks.open.mockResolvedValue('/tmp/project/readme.txt');
         expect(await pickEnvFile('file')).toEqual({
@@ -115,5 +115,13 @@ describe('.env import', () => {
         expect(await pickEnvFile('file')).toEqual({
             kind: 'error', error: '無法匯入 .env；請確認金鑰格式與系統憑證庫。',
         });
+    });
+    it.each([
+        '無法存取系統憑證庫，請解鎖憑證庫後重試；原有資料已保留',
+        '憑證資料超過 Windows 憑證庫的 2560 UTF-16 bytes 上限，請縮短憑證密碼',
+    ])('preserves the fixed native error for candidate imports: %s', async error => {
+        mocks.invoke.mockRejectedValueOnce(error);
+        expect(await importEnvCandidate({ directory: '/fixture', candidates: ['test.env'] }, 'test.env'))
+            .toEqual({ kind: 'error', error });
     });
 });
