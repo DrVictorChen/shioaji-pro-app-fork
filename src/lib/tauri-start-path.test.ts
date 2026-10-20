@@ -5,11 +5,11 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const native = vi.hoisted(() => ({ invoke: vi.fn(), execute: vi.fn(), fetch: vi.fn() }));
+const native = vi.hoisted(() => ({ invoke: vi.fn(), execute: vi.fn(), fetch: vi.fn(), readTextFile: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/plugin-shell', () => ({ Command: { sidecar: () => ({ execute: native.execute }) } }));
 vi.mock('@tauri-apps/plugin-http', () => ({ fetch: native.fetch }));
-vi.mock('@tauri-apps/plugin-fs', () => ({ readTextFile: async () => '', exists: async () => false }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ readTextFile: native.readTextFile, exists: async () => false }));
 vi.mock('@tauri-apps/api/path', () => ({ homeDir: async () => '/home', join: async (...p: string[]) => p.join('/') }));
 vi.mock('./runtime', async importOriginal => ({ ...await importOriginal<object>(), isTauri: true }));
 vi.mock('./trade', () => ({ notify: vi.fn() }));
@@ -38,6 +38,7 @@ beforeEach(() => {
     clock += 60_000;
     vi.setSystemTime(clock);
     vi.clearAllMocks();
+    native.readTextFile.mockResolvedValue('');
     storage.clear();
     vi.stubGlobal('window', Object.assign(new EventTarget(), { setTimeout, clearTimeout }));
     // probeFetch retries https through the webview fetch: never hit the network
@@ -77,6 +78,21 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 const calls = (cmd: string) => native.invoke.mock.calls.filter(c => c[0] === cmd).map(c => c[1]);
 
 describe('serverStart start path', () => {
+    it('reads Pro stdout/stderr capture after startup failure when SDK 1.7.9 also announces daily logs', async () => {
+        vi.useFakeTimers();
+        const output = 'Shioaji server log: /home/.shioaji/logs/server-21322/server.<UTC date>.log\nError: Sign data is timeout.';
+        native.readTextFile.mockResolvedValue(output);
+        const invoke = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) =>
+            cmd === 'spawn_server' ? { pid: 777, credentialRevision: 'native-revision' } : invoke(cmd, args));
+        const starting = tauri.serverStart(settings);
+        await vi.waitFor(() => expect(calls('spawn_server')).toHaveLength(1));
+        await vi.advanceTimersByTimeAsync(3000); // process_alive is throttled to 1.5 seconds
+        const result = await starting;
+        expect(result).toMatchObject({ ok: false, output });
+        expect(native.readTextFile).toHaveBeenCalledExactlyOnceWith('/home/.shioaji/sjpro-server-21322.log');
+    });
+
     it('relaunch: a dead remembered spawn is skipped at once and its PID never reaches kill', async () => {
         storage.set('sj-pro-server-pid', '4242');
         storage.set('sj-pro-server-port', '21322');
@@ -233,7 +249,7 @@ describe('serverStart and another program\'s server', () => {
 });
 
 // #285 customer report (v0.1.53): the user's own `shioaji server start`
-// (CLI 1.7.8, same version as the bundled sidecar) on 8080, Agent Harness on.
+// (CLI at EXPECTED_SERVER_VERSION, same as the bundled sidecar) on 8080, Agent Harness on.
 // Pro used to try to stop it, get refused, and never start its own server.
 describe('customer: same-version CLI server on 8080 with Agent Harness on', () => {
     function cliOn8080(personId: string) {

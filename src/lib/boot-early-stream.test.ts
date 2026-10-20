@@ -3,6 +3,7 @@
 // after the server was healthy (#142)
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EXPECTED_SERVER_VERSION } from './runtime';
 
 const m = vi.hoisted(() => ({
     child: false,
@@ -128,7 +129,7 @@ describe('early stream at bootstrap', () => {
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
                 running: true, healthy: true, port: 21322,
-                simulation: true, version: '1.7.8', scheme: 'http',
+                simulation: true, version: EXPECTED_SERVER_VERSION, scheme: 'http',
             });
         });
         await vi.waitFor(() => expect(m.startTrading).toHaveBeenCalledTimes(1));
@@ -228,7 +229,7 @@ describe('early stream at bootstrap', () => {
             vi.mocked(tauri.serverStatus)
                 .mockResolvedValueOnce({ running: false })
                 .mockResolvedValueOnce({ running: true, healthy: true, port: 21322,
-                    simulation: true, version: '1.7.8', scheme: 'http' });
+                    simulation: true, version: EXPECTED_SERVER_VERSION, scheme: 'http' });
             vi.mocked(tauri.serverStart).mockResolvedValueOnce({
                 ok: false, output: 'spawn failed', port: 21322,
                 attached: false, portChanged: false,
@@ -248,7 +249,7 @@ describe('early stream at bootstrap', () => {
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
                 running: true, healthy: true, port: 21322, simulation: false,
-                version: '1.7.8', scheme: 'http',
+                version: EXPECTED_SERVER_VERSION, scheme: 'http',
             });
             vi.mocked(tauri.serverStart).mockResolvedValueOnce({
                 ok: false, output: 'CA inactive', port: 21322,
@@ -263,7 +264,7 @@ describe('early stream at bootstrap', () => {
 
     // #285 — another program's server is used only in the right environment
     // and on the same account; otherwise never adopted, never read
-    const prodElsewhere = { running: true, healthy: true, port: 21322, simulation: false, version: '1.7.8', scheme: 'http' as const };
+    const prodElsewhere = { running: true, healthy: true, port: 21322, simulation: false, version: EXPECTED_SERVER_VERSION, scheme: 'http' as const };
     const refusal = { reason: 'mode' as const, text: ':21322 上另一個程式啟動的正式伺服器與本 App 設定（模擬）不符，未連上' };
 
     it('autostart: another App\'s production server is not adopted; this App starts its own elsewhere', async () => {
@@ -372,7 +373,7 @@ describe('early stream at bootstrap', () => {
                 autoStart: true, configured: true, credentialRevision: 'revision', production: false,
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
-                running: true, healthy: true, port: 21322, simulation: true, version: '1.7.8', scheme: 'http',
+                running: true, healthy: true, port: 21322, simulation: true, version: EXPECTED_SERVER_VERSION, scheme: 'http',
             });
         });
         const runtime = await import('./runtime');
@@ -394,7 +395,7 @@ describe('early stream at bootstrap', () => {
             } as Awaited<ReturnType<typeof tauri.loadDesktopSettings>>);
             // own orphan from the previous launch: Harness mismatch → restarted
             vi.mocked(tauri.serverStatus).mockResolvedValueOnce({
-                running: true, healthy: true, port: 21322, simulation: true, version: '1.7.8', scheme: 'http',
+                running: true, healthy: true, port: 21322, simulation: true, version: EXPECTED_SERVER_VERSION, scheme: 'http',
             });
             vi.mocked(tauri.serverStart).mockReset().mockResolvedValueOnce({
                 ok: true, output: '', port: 21322, attached: false, portChanged: false,
@@ -429,7 +430,7 @@ describe('early stream at bootstrap', () => {
     // on 8080 while Agent Harness is on
     it('customer: CLI server on 8080 + Harness on → this App starts its own on 21322 and says so', async () => {
         m.navType = 'navigate';
-        const cli = { running: true, healthy: true, port: 8080, simulation: true, version: '1.7.8', scheme: 'http' as const };
+        const cli = { running: true, healthy: true, port: 8080, simulation: true, version: EXPECTED_SERVER_VERSION, scheme: 'http' as const };
         const text = ':8080 上另一個程式啟動的伺服器（已開啟 Agent Harness，本 App 只使用自己啟動的伺服器），未連上，也不會停止它';
         await boot(null, async () => {
             const tauri = await import('./tauri');
