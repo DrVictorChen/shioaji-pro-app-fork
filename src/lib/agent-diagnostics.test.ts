@@ -4,6 +4,40 @@ import { agentRuntimeDiagnostics, recordAgentRuntimeFailure, redactAgentRuntimeD
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Agent runtime copied diagnostics', () => {
+    // All inputs from review5's unc.test.ts / unc2.test.ts probes, with
+    // assertions replacing console output. Ambiguous unquoted spaces retain
+    // the existing best-effort behavior; quoted paths are covered below.
+    it.each([
+        [String.raw`failed\\n/opt/homebrew/lib/node_modules/x/cli.js:12 real cause here`, 'failed[REDACTED_PATH] real cause here'],
+        [String.raw`failed\\nnode_modules/x/cli.js real cause`, 'failed[REDACTED_PATH] real cause'],
+        [String.raw`\\server\share`, '[REDACTED_PATH]'],
+        [String.raw`\\server\c$\Users\Fixture\x`, '[REDACTED_PATH]'],
+        [String.raw`\\192.168.1.5\share\Fixture User\proj more text`, '[REDACTED_PATH] more text'],
+        [String.raw`open \\server\share\Fixture User\proj failed: EACCES`, 'open [REDACTED_PATH] failed: EACCES'],
+        [String.raw`{"path":"\\\\server\\share\\Fixture User\\p"}`, '{"path":"[REDACTED_PATH]"}'],
+        [String.raw`C:\\project\\config.json not found`, '[REDACTED_PATH] not found'],
+        ['http://fixture-user@proxy.test:80 and https://github.com/org/repo@v1', 'http://[REDACTED]@proxy.test:80 and https://github.com/org/repo@v1'],
+        ['git+ssh://git@github.com/org/repo.git', 'git+ssh://[REDACTED]@github.com/org/repo.git'],
+        ['https://host:8080/path?x=a@b.com', 'https://host:8080/path?[REDACTED]'],
+        [String.raw`\\.\pipe\codex-Fixture`, '[REDACTED_PATH]'],
+        [String.raw`//server/share/Fixture User/p`, '//server/share/Fixture User/p'],
+        [String.raw`open \\server\share failed: EACCES`, 'open [REDACTED_PATH] failed: EACCES'],
+        [String.raw`open \\?\uNc\server\share\x\y failed: EACCES`, 'open [REDACTED_PATH] failed: EACCES'],
+        [String.raw`open \\?\UNC\server\share failed: ENOENT`, 'open [REDACTED_PATH] failed: ENOENT'],
+        [String.raw`open \\.\UNC\server\share\Fixture\p failed: EACCES`, 'open [REDACTED_PATH] failed: EACCES'],
+        [String.raw`open \\server\My Share\Fixture\p failed: EACCES`, String.raw`open [REDACTED_PATH] Share\Fixture\p failed: EACCES`],
+        [String.raw`open \\server\share\Fixture User\p failed: EACCES`, 'open [REDACTED_PATH] failed: EACCES'],
+        [String.raw`open \\server\share\Fixture\p\tfailed`, 'open [REDACTED_PATH]'],
+        [String.raw`open "\\server\share\Fixture\p" failed`, 'open [REDACTED_PATH] failed'],
+        [String.raw`open \\server\share\Fixture\p: EACCES`, 'open [REDACTED_PATH] EACCES'],
+        [String.raw`{"message":"open \\\\?\\unc\\server\\share\\Fixture\\p failed: EACCES"}`, '{"message":"open [REDACTED_PATH] failed: EACCES"}'],
+        [String.raw`{"message":"open \\\\server\\share failed: EACCES"}`, '{"message":"open [REDACTED_PATH] failed: EACCES"}'],
+        [String.raw`{"message":"open \\\\server\\share\\Fixture User\\p failed"}`, '{"message":"open [REDACTED_PATH] failed"}'],
+    ])('retains the review probe behavior for %s', (input, expected) => {
+        expect(redactAgentRuntimeDetail(input)).toBe(expected);
+        expect(JSON.parse(redactAgentRuntimeDetail(JSON.stringify({ message: input }))).message).toBe(expected);
+    });
+
     it('masks complete paths without consuming the following cause in text and JSON', () => {
         for (const [path, cause] of [
             [String.raw`"\\server\share\Client Secret\account.json"`, 'failed: EACCES'],
@@ -14,6 +48,17 @@ describe('Agent runtime copied diagnostics', () => {
             [String.raw`\\server\share`, 'access denied'],
             [String.raw`\\?\UnC\server\share`, 'access denied'],
             [String.raw`C:\\project\\config.json`, 'not found'],
+            [String.raw`\\server\share\O'Brien\account.json`, 'failed: EACCES'],
+            [String.raw`\\O'Brien\share\account.json`, 'failed: EACCES'],
+            [String.raw`\\server\O'Brien\account.json`, 'failed: EACCES'],
+            [String.raw`\\?\uNc\server\share\O'Brien\account.json`, 'failed: EACCES'],
+            [String.raw`C:\O'Brien\account.json`, 'failed: EACCES'],
+            [String.raw`C:/O'Brien/account.json`, 'failed: EACCES'],
+            [String.raw`\\server\share\Fixture O'Brien\account.json`, 'failed: EACCES'],
+            [String.raw`C:\Fixture O'Brien\account.json`, 'failed: EACCES'],
+            [String.raw`"\\server\Client Share\O'Brien\account.json"`, 'failed: EACCES'],
+            [String.raw`"C:\Client Secret\O'Brien\account.json"`, 'failed: EACCES'],
+            [String.raw`'C:\Client Secret\account.json'`, 'failed: EACCES'],
         ]) {
             const detail = `open ${path} ${cause}`;
             const redacted = redactAgentRuntimeDetail(detail);
