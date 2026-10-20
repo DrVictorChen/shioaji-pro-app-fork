@@ -136,7 +136,7 @@ function FundsSection({
           ? vars.color.danger
           : risk < 200
             ? vars.color.amber
-            : vars.color.down; // 綠 = 安全（台股綠跌語彙外，安全狀態沿用綠）
+            : vars.color.success; // 綠 = 安全（狀態色固定，不隨漲跌配色翻轉）
 
     const totalAssets =
         (showStock ? stockValue + cash : 0) + (showFut ? futEquity : 0);

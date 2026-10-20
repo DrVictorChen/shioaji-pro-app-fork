@@ -1486,7 +1486,7 @@ export function OrderTicket({
             {feedback && (
                 <span
                     className={`${styles.feedback} ${
-                        panel.dirText[feedback.kind === 'ok' ? 'down' : 'up']
+                        panel.statusText[feedback.kind]
                     }`}
                 >
                     {feedback.text}

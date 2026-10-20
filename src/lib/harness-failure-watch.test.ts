@@ -21,18 +21,6 @@ vi.mock('@tauri-apps/plugin-http', () => ({ fetch: async () => { throw new Error
 vi.mock('@tauri-apps/plugin-shell', () => ({
     Command: { sidecar: () => ({ execute: async () => ({ code: 0, stdout: '{"running":false}', stderr: '' }) }) },
 }));
-vi.mock('@tauri-apps/plugin-store', () => ({
-    LazyStore: class {
-        async get(key: string) {
-            const values: Record<string, unknown> = {
-                apiKey: 'TEST-KEY', secretKey: 'TEST-SECRET',
-                agentHarnessSafeDefaultV1: true, agentHarnessEnabled: false,
-            };
-            return values[key];
-        }
-    },
-}));
-
 const data = new Map<string, string>();
 const { setAgentHarnessEnabled } = await import('./tauri');
 
@@ -40,7 +28,7 @@ beforeEach(() => {
     data.clear();
     mocks.healthy = false;
     mocks.reload.mockReset();
-    mocks.invoke.mockReset().mockRejectedValue(new Error('harness command failed'));
+    mocks.invoke.mockReset().mockImplementation(async (cmd: string) => { if (cmd === 'credentials_status') return { configured: true, credentialRevision: 'native-revision', production: false, agentHarnessEnabled: false }; throw new Error('harness command failed'); });
     vi.useFakeTimers();
     vi.setSystemTime(0);
     vi.stubGlobal('window', {
@@ -70,6 +58,7 @@ it('keeps the mutation gate closed after Harness failure, then reloads when the 
     data.set('sj-pro-server-port', '21322');
     data.set('sj-pro-server-pid', '4242');
     mocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'credentials_status') return { configured: true, credentialRevision: 'native-revision', production: false, agentHarnessEnabled: false };
         if (cmd === 'process_alive') return true;
         throw new Error('harness command failed');
     });
@@ -93,6 +82,7 @@ it('#285: never reloads onto another program\'s server whose account cannot be c
     data.set('sj-pro-server-port', '21322');
     data.set('sj-pro-server-pid', '4242');
     mocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'credentials_status') return { configured: true, credentialRevision: 'native-revision', production: false, agentHarnessEnabled: false };
         if (cmd === 'process_alive') return true;
         throw new Error('harness command failed');
     });
