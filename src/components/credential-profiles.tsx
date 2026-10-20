@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Check, CheckCircle2, Circle, CircleCheck, FileKey, FileUp, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCw, ShieldAlert, ShieldCheck, ShieldOff, Trash2, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Check, CheckCircle2, Circle, CircleCheck, FileKey, FileUp, FolderOpen, KeyRound, Loader2, Pencil, Play, Plus, RotateCw, ShieldAlert, ShieldCheck, ShieldOff, Trash2, X } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { importEnvCandidate, loadDesktopSettings, pickCaFile, pickEnvFile, type CredentialDraft, type CredentialProfile, type DesktopSettings, type EnvImportResult, type EnvSelection } from '../lib/tauri';
 import * as s from './server-settings-dialog.css';
@@ -40,11 +40,13 @@ function Callout({ tone, icon, title, children, actions }: { tone: 'danger' | 'w
     </div>;
 }
 
-export function CredentialProfiles({ settings, busy, running, onSave, onAction, onImported, onBusyChange, onEditingChange }: {
+export function CredentialProfiles({ settings, busy, running, onSave, onAction, onImported, onStart, onBusyChange, onEditingChange }: {
     settings: DesktopSettings; busy: boolean; running: boolean;
     onSave: (draft: CredentialDraft, apply: boolean) => Promise<DesktopSettings>;
     onAction: (action: 'select' | 'delete', id: string) => Promise<DesktopSettings>;
     onImported: (settings: DesktopSettings) => void;
+    // 首次設定畫面沒有頁首的啟動鈕：提供時列表下方顯示「啟動」，用使用中的帳號啟動
+    onStart?: () => Promise<void>;
     onBusyChange?: (busy: boolean) => void;
     // 編輯中時讓外層收起其他設定區塊，畫面只留表單
     onEditingChange?: (editing: boolean) => void;
@@ -221,7 +223,18 @@ export function CredentialProfiles({ settings, busy, running, onSave, onAction, 
                     </div>}
                 </li>;
             })}
-        </ul> : <div className={s.empty}>
+        </ul> : null}
+        {profiles.length > 0 && onStart && (() => {
+            const activeProfile = profiles.find(p => p.id === settings.activeProfileId);
+            const ready = activeProfile?.secretState === 'stored';
+            return <div className={s.startBar}>
+                <p className={s.startText}>{activeProfile
+                    ? <>以<span className={s.inlineBadge}><EnvBadge environment={activeProfile.environment} /></span>「{activeProfile.name}」啟動伺服器{ready ? '' : '；這個帳號需要先修復'}</>
+                    : '先選一個帳號，按「切換使用」後再啟動。'}</p>
+                <button ref={reg('start')} className={s.primary} disabled={locked || !ready || !!confirmation} onClick={() => void operation(onStart)}><Play size={15} />啟動</button>
+            </div>;
+        })()}
+        {profiles.length ? null : <div className={s.empty}>
             <span className={s.emptyIcon}><KeyRound size={20} /></span>
             <p className={s.emptyTitle}>還沒有帳號</p>
             <p className={s.hint}>新增永豐 API 金鑰後，就能啟動伺服器。</p>

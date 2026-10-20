@@ -61,16 +61,22 @@ export function OnboardingSetup() {
                 if (id && id !== next.activeProfileId) { next = await selectCredentialProfile(id); setSettings(next); }
             }
         } finally { setBusy(false); }
-        if (apply) {
-            const invalid = validateDesktopSettings(next);
-            if (invalid) { setError(invalid.body); return next; }
-            setBusy(true);
-            try {
-                const result = await timedOnboarding({ save: async () => {}, start: () => serverStart(next), reloadWhenHealthy });
-                if (!result.ok) { setError('伺服器啟動失敗，請確認帳號設定、網路與憑證後重試。'); setBusy(false); }
-            } catch { setError('伺服器啟動失敗，請重試。'); setBusy(false); }
-        }
+        if (apply) await launch(next);
         return next;
+    };
+    // 以目前使用中的帳號啟動；成功後等伺服器健康再重新載入
+    const launch = async (target: DesktopSettings) => {
+        const invalid = validateDesktopSettings(target);
+        if (invalid) { setError(invalid.body); return; }
+        setBusy(true); setError('');
+        try {
+            const result = await timedOnboarding({ save: async () => {}, start: () => serverStart(target), reloadWhenHealthy });
+            if (!result.ok) { setError('伺服器啟動失敗，請確認帳號設定、網路與憑證後重試。'); setBusy(false); }
+        } catch { setError('伺服器啟動失敗，請重試。'); setBusy(false); }
+    };
+    const start = async () => {
+        if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
+        await launch(settings);
     };
     const action = async (kind: 'select' | 'delete', id: string) => {
         if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
@@ -87,7 +93,7 @@ export function OnboardingSetup() {
         <div className={styles.card}>
             <div><div className={styles.logo}>Shioaji Pro</div><div className={styles.subtitle}>設定或選擇帳號以啟動交易伺服器</div></div>
             {error && <p className={styles.errorText} role="alert">{error}</p>}
-            {loaded && <CredentialProfiles settings={settings} busy={busy} running={false} onSave={save} onAction={action} onImported={setSettings} onBusyChange={setBusy} />}
+            {loaded && <CredentialProfiles settings={settings} busy={busy} running={false} onSave={save} onAction={action} onImported={setSettings} onStart={start} onBusyChange={setBusy} />}
             {loaded && settings.migrationError && <div className={styles.logoutBox}>
                 <p className={styles.hint}>無法轉移時可以登出重來：會停止本 App 的 Agent 與伺服器，並清除舊金鑰、CA 密碼與使用中帳號的金鑰。</p>
                 <div className={styles.logoutActions}>

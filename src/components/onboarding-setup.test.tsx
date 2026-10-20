@@ -85,6 +85,24 @@ describe('first-run credential profiles', () => {
         });
         expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.select).not.toHaveBeenCalled(); expect(mocks.start).not.toHaveBeenCalled();
     });
+    it('keeps a start action after saving the first account without starting', async () => {
+        const profile = { id: 'new', name: '新帳號', environment: 'simulation', hasCA: false, caPath: '', createdAt: '', apiKeyMasked: '••••1234', secretState: 'stored', credentialBackend: 'system', revision: 'native' } as const;
+        const saved: DesktopSettings = { ...EMPTY_DESKTOP_SETTINGS, configured: true, activeProfileId: 'new', credentialRevision: 'native', profiles: [profile] };
+        mocks.save.mockResolvedValue(saved); mocks.start.mockResolvedValue({ ok: true });
+        await act(async () => { view = create(createElement(OnboardingSetup)); });
+        const label = (b: { children: unknown[] }) => b.children.filter(x => typeof x === 'string').join('');
+        const button = (text: string) => view!.root.findAllByType('button').find(b => label(b) === text)!;
+        const inputs = () => view!.root.findByType(CredentialProfiles).findAllByType('input');
+        for (const [i, value] of ['新帳號', 'key', 'secret'].entries()) await act(async () => inputs()[i]!.props.onChange({ target: { value } }));
+        await act(async () => button('僅儲存').props.onClick());
+        await act(async () => button('確認新增帳號').props.onClick());
+        expect(mocks.save).toHaveBeenCalledOnce(); expect(mocks.start).not.toHaveBeenCalled();
+        // 回到列表後仍有啟動鈕，用使用中的帳號啟動
+        expect(inputs()).toHaveLength(0);
+        expect(button('啟動').props.disabled).toBe(false);
+        await act(async () => button('啟動').props.onClick());
+        expect(mocks.start).toHaveBeenCalledWith(saved); expect(mocks.reload).toHaveBeenCalledOnce();
+    });
     it('offers two-click logout after migration failure and stops before clearing', async () => {
         mocks.load.mockResolvedValue({ ...EMPTY_DESKTOP_SETTINGS, migrationError: '遷移失敗；原有資料已保留' });
         mocks.logout.mockImplementation(async () => { expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true, ownedOnly: true }); return EMPTY_DESKTOP_SETTINGS; });

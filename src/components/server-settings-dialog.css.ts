@@ -6,6 +6,13 @@ import { vars } from '../theme.css';
 const CONTROL = '2.25em'; // 輸入框、按鈕、分段切換同高
 const CONTROL_SM = '2em'; // 列表列尾按鈕
 const tint = (color: string, pct: number) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
+// 舊版 WKWebView（Safari 13–16.1）不支援 color-mix。含 var() 的宣告在計算值
+// 階段才失效，不會退回前一個值，所以 rgba 放基本樣式、color-mix 只在 @supports 內覆寫。
+const SUPPORTS_MIX = '(color: color-mix(in srgb, red 50%, transparent))';
+const mixed = (props: Record<'borderColor' | 'background', [string, string]>) => ({
+    borderColor: props.borderColor[0], background: props.background[0],
+    '@supports': { [SUPPORTS_MIX]: { borderColor: props.borderColor[1], background: props.background[1] } },
+});
 const focusRing = { outline: `2px solid ${vars.color.accent}`, outlineOffset: 2 } as const;
 
 export const backdrop = style({ position: 'fixed', inset: 0, zIndex: 209, background: 'rgba(0,0,0,.45)' });
@@ -51,7 +58,7 @@ export const button = style({
 // 主要動作沿用全 App 的「淡底＋強調色字框」語彙
 export const primary = style([button, {
     background: vars.color.accentDim, borderColor: vars.color.accent, color: vars.color.accent, fontWeight: 600,
-    selectors: { '&:hover:not(:disabled)': { borderColor: vars.color.accent, background: tint(vars.color.accent, 20) } },
+    selectors: { '&:hover:not(:disabled)': { borderColor: vars.color.accent, boxShadow: `inset 0 0 0 1px ${vars.color.accent}` } },
 }]);
 export const selected = style([button, { background: vars.color.accentDim, borderColor: vars.color.accent, color: vars.color.accent }]);
 export const iconButton = style([button, { width: CONTROL, padding: 0 }]);
@@ -95,8 +102,7 @@ const badgeBase = {
     fontSize: '0.75em', fontWeight: 650, letterSpacing: '0.04em', lineHeight: 1,
     borderRadius: vars.radius.sm, whiteSpace: 'nowrap', flexShrink: 0,
 } as const;
-// color-mix 前先給固定 rgba，舊版 WKWebView 不支援時仍有框線與底色
-export const simBadge = style({ ...badgeBase, color: vars.color.amber, border: '1px solid', borderColor: ['rgba(224, 164, 60, 0.45)', tint(vars.color.amber, 50)], background: ['rgba(224, 164, 60, 0.08)', tint(vars.color.amber, 10)] });
+export const simBadge = style({ ...badgeBase, color: vars.color.amber, border: '1px solid', ...mixed({ borderColor: ['rgba(224, 164, 60, 0.45)', tint(vars.color.amber, 50)], background: ['rgba(224, 164, 60, 0.08)', tint(vars.color.amber, 10)] }) });
 export const prodBadge = style({ ...badgeBase, color: '#fff', background: vars.color.danger, border: `1px solid ${vars.color.danger}` });
 
 export const profileList = style({
@@ -154,9 +160,9 @@ export const confirmDanger = style([smallButton, {
 }]);
 export const confirmPrimary = style([smallButton, {
     background: vars.color.accentDim, borderColor: vars.color.accent, color: vars.color.accent, fontWeight: 600,
-    selectors: { '&:hover:not(:disabled)': { borderColor: vars.color.accent, background: tint(vars.color.accent, 20) } },
+    selectors: { '&:hover:not(:disabled)': { borderColor: vars.color.accent, boxShadow: `inset 0 0 0 1px ${vars.color.accent}` } },
 }]);
-export const inlineBadge = style({ display: 'inline-flex', verticalAlign: '-0.2em', margin: '0 0.25em' });
+export const inlineBadge = style({ display: 'inline-flex', verticalAlign: '-0.1em', margin: '0 0.25em' });
 
 // 空狀態
 export const empty = style({
@@ -180,8 +186,8 @@ export const calloutBody = style({ display: 'flex', flexDirection: 'column', gap
 export const calloutTitle = style({ margin: 0, fontWeight: 650 });
 export const calloutText = style({ margin: 0 });
 export const calloutActions = style({ display: 'flex', gap: '0.375em', flexWrap: 'wrap', marginTop: '0.375em' });
-export const calloutDanger = style([calloutBase, { borderColor: [vars.color.danger, tint(vars.color.danger, 40)], background: ['rgba(242, 54, 69, 0.08)', tint(vars.color.danger, 8)], color: vars.color.danger }]);
-export const calloutWarn = style([calloutBase, { borderColor: ['rgba(224, 164, 60, 0.45)', tint(vars.color.amber, 45)], background: ['rgba(224, 164, 60, 0.08)', tint(vars.color.amber, 9)], color: vars.color.amber }]);
+export const calloutDanger = style([calloutBase, { ...mixed({ borderColor: ['rgba(242, 54, 69, 0.45)', tint(vars.color.danger, 40)], background: ['rgba(242, 54, 69, 0.08)', tint(vars.color.danger, 8)] }), color: vars.color.danger }]);
+export const calloutWarn = style([calloutBase, { ...mixed({ borderColor: ['rgba(224, 164, 60, 0.45)', tint(vars.color.amber, 45)], background: ['rgba(224, 164, 60, 0.08)', tint(vars.color.amber, 9)] }), color: vars.color.amber }]);
 const spin = keyframes({ to: { transform: 'rotate(360deg)' } });
 export const status = style({
     display: 'flex', alignItems: 'center', gap: '0.4em', margin: 0, fontSize: '0.875em', lineHeight: 1.6, color: vars.color.mutedForeground,
@@ -215,7 +221,7 @@ export const segment = style({
         '&:disabled': { cursor: 'default', opacity: 0.6 },
     },
 });
-export const segmentSim = style([segment, { color: vars.color.amber, borderColor: ['rgba(224, 164, 60, 0.5)', tint(vars.color.amber, 55)], background: ['rgba(224, 164, 60, 0.1)', tint(vars.color.amber, 12)], fontWeight: 650, selectors: { '&:hover:not(:disabled)': { color: vars.color.amber } } }]);
+export const segmentSim = style([segment, { color: vars.color.amber, ...mixed({ borderColor: ['rgba(224, 164, 60, 0.5)', tint(vars.color.amber, 55)], background: ['rgba(224, 164, 60, 0.1)', tint(vars.color.amber, 12)] }), fontWeight: 650, selectors: { '&:hover:not(:disabled)': { color: vars.color.amber } } }]);
 export const segmentProd = style([segment, { color: '#fff', background: vars.color.danger, borderColor: vars.color.danger, fontWeight: 650, selectors: { '&:hover:not(:disabled)': { color: '#fff' } } }]);
 export const fieldNote = style({ margin: 0, fontSize: '0.8125em', lineHeight: 1.5, color: vars.color.mutedForeground });
 export const fieldNoteDanger = style([fieldNote, { color: vars.color.danger, display: 'flex', alignItems: 'center', gap: '0.375em', fontWeight: 600 }]);
@@ -247,3 +253,10 @@ export const saveConfirm = style({
     display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.625em 0.75em',
     padding: '0.625em 0.75em', border: `1px dashed ${vars.color.borderBright}`, borderRadius: vars.radius.sm,
 });
+
+// 首次設定：列表下方的啟動列
+export const startBar = style({
+    display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.625em 0.75em',
+    padding: '0.75em 0.875em', border: `1px solid ${vars.color.borderBright}`, borderRadius: vars.radius.sm, background: vars.color.inset,
+});
+export const startText = style({ flex: '1 1 14em', margin: 0, fontSize: '0.875em', lineHeight: 1.6, minWidth: 0, overflowWrap: 'anywhere' });

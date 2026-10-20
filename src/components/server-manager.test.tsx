@@ -56,6 +56,8 @@ describe('credential profiles in server settings', () => {
         expect(text()).toContain('模擬'); expect(text()).toContain('正式'); expect(text()).toContain('已設定憑證');
         // 列表模式不渲染任何輸入欄位；點編輯才展開表單
         expect(view.root.findByType(CredentialProfiles).findAllByType('input')).toHaveLength(0);
+        // 伺服器設定有自己的啟動控制，帳號列表不重複顯示啟動鈕
+        expect(view.root.findByType(CredentialProfiles).findAllByType('button').some(b => b.children.includes('啟動'))).toBe(false);
         await click('編輯 主帳號');
         expect(field(1).props.value).toBe(''); expect(field(2).props.value).toBe('');
         await change(1, 'draft-canary'); await click('關閉伺服器設定');
