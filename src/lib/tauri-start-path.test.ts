@@ -15,7 +15,7 @@ vi.mock('./runtime', async importOriginal => ({ ...await importOriginal<object>(
 vi.mock('./trade', () => ({ notify: vi.fn() }));
 
 const storage = new Map<string, string>();
-const settings = { apiKey: 'k', secretKey: 's', production: false };
+const settings = { credentialRevision: 'native-revision', production: false };
 let listening: Set<number>; // ports a sidecar answers on
 let bound: Set<number>; // ports find_free_port sees as taken
 
@@ -64,7 +64,7 @@ beforeEach(() => {
                 return p;
             }
             case 'kill_shioaji': return false;
-            case 'spawn_server': listening.add(args.port as number); bound.add(args.port as number); return 777;
+            case 'spawn_server': listening.add(args.port as number); bound.add(args.port as number); return { pid: 777, credentialRevision: args.credentialRevision };
             case 'agent_harness_sidecar_owned': return true;
             case 'agent_runtime_list': return [];
             default: throw new Error(`unexpected ${cmd}`);
@@ -87,7 +87,10 @@ describe('serverStart start path', () => {
         const kills = calls('kill_shioaji');
         expect(kills.length).toBeGreaterThan(0);
         expect(kills.every(k => k.pid === null)).toBe(true);
-        expect(calls('spawn_server')[0]).toMatchObject({ port: 21322 });
+        const spawn = calls('spawn_server')[0];
+        expect(spawn).toMatchObject({ port: 21322, credentialRevision: 'native-revision' });
+        for (const key of ['SJ_API_KEY', 'SJ_SEC_KEY', 'SJ_CA_PATH', 'SJ_CA_PASSWD']) expect(spawn.env).not.toHaveProperty(key);
+        expect(storage.get('sj-pro-spawn-keys')).toBe('native-revision');
     });
 
     it('sweeps only ports something is bound to', async () => {
@@ -124,7 +127,7 @@ describe('serverStart start path', () => {
         native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
             if (cmd === 'kill_shioaji') { listening.delete(21322); setTimeout(() => bound.delete(21322), 300); return true; }
             if (cmd === 'find_free_port') { let p = args.preferred as number; while (bound.has(p)) p++; return p; }
-            if (cmd === 'spawn_server') { listening.add(args.port as number); return 778; }
+            if (cmd === 'spawn_server') { listening.add(args.port as number); return { pid: 778, credentialRevision: args.credentialRevision }; }
             if (cmd === 'agent_harness_sidecar_owned') return true;
             if (cmd === 'process_alive') return false;
             throw new Error(`unexpected ${cmd}`);
@@ -169,9 +172,8 @@ describe('serverStart and another program\'s server', () => {
     });
 
     it('another account is not used', async () => {
-        const { hashCredentials } = await import('./spawn-keys');
         const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
-        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        recordOwnIdentity(settings.credentialRevision, await hashPerson('A123456789'));
         foreignOn21322({ simulation: true }, 'B987654321');
         const res = await tauri.serverStart(settings);
         expect(res.attached).toBe(false);
@@ -179,9 +181,8 @@ describe('serverStart and another program\'s server', () => {
     });
 
     it('the same environment and the account this App\'s own server had: used, and said so', async () => {
-        const { hashCredentials } = await import('./spawn-keys');
         const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
-        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        recordOwnIdentity(settings.credentialRevision, await hashPerson('A123456789'));
         foreignOn21322({ simulation: true }, 'A123456789');
         const res = await tauri.serverStart(settings);
         expect(res.foreign).toBeUndefined();
@@ -246,9 +247,8 @@ describe('customer: same-version CLI server on 8080 with Agent Harness on', () =
     }
 
     it('even on the same account: never stops 8080, starts its own on 21322 and says why', async () => {
-        const { hashCredentials } = await import('./spawn-keys');
         const { hashPerson, recordOwnIdentity } = await import('./server-adoption');
-        recordOwnIdentity(await hashCredentials('k', 's'), await hashPerson('A123456789'));
+        recordOwnIdentity(settings.credentialRevision, await hashPerson('A123456789'));
         cliOn8080('A123456789');
         const status = await tauri.serverStatus();
         expect(EXPECTED_SERVER_VERSION).not.toBe('');

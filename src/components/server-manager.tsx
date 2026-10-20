@@ -64,6 +64,11 @@ import {
     reloadWhenHealthy,
     restartAndInstallUpdate,
     saveDesktopSettings,
+    saveCredentialProfile,
+    selectCredentialProfile,
+    deleteCredentialProfile,
+    logoutCredentialProfile,
+    EMPTY_DESKTOP_SETTINGS,
     subscribeAgentHarnessEnabled,
     serverStart,
     serverStatus,
@@ -111,16 +116,7 @@ export function ServerManager({
     open: boolean;
     onToggle: (open: boolean) => void;
 }) {
-    const [settings, setSettings] = useState<DesktopSettings>({
-        apiKey: '',
-        secretKey: '',
-        production: false,
-        autoStart: true,
-        caPath: '',
-        caPasswd: '',
-        httpsEnabled: false,
-        agentHarnessEnabled: true,
-    });
+    const [settings, setSettings] = useState<DesktopSettings>(EMPTY_DESKTOP_SETTINGS);
     const [busy, setBusy] = useState(false);
     const [lastOutput, setLastOutput] = useState('');
     const [ver, setVer] = useState('');
@@ -367,8 +363,7 @@ export function ServerManager({
                     serverActionDeps.reloadAfterFailedStop();
                     throw new Error(stopped.output || '無法停止本機伺服器');
                 }
-                const current = await loadDesktopSettings();
-                await saveDesktopSettings({ ...current, apiKey: '', secretKey: '' });
+                await logoutCredentialProfile();
                 clearStoredSpawnKeyHash();
                 window.location.reload();
             } catch (e) {
@@ -468,28 +463,47 @@ export function ServerManager({
         } finally { setBusy(false); }
     };
 
-    const saveConnectionSettings = async (draft: ServerConnectionSettings, apply: boolean) => {
+    const saveConnectionSettings = async (draft: ServerConnectionSettings, apply: boolean): Promise<DesktopSettings> => {
         if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
         restartError.current = '';
-        // Re-read settings so saving this form cannot revert another panel's
-        // Harness/autostart/TLS setting while the dialog was open.
-        const current = await loadDesktopSettings();
-        const next = { ...current, ...draft };
-        if (apply) {
-            const error = validateDesktopSettings(next);
-            if (error) throw new Error(`${error.title}：${error.body}`);
-            // Do not save a new environment if a native Agent cannot be stopped.
-            await stopAgentsForServerChange();
-        }
-        await saveDesktopSettings(next);
+        if (apply) await stopAgentsForServerChange();
+        let next = await saveCredentialProfile(draft);
         setSettings(next);
         setSavedForRestart(true);
         if (apply) {
-            // a mode flip against the running server is timed as a switch
+            const id = draft.id ?? next.profiles.at(-1)?.id;
+            if (id && id !== next.activeProfileId) {
+                const stopped = await serverStop({ stopAgents: true });
+                if (!stopped.ok) throw new Error('未能停止伺服器；帳號已儲存，尚未切換。');
+                next = await selectCredentialProfile(id);
+                setSettings(next);
+            }
+            const invalid = validateDesktopSettings(next);
+            if (invalid) throw new Error(invalid.body);
             const scenario = applyScenario(!!status?.running, status?.simulation, next.production);
             const ok = status?.running ? await doRestart(next, scenario) : await doStart(next, scenario);
-            if (!ok) throw new Error(`設定已儲存，但伺服器未能套用。${restartError.current || '請查看狀態面板的錯誤後再試。'}`);
+            if (!ok) throw new Error('帳號已儲存，但伺服器未能套用。');
         }
+        return next;
+    };
+
+    const profileAction = async (action: 'select' | 'delete', id: string): Promise<DesktopSettings> => {
+        if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
+        setBusy(true);
+        try {
+            // Selecting another account always stops the old generation.
+            // Deleting the selected account follows the same logout stop path.
+            if (action === 'select' || id === settings.activeProfileId) {
+                setServerIdentityVerified(false);
+                const stopped = await serverStop({ stopAgents: true });
+                if (!stopped.ok) throw new Error('無法停止伺服器，尚未變更帳號。');
+                clearStoredSpawnKeyHash();
+            }
+            const next = action === 'select' ? await selectCredentialProfile(id) : await deleteCredentialProfile(id);
+            setSettings(next); setSavedForRestart(true);
+            if (action === 'delete' && !next.activeProfileId) window.location.reload();
+            return next;
+        } finally { setBusy(false); }
     };
 
     // ---- 本機 HTTPS ----
@@ -926,7 +940,7 @@ export function ServerManager({
                                 }
                             />
                         </div>
-                        {!settings.apiKey && (
+                        {!settings.configured && (
                             <span
                                 className={styles.emptyHint}
                                 style={{ color: 'var(--amber, #e0a43c)' }}
@@ -1040,7 +1054,7 @@ export function ServerManager({
                     {settingsOpen && <ServerSettingsDialog
                         settings={settings} status={status} busy={busy || httpsBusy}
                         pendingApply={savedForRestart || (!!status?.running && status.simulation === settings.production)}
-                        onSave={saveConnectionSettings} onClose={() => {
+                        onSave={saveConnectionSettings} onProfileAction={profileAction} onImported={setSettings} onClose={() => {
                             setSettingsOpen(false);
                             // macOS does not necessarily focus a button on click.
                             // Restore explicitly after the popover becomes visible.
@@ -1069,7 +1083,7 @@ export function ServerManager({
                         </details>
                         <details className={dialogStyles.details}>
                             <summary>登出這個 App</summary>
-                            <p className={dialogStyles.hint}>停止此 App 的 Agent、清除本機儲存的 API 金鑰，並停止此 App 管理的伺服器。</p>
+                            <p className={dialogStyles.hint}>停止此 App 的 Agent、清除使用中帳號的 API 金鑰與 CA 密碼，並停止此 App 管理的伺服器。其他帳號會保留，登出後回到首次設定。</p>
                             <button className={confirmLogout ? styles.killBtnOn : styles.killBtnOff} onClick={doLogout}><LogOut size={14} />{confirmLogout ? '確認登出並清除金鑰' : '登出並清除金鑰'}</button>
                             {confirmLogout && <button className={dialogStyles.button} onClick={() => setConfirmLogout(false)}>取消登出</button>}
                         </details>

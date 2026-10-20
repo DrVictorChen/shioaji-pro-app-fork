@@ -56,7 +56,7 @@ export function errorLines(output: string): string {
 export function validateDesktopSettings(
     settings: DesktopSettings,
 ): { title: string; body: string } | null {
-    if (!settings.apiKey || !settings.secretKey) {
+    if (!settings.configured) {
         return { title: '缺少 API 金鑰', body: '請先填入 SJ_API_KEY / SJ_SEC_KEY' };
     }
     if (settings.production && !settings.caPath) {
@@ -67,7 +67,7 @@ export function validateDesktopSettings(
     }
     // 選了憑證卻沒填密碼 → 伺服器照樣啟動但 CA 啟用失敗，下單全部
     // 400（issue #1 的真因之一）— 啟動前就擋下
-    if (settings.production && settings.caPath && !settings.caPasswd) {
+    if (settings.production && settings.caPath && !settings.hasCaPassword) {
         return {
             title: '憑證密碼空白',
             body: '已選擇憑證檔但未填密碼 — CA 會啟用失敗導致下單 400，請先填入憑證密碼',

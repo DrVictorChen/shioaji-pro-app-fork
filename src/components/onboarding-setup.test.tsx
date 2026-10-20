@@ -1,53 +1,41 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { act, create } from 'react-test-renderer';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
-const mocks = vi.hoisted(() => ({ panel: vi.fn(() => null), defaults: vi.fn(), env: vi.fn(), envCandidate: vi.fn() }));
-vi.mock('../lib/features', () => ({
-    agentModule: { Panel: mocks.panel, ensureDefaultProvider: mocks.defaults },
-    useFeature: () => ({ enabled: true }),
-    FEATURES: [],
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const mocks = vi.hoisted(() => ({ panel: vi.fn(() => null), defaults: vi.fn(), load: vi.fn(), save: vi.fn(), select: vi.fn(), start: vi.fn(), reload: vi.fn() }));
+vi.mock('../lib/features', () => ({ agentModule: { Panel: mocks.panel, ensureDefaultProvider: mocks.defaults }, useFeature: () => ({ enabled: true }), FEATURES: [] }));
+vi.mock('../lib/tauri', async () => ({
+    ...await import('../lib/desktop-credentials'), isTauri: true,
+    loadDesktopSettings: mocks.load, saveCredentialProfile: mocks.save, selectCredentialProfile: mocks.select,
+    pickCaFile: vi.fn(), pickEnvFile: vi.fn(), importEnvCandidate: vi.fn(), reloadWhenHealthy: mocks.reload, serverStart: mocks.start,
 }));
-vi.mock('../lib/tauri', () => ({
-    isTauri: true, pickCaFile: vi.fn(), pickEnvFile: mocks.env, importEnvCandidate: mocks.envCandidate, reloadWhenHealthy: vi.fn(),
-    saveDesktopSettings: vi.fn(), serverStart: vi.fn(),
-}));
-
+import { EMPTY_DESKTOP_SETTINGS, type DesktopSettings } from '../lib/desktop-credentials';
 import { OnboardingSetup } from './onboarding-setup';
-
-afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
-
-describe('first-run guide runtime scope', () => {
-    it('explicitly opts only the embedded guide into onboarding', () => {
-        const html = renderToStaticMarkup(createElement(OnboardingSetup));
-        expect(html).toContain('引導申請 API Key');
-        expect(mocks.panel).toHaveBeenCalledWith({
-            onboarding: true,
-            initialPrompt: '我是第一次使用，還沒有永豐 Shioaji API Key，可以引導我怎麼申請嗎？',
-            visibleTabs: ['chat', 'settings'],
-        }, undefined);
-        expect(mocks.defaults).toHaveBeenCalledWith('codex');
-    });
+import { CredentialProfiles } from './credential-profiles';
+let view: ReactTestRenderer | undefined;
+beforeEach(() => {
+    vi.clearAllMocks(); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); vi.stubGlobal('window', new EventTarget());
+    mocks.load.mockResolvedValue(EMPTY_DESKTOP_SETTINGS);
 });
-
-describe('first-run .env import', () => {
-    it('uses the same file and folder choices and reports the chosen file', async () => {
-        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-        vi.stubGlobal('window', new EventTarget());
-        const selection = { directory: '/tmp/fixture', candidates: ['.env', 's_multi.env'] };
-        mocks.env.mockResolvedValue({ kind: 'choose', selection });
-        mocks.envCandidate.mockResolvedValue({ kind: 'imported', fileName: 's_multi.env', apiKey: 'fixture-api' });
-        let view!: ReturnType<typeof create>;
+afterEach(async () => { if (view) { await act(async () => view!.unmount()); view = undefined; } vi.unstubAllGlobals(); });
+describe('first-run credential profiles', () => {
+    it('opts only the embedded guide into onboarding', () => {
+        expect(renderToStaticMarkup(createElement(OnboardingSetup))).toContain('引導申請 API Key');
+        expect(mocks.panel).toHaveBeenCalledWith({ onboarding: true, initialPrompt: '我是第一次使用，還沒有永豐 Shioaji API Key，可以引導我怎麼申請嗎？', visibleTabs: ['chat', 'settings'] }, undefined);
+    });
+    it('starts with the native non-secret read model after saving a new account', async () => {
+        const settings: DesktopSettings = { ...EMPTY_DESKTOP_SETTINGS, configured: true, activeProfileId: 'new', credentialRevision: 'native', profiles: [{ id: 'new', name: '新帳號', environment: 'simulation', hasCA: false, caPath: '', createdAt: '', apiKeyMasked: '••••1234', secretState: 'stored', credentialBackend: 'system', revision: 'native' }] };
+        mocks.save.mockResolvedValue(settings); mocks.start.mockResolvedValue({ ok: true });
         await act(async () => { view = create(createElement(OnboardingSetup)); });
-        const button = (label: string) => view.root.findAllByType('button').find(node => node.children.filter(x => typeof x === 'string').join('').includes(label))!;
-        expect(JSON.stringify(view.toJSON())).toContain('支援 name.env、.env、.env.local；隱藏檔請選資料夾。');
-        await act(async () => button('選擇資料夾').props.onClick());
-        expect(mocks.env).toHaveBeenCalledWith('directory');
-        expect(JSON.stringify(view.toJSON())).toContain('資料夾裡有 2 個 .env 檔案');
-        await act(async () => button('s_multi.env').props.onClick());
-        expect(mocks.envCandidate).toHaveBeenCalledExactlyOnceWith(selection, 's_multi.env');
-        expect(JSON.stringify(view.toJSON())).toContain('已從 s_multi.env 匯入');
-        await act(async () => view.unmount());
+        await act(async () => view!.root.findByType(CredentialProfiles).props.onSave({ name: '新帳號', environment: 'simulation', caPath: '', apiKey: 'test', secretKey: 'test' }, true));
+        expect(mocks.start).toHaveBeenCalledWith(settings);
+        expect(mocks.start.mock.calls[0]![0]).not.toHaveProperty('apiKey'); expect(mocks.start.mock.calls[0]![0]).not.toHaveProperty('caPassword');
+        expect(mocks.reload).toHaveBeenCalledOnce();
+    });
+    it('does not start when secret storage fails', async () => {
+        mocks.save.mockRejectedValue(new Error('storage unavailable'));
+        await act(async () => { view = create(createElement(OnboardingSetup)); });
+        await expect(view!.root.findByType(CredentialProfiles).props.onSave({ name: 'test', environment: 'simulation', caPath: '' }, true)).rejects.toThrow();
+        expect(mocks.start).not.toHaveBeenCalled();
     });
 });
