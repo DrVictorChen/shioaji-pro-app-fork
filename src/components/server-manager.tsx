@@ -82,6 +82,7 @@ import { notify } from '../lib/trade';
 import { Orb } from './orb';
 import { ServerSettingsDialog, type ServerConnectionSettings } from './server-settings-dialog';
 import * as dialogStyles from './server-settings-dialog.css';
+import { vars } from '../theme.css';
 import type { Health } from '../lib/types/health';
 import { setServerIdentityVerified } from '../lib/server-identity';
 import * as styles from './hud-header.css';
@@ -760,7 +761,8 @@ export function ServerManager({
                                                   color: 'var(--amber, #e0a43c)',
                                               }
                                             : {
-                                                  color: 'var(--danger, #f23645)',
+                                                  // 正式環境固定 danger 紅（theme token，不隨漲跌配色翻轉）
+                                                  color: vars.color.danger,
                                                   fontWeight: 700,
                                               }
                                     }
