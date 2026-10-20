@@ -1,9 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { agentRuntimeDiagnostics, recordAgentRuntimeFailure } from './agent-diagnostics';
+import { agentRuntimeDiagnostics, recordAgentRuntimeFailure, redactAgentRuntimeDetail } from './agent-diagnostics';
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Agent runtime copied diagnostics', () => {
+    it('redacts structured credentials, account data and private paths without hiding token limits', () => {
+        const detail = [
+            JSON.stringify({ nested: [{ Cookie: 'session=fixture-login-cookie', SJ_PERSON_ID: 'fixture-person', email: 'fixture@example.com', custom_key: 'fixture-private-key', max_tokens: 4096 }] }),
+            'proxy=http://fixture-user:fixture-pass@proxy.test:80',
+            'C:\\Users\\Fixture User\\project',
+            JSON.stringify({ message: 'C:\\Users\\Fixture User\\project' }),
+            '\\\\host\\Users\\Fixture User\\project',
+            '\\\\host\\share\\Fixture User\\project',
+            'email=fixture@example.com SJ_PERSON_ID=fixture-person',
+        ].join('\n');
+        const result = redactAgentRuntimeDetail(detail);
+        for (const secret of ['fixture-login-cookie', 'fixture-person', 'fixture@example.com', 'fixture-user', 'fixture-pass', 'Fixture User', 'fixture-private-key']) expect(result).not.toContain(secret);
+        expect(result).toContain('"max_tokens":4096');
+    });
     it('retains the cause across reloads and redacts credentials before storage', async () => {
         const stored = new Map<string, string>();
         vi.stubGlobal('localStorage', {
