@@ -22,6 +22,7 @@ import { EMPTY_DESKTOP_SETTINGS, type DesktopSettings } from '../lib/desktop-cre
 import { ServerManager } from './server-manager';
 import { ServerSettingsDialog } from './server-settings-dialog';
 import { CredentialProfiles } from './credential-profiles';
+import { getStoredSpawnKeyHash, setStoredSpawnKeyHash } from '../lib/spawn-keys';
 const updateState = { phase: 'idle' };
 const one = { id: 'one', name: '主帳號', environment: 'simulation' as const, caPath: '', hasCA: false, apiKeyMasked: '••••1234', createdAt: '2026-10-20', secretState: 'stored' as const, credentialBackend: 'system' as const, revision: 'one-rev' };
 const two = { ...one, id: 'two', name: '備用帳號', environment: 'production' as const, hasCA: true, caPath: '/fixture/ca.pfx', revision: 'two-rev' };
@@ -32,6 +33,8 @@ describe('credential profiles in server settings', () => {
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
         vi.stubGlobal('window', Object.assign(new EventTarget(), { location: { reload: mocks.reload } }));
         vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 0; });
+        const storage = new Map<string, string>();
+        vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
         vi.clearAllMocks();
         mocks.load.mockResolvedValue(structuredClone(initial)); mocks.save.mockResolvedValue(initial); mocks.profile.mockResolvedValue(initial);
         mocks.select.mockResolvedValue({ ...initial, activeProfileId: 'two', production: true, credentialRevision: 'two-rev', caPath: two.caPath, hasCaPassword: true });
@@ -70,16 +73,35 @@ describe('credential profiles in server settings', () => {
         expect(mocks.profile).toHaveBeenCalledWith({ id: 'one', name: '更名', environment: 'simulation', caPath: '' });
         expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.start).not.toHaveBeenCalled();
     });
-    it('does not save or restart when native Agent shutdown fails', async () => {
+    it('saves first but does not restart when native Agent shutdown fails', async () => {
         await open(); mocks.prepare.mockRejectedValueOnce(new Error('unavailable'));
-        await click('儲存並重啟'); expect(mocks.profile).not.toHaveBeenCalled(); expect(mocks.start).not.toHaveBeenCalled(); expect(text()).toContain('操作未完成');
+        await click('儲存並重啟'); expect(mocks.profile).toHaveBeenCalledOnce(); expect(mocks.start).not.toHaveBeenCalled(); expect(text()).toContain('unavailable');
+    });
+    it.each([new Error('API Key 格式錯誤'), '憑證資料超過 Windows 儲存上限'])('shows the actual native validation error without stopping (%s)', async error => {
+        await open(); mocks.profile.mockRejectedValueOnce(error);
+        await click('儲存並重啟');
+        expect(text()).toContain(error instanceof Error ? error.message : error);
+        expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.select).not.toHaveBeenCalled();
+    });
+    it('validates the newly saved production profile before stopping or switching', async () => {
+        await open(); await click('新增帳號'); await change(0, '正式無CA'); await change(1, 'Abc123'); await change(2, 'Xyz789'); await click('正式環境');
+        mocks.profile.mockResolvedValueOnce({ ...initial, profiles: [...initial.profiles, { ...two, id: 'three', caPath: '', hasCaPassword: false }] });
+        await click('儲存並重啟'); await click('確認新增並啟動');
+        expect(text()).toContain('正式環境下單需要');
+        expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.select).not.toHaveBeenCalled();
+    });
+    it('shows the actual running environment and scheme independently of the selected profile', async () => {
+        mocks.status.mockResolvedValueOnce({ running: true, simulation: false, scheme: 'https', healthy: true });
+        await open(); expect(text()).toContain('伺服器運行中 · 正式環境 · https');
     });
     it('switches only after confirmation and stopping the old server', async () => {
+        setStoredSpawnKeyHash('old-spawn-revision');
         await open(); await click('切換使用'); expect(mocks.select).not.toHaveBeenCalled();
         await click('確認切換並停止伺服器');
         expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true }); expect(mocks.select).toHaveBeenCalledWith('two');
         expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(mocks.select.mock.invocationCallOrder[0]!);
         expect(mocks.start).not.toHaveBeenCalled();
+        expect(getStoredSpawnKeyHash()).toBe('old-spawn-revision');
     });
     it('does not switch or delete when stopping fails', async () => {
         await open(); mocks.stop.mockResolvedValue({ ok: false, output: 'busy' });
@@ -100,7 +122,7 @@ describe('credential profiles in server settings', () => {
     });
     it('shows migration and Linux fallback warnings without secrets', async () => {
         mocks.load.mockResolvedValue({ ...initial, credentialBackend: 'plaintext-fallback', fallbackPath: '/fixture/credentials.json', migrationError: '遷移未完成；明文設定已保留' });
-        await open(); expect(text()).toContain('0600'); expect(text()).toContain('/fixture/credentials.json'); expect(text()).toContain('遷移未完成');
+        await open(); expect(text()).toContain('0600'); expect(text()).toContain('/fixture/credentials.json'); expect(text()).toContain('遷移未完成'); expect(text()).toContain('含 Agent');
     });
     it('logout stops then clears all active secrets through one native command and reloads', async () => {
         await open(); await click('登出並清除金鑰'); expect(mocks.logout).not.toHaveBeenCalled();

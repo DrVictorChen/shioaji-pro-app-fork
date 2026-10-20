@@ -466,22 +466,30 @@ export function ServerManager({
     const saveConnectionSettings = async (draft: ServerConnectionSettings, apply: boolean): Promise<DesktopSettings> => {
         if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
         restartError.current = '';
-        if (apply) await stopAgentsForServerChange();
         let next = await saveCredentialProfile(draft);
         setSettings(next);
         setSavedForRestart(true);
         if (apply) {
             const id = draft.id ?? next.profiles.at(-1)?.id;
+            const target = next.profiles.find(profile => profile.id === id);
+            const invalid = validateDesktopSettings({ ...next,
+                configured: target?.secretState === 'stored',
+                production: target?.environment === 'production',
+                caPath: target?.caPath ?? '',
+                hasCaPassword: target?.hasCaPassword ?? (id === next.activeProfileId && next.hasCaPassword),
+            });
+            if (invalid) throw new Error(invalid.body);
+            await stopAgentsForServerChange();
+            let stoppedForSwitch = false;
             if (id && id !== next.activeProfileId) {
                 const stopped = await serverStop({ stopAgents: true });
                 if (!stopped.ok) throw new Error('未能停止伺服器；帳號已儲存，尚未切換。');
                 next = await selectCredentialProfile(id);
                 setSettings(next);
+                stoppedForSwitch = true;
             }
-            const invalid = validateDesktopSettings(next);
-            if (invalid) throw new Error(invalid.body);
             const scenario = applyScenario(!!status?.running, status?.simulation, next.production);
-            const ok = status?.running ? await doRestart(next, scenario) : await doStart(next, scenario);
+            const ok = status?.running && !stoppedForSwitch ? await doRestart(next, scenario) : await doStart(next, scenario);
             if (!ok) throw new Error('帳號已儲存，但伺服器未能套用。');
         }
         return next;
@@ -497,7 +505,6 @@ export function ServerManager({
                 setServerIdentityVerified(false);
                 const stopped = await serverStop({ stopAgents: true });
                 if (!stopped.ok) throw new Error('無法停止伺服器，尚未變更帳號。');
-                clearStoredSpawnKeyHash();
             }
             const next = action === 'select' ? await selectCredentialProfile(id) : await deleteCredentialProfile(id);
             setSettings(next); setSavedForRestart(true);

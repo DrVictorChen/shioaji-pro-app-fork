@@ -10,6 +10,7 @@ export interface CredentialProfile {
     environment: CredentialEnvironment;
     createdAt: string;
     hasCA: boolean;
+    hasCaPassword?: boolean;
     caPath: string;
     apiKeyMasked: string;
     secretState: 'pending' | 'stored' | 'pendingDelete' | 'missing' | 'unavailable';

@@ -57,6 +57,7 @@ beforeEach(() => {
     });
     native.invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
         switch (cmd) {
+            case 'sidecar_server_status': return { running: false };
             case 'process_alive': return false; // the previous App's sidecar is gone
             case 'find_free_port': {
                 let p = args.preferred as number;
@@ -108,7 +109,8 @@ describe('serverStart start path', () => {
         vi.clearAllMocks();
         listening.clear(); bound.clear();
         await tauri.serverStart(settings);
-        expect(native.execute).toHaveBeenCalled(); // `server status` fallback
+        expect(native.invoke).toHaveBeenCalledWith('sidecar_server_status');
+        expect(native.execute).not.toHaveBeenCalled();
         expect(native.fetch.mock.calls.length).toBeGreaterThan(withKnown);
     });
 

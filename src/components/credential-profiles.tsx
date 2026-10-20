@@ -33,7 +33,7 @@ export function CredentialProfiles({ settings, busy, running, onSave, onAction, 
         if (inFlight.current || busy) return;
         inFlight.current = true; setPending(true); onBusyChange?.(true); setError(''); setMessage('');
         try { await action(); }
-        catch { setError('操作未完成。請確認系統憑證庫可用後重試；若伺服器未停止，請先停止伺服器。'); }
+        catch (e) { setError(e instanceof Error ? e.message : typeof e === 'string' ? e : '操作未完成，請重試。'); }
         finally {
             // Clear even on partial success (e.g. saved, but restart failed).
             // No submitted secret remains in React state or a hidden input.
@@ -91,7 +91,7 @@ export function CredentialProfiles({ settings, busy, running, onSave, onAction, 
     const selectedProfile = settings.profiles.find(p => p.id === draft.id);
     return <div className={s.fields}>
         {settings.migrationError && <p className={s.warning} role="alert">{settings.migrationError}<button className={s.button} disabled={locked} onClick={() => window.location.reload()}>重試遷移</button></p>}
-        {settings.credentialBackend === 'plaintext-fallback' && <p className={s.warning} role="alert"><ShieldAlert size={16} />此系統沒有可用的 Secret Service，金鑰與 CA 密碼以明文保存在 {settings.fallbackPath}（檔案權限 0600）。</p>}
+        {settings.credentialBackend === 'plaintext-fallback' && <p className={s.warning} role="alert"><ShieldAlert size={16} />此系統沒有可用的 Secret Service，金鑰與 CA 密碼以明文保存在 {settings.fallbackPath}（檔案權限 0600）。同機以相同使用者權限執行的程式（含 Agent）仍可能讀到此檔案。</p>}
         <section className={s.section} aria-label="帳號設定列表">
             <div className={s.row}><h3 className={s.heading}>帳號設定</h3><button className={s.button} disabled={locked} onClick={() => { setDraft(emptyDraft()); setConfirmation(''); setError(''); setMessage(''); }}><Plus size={14} />新增帳號</button></div>
             {settings.profiles.map(profile => <div className={s.notice} key={profile.id}>

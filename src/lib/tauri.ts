@@ -191,21 +191,6 @@ export interface SidecarResult {
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
 
-async function sidecar(
-    args: string[],
-    env?: Record<string, string>,
-): Promise<SidecarResult> {
-    const { Command } = await import('@tauri-apps/plugin-shell');
-    const cmd = Command.sidecar('binaries/shioaji', args, {
-        env: { NO_COLOR: '1', ...env },
-    });
-    const out = await cmd.execute();
-    const text = `${out.stdout}\n${out.stderr}`
-        .replace(ANSI_RE, '')
-        .trim();
-    return { ok: out.code === 0, output: text };
-}
-
 // `shioaji server start` runs the server in the FOREGROUND — it never exits,
 // so awaiting execute() hangs the UI on 啟動中 forever. Spawn it instead and
 // poll health to know when it's actually up; surface the captured log only if
@@ -572,27 +557,22 @@ export async function serverStatus(
     }
     if (getDevServerPort()) return { running: false };
     try {
-        const res = await sidecar(['server', 'status', '--format', 'json']);
-        const jsonStart = res.output.indexOf('{');
-        if (jsonStart >= 0) {
-            const st = JSON.parse(
-                res.output.slice(jsonStart),
-            ) as ServerStatus;
-            if (st.running && st.port && !ports.includes(st.port)) {
-                const hit = await probeInfoEither(st.port);
-                if (hit) {
-                    const status: ServerStatus = {
-                        running: true,
-                        port: st.port,
-                        healthy: await probeHealthy(st.port, hit.scheme),
-                        simulation: hit.info.simulation,
-                        version: hit.info.version,
-                        scheme: hit.scheme,
-                        agentHarnessEnabled: hit.info.agentHarnessEnabled,
-                        pid: st.pid,
-                    };
-                    if (!accept || await accept(status)) return status;
-                }
+        const { invoke } = await import('@tauri-apps/api/core');
+        const st = await invoke<ServerStatus>('sidecar_server_status');
+        if (st.running && st.port && !ports.includes(st.port)) {
+            const hit = await probeInfoEither(st.port);
+            if (hit) {
+                const status: ServerStatus = {
+                    running: true,
+                    port: st.port,
+                    healthy: await probeHealthy(st.port, hit.scheme),
+                    simulation: hit.info.simulation,
+                    version: hit.info.version,
+                    scheme: hit.scheme,
+                    agentHarnessEnabled: hit.info.agentHarnessEnabled,
+                    pid: st.pid,
+                };
+                if (!accept || await accept(status)) return status;
             }
         }
     } catch {
