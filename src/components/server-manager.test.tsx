@@ -1,4 +1,4 @@
-import { createElement } from 'react';
+import { createElement, type ReactElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ load: vi.fn(), save: vi.fn(), profile: vi.fn(), select: vi.fn(), remove: vi.fn(), logout: vi.fn(), start: vi.fn(), stop: vi.fn(), status: vi.fn(), env: vi.fn(), envCandidate: vi.fn(), ca: vi.fn(), notify: vi.fn(), info: vi.fn(), prepare: vi.fn(), reload: vi.fn() }));
@@ -102,7 +102,7 @@ describe('credential profiles in server settings', () => {
     it('switches only after confirmation and stopping the old server', async () => {
         setStoredSpawnKeyHash('old-spawn-revision');
         await open(); await click('切換使用'); expect(mocks.select).not.toHaveBeenCalled();
-        await click('確認切換並停止伺服器');
+        await click('確認切換');
         expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true, ownedOnly: true }); expect(mocks.select).toHaveBeenCalledWith('two');
         expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(mocks.select.mock.invocationCallOrder[0]!);
         expect(mocks.start).not.toHaveBeenCalled();
@@ -110,21 +110,39 @@ describe('credential profiles in server settings', () => {
     });
     it('does not switch or delete when stopping fails', async () => {
         await open(); mocks.stop.mockResolvedValue({ ok: false, output: 'busy' });
-        await click('切換使用'); await click('確認切換並停止伺服器');
+        await click('切換使用'); await click('確認切換');
         expect(mocks.select).not.toHaveBeenCalled(); expect(mocks.remove).not.toHaveBeenCalled();
     });
     it('requires confirmation and a stop before deleting the active profile', async () => {
         await open(); await click('刪除 主帳號'); expect(mocks.remove).not.toHaveBeenCalled();
-        await click('確認刪除全部秘密'); expect(mocks.remove).toHaveBeenCalledWith('one');
+        await click('確認刪除'); expect(mocks.remove).toHaveBeenCalledWith('one');
         expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(mocks.remove.mock.invocationCallOrder[0]!);
         expect(mocks.reload).toHaveBeenCalledOnce();
     });
     it('imports only after confirmation and receives no plaintext form values', async () => {
         await open(); mocks.env.mockResolvedValue({ kind: 'imported', fileName: 'fixture.env', settings: initial, profileId: 'two' });
         await click('新增帳號'); await click('從 .env 匯入'); expect(mocks.env).not.toHaveBeenCalled();
-        await click('確認匯入並新增帳號'); expect(mocks.env).toHaveBeenCalledWith('file', 'simulation');
+        await click('確認匯入'); expect(mocks.env).toHaveBeenCalledWith('file', 'simulation');
         // 匯入成功回到列表，畫面上不再有任何輸入欄位
         expect(view.root.findByType(CredentialProfiles).findAllByType('input')).toHaveLength(0); expect(text()).toContain('匯入並儲存帳號');
+    });
+    it('keeps keyboard focus when switching between the list, the editor and confirmations', async () => {
+        // 按鈕被卸載時焦點會掉到 body，Escape 就送不到 dialog；確認焦點每次都移到對應位置
+        const focused: string[] = [];
+        const nodeMock = (element: ReactElement) => {
+            const p = element.props as Record<string, unknown>;
+            return { focus: () => { focused.push(String(p['aria-label'] ?? p.placeholder ?? [p.children].flat().filter(x => typeof x === 'string').join(''))); } };
+        };
+        const props = { settings: initial, busy: false, running: false, onSave: vi.fn(async () => initial), onAction: vi.fn(async () => initial), onImported: vi.fn() };
+        await act(async () => { view = create(createElement(CredentialProfiles, props), { createNodeMock: nodeMock }); });
+        await click('編輯 備用帳號'); expect(focused.at(-1)).toBe('例如：主帳號、模擬測試');
+        await click('返回帳號列表'); expect(focused.at(-1)).toBe('編輯 備用帳號');
+        await click('新增帳號'); expect(focused.at(-1)).toBe('例如：主帳號、模擬測試');
+        await click('取消'); expect(focused.at(-1)).toBe('新增帳號');
+        await click('刪除 備用帳號'); expect(focused.at(-1)).toBe('取消刪除');
+        await click('取消刪除'); expect(focused.at(-1)).toBe('刪除 備用帳號');
+        await click('切換使用'); expect(focused.at(-1)).toBe('取消切換');
+        await click('確認切換'); expect(props.onAction).toHaveBeenCalledWith('select', 'two'); expect(focused.at(-1)).toBe('編輯 備用帳號');
     });
     it('shows migration and Linux fallback warnings without secrets', async () => {
         mocks.load.mockResolvedValue({ ...initial, credentialBackend: 'plaintext-fallback', fallbackPath: '/fixture/credentials.json', migrationError: '遷移未完成；明文設定已保留' });

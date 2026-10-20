@@ -9,6 +9,7 @@ import { FeatureGate } from './feature-gate';
 import { CredentialProfiles } from './credential-profiles';
 import { timedOnboarding } from '../lib/server-actions';
 import * as styles from './onboarding-setup.css';
+import * as dialog from './server-settings-dialog.css';
 
 const AGENT_STARTER_PROMPT = '我是第一次使用，還沒有永豐 Shioaji API Key，可以引導我怎麼申請嗎？';
 export function OnboardingSetup() {
@@ -87,13 +88,15 @@ export function OnboardingSetup() {
             <div><div className={styles.logo}>Shioaji Pro</div><div className={styles.subtitle}>設定或選擇帳號以啟動交易伺服器</div></div>
             {error && <p className={styles.errorText} role="alert">{error}</p>}
             {loaded && <CredentialProfiles settings={settings} busy={busy} running={false} onSave={save} onAction={action} onImported={setSettings} onBusyChange={setBusy} />}
-            {loaded && settings.migrationError && <div>
-                <p className={styles.hint}>登出會停止本 App 的 Agent 與伺服器，並清除舊金鑰、CA 密碼及使用中的帳號秘密。</p>
-                <button className={styles.caPickBtn} disabled={busy} onClick={() => void logout()}>{confirmLogout ? '確認登出並清除' : '登出並清除'}</button>
-                {confirmLogout && <button className={styles.caPickBtn} disabled={busy} onClick={() => setConfirmLogout(false)}>取消</button>}
+            {loaded && settings.migrationError && <div className={styles.logoutBox}>
+                <p className={styles.hint}>無法轉移時可以登出重來：會停止本 App 的 Agent 與伺服器，並清除舊金鑰、CA 密碼與使用中帳號的金鑰。</p>
+                <div className={styles.logoutActions}>
+                    {confirmLogout && <button className={dialog.smallButton} disabled={busy} onClick={() => setConfirmLogout(false)}>取消</button>}
+                    <button className={confirmLogout ? dialog.confirmDanger : dialog.smallButton} disabled={busy} onClick={() => void logout()}>{confirmLogout ? '確認登出並清除' : '登出並清除'}</button>
+                </div>
             </div>}
             {busy && <p className={styles.hint}>啟動中 — 登入與載入合約約需 10–30 秒…</p>}
-            <p className={styles.hint}>秘密儲存在系統憑證庫。還沒有 API Key？可使用右側 AI 助理引導申請。</p>
+            <p className={styles.hint}>金鑰只存在這台電腦的系統憑證庫。還沒有 API Key？可以請 AI 助理引導申請。</p>
         </div>
                 {AgentPanel && (
                     <div className={styles.agentCard}>

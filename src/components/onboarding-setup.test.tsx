@@ -45,7 +45,7 @@ describe('first-run credential profiles', () => {
     it('retries migration through native settings and refreshes the current view', async () => {
         mocks.load.mockResolvedValueOnce({ ...EMPTY_DESKTOP_SETTINGS, migrationError: '暫時無法存取' });
         await act(async () => { view = create(createElement(OnboardingSetup)); });
-        const retry = view!.root.findAllByType('button').find(b => b.children.join('') === '重試遷移')!;
+        const retry = view!.root.findAllByType('button').find(b => b.children.filter(x => typeof x === 'string').join('') === '重試遷移')!;
         await act(async () => retry.props.onClick());
         expect(mocks.load).toHaveBeenCalledTimes(2);
         expect(view!.root.findByType(CredentialProfiles).props.settings.migrationError).toBeNull();
