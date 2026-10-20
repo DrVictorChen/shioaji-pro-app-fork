@@ -16,6 +16,7 @@ import type {
     SeriesType,
     Time,
 } from 'lightweight-charts';
+import { colorWithOpacity } from './indicator-defs';
 
 export interface PriceBandPoint {
     time: Time;
@@ -29,6 +30,52 @@ export interface PriceBandOptions {
     borderColor: string; // 上下緣線色（實色）
     borderStyle: 'solid' | 'dashed';
     borderWidth: number;
+}
+
+// 預設外觀：填色只是「這裡有個價位區」的底色提示，要輕到 K 棒、量能與
+// 格線都還看得清楚（深色、淺色主題 12% 都辨識得出、又不搶 K 棒）；上下緣 1px、
+// 略帶透明，界線清楚但不搶 K 棒。使用者在樣式對話框調的「透明度」會
+// 等比例套在這兩個基準上（100% = 預設外觀，往下調更淡）。
+export const BAND_FILL_OPACITY = 12;
+export const BAND_BORDER_OPACITY = 70;
+
+export function bandColors(
+    color: string,
+    opacity: number,
+): { fillColor: string; borderColor: string } {
+    const k = Math.max(0, Math.min(opacity, 100)) / 100;
+    return {
+        fillColor: colorWithOpacity(color, Math.round(BAND_FILL_OPACITY * k)),
+        borderColor: colorWithOpacity(color, Math.round(BAND_BORDER_OPACITY * k)),
+    };
+}
+
+// 時間區間 [from, to] 內所有點的上下界（points 依時間遞增）。副圖的
+// band 用它讓 y 軸跟著可見範圍縮放；區間內沒有點時回 null。
+export function bandRangeIn(
+    points: readonly PriceBandPoint[],
+    from: number,
+    to: number,
+): { minValue: number; maxValue: number } | null {
+    // 二分找第一個 time >= from
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if ((points[mid]!.time as number) < from) lo = mid + 1;
+        else hi = mid;
+    }
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = lo; i < points.length; i++) {
+        const p = points[i]!;
+        if ((p.time as number) > to) break;
+        const a = Math.min(p.top, p.bottom);
+        const b = Math.max(p.top, p.bottom);
+        if (a < min) min = a;
+        if (b > max) max = b;
+    }
+    return min <= max ? { minValue: min, maxValue: max } : null;
 }
 
 type DrawTarget = Parameters<IPrimitivePaneRenderer['draw']>[0];
@@ -108,20 +155,25 @@ class PriceBandRenderer implements IPrimitivePaneRenderer {
                 ctx.fill();
             }
 
-            // 上下緣線
+            // 上下緣線：線寬取整數 bitmap px，y 對齊像素格，1px 線才不會
+            // 被反鋸齒糊成兩條半透明的粗線
+            const lw = Math.max(1, Math.round(o.borderWidth * hr));
+            const half = lw % 2 === 1 ? 0.5 : 0;
+            const snap = (y: number) => Math.round(y - half) + half;
             ctx.strokeStyle = o.borderColor;
-            ctx.lineWidth = o.borderWidth * hr;
+            ctx.lineWidth = lw;
             ctx.setLineDash(o.borderStyle === 'dashed' ? [4 * hr, 4 * hr] : []);
             for (const s of segs) {
                 const n = s.xs.length;
                 for (const ys of [s.yTops, s.yBots]) {
                     ctx.beginPath();
                     if (n === 1) {
-                        ctx.moveTo(s.xs[0]! - minHalf, ys[0]!);
-                        ctx.lineTo(s.xs[0]! + minHalf, ys[0]!);
+                        ctx.moveTo(s.xs[0]! - minHalf, snap(ys[0]!));
+                        ctx.lineTo(s.xs[0]! + minHalf, snap(ys[0]!));
                     } else {
-                        ctx.moveTo(s.xs[0]!, ys[0]!);
-                        for (let i = 1; i < n; i++) ctx.lineTo(s.xs[i]!, ys[i]!);
+                        ctx.moveTo(s.xs[0]!, snap(ys[0]!));
+                        for (let i = 1; i < n; i++)
+                            ctx.lineTo(s.xs[i]!, snap(ys[i]!));
                     }
                     ctx.stroke();
                 }
@@ -134,7 +186,9 @@ class PriceBandRenderer implements IPrimitivePaneRenderer {
 class PriceBandView implements IPrimitivePaneView {
     constructor(private readonly _band: PriceBandPrimitive) {}
     zOrder(): PrimitivePaneViewZOrder {
-        return 'bottom'; // 區域墊在 K 棒底下，不遮價格
+        // 'bottom'：lightweight-charts 先畫所有 bottom 層（連格線都在它
+        // 之上），再畫各 series 本體，所以 K 棒、量能永遠蓋在價格帶上面
+        return 'bottom';
     }
     renderer(): IPrimitivePaneRenderer {
         return new PriceBandRenderer(

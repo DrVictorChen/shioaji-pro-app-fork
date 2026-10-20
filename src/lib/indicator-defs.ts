@@ -456,6 +456,14 @@ export function outputStyle(
     };
 }
 
+// 這個輸出畫在圖上的線型（樣式對話框的預覽用）：dashed 輸出、或
+// 上下緣設成虛線的 band，預覽也要是虛線
+export function outputLineStyle(o: OutputDef): 'solid' | 'dashed' {
+    if (o.kind === 'dashed') return 'dashed';
+    if (o.kind === 'band' && o.border === 'dashed') return 'dashed';
+    return 'solid';
+}
+
 // hex + 0-100 opacity → rgba()（100% 直接回傳 hex，保住主題原色）
 export function colorWithOpacity(hex: string, opacity: number): string {
     if (opacity >= 100 || !/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;

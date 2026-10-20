@@ -88,7 +88,12 @@ import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
 import { canUpdateOrderPrice } from '../lib/odd-lot';
 import { resetEscCancelArm } from '../lib/esc-cancel-arm';
 import { baseMode, getChartColors, useThemeSettings, themeKey as themeKeyOf } from '../lib/theme-store';
-import { PriceBandPrimitive, type PriceBandPoint } from '../lib/price-band';
+import {
+    bandColors,
+    bandRangeIn,
+    PriceBandPrimitive,
+    type PriceBandPoint,
+} from '../lib/price-band';
 import { notify, placeQuickOrder } from '../lib/trade';
 import { captureServerMode } from '../lib/server-info-store';
 import { creditEnquireCond, creditSideBlocks, creditStatus, prepareCreditOrder, useCreditEnquire, type CreditCheck } from '../lib/credit-eligibility';
@@ -1261,6 +1266,8 @@ export function CandleChart({
                     // 主圖：不參與自動縮放（牆在畫面外時不硬拉比例）。
                     // 副圖：band 就是這個 pane 唯一的內容，必須提供價格範圍，
                     // 否則整個 pane 沒有尺度（預設 -0.5~0.5），畫了也看不見。
+                    // 範圍取可見區間內的上下緣，縮放/捲動時 y 軸跟著調整；
+                    // 可見區間沒有點時才退回全歷史範圍。
                     let bandMin = Infinity;
                     let bandMax = -Infinity;
                     for (const bp of bandPoints) {
@@ -1278,12 +1285,24 @@ export function CandleChart({
                             autoscaleInfoProvider:
                                 pane === 0
                                     ? () => null
-                                    : () => ({
-                                          priceRange: {
-                                              minValue: bandMin,
-                                              maxValue: bandMax,
-                                          },
-                                      }),
+                                    : () => {
+                                          const vr = chart
+                                              .timeScale()
+                                              .getVisibleRange();
+                                          const r = vr
+                                              ? bandRangeIn(
+                                                    bandPoints,
+                                                    vr.from as number,
+                                                    vr.to as number,
+                                                )
+                                              : null;
+                                          return {
+                                              priceRange: r ?? {
+                                                  minValue: bandMin,
+                                                  maxValue: bandMax,
+                                              },
+                                          };
+                                      },
                             ...labelOpts,
                             ...priceFormatOpt,
                         },
@@ -1293,12 +1312,9 @@ export function CandleChart({
                     anchor.attachPrimitive(
                         new PriceBandPrimitive({
                             points: bandPoints,
-                            // 填色壓低透明度，邊框保持實色才看得見區間
-                            fillColor: colorWithOpacity(
-                                st.color,
-                                Math.min(st.opacity, 20),
-                            ),
-                            borderColor: st.color,
+                            // 淡填色＋略透明的細邊（見 price-band.ts 的
+                            // BAND_*_OPACITY）；透明度設定等比例套用
+                            ...bandColors(st.color, st.opacity),
                             borderStyle: o.border ?? 'solid',
                             borderWidth: st.width,
                         }),

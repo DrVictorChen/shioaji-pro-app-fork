@@ -452,7 +452,9 @@ export function CustomIndicatorEditor({
                                             className={styles.fieldLabel}
                                             style={{ alignSelf: 'center' }}
                                         >
-                                            plot('{o.key}')
+                                            {o.kind === 'band'
+                                                ? `band('${o.key}')`
+                                                : `plot('${o.key}')`}
                                         </span>
                                         <input
                                             className={styles.textInput}
