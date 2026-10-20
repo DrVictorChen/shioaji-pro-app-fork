@@ -4,6 +4,21 @@ import { agentRuntimeDiagnostics, recordAgentRuntimeFailure, redactAgentRuntimeD
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Agent runtime copied diagnostics', () => {
+    it('masks proxy accounts with or without passwords', () => {
+        for (const proxy of ['http://fixture-user@proxy.test:80', 'socks5://fixture-user@proxy.test:1080', 'http://fixture-user:@proxy.test:80']) {
+            expect(redactAgentRuntimeDetail(proxy)).not.toContain('fixture-user');
+        }
+    });
+
+    it('preserves causes after escaped newlines while masking actual UNC paths', () => {
+        for (const detail of [String.raw`failed\\nimportant cause /project/config.json`, String.raw`failed\\nimportant cause \"quoted\"`, String.raw`failed\\nimportant cause C:\project\config.json`]) {
+            expect(redactAgentRuntimeDetail(detail)).toBe(detail);
+            expect(JSON.parse(redactAgentRuntimeDetail(JSON.stringify({ message: detail }))).message).toBe(detail);
+        }
+        for (const path of [String.raw`\\server\share\Fixture User\project`, String.raw`\\server\shared folder\Fixture User\project`, String.raw`\\?\UNC\server\share\Fixture User\project`]) {
+            expect(redactAgentRuntimeDetail(path)).not.toContain('Fixture User');
+        }
+    });
     it('redacts structured credentials, account data and private paths without hiding token limits', () => {
         const detail = [
             JSON.stringify({ nested: [{ Cookie: 'session=fixture-login-cookie', SJ_PERSON_ID: 'fixture-person', email: 'fixture@example.com', custom_key: 'fixture-private-key', max_tokens: 4096 }] }),

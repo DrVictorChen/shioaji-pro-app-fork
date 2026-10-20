@@ -14,11 +14,11 @@ function redactText(text: string): string {
         .replace(/\b(?:[\w-]*(?:token|key|secret|password|passwd|passphrase|credential|credentials)|SJ_PERSON_ID|person_id|email|username|account_id)["']?\s*[=:]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi, '[REDACTED]')
         .replace(/\b(?:bearer|basic)\s+[^\s,"'}]+/gi, '[REDACTED]')
         .replace(/\b(?:sk-|sk_|rk_|pk_|ghp_|gho_|github_pat_|xox)[\w-]+|\bAKIA[A-Z0-9]{16}\b|\beyJ[\w-]{16,}(?:\.[\w-]+)*/g, '[REDACTED]')
-        .replace(/(\w+:\/\/)[^\s/:@]+:[^\s/@]+@/g, '$1[REDACTED]@')
+        .replace(/(\w+:\/\/)[^\s/:@]+(?::[^\s/@]*)?@/g, '$1[REDACTED]@')
         .replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, '$1?[REDACTED]')
         .replace(/\/(?:Users|home)\/[^/\r\n"]+/g, '~')
         .replace(/(?:[A-Za-z]:[\\/]+|[\\/]{2}[^\\/\r\n"]+[\\/]+)(?:Users|home)[\\/]+[^\\/\r\n"]+/gi, '~')
-        .replace(/\\{2,}[^\\/\r\n"]+[\\/]+[^\r\n"]+/g, '[REDACTED_PATH]')
+        .replace(/\\{2,}(?:\?\\UNC\\)?[^\s\\/:*?"<>|]+[\\/]+[^\r\n\t\\/:*?"<>|]+(?:[\\/][^\r\n"]*)?/g, '[REDACTED_PATH]')
         .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[REDACTED]')
         .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
 }
