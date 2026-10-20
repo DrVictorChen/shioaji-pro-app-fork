@@ -47,6 +47,7 @@ import {
     type ServerActionDeps,
 } from '../lib/server-actions';
 import { freshDiagnostics } from '../lib/diagnostics-snapshot';
+import { agentRuntimeDiagnostics } from '../lib/agent-diagnostics';
 import {
     fetchAccounts,
     fetchCaExpire,
@@ -324,6 +325,7 @@ export function ServerManager({
             lastOutput ? `--- log ---\n${lastOutput}` : '',
             timingDiagnostics(),
             orderTraceDiagnostics(),
+            agentRuntimeDiagnostics(),
         ].filter(Boolean);
         try {
             await navigator.clipboard.writeText(lines.join('\n'));
