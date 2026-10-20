@@ -28,6 +28,8 @@ describe('diagnoseOutput', () => {
             'Error: Authentication failed: Shioaji error Request #P2P/v:bcsolace01/x/PYAPI/x/1018/170353/889277500/LOGINING/_ error code: 400, detail: Sign data is timeout.',
         ].join('\n');
         expect(diagnoseOutput(log)).toMatch(/登入簽章逾時/);
+        expect(diagnoseOutput(log)).toContain('預設 30 秒');
+        expect(diagnoseOutput(log)).not.toContain('5 秒');
         expect(diagnoseOutput(log)).toMatch(/電腦時間/);
         expect(diagnoseOutput(log)).toMatch(/網路延遲/);
         expect(diagnoseOutput(log)).toMatch(/主機端/);

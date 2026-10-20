@@ -368,7 +368,8 @@ export function ensureHarnessOwnedServer(opts: { deferReload?: boolean } = {}): 
     });
 }
 
-// startup/login output lands in ~/.shioaji/sjpro-server-<port>.log now —
+// Pro's native shell captures stdout/stderr in ~/.shioaji/sjpro-server-<port>.log.
+// SDK 1.7.9 also writes daily logs, while keeping its terminal output —
 // read it back for error surfacing and the CA-activation warning scan
 async function readServerLog(port: number): Promise<string> {
     try {
