@@ -4,6 +4,24 @@ import { agentRuntimeDiagnostics, recordAgentRuntimeFailure, redactAgentRuntimeD
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Agent runtime copied diagnostics', () => {
+    it('masks complete paths without consuming the following cause in text and JSON', () => {
+        for (const [path, cause] of [
+            [String.raw`"\\server\share\Client Secret\account.json"`, 'failed: EACCES'],
+            [String.raw`'\\server\Client Share\Client Secret\account.json'`, 'failed: EACCES'],
+            [String.raw`"\\?\unc\server\share\Client Secret\account.json"`, 'failed: EACCES'],
+            [String.raw`"C:\Client Secret\account.json"`, 'failed: EACCES'],
+            [String.raw`\\server\share\Fixture User\p`, 'failed'],
+            [String.raw`\\server\share`, 'access denied'],
+            [String.raw`\\?\UnC\server\share`, 'access denied'],
+            [String.raw`C:\\project\\config.json`, 'not found'],
+        ]) {
+            const detail = `open ${path} ${cause}`;
+            const redacted = redactAgentRuntimeDetail(detail);
+            expect(redacted).toBe(`open [REDACTED_PATH] ${cause}`);
+            expect(JSON.parse(redactAgentRuntimeDetail(JSON.stringify({ message: detail }))).message).toBe(redacted);
+        }
+    });
+
     it('masks case variants of UNC paths while retaining the following cause in text and JSON', () => {
         for (const path of [
             String.raw`\\server\share\FixtureUser\project`,
@@ -26,11 +44,12 @@ describe('Agent runtime copied diagnostics', () => {
     });
 
     it('preserves causes after escaped newlines while masking actual UNC paths', () => {
-        for (const detail of [String.raw`failed\\nimportant cause /project/config.json`, String.raw`failed\\nimportant cause \"quoted\"`, String.raw`failed\\nimportant cause C:\project\config.json`]) {
+        for (const detail of [String.raw`failed\\nimportant cause /project/config.json`, String.raw`failed\\nimportant cause \"quoted\"`]) {
             expect(redactAgentRuntimeDetail(detail)).toBe(detail);
             expect(JSON.parse(redactAgentRuntimeDetail(JSON.stringify({ message: detail }))).message).toBe(detail);
         }
-        for (const path of [String.raw`\\server\share\Fixture User\project`, String.raw`\\server\shared folder\Fixture User\project`, String.raw`\\?\UNC\server\share\Fixture User\project`]) {
+        expect(redactAgentRuntimeDetail(String.raw`failed\\nimportant cause C:\project\config.json`)).toBe(String.raw`failed\\nimportant cause [REDACTED_PATH]`);
+        for (const path of [String.raw`\\server\share\Fixture User\project`, String.raw`"\\server\shared folder\Fixture User\project"`, String.raw`\\?\UNC\server\share\Fixture User\project`]) {
             expect(redactAgentRuntimeDetail(path)).not.toContain('Fixture User');
         }
     });

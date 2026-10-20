@@ -16,9 +16,15 @@ function redactText(text: string): string {
         .replace(/\b(?:sk-|sk_|rk_|pk_|ghp_|gho_|github_pat_|xox)[\w-]+|\bAKIA[A-Z0-9]{16}\b|\beyJ[\w-]{16,}(?:\.[\w-]+)*/g, '[REDACTED]')
         .replace(/(\w+:\/\/)[^\s/:@]+(?::[^\s/@]*)?@/g, '$1[REDACTED]@')
         .replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, '$1?[REDACTED]')
+        // Quoted paths may contain spaces in any segment. Match them before
+        // the unquoted rules, which stop before a following error message.
+        .replace(/"(?:[A-Za-z]:[\\/]+|\\{2,})[^"\r\n]*"|'(?:[A-Za-z]:[\\/]+|\\{2,})[^'\r\n]*'/g, '[REDACTED_PATH]')
         .replace(/\/(?:Users|home)\/[^/\r\n"]+/g, '~')
         .replace(/(?:[A-Za-z]:[\\/]+|[\\/]{2}[^\\/\r\n"]+[\\/]+)(?:Users|home)[\\/]+[^\\/\r\n"]+/gi, '~')
-        .replace(/\\{2,}(?:\?\\[Uu][Nn][Cc]\\)?[^\s\\/:*?"<>|]+[\\/]+[^\r\n\t\\/:*?"<>|]+(?:[\\/][^\s"]*)?/g, '[REDACTED_PATH]')
+        // Beyond the share, continue across spaces only when the next word
+        // contains a path separator (e.g. "Fixture User\p failed").
+        .replace(/\b[A-Za-z]:[\\/]+[^\s"']*(?:[ \t]+[^\s"'\\/]*[\\/][^\s"']*)*/g, '[REDACTED_PATH]')
+        .replace(/\\{2,}(?:\?\\[Uu][Nn][Cc]\\)?[^\s\\/:*?"<>|']+[\\/]+[^\s\\/:*?"<>|']+(?:[\\/][^\s"']*(?:[ \t]+[^\s"'\\/]*[\\/][^\s"']*)*)?/g, '[REDACTED_PATH]')
         .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[REDACTED]')
         .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
 }
