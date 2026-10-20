@@ -23,6 +23,7 @@ import { ServerManager } from './server-manager';
 import { ServerSettingsDialog } from './server-settings-dialog';
 import { CredentialProfiles } from './credential-profiles';
 import { getStoredSpawnKeyHash, setStoredSpawnKeyHash } from '../lib/spawn-keys';
+import { recordAgentRuntimeFailure } from '../lib/agent-diagnostics';
 const updateState = { phase: 'idle' };
 const one = { id: 'one', name: '主帳號', environment: 'simulation' as const, caPath: '', hasCA: false, apiKeyMasked: '••••1234', createdAt: '2026-10-20', secretState: 'stored' as const, credentialBackend: 'system' as const, revision: 'one-rev' };
 const two = { ...one, id: 'two', name: '備用帳號', environment: 'production' as const, hasCA: true, caPath: '/fixture/ca.pfx', revision: 'two-rev' };
@@ -170,5 +171,16 @@ describe('credential profiles in server settings', () => {
     it('does not call an unknown server environment production during diagnostics', async () => {
         await open(); mocks.info.mockRejectedValue(new Error('offline')); await click('檢查目前帳戶');
         expect(text()).toContain('環境：未知'); expect(text()).not.toContain('環境：⚠ 正式');
+    });
+    it('includes the Agent runtime exit cause in copied server diagnostics', async () => {
+        const copy = vi.fn(async (_text: string) => undefined);
+        vi.stubGlobal('navigator', { platform: 'test', clipboard: { writeText: copy } });
+        recordAgentRuntimeFailure('Claude 連線失敗', 'exit code: 3\nInvalid settings\nAuthorization: Bearer hidden-token');
+        await act(async () => { view = create(createElement(ServerManager, { open: true, onToggle: vi.fn() })); });
+        await click('複製診斷');
+        await act(async () => {
+            await vi.waitFor(() => expect(copy).toHaveBeenCalledWith(expect.stringContaining('exit code: 3\nInvalid settings')));
+        });
+        expect(copy.mock.calls[0]![0]).not.toContain('hidden-token');
     });
 });
