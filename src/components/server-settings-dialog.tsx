@@ -14,6 +14,7 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
 }) {
     const dialog = useRef<HTMLDivElement>(null);
     const [credentialBusy, setCredentialBusy] = useState(false);
+    const [editingProfile, setEditingProfile] = useState(false);
     const locked = busy || credentialBusy;
     const close = useRef(onClose); close.current = onClose;
     const lockedRef = useRef(locked); lockedRef.current = locked;
@@ -43,8 +44,8 @@ export function ServerSettingsDialog({ settings, status, busy, pendingApply = fa
         <div ref={dialog} className={s.dialog} role="dialog" aria-modal="true" aria-labelledby="server-settings-title" tabIndex={-1}>
             <header className={s.header}><div><h2 id="server-settings-title" className={s.title}>伺服器設定</h2><p className={s.hint}>{status?.running ? `伺服器運行中 · ${status.simulation === true ? '模擬環境' : status.simulation === false ? '正式環境' : '環境未知'} · ${status.scheme ?? 'scheme 未知'}` : '伺服器未啟動'}{pendingApply ? ' · 有設定尚未套用' : ''}</p></div><button className={s.button} aria-label="關閉伺服器設定" disabled={locked} onClick={onClose}><X size={16} /></button></header>
             <div className={s.body}>
-                <CredentialProfiles settings={settings} busy={busy} running={!!status?.running} onSave={onSave} onAction={onProfileAction} onImported={onImported} onBusyChange={setCredentialBusy} />
-                <fieldset className={s.fields} disabled={locked}>{children}</fieldset>
+                <CredentialProfiles settings={settings} busy={busy} running={!!status?.running} onSave={onSave} onAction={onProfileAction} onImported={onImported} onBusyChange={setCredentialBusy} onEditingChange={setEditingProfile} />
+                {!editingProfile && <fieldset className={s.fields} disabled={locked}>{children}</fieldset>}
             </div>
             <footer className={s.footer}><p className={s.hint}>重啟會停止本 App 的 Agent、撤銷本次 Auto 授權，並暫時中斷行情；既有委託不會因此撤銷。</p><button className={s.button} disabled={locked} onClick={onClose}>關閉</button></footer>
         </div>

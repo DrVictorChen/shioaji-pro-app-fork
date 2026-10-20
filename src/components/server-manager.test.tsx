@@ -53,10 +53,15 @@ describe('credential profiles in server settings', () => {
     const change = async (index: number, value: string) => { await act(async () => field(index).props.onChange({ target: { value } })); };
     it('lists names, masked keys, environments and CA state without preloading secrets', async () => {
         await open(); expect(text()).toContain('主帳號'); expect(text()).toContain('備用帳號'); expect(text()).toContain('••••1234');
+        expect(text()).toContain('模擬'); expect(text()).toContain('正式'); expect(text()).toContain('已設定憑證');
+        // 列表模式不渲染任何輸入欄位；點編輯才展開表單
+        expect(view.root.findByType(CredentialProfiles).findAllByType('input')).toHaveLength(0);
+        await click('編輯 主帳號');
         expect(field(1).props.value).toBe(''); expect(field(2).props.value).toBe('');
         await change(1, 'draft-canary'); await click('關閉伺服器設定');
         expect(mocks.profile).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled();
         await click('完整設定'); expect(text()).not.toContain('draft-canary');
+        await click('編輯 主帳號'); expect(field(1).props.value).toBe('');
     });
     it('requires a second confirmation to add and clears secrets before save finishes', async () => {
         await open(); await click('新增帳號'); await change(0, '新帳號'); await change(1, 'Abc123'); await change(2, 'Xyz789');
@@ -69,16 +74,16 @@ describe('credential profiles in server settings', () => {
         expect(mocks.stop).not.toHaveBeenCalled(); expect(text()).toContain('帳號已儲存');
     });
     it('saves a profile separately from preferences without restarting', async () => {
-        await open(); await change(0, '更名'); await click('僅儲存');
+        await open(); await click('編輯 主帳號'); await change(0, '更名'); await click('僅儲存');
         expect(mocks.profile).toHaveBeenCalledWith({ id: 'one', name: '更名', environment: 'simulation', caPath: '' });
         expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.start).not.toHaveBeenCalled();
     });
     it('saves first but does not restart when native Agent shutdown fails', async () => {
-        await open(); mocks.prepare.mockRejectedValueOnce(new Error('unavailable'));
+        await open(); await click('編輯 主帳號'); mocks.prepare.mockRejectedValueOnce(new Error('unavailable'));
         await click('儲存並重啟'); expect(mocks.profile).toHaveBeenCalledOnce(); expect(mocks.start).not.toHaveBeenCalled(); expect(text()).toContain('unavailable');
     });
     it.each([new Error('API Key 格式錯誤'), '憑證資料超過 Windows 儲存上限'])('shows the actual native validation error without stopping (%s)', async error => {
-        await open(); mocks.profile.mockRejectedValueOnce(error);
+        await open(); await click('編輯 主帳號'); mocks.profile.mockRejectedValueOnce(error);
         await click('儲存並重啟');
         expect(text()).toContain(error instanceof Error ? error.message : error);
         expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.select).not.toHaveBeenCalled();
@@ -109,16 +114,17 @@ describe('credential profiles in server settings', () => {
         expect(mocks.select).not.toHaveBeenCalled(); expect(mocks.remove).not.toHaveBeenCalled();
     });
     it('requires confirmation and a stop before deleting the active profile', async () => {
-        await open(); await click('刪除帳號'); expect(mocks.remove).not.toHaveBeenCalled();
+        await open(); await click('刪除 主帳號'); expect(mocks.remove).not.toHaveBeenCalled();
         await click('確認刪除全部秘密'); expect(mocks.remove).toHaveBeenCalledWith('one');
         expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(mocks.remove.mock.invocationCallOrder[0]!);
         expect(mocks.reload).toHaveBeenCalledOnce();
     });
     it('imports only after confirmation and receives no plaintext form values', async () => {
         await open(); mocks.env.mockResolvedValue({ kind: 'imported', fileName: 'fixture.env', settings: initial, profileId: 'two' });
-        await click('選擇 .env 檔案'); expect(mocks.env).not.toHaveBeenCalled();
+        await click('新增帳號'); await click('從 .env 匯入'); expect(mocks.env).not.toHaveBeenCalled();
         await click('確認匯入並新增帳號'); expect(mocks.env).toHaveBeenCalledWith('file', 'simulation');
-        expect(field(1).props.value).toBe(''); expect(field(2).props.value).toBe(''); expect(text()).toContain('匯入並儲存帳號');
+        // 匯入成功回到列表，畫面上不再有任何輸入欄位
+        expect(view.root.findByType(CredentialProfiles).findAllByType('input')).toHaveLength(0); expect(text()).toContain('匯入並儲存帳號');
     });
     it('shows migration and Linux fallback warnings without secrets', async () => {
         mocks.load.mockResolvedValue({ ...initial, credentialBackend: 'plaintext-fallback', fallbackPath: '/fixture/credentials.json', migrationError: '遷移未完成；明文設定已保留' });
