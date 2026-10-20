@@ -32,6 +32,7 @@ describe('first-run credential profiles', () => {
         await act(async () => { view = create(createElement(OnboardingSetup)); });
         await act(async () => view!.root.findByType(CredentialProfiles).props.onSave({ name: '新帳號', environment: 'simulation', caPath: '', apiKey: 'test', secretKey: 'test' }, true));
         expect(mocks.start).toHaveBeenCalledWith(settings);
+        expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true, ownedOnly: true });
         expect(mocks.start.mock.calls[0]![0]).not.toHaveProperty('apiKey'); expect(mocks.start.mock.calls[0]![0]).not.toHaveProperty('caPassword');
         expect(mocks.reload).toHaveBeenCalledOnce();
     });
@@ -41,8 +42,17 @@ describe('first-run credential profiles', () => {
         await expect(view!.root.findByType(CredentialProfiles).props.onSave({ name: 'test', environment: 'simulation', caPath: '' }, true)).rejects.toThrow();
         expect(mocks.start).not.toHaveBeenCalled();
     });
+    it('retries migration through native settings and refreshes the current view', async () => {
+        mocks.load.mockResolvedValueOnce({ ...EMPTY_DESKTOP_SETTINGS, migrationError: '暫時無法存取' });
+        await act(async () => { view = create(createElement(OnboardingSetup)); });
+        const retry = view!.root.findAllByType('button').find(b => b.children.join('') === '重試遷移')!;
+        await act(async () => retry.props.onClick());
+        expect(mocks.load).toHaveBeenCalledTimes(2);
+        expect(view!.root.findByType(CredentialProfiles).props.settings.migrationError).toBeNull();
+        expect(mocks.start).not.toHaveBeenCalled();
+    });
     it('stops the owned server and Agents before selecting from onboarding', async () => {
-        mocks.select.mockImplementation(async () => { expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true }); return EMPTY_DESKTOP_SETTINGS; });
+        mocks.select.mockImplementation(async () => { expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true, ownedOnly: true }); return EMPTY_DESKTOP_SETTINGS; });
         await act(async () => { view = create(createElement(OnboardingSetup)); });
         await act(async () => view!.root.findByType(CredentialProfiles).props.onAction('select', 'two'));
         expect(mocks.select).toHaveBeenCalledWith('two');
@@ -77,7 +87,7 @@ describe('first-run credential profiles', () => {
     });
     it('offers two-click logout after migration failure and stops before clearing', async () => {
         mocks.load.mockResolvedValue({ ...EMPTY_DESKTOP_SETTINGS, migrationError: '遷移失敗；原有資料已保留' });
-        mocks.logout.mockImplementation(async () => { expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true }); return EMPTY_DESKTOP_SETTINGS; });
+        mocks.logout.mockImplementation(async () => { expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true, ownedOnly: true }); return EMPTY_DESKTOP_SETTINGS; });
         await act(async () => { view = create(createElement(OnboardingSetup)); });
         const button = () => view!.root.findAllByType('button').find(b => b.children.join('').includes('登出並清除'))!;
         expect(button()).toBeDefined();

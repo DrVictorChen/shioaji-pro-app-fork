@@ -158,6 +158,9 @@ describe('serverStart and another program\'s server', () => {
 
     it('another App\'s production server is neither used nor stopped: this App starts its own on a free port', async () => {
         foreignOn21322({ simulation: false });
+        // This is the onboarding account-change path before serverStart.
+        expect((await tauri.serverStop({ stopAgents: true, ownedOnly: true })).ok).toBe(true);
+        expect(listening.has(21322)).toBe(true);
         const res = await tauri.serverStart(settings); // simulation
         expect(res).toMatchObject({ ok: true, attached: false, port: 21323,
             foreign: { port: 21322, simulation: false, text: expect.stringContaining('正式伺服器與本 App 設定（模擬）不符') } });

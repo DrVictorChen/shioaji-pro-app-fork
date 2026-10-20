@@ -1,6 +1,6 @@
 import { Check, FileUp, KeyRound, Pencil, Plus, ShieldAlert, Trash2 } from 'lucide-react';
 import { useRef, useState } from 'react';
-import { importEnvCandidate, pickCaFile, pickEnvFile, type CredentialDraft, type CredentialProfile, type DesktopSettings, type EnvImportResult, type EnvSelection } from '../lib/tauri';
+import { importEnvCandidate, loadDesktopSettings, pickCaFile, pickEnvFile, type CredentialDraft, type CredentialProfile, type DesktopSettings, type EnvImportResult, type EnvSelection } from '../lib/tauri';
 import * as s from './server-settings-dialog.css';
 
 const emptyDraft = (): CredentialDraft => ({ name: '', environment: 'simulation', caPath: '', apiKey: '', secretKey: '', caPassword: '' });
@@ -90,7 +90,7 @@ export function CredentialProfiles({ settings, busy, running, onSave, onAction, 
     };
     const selectedProfile = settings.profiles.find(p => p.id === draft.id);
     return <div className={s.fields}>
-        {settings.migrationError && <p className={s.warning} role="alert">{settings.migrationError}<button className={s.button} disabled={locked} onClick={() => window.location.reload()}>重試遷移</button></p>}
+        {settings.migrationError && <p className={s.warning} role="alert">{settings.migrationError}<button className={s.button} disabled={locked} onClick={() => void operation(async () => onImported(await loadDesktopSettings()))}>重試遷移</button></p>}
         {settings.credentialBackend === 'plaintext-fallback' && <p className={s.warning} role="alert"><ShieldAlert size={16} />此系統沒有可用的 Secret Service，金鑰與 CA 密碼以明文保存在 {settings.fallbackPath}（檔案權限 0600）。同機以相同使用者權限執行的程式（含 Agent）仍可能讀到此檔案。</p>}
         <section className={s.section} aria-label="帳號設定列表">
             <div className={s.row}><h3 className={s.heading}>帳號設定</h3><button className={s.button} disabled={locked} onClick={() => { setDraft(emptyDraft()); setConfirmation(''); setError(''); setMessage(''); }}><Plus size={14} />新增帳號</button></div>

@@ -98,7 +98,7 @@ describe('credential profiles in server settings', () => {
         setStoredSpawnKeyHash('old-spawn-revision');
         await open(); await click('切換使用'); expect(mocks.select).not.toHaveBeenCalled();
         await click('確認切換並停止伺服器');
-        expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true }); expect(mocks.select).toHaveBeenCalledWith('two');
+        expect(mocks.stop).toHaveBeenCalledWith({ stopAgents: true, ownedOnly: true }); expect(mocks.select).toHaveBeenCalledWith('two');
         expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(mocks.select.mock.invocationCallOrder[0]!);
         expect(mocks.start).not.toHaveBeenCalled();
         expect(getStoredSpawnKeyHash()).toBe('old-spawn-revision');

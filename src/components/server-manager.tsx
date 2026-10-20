@@ -358,7 +358,7 @@ export function ServerManager({
         void (async () => {
             try {
                 setServerIdentityVerified(false);
-                const stopped = await serverStop({ stopAgents: true });
+                const stopped = await serverStop({ stopAgents: true, ownedOnly: true });
                 if (!stopped.ok) {
                     serverActionDeps.reloadAfterFailedStop();
                     throw new Error(stopped.output || '無法停止本機伺服器');
@@ -482,7 +482,7 @@ export function ServerManager({
             await stopAgentsForServerChange();
             let stoppedForSwitch = false;
             if (id && id !== next.activeProfileId) {
-                const stopped = await serverStop({ stopAgents: true });
+                const stopped = await serverStop({ stopAgents: true, ownedOnly: true });
                 if (!stopped.ok) throw new Error('未能停止伺服器；帳號已儲存，尚未切換。');
                 next = await selectCredentialProfile(id);
                 setSettings(next);
@@ -503,7 +503,7 @@ export function ServerManager({
             // Deleting the selected account follows the same logout stop path.
             if (action === 'select' || id === settings.activeProfileId) {
                 setServerIdentityVerified(false);
-                const stopped = await serverStop({ stopAgents: true });
+                const stopped = await serverStop({ stopAgents: true, ownedOnly: true });
                 if (!stopped.ok) throw new Error('無法停止伺服器，尚未變更帳號。');
             }
             const next = action === 'select' ? await selectCredentialProfile(id) : await deleteCredentialProfile(id);

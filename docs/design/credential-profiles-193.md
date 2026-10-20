@@ -158,7 +158,27 @@ clippy `--all-targets -- -D warnings`、fmt 通過。未啟動使用者 App／Sh
   本次 browser fixture／Keychain smoke 的驗證範圍不包含實際交易登入。
 - CA 原檔不會被刪除；只清除已存秘密與索引。歷史備份與 JavaScript GC 記憶體殘留無法保證清除。
   sidecar 仍以 env 接收秘密；降版需重新輸入 key。此版未提供不保存的單次輸入模式，
-  fallback 不會自動搬回 Secret Service；初始化失敗需重啟 native App 才重新初始化連線。
+  fallback 不會自動搬回 Secret Service；初始化失敗的重試行為已由下方第三輪修正更新。
 
 合併與發佈前仍須依兩邊 DEV／RELEASE 規範完成 paired review／合成 CI，再處理 pin；
 這次只提供兩邊各自的本機 commit。
+
+## 第三輪 review 修正（2026-10-20）
+
+- 帳號變更（含 onboarding、切換與登出）使用 `serverStop` 的 `ownedOnly` 模式：
+  先停止 Agent，再停止自有 server；只有外部 server 或沒有 server 時繼續。
+  Agent／自有 server 停止失敗仍中止。一般伺服器停止／重啟維持拒絕外部 server。
+- 「重試遷移」直接呼叫 native settings/status，透過既有 busy／錯誤處理更新面板。
+  配對 desktop 現在只快取成功初始化的 backend，初始化錯誤可在同一 App 內重新探測，
+  通訊／存取故障仍不降級明文。
+- Desktop 同步修正 Windows 無引號 SET 刪除、只遮蔽實際繼承的 SJ_*、Linux
+  NoService 允許新 fallback HMAC，以及無 session bus／ENOENT／ECONNREFUSED 分類。
+  權限拒絕／逾時仍回錯。Windows plugin-shell／cmd 與 Linux Secret Service 仍待實機確認。
+- 回歸測試重現修改前的外部 server 阻擋、重試按鈕無效與 Windows 命令字串問題；
+  `tauri-start-path` 串接帳號停機再啟動，確認保留外部 21322 並改在 21323 啟動。
+- `pnpm tsc -b` 通過；完整 Vitest Asia/Taipei／UTC 各 330 檔、5,800 passed、
+  1 skipped（Windows-only cmd.exe）。配對 Rust 571 passed、14 ignored，clippy
+  `--all-targets -- -D warnings` 與 fmt check 通過。
+- 本輪未讀使用者 `.env`、未存取使用者 Keychain、未啟動伺服器或使用者 App。
+  Vitest 暫存設定移除 `loadEnv` 並使用 `envDir: false`，測後移除；測試使用假值與 mock。
+  不 push、不改 `DESKTOP_MODULES_REF`，兩側各建立本機繁中 commit。

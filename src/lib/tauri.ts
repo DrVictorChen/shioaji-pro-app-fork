@@ -1197,6 +1197,7 @@ export async function stopAgentsForServerChange(): Promise<void> {
 // lock and could stop an external server after a new Agent has started.
 export async function serverStop(opts?: {
     stopAgents?: boolean; // explicit UI action only; automatic recovery must not stop agents
+    ownedOnly?: boolean; // account changes may continue alongside an external server
 }): Promise<SidecarResult> {
     if (!isTauri) return { ok: false, output: '' };
     if (opts?.stopAgents) {
@@ -1210,7 +1211,7 @@ export async function serverStop(opts?: {
     // user's own CLI daemon
     if (st?.running && st.port && !(await ownsServer(st))) {
         return {
-            ok: false,
+            ok: !!opts?.ownedOnly,
             output: `:${st.port} 上的伺服器不是本 App 啟動的，本 App 不會停止它；請在啟動它的程式中停止`,
         };
     }

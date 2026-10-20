@@ -19,7 +19,7 @@ export function OnboardingSetup() {
     const [confirmLogout, setConfirmLogout] = useState(false);
     const logoutInFlight = useRef(false);
     const stopForChange = async () => {
-        const result = await serverStop({ stopAgents: true });
+        const result = await serverStop({ stopAgents: true, ownedOnly: true });
         if (!result.ok) throw new Error(result.output || '無法停止伺服器，尚未變更帳號。');
     };
     const logout = async () => {
