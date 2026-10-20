@@ -35,10 +35,13 @@ export function normalizeFlashLink(v: unknown): FlashLink {
     };
 }
 
-/** 個股期。ETF 期貨不算：spec_kind 有值就必須是 stock_fut；缺省時標的不可是 ETF（00 開頭） */
+/** 個股期：標的是證券（underlying_kind S）的期貨，含 ETF 期貨（例如 0050 → NYF）。
+ * 與個股期選擇器同一份合約（fetchFutures 依標的查），兩邊不會不一致。
+ * spec_kind 有值時只接受 stock_fut／etf_fut；指數期（TXF 等，underlying_kind I）不算 */
+const STOCK_FUT_SPECS = new Set(['stock_fut', 'etf_fut']);
 export function isStockFuture(c: Pick<ContractInfo, 'security_type' | 'underlying_kind' | 'underlying_code' | 'spec_kind'>): boolean {
     if (c.security_type !== 'FUT' || c.underlying_kind !== 'S' || !c.underlying_code) return false;
-    return c.spec_kind ? c.spec_kind === 'stock_fut' : !/^00/.test(c.underlying_code);
+    return !c.spec_kind || STOCK_FUT_SPECS.has(c.spec_kind);
 }
 
 /** 現股／個股期面板的標的股票；不是股票也不是個股期 → null（暫停） */
@@ -74,7 +77,7 @@ export type StockFuturePick =
 /** 依面板的規格與月份，從某檔股票的個股期合約中選出要下單的真實月份合約 */
 export function pickStockFuture(rows: ContractInfo[], link: Pick<FlashLink, 'spec' | 'month'>, now = Date.now()): StockFuturePick {
     // 近月／次月別名（…R1／…R2）不用：下單一律用真實月份
-    // ETF 期貨不是個股期（spec_kind 缺省時不排除）
+    // ETF 期貨（每口 10,000 受益權單位）視同標準規格個股期
     const real = rows.filter(r => isStockFuture(r) && !r.target_code && /^\d{6}$/.test(r.delivery_month ?? ''));
     if (real.length === 0) return { status: 'none' };
     // 規格依實際每口股數：標準（≥1,000 股，一般 2,000）、小型（< 1,000，一般 100）；對不到就不替換
@@ -111,7 +114,7 @@ export function spreadOf(a: number | null | undefined, b: number | null | undefi
     return { diff, pct: (diff / b) * 100 };
 }
 
-/** 個股期 1 口對應的現股：2,000 股 → 1口=2張；小型 100 股 → 1口=100股 */
+/** 個股期 1 口對應的現股：2,000 股 → 1口=2張；ETF 期貨 10,000 → 1口=10張；小型 100 股 → 1口=100股 */
 export function lotsPerContract(multiplier: number | undefined): string {
     if (!multiplier) return '';
     return multiplier % 1000 === 0 ? `1口=${multiplier / 1000}張` : `1口=${multiplier}股`;

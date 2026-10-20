@@ -29,6 +29,7 @@ import { getPrivacyMode, maskAccountId } from '../lib/privacy';
 import { EXPECTED_SERVER_VERSION } from '../lib/runtime';
 import { diagnoseOutput, errorLines, validateDesktopSettings } from '../lib/server-diagnostics';
 import { clearStoredSpawnKeyHash } from '../lib/spawn-keys';
+import { orderTraceDiagnostics } from '../lib/order-trace';
 import {
     STALE_RUN_MS,
     applyScenario,
@@ -45,6 +46,8 @@ import {
     timedStop,
     type ServerActionDeps,
 } from '../lib/server-actions';
+import { freshDiagnostics } from '../lib/diagnostics-snapshot';
+import { agentRuntimeDiagnostics } from '../lib/agent-diagnostics';
 import {
     fetchAccounts,
     fetchCaExpire,
@@ -62,6 +65,11 @@ import {
     reloadWhenHealthy,
     restartAndInstallUpdate,
     saveDesktopSettings,
+    saveCredentialProfile,
+    selectCredentialProfile,
+    deleteCredentialProfile,
+    logoutCredentialProfile,
+    EMPTY_DESKTOP_SETTINGS,
     subscribeAgentHarnessEnabled,
     serverStart,
     serverStatus,
@@ -75,6 +83,7 @@ import { notify } from '../lib/trade';
 import { Orb } from './orb';
 import { ServerSettingsDialog, type ServerConnectionSettings } from './server-settings-dialog';
 import * as dialogStyles from './server-settings-dialog.css';
+import { vars } from '../theme.css';
 import type { Health } from '../lib/types/health';
 import { setServerIdentityVerified } from '../lib/server-identity';
 import * as styles from './hud-header.css';
@@ -109,16 +118,7 @@ export function ServerManager({
     open: boolean;
     onToggle: (open: boolean) => void;
 }) {
-    const [settings, setSettings] = useState<DesktopSettings>({
-        apiKey: '',
-        secretKey: '',
-        production: false,
-        autoStart: true,
-        caPath: '',
-        caPasswd: '',
-        httpsEnabled: false,
-        agentHarnessEnabled: true,
-    });
+    const [settings, setSettings] = useState<DesktopSettings>(EMPTY_DESKTOP_SETTINGS);
     const [busy, setBusy] = useState(false);
     const [lastOutput, setLastOutput] = useState('');
     const [ver, setVer] = useState('');
@@ -242,10 +242,12 @@ export function ServerManager({
         useCallback(() => serverStatus(), []),
         8000,
     );
+    const polledStatus = status;
     const { data: health } = usePoll<Health | null>(
         useCallback(() => fetchHealth().catch(() => null), []),
         15000,
     );
+    const polledHealth = health ?? undefined;
 
     useEffect(() => {
         loadDesktopSettings().then(value => { setSettings(value); setSettingsLoaded(true); }).catch(() => setSettingsLoadError('無法讀取本機設定，請重新開啟 App 後重試。'));
@@ -278,6 +280,15 @@ export function ServerManager({
         } catch {
             // older shell without the command
         }
+        // #287: read now — the polled values can still be the busy boot
+        // window's (healthy=false, health: —) right after a restart
+        const fresh = await freshDiagnostics(
+            () => serverStatus(),
+            signal => fetchHealth({ signal }),
+            { status: polledStatus, health: polledHealth },
+        );
+        const status = fresh.status;
+        const health = fresh.health ?? null;
         const lines = [
             `Shioaji Pro ${ver || '?'} · ${host}`,
             status?.running
@@ -313,6 +324,8 @@ export function ServerManager({
             } · autostart: ${settings.autoStart ? 'on' : 'off'}`,
             lastOutput ? `--- log ---\n${lastOutput}` : '',
             timingDiagnostics(),
+            orderTraceDiagnostics(),
+            agentRuntimeDiagnostics(),
         ].filter(Boolean);
         try {
             await navigator.clipboard.writeText(lines.join('\n'));
@@ -348,13 +361,12 @@ export function ServerManager({
         void (async () => {
             try {
                 setServerIdentityVerified(false);
-                const stopped = await serverStop({ stopAgents: true });
+                const stopped = await serverStop({ stopAgents: true, ownedOnly: true });
                 if (!stopped.ok) {
                     serverActionDeps.reloadAfterFailedStop();
                     throw new Error(stopped.output || '無法停止本機伺服器');
                 }
-                const current = await loadDesktopSettings();
-                await saveDesktopSettings({ ...current, apiKey: '', secretKey: '' });
+                await logoutCredentialProfile();
                 clearStoredSpawnKeyHash();
                 window.location.reload();
             } catch (e) {
@@ -392,11 +404,14 @@ export function ServerManager({
                 kind: res.ok ? 'ok' : 'err',
                 title: res.ok
                     ? res.attached
-                        ? '🔗 已連接既有伺服器'
+                        ? res.attachedExternal
+                            ? '🔗 已連上另一個程式啟動的伺服器'
+                            : '🔗 已連接既有伺服器'
                         : '🟢 伺服器啟動指令已送出'
                     : '伺服器啟動失敗',
                 body: res.ok
-                    ? `port ${res.port} · 模式：${cfg.production ? '⚠ 正式環境' : '模擬環境'}`
+                    ? `port ${res.port} · 模式：${cfg.production ? '⚠ 正式環境' : '模擬環境'}${
+                        res.foreign ? `（${res.foreign.text}，未使用）` : ''}`
                     : diagnoseOutput(res.output) ||
                       errorLines(res.output) ||
                       res.output.slice(-120),
@@ -451,28 +466,54 @@ export function ServerManager({
         } finally { setBusy(false); }
     };
 
-    const saveConnectionSettings = async (draft: ServerConnectionSettings, apply: boolean) => {
+    const saveConnectionSettings = async (draft: ServerConnectionSettings, apply: boolean): Promise<DesktopSettings> => {
         if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
         restartError.current = '';
-        // Re-read settings so saving this form cannot revert another panel's
-        // Harness/autostart/TLS setting while the dialog was open.
-        const current = await loadDesktopSettings();
-        const next = { ...current, ...draft };
-        if (apply) {
-            const error = validateDesktopSettings(next);
-            if (error) throw new Error(`${error.title}：${error.body}`);
-            // Do not save a new environment if a native Agent cannot be stopped.
-            await stopAgentsForServerChange();
-        }
-        await saveDesktopSettings(next);
+        let next = await saveCredentialProfile(draft);
         setSettings(next);
         setSavedForRestart(true);
         if (apply) {
-            // a mode flip against the running server is timed as a switch
+            const id = draft.id ?? next.profiles.at(-1)?.id;
+            const target = next.profiles.find(profile => profile.id === id);
+            const invalid = validateDesktopSettings({ ...next,
+                configured: target?.secretState === 'stored',
+                production: target?.environment === 'production',
+                caPath: target?.caPath ?? '',
+                hasCaPassword: target?.hasCaPassword ?? (id === next.activeProfileId && next.hasCaPassword),
+            });
+            if (invalid) throw new Error(invalid.body);
+            await stopAgentsForServerChange();
+            let stoppedForSwitch = false;
+            if (id && id !== next.activeProfileId) {
+                const stopped = await serverStop({ stopAgents: true, ownedOnly: true });
+                if (!stopped.ok) throw new Error('未能停止伺服器；帳號已儲存，尚未切換。');
+                next = await selectCredentialProfile(id);
+                setSettings(next);
+                stoppedForSwitch = true;
+            }
             const scenario = applyScenario(!!status?.running, status?.simulation, next.production);
-            const ok = status?.running ? await doRestart(next, scenario) : await doStart(next, scenario);
-            if (!ok) throw new Error(`設定已儲存，但伺服器未能套用。${restartError.current || '請查看狀態面板的錯誤後再試。'}`);
+            const ok = status?.running && !stoppedForSwitch ? await doRestart(next, scenario) : await doStart(next, scenario);
+            if (!ok) throw new Error('帳號已儲存，但伺服器未能套用。');
         }
+        return next;
+    };
+
+    const profileAction = async (action: 'select' | 'delete', id: string): Promise<DesktopSettings> => {
+        if (logoutInFlight.current) throw new Error('正在登出，請等待完成。');
+        setBusy(true);
+        try {
+            // Selecting another account always stops the old generation.
+            // Deleting the selected account follows the same logout stop path.
+            if (action === 'select' || id === settings.activeProfileId) {
+                setServerIdentityVerified(false);
+                const stopped = await serverStop({ stopAgents: true, ownedOnly: true });
+                if (!stopped.ok) throw new Error('無法停止伺服器，尚未變更帳號。');
+            }
+            const next = action === 'select' ? await selectCredentialProfile(id) : await deleteCredentialProfile(id);
+            setSettings(next); setSavedForRestart(true);
+            if (action === 'delete' && !next.activeProfileId) window.location.reload();
+            return next;
+        } finally { setBusy(false); }
     };
 
     // ---- 本機 HTTPS ----
@@ -722,7 +763,8 @@ export function ServerManager({
                                                   color: 'var(--amber, #e0a43c)',
                                               }
                                             : {
-                                                  color: 'var(--danger, #f23645)',
+                                                  // 正式環境固定 danger 紅（theme token，不隨漲跌配色翻轉）
+                                                  color: vars.color.danger,
                                                   fontWeight: 700,
                                               }
                                     }
@@ -909,7 +951,7 @@ export function ServerManager({
                                 }
                             />
                         </div>
-                        {!settings.apiKey && (
+                        {!settings.configured && (
                             <span
                                 className={styles.emptyHint}
                                 style={{ color: 'var(--amber, #e0a43c)' }}
@@ -1023,7 +1065,7 @@ export function ServerManager({
                     {settingsOpen && <ServerSettingsDialog
                         settings={settings} status={status} busy={busy || httpsBusy}
                         pendingApply={savedForRestart || (!!status?.running && status.simulation === settings.production)}
-                        onSave={saveConnectionSettings} onClose={() => {
+                        onSave={saveConnectionSettings} onProfileAction={profileAction} onImported={setSettings} onClose={() => {
                             setSettingsOpen(false);
                             // macOS does not necessarily focus a button on click.
                             // Restore explicitly after the popover becomes visible.
@@ -1052,7 +1094,7 @@ export function ServerManager({
                         </details>
                         <details className={dialogStyles.details}>
                             <summary>登出這個 App</summary>
-                            <p className={dialogStyles.hint}>停止此 App 的 Agent、清除本機儲存的 API 金鑰，並停止此 App 管理的伺服器。</p>
+                            <p className={dialogStyles.hint}>停止此 App 的 Agent、清除使用中帳號的 API 金鑰與 CA 密碼，並停止此 App 管理的伺服器。其他帳號會保留，登出後回到首次設定。</p>
                             <button className={confirmLogout ? styles.killBtnOn : styles.killBtnOff} onClick={doLogout}><LogOut size={14} />{confirmLogout ? '確認登出並清除金鑰' : '登出並清除金鑰'}</button>
                             {confirmLogout && <button className={dialogStyles.button} onClick={() => setConfirmLogout(false)}>取消登出</button>}
                         </details>

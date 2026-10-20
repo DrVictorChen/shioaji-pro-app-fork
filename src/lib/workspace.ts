@@ -67,6 +67,7 @@ export type BlockType =
     | 'notices'
     | 'debug'
     | 'grid'
+    | 'conditional'
     | 'heatmap'
     | 'pulse'
     | 'signals'
@@ -116,6 +117,10 @@ export interface Block {
     intradaySession?: 'auto' | 'day' | 'night';
     // K 線圖下單設定（#204，每市場一組）— 跟版面一起持久化
     chartOrder?: import('./chart-order-settings').ChartOrderPanelState;
+    // K 棒讀值列（開高低收，#240）— false = 隱藏；缺省 = 顯示
+    chartOhlc?: boolean;
+    // 可見範圍最高／最低標記（#240）— false = 隱藏；缺省 = 顯示
+    chartHighLow?: boolean;
 }
 
 export interface Workspace {
@@ -174,7 +179,7 @@ export function linkGroupSummary(w: Workspace): { id: LinkGroupId; code: string 
 }
 
 export type SessionConfigPatch = Partial<
-    Pick<Block, 'chartSession' | 'intradaySession' | 'chartOrder'>
+    Pick<Block, 'chartSession' | 'intradaySession' | 'chartOrder' | 'chartOhlc' | 'chartHighLow'>
 >;
 
 // 開彈出視窗時把面板的時段選擇帶進 URL（session=…）
@@ -440,6 +445,14 @@ export const BLOCK_META: Record<
         singleton: false,
         defaultSize: { w: 5, h: 13, minW: 4, minH: 10 },
     },
+    conditional: {
+        label: '條件單管理',
+        description: '觸價單、二擇一、括號單集中查看、修改、暫停與取消',
+        category: 'trading',
+        pinnable: false,
+        singleton: true,
+        defaultSize: { w: 14, h: 10, minW: 4, minH: 6 },
+    },
     heatmap: {
         label: '產業全景',
         description: '產業資金與強弱地圖，點產業下鑽主力貢獻',
@@ -516,6 +529,12 @@ const RAW_DEFAULT_WORKSPACE: Workspace = {
 export const DEFAULT_WORKSPACE: Workspace = upscaleLegacyWorkspace(
     RAW_DEFAULT_WORKSPACE,
 );
+
+// 內建版面格子：最小尺寸取面板庫預設（24 欄撰寫）
+function presetCell(i: string, type: BlockType, x: number, y: number, w: number, h: number): LayoutItem {
+    const { minW, minH } = BLOCK_META[type].defaultSize;
+    return { i, x, y, w, h, minW, minH };
+}
 
 // built-in layout presets for common trading workflows（24 欄撰寫，
 // 檔尾統一升階匯出）
@@ -812,6 +831,139 @@ const RAW_LAYOUT_PRESETS: { name: string; desc: string; workspace: Workspace }[]
                 { i: 'chips-an', x: 18, y: 0, w: 6, h: 13, minW: 4, minH: 5 },
                 { i: 'pnl-an', x: 0, y: 13, w: 12, h: 11, minW: 6, minH: 6 },
                 { i: 'replay-an', x: 12, y: 13, w: 12, h: 11, minW: 6, minH: 6 },
+            ],
+        },
+    },
+    // ---- 新面板組合（條件單管理、整零價差、組合單、走勢牆、委託簿熱圖…）----
+    {
+        name: '期貨當沖',
+        desc: '台指期 K 線＋閃電＋委託簿熱圖＋明細，條件單與持倉在下方',
+        workspace: {
+            blocks: [
+                { id: 'chart-fd', type: 'chart', pin: 'TXFR1' },
+                { id: 'flash-fd', type: 'flash', pin: 'TXFR1' },
+                { id: 'depthmap-fd', type: 'depthmap', pin: 'TXFR1' },
+                { id: 'tape-fd', type: 'tape', pin: 'TXFR1' },
+                { id: 'cond-fd', type: 'conditional', pin: null },
+                { id: 'dock-fd', type: 'dock', pin: null },
+            ],
+            layout: [
+                presetCell('chart-fd', 'chart', 0, 0, 12, 15),
+                presetCell('flash-fd', 'flash', 12, 0, 5, 24),
+                presetCell('depthmap-fd', 'depthmap', 17, 0, 7, 12),
+                presetCell('tape-fd', 'tape', 17, 12, 7, 12),
+                presetCell('cond-fd', 'conditional', 0, 15, 6, 9),
+                presetCell('dock-fd', 'dock', 6, 15, 6, 9),
+            ],
+        },
+    },
+    {
+        name: '期現對照',
+        desc: '點一檔股票，現股與個股期兩條閃電梯並排，含價差對照',
+        workspace: {
+            blocks: [
+                { id: 'watch-sf', type: 'watchlist', pin: null },
+                { id: 'stockfut-sf', type: 'stockfutures', pin: null },
+                { id: 'chart-sf', type: 'chart', pin: null },
+                {
+                    id: 'flash-sfs',
+                    type: 'flash',
+                    pin: null,
+                    flashLink: { kind: 'stock', spec: 'std', month: 'near', ref: true },
+                },
+                {
+                    id: 'flash-sff',
+                    type: 'flash',
+                    pin: null,
+                    flashLink: { kind: 'future', spec: 'std', month: 'near', ref: true },
+                },
+                { id: 'dock-sf', type: 'dock', pin: null },
+            ],
+            layout: [
+                presetCell('watch-sf', 'watchlist', 0, 0, 4, 12),
+                presetCell('stockfut-sf', 'stockfutures', 0, 12, 8, 12),
+                presetCell('chart-sf', 'chart', 4, 0, 10, 12),
+                presetCell('flash-sfs', 'flash', 14, 0, 5, 24),
+                presetCell('flash-sff', 'flash', 19, 0, 5, 24),
+                presetCell('dock-sf', 'dock', 8, 12, 6, 12),
+            ],
+        },
+    },
+    {
+        name: '零股存股',
+        desc: '自選＋日 K＋籌碼，整零價差試算與兩腳送單',
+        workspace: {
+            blocks: [
+                { id: 'watch-od', type: 'watchlist', pin: null },
+                { id: 'chart-od', type: 'chart', pin: null },
+                { id: 'chips-od', type: 'chips', pin: null },
+                { id: 'dock-od', type: 'dock', pin: null },
+                { id: 'oddspread-od', type: 'oddspread', pin: null },
+            ],
+            layout: [
+                presetCell('watch-od', 'watchlist', 0, 0, 5, 24),
+                presetCell('chart-od', 'chart', 5, 0, 12, 14),
+                presetCell('chips-od', 'chips', 5, 14, 5, 10),
+                presetCell('dock-od', 'dock', 10, 14, 7, 10),
+                presetCell('oddspread-od', 'oddspread', 17, 0, 7, 24),
+            ],
+        },
+    },
+    {
+        name: '條件單監控',
+        desc: '條件單管理加寬置底，K 線＋閃電觸價欄＋通知同屏盯單',
+        workspace: {
+            blocks: [
+                { id: 'chart-cm', type: 'chart', pin: null },
+                { id: 'flash-cm', type: 'flash', pin: null },
+                { id: 'notices-cm', type: 'notices', pin: null },
+                { id: 'cond-cm', type: 'conditional', pin: null },
+                { id: 'dock-cm', type: 'dock', pin: null },
+            ],
+            layout: [
+                presetCell('chart-cm', 'chart', 0, 0, 13, 14),
+                presetCell('flash-cm', 'flash', 13, 0, 5, 14),
+                presetCell('notices-cm', 'notices', 18, 0, 6, 14),
+                presetCell('cond-cm', 'conditional', 0, 14, 14, 10),
+                presetCell('dock-cm', 'dock', 14, 14, 10, 10),
+            ],
+        },
+    },
+    {
+        name: '選擇權組合',
+        desc: 'T 字＋組合單＋損益圖，台指期 K 線與持倉在下方',
+        workspace: {
+            blocks: [
+                { id: 'opt-oc', type: 'optchain', pin: null },
+                { id: 'combo-oc', type: 'combo', pin: null },
+                { id: 'optpnl-oc', type: 'optpnl', pin: null },
+                { id: 'chart-oc', type: 'chart', pin: 'TXFR1' },
+                { id: 'dock-oc', type: 'dock', pin: null },
+            ],
+            layout: [
+                presetCell('opt-oc', 'optchain', 0, 0, 10, 14),
+                presetCell('combo-oc', 'combo', 10, 0, 6, 14),
+                presetCell('optpnl-oc', 'optpnl', 16, 0, 8, 14),
+                presetCell('chart-oc', 'chart', 0, 14, 10, 10),
+                presetCell('dock-oc', 'dock', 10, 14, 14, 10),
+            ],
+        },
+    },
+    {
+        name: '盤勢總覽',
+        desc: '大盤貢獻＋產業全景＋自選走勢牆＋排行，開盤先看全局',
+        workspace: {
+            blocks: [
+                { id: 'pulse-ov', type: 'pulse', pin: null, pulseIndex: 'IX0001' },
+                { id: 'heatmap-ov', type: 'heatmap', pin: null },
+                { id: 'wall-ov', type: 'intradaywall', pin: null },
+                { id: 'movers-ov', type: 'movers', pin: null },
+            ],
+            layout: [
+                presetCell('pulse-ov', 'pulse', 0, 0, 12, 12),
+                presetCell('heatmap-ov', 'heatmap', 12, 0, 12, 12),
+                presetCell('wall-ov', 'intradaywall', 0, 12, 16, 12),
+                presetCell('movers-ov', 'movers', 16, 12, 8, 12),
             ],
         },
     },

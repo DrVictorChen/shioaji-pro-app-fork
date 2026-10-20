@@ -21,7 +21,6 @@ import {
     fetchStockReserveDetail,
     fetchStockReserveSummary,
     fetchTradingLimits,
-    resolveContract,
     type EarmarkStocksDetail,
     type ProfitLoss,
     type ReserveStocksDetail,
@@ -36,6 +35,7 @@ import type {
     AccountedPosition,
     Margin,
 } from '../lib/types/portfolio';
+import { canonicalBrokerCode, resolveRealizedName } from '../lib/realized-name';
 import { bizDateLabel, settleDateLabel } from '../lib/settle-date';
 import { fmtMoney, fmtSigned } from '../lib/utils/format';
 import { vars } from '../theme.css';
@@ -136,7 +136,7 @@ function FundsSection({
           ? vars.color.danger
           : risk < 200
             ? vars.color.amber
-            : vars.color.down; // 綠 = 安全（台股綠跌語彙外，安全狀態沿用綠）
+            : vars.color.success; // 綠 = 安全（狀態色固定，不隨漲跌配色翻轉）
 
     const totalAssets =
         (showStock ? stockValue + cash : 0) + (showFut ? futEquity : 0);
@@ -293,6 +293,8 @@ function SettleSection({
 
 type AccountedPnl = ProfitLoss & { market: 'S' | 'F'; accountKey: string };
 
+const nameKey = (r: AccountedPnl) => `${r.market}:${r.code}`;
+
 interface PnlData {
     rows: AccountedPnl[];
     total: number;
@@ -306,36 +308,43 @@ function PnlSection({
     privMoney: boolean;
 }) {
     const [open, setOpen] = useState(false);
-    // 股名 lazy 解析：展開時才查、component 內快取，不訂閱行情
+    // 股名 lazy 解析：展開時才查、component 內快取，不訂閱行情。
+    // 以「市場:列上代號」為 key（#240 #286）：正式環境券商損益的期貨代號不保證
+    // 與合約代號一字不差，resolveRealizedName 會正規化並逐一嘗試替代格式；
+    // 只查還沒有名稱的列，查不到的下次更新（重新整理／重新展開）再試。
     const [names, setNames] = useState<Record<string, string>>({});
-    const codesKey = useMemo(
-        () => (open ? [...new Set((pnl?.rows ?? []).map((r) => r.code))] : []),
-        [open, pnl],
-    );
+    const wanted = useMemo(() => {
+        if (!open) return [];
+        const seen = new Map<string, { code: string; market: 'S' | 'F' }>();
+        for (const r of pnl?.rows ?? []) {
+            seen.set(nameKey(r), { code: r.code, market: r.market });
+        }
+        return [...seen.entries()];
+    }, [open, pnl]);
     useEffect(() => {
-        if (codesKey.length === 0) return;
+        const missing = wanted.filter(([key]) => !names[key]);
+        if (missing.length === 0) return;
         let alive = true;
         void Promise.allSettled(
-            codesKey.map((code) => resolveContract(code.trim())),
+            missing.map(([, r]) => resolveRealizedName(r.code, r.market)),
         ).then((rs) => {
             if (!alive) return;
-            setNames((prev) => {
-                const next = { ...prev };
-                // 以列上的代號為 key（#240）：券商損益的代號可能帶空白或與合約查詢回傳的
-                // 正規代號不同，用回傳的 code 當 key 會查不到而只顯示代號
-                rs.forEach((r, index) => {
-                    if (r.status === 'fulfilled' && r.value.name) {
-                        next[codesKey[index]!] = r.value.name;
-                    }
-                });
-                return next;
+            const found: Record<string, string> = {};
+            rs.forEach((r, index) => {
+                if (r.status === 'fulfilled' && r.value) {
+                    found[missing[index]![0]] = r.value;
+                }
             });
+            if (Object.keys(found).length > 0) {
+                setNames((prev) => ({ ...prev, ...found }));
+            }
         });
         return () => {
             alive = false;
         };
+        // names 只用來略過已解析的列，不能當 deps（否則每解析到一筆就重查其餘）
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [codesKey.join(',')]);
+    }, [wanted]);
 
     return (
         <section className={styles.acctSection}>
@@ -371,9 +380,14 @@ function PnlSection({
                                 key={`${r.accountKey}-${r.market}-${r.id}-${'dseq' in r ? r.dseq : r.date}`}
                                 className={styles.pnlDetailRow}
                             >
-                                <span>{r.code}</span>
+                                <span
+                                    // 查不到名稱時滑過顯示券商回傳的原始代號（含看不到的字元），方便回報
+                                    title={names[nameKey(r)] ? undefined : `原始代號 ${JSON.stringify(r.code)}`}
+                                >
+                                    {canonicalBrokerCode(r.code) || r.code}
+                                </span>
                                 <span className={styles.pnlDetailName}>
-                                    {names[r.code] ?? ''}
+                                    {names[nameKey(r)] ?? ''}
                                 </span>
                                 <span className={styles.pnlDetailQty}>
                                     {/* 平倉筆的數量帶方向正負 — 顯示絕對值 */}

@@ -87,9 +87,19 @@ describe('pickStockFuture', () => {
 });
 
 describe('stock futures only', () => {
-    it('ETF futures are not stock futures: an ETF has no 個股期', () => {
-        const etf = [{ ...fut('NYFJ6', 'NYF', '202610', '2026-10-21', 10000), spec_kind: 'etf_fut', underlying_code: '0050' } as ContractInfo];
-        expect(pickStockFuture(etf, link(), now)).toEqual({ status: 'none' });
+    it('an ETF with ETF futures maps like a stock: 0050 → NYF near/next month (alias rows skipped)', () => {
+        const nyf = (code: string, month: string, ltd: string, target: string | null = null) =>
+            ({ ...fut(code, 'NYF', month, ltd, 10000, target), spec_kind: 'etf_fut', underlying_code: '0050', name: `元大台灣50ETF期貨 ${month}` }) as ContractInfo;
+        const etf = [nyf('NYFR1', '202610', '2026-10-21', 'NYFJ6'), nyf('NYFR2', '202611', '2026-11-18', 'NYFK6'), nyf('NYFJ6', '202610', '2026-10-21'), nyf('NYFK6', '202611', '2026-11-18')];
+        expect(pickStockFuture(etf, link(), now)).toMatchObject({ status: 'ok', contract: { code: 'NYFJ6', multiplier: 10000 }, hasMini: false, months: ['202610', '202611'] });
+        expect(pickStockFuture(etf, link({ month: 'next' }), now)).toMatchObject({ status: 'ok', contract: { code: 'NYFK6' } });
+        // ETF 期貨沒有小型：說明，不拿標準代替
+        expect(pickStockFuture(etf, link({ spec: 'mini' }), now)).toEqual({ status: 'noMini' });
+        expect(linkedStockCode(etf[2]!)).toBe('0050');
+    });
+    it('a stock with no futures still reports none; index futures in the rows never count', () => {
+        const txf = { ...fut('TXFJ6', 'TXF', '202610', '2026-10-21', 200), underlying_code: 'IX0001', underlying_kind: 'I', spec_kind: 'index_fut' } as unknown as ContractInfo;
+        expect(pickStockFuture([txf], link(), now)).toEqual({ status: 'none' });
     });
     it('a chosen month that is simply not listed is not called expired', () => {
         expect(pickStockFuture(rows, link({ month: '202704' }), now)).toEqual({ status: 'unlisted', month: '202704' });
@@ -107,9 +117,11 @@ describe('stock futures only', () => {
         const chosen = pickStockFuture(rows, link({ month: '202611' }), now);
         expect(chosen.status === 'ok' && chosen.expiresAt).toBe(Date.UTC(2026, 10, 18, 5, 30));
     });
-    it('an ETF future is not a stock future anywhere', () => {
-        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050', spec_kind: 'etf_fut' } as ContractInfo)).toBe(false);
-        expect(linkedStockCode({ code: 'NYFJ6', security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050', spec_kind: 'etf_fut' } as ContractInfo)).toBeNull();
+    it('an ETF future counts as a stock future everywhere; index futures do not', () => {
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050', spec_kind: 'etf_fut' } as ContractInfo)).toBe(true);
+        expect(linkedStockCode({ code: 'NYFJ6', security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050', spec_kind: 'etf_fut' } as ContractInfo)).toBe('0050');
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'I', underlying_code: 'IX0001' } as ContractInfo)).toBe(false);
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '2330', spec_kind: 'index_fut' } as ContractInfo)).toBe(false);
     });
 });
 
@@ -127,9 +139,9 @@ describe('strict spec, expiry and ETF rules', () => {
         const broken = rows.map(r => (r.code === 'CDFJ6' ? { ...r, last_trading_date: '', delivery_date: undefined } as unknown as ContractInfo : r));
         expect(pickStockFuture(broken, link(), now)).toEqual({ status: 'noExpiry' });
     });
-    it('an ETF future without spec_kind is still not a stock future (00xx underlying)', () => {
-        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050' } as ContractInfo)).toBe(false);
-        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '00878' } as ContractInfo)).toBe(false);
+    it('an ETF future without spec_kind is a stock future too (00xx underlying)', () => {
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '0050' } as ContractInfo)).toBe(true);
+        expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '00878' } as ContractInfo)).toBe(true);
         expect(isStockFuture({ security_type: 'FUT', underlying_kind: 'S', underlying_code: '2330' } as ContractInfo)).toBe(true);
     });
 });
@@ -142,6 +154,7 @@ describe('spread row', () => {
     });
     it('1 口 in 張 (or 股 for a mini)', () => {
         expect(lotsPerContract(2000)).toBe('1口=2張');
+        expect(lotsPerContract(10000)).toBe('1口=10張'); // ETF 期貨（NYF）
         expect(lotsPerContract(100)).toBe('1口=100股');
         expect(lotsPerContract(undefined)).toBe('');
     });

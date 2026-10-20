@@ -51,16 +51,19 @@ function Probe({
     tradeArmed,
     onEnterDrawingMode,
     host,
+    chart,
 }: {
     receive: (v: ChartDrawingsApi) => void;
     tradeArmed: boolean;
     onEnterDrawingMode: () => void;
     host?: unknown;
+    chart?: unknown;
 }) {
     const hostRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef(null);
     const seriesRef = useRef(null);
     (hostRef as { current: unknown }).current = host ?? null;
+    (chartRef as { current: unknown }).current = chart ?? null;
     receive(
         useChartDrawings({
             contract,
@@ -2372,5 +2375,43 @@ describe('第一期：多選、平行通道、量測、文字、復原、快捷�
         expect(api().drawings.map((d) => d.id)).toEqual([a.id, b.id]);
         expect(api().drawings[0]).toMatchObject({ hidden: false, locked: false });
         expect(api().drawings[0]!.name).toBeUndefined();
+    });
+});
+
+describe('畫圖中的十字線模式跟著畫圖走（#313）', () => {
+    // 圖表預設 Magnet（吸收盤價）；畫圖時改 Normal，端點位置由滑鼠 effect 擺
+    function fakeChart(mode = 1) {
+        const opts = { crosshair: { mode } };
+        return {
+            opts,
+            options: () => opts,
+            applyOptions: vi.fn((o: { crosshair?: { mode?: number } }) => {
+                if (o.crosshair?.mode !== undefined) opts.crosshair.mode = o.crosshair.mode;
+            }),
+        };
+    }
+
+    it('武裝工具時改 Normal，收起後還原圖表原本的模式', async () => {
+        const chart = fakeChart(1);
+        let api!: ChartDrawingsApi;
+        await mount({ receive: (v) => (api = v), tradeArmed: false, onEnterDrawingMode: vi.fn(), chart });
+        expect(chart.opts.crosshair.mode).toBe(1);
+        await act(async () => api.setTool('trend'));
+        expect(chart.opts.crosshair.mode).toBe(0);
+        await act(async () => api.setTool(null));
+        expect(chart.opts.crosshair.mode).toBe(1);
+    });
+
+    it('交易模式接手（工具收起）也還原；沒在畫圖時不動圖表設定', async () => {
+        const chart = fakeChart(3);
+        let api!: ChartDrawingsApi;
+        const props = { receive: (v: ChartDrawingsApi) => (api = v), onEnterDrawingMode: vi.fn(), chart };
+        const root = await mount({ ...props, tradeArmed: false });
+        expect(chart.applyOptions).not.toHaveBeenCalled();
+        await act(async () => api.setTool('horizontal'));
+        expect(chart.opts.crosshair.mode).toBe(0);
+        await act(async () => root.update(createElement(Probe, { ...props, tradeArmed: true })));
+        expect(api.tool).toBeNull();
+        expect(chart.opts.crosshair.mode).toBe(3);
     });
 });

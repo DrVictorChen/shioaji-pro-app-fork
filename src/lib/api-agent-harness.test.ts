@@ -149,7 +149,11 @@ describe('agent harness native POST proxy', () => {
         const error = await apiPost('/api/v1/order/place_order', { code: '2330' }, {
             agentInitiated: true, agentCallId: 'call-2', agentAuto: true,
         }).catch((caught: unknown) => caught);
-        expect(error).toBe('UI trading proxy request failed: timeout');
+        // #249: wrapped as an Error with the same text, marked outcome-unknown, never not-started
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe('UI trading proxy request failed: timeout');
+        expect(error).toMatchObject({ mutationOutcomeUnknown: true });
+        expect((error as { mutationNotStarted?: boolean }).mutationNotStarted).toBeUndefined();
         expect(mocks.invoke).toHaveBeenCalledTimes(1);
     });
 
@@ -176,8 +180,7 @@ describe('agent harness native POST proxy', () => {
         const error = await apiPost('/api/v1/order/cancel_order', { trade_id: 't-1' }).catch((caught: unknown) => caught);
         expect(error).toBeInstanceOf(Error);
         expect(error).toMatchObject({ mutationNotStarted: true });
-        expect((error as Error).message).toContain('主視窗');
-        expect((error as Error).message).toContain('此視窗無權呼叫 Agent 原生命令');
+        expect((error as Error).message).toBe('彈出視窗目前不能下單或刪單，這筆沒有送出；請在主視窗操作');
     });
 
     it.each(['錯誤：此視窗無權呼叫 Agent 原生命令', '此視窗無權呼叫 Agent 原生命令。'])('does not mark a near-match native error %s as not started', async text => {

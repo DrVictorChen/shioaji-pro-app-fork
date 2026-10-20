@@ -87,10 +87,14 @@ export function loadStockIndex(): Promise<StockMeta[]> {
     if (detailsCache) return Promise.resolve(detailsCache);
     if (detailsLoading) return detailsLoading;
     detailsLoading = loadStockCatalog()
-        .then((catalog) => loadStockDetails(catalog.map((stock) => stock.code)))
-        .then((details) => {
-            detailsCache = details;
-            return detailsCache;
+        .then(async (catalog) => {
+            const details = await loadStockDetails(catalog.map((stock) => stock.code));
+            // a partial index (some reads failed, e.g. the server was still
+            // starting) is returned but never kept: the next call retries
+            // the missing ones (per-code successes stay cached)
+            if (details.length >= new Set(catalog.map((stock) => stock.code).filter(Boolean)).size) detailsCache = details;
+            else detailsLoading = null;
+            return details;
         })
         .catch((error) => {
             detailsLoading = null;

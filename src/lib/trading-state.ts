@@ -13,6 +13,8 @@ import { fetchAccountBalance, fetchMargin, fetchPositions, fetchTradeCacheHealth
 import { ensureStream, getStreamStatus, isStreamOwner, onAnyTick, onOrderEvent, subscribeStatusStore } from './stream';
 import { applyPositionFill, markPosition, positionFill, reportBody } from './portfolio-projection';
 import { projectOrderReport, projectTradeDeal } from './order-projection';
+import { noteOrderReport } from './order-trace';
+import { onOrderCodeHintsChanged, orderCodeHint } from './order-code-hints';
 import { parseEventId, reportLedger } from './report-ledger';
 import { remainingWorkingOrderQuantity } from './working-order-quantity';
 import { takeMutationIntent, type MutationIntent } from './mutation-intent';
@@ -27,7 +29,9 @@ import { markStage } from './startup-timing';
 // marked with its own duration, so a slow `positions-loaded` shows whether
 // the broker/sidecar was slow or the page was. No-op without an active run;
 // accounts are named by type and order only (S1, F1), never by id.
-async function timedRead<T>(label: string, read: () => Promise<T>): Promise<T> {
+// A read dropped only because the first known mode arrived meanwhile is
+// reread at once (#287): it is marked `superseded`, never `failed`.
+async function timedRead<T>(label: string, read: () => Promise<T>, superseded?: () => boolean): Promise<T> {
     const start = Date.now();
     let ok = false;
     try {
@@ -35,7 +39,7 @@ async function timedRead<T>(label: string, read: () => Promise<T>): Promise<T> {
         ok = true;
         return value;
     } finally {
-        markStage('account-read', `${label} ${Date.now() - start}ms${ok ? '' : ' failed'}`);
+        markStage('account-read', `${label} ${Date.now() - start}ms${ok ? '' : superseded?.() ? ' superseded' : ' failed'}`);
     }
 }
 function accountLabel(account: Account, accounts: Account[]): string {
@@ -355,10 +359,20 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
     const readOrders = targets.includes('orders');
     const readAccount = targets.includes('account');
     let ordersRead = false;
+    let reread = false;
     const run: Promise<void> = inFlight = (async () => {
         if (resyncInFlight) await resyncInFlight;
         const query = createAccountQuery();
         const queryAccount = (account: Account) => query.account(account.account_type as 'S' | 'F', account);
+        // #287: the boot snapshot can start before the first /info answer
+        // (early stream). Learning the mode for the first time bumps the mode
+        // version and drops these reads in 0 ms; that is not a failed query.
+        // Record nothing and reread under the now-known mode instead. A change
+        // between two known modes still fails closed below.
+        const modeKnownAtStart = typeof knownServerInfo()?.simulation === 'boolean';
+        const superseded = () => !modeKnownAtStart && getServerModeVersion() !== query.version
+            && typeof knownServerInfo()?.simulation === 'boolean';
+        const timed = <T>(label: string, read: () => Promise<T>) => timedRead(label, read, superseded);
         const before = eventSequence;
         const connectionBefore = connectionEpoch;
         const clockBefore = reasonClock;
@@ -372,7 +386,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
         try {
             let subscribed = true;
             if (readPositions || readOrders) {
-                try { await timedRead('subscribe', () => subscribeTradeReports()); }
+                try { await timed('subscribe', () => subscribeTradeReports()); }
                 catch (e) {
                     subscribed = false;
                     const message = e instanceof Error ? e.message : String(e);
@@ -395,7 +409,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                     if (readPositions) try {
                         const positionStart = eventSequence;
                         const hadSnapshot = snapshotEnds.has(accountKey(account));
-                        const positions = await timedRead(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', queryAccount(account)));
+                        const positions = await timed(`${accountLabel(account, accounts)} positions`, () => fetchPositions(account.account_type as 'S' | 'F', queryAccount(account)));
                         queryAccount(account);
                         if (positionStart === eventSequence || !hadSnapshot) {
                             snapshotEnds.set(accountKey(account), Date.now() / 1000);
@@ -414,7 +428,7 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                     if (readOrders) try {
                         // Initial/manual reconciliation stays authoritative:
                         // refresh:true runs update_status(account) (accounting quota).
-                        const trades = await timedRead(`${accountLabel(account, accounts)} orders`, () => fetchTrades(account.account_type as 'S' | 'F', queryAccount(account), { refresh: true }));
+                        const trades = await timed(`${accountLabel(account, accounts)} orders`, () => fetchTrades(account.account_type as 'S' | 'F', queryAccount(account), { refresh: true }));
                         queryAccount(account);
                         // A kept (not rebuilt) view resolves nothing.
                         if (!mergeOrders(account, trades, accounts, problems.orders)) { ordersOk = false; failed.add('orders'); }
@@ -431,8 +445,8 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
                         const previous = state.funds?.find(f => accountKey(f.account) === accountKey(account));
                         try {
                             const value = account.account_type === 'S'
-                                ? { balance: await timedRead(`${accountLabel(account, accounts)} balance`, () => fetchAccountBalance(queryAccount(account))) }
-                                : { margin: await timedRead(`${accountLabel(account, accounts)} margin`, () => fetchMargin(queryAccount(account))) };
+                                ? { balance: await timed(`${accountLabel(account, accounts)} balance`, () => fetchAccountBalance(queryAccount(account))) }
+                                : { margin: await timed(`${accountLabel(account, accounts)} margin`, () => fetchMargin(queryAccount(account))) };
                             queryAccount(account);
                             if (value.balance?.errmsg?.trim()) throw new Error('券商餘額查詢回報錯誤');
                             return { account, ...value, updatedAt: Date.now() };
@@ -459,6 +473,15 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
         } catch (e) {
             for (const key of targets) { failed.add(key); problems[key].push(['query-failed', e instanceof Error ? e.message : String(e)]); }
         }
+        // #287: reads dropped by the first mode discovery are reread right
+        // after this run (finally below); none of them is a failure, so no
+        // reason, timestamp or settled-with-error status is recorded here.
+        if (failed.size && superseded()) {
+            reread = true;
+            state = { ...state, loading: false };
+            publish();
+            return;
+        }
         if (queryOverflow && readOrders) problems.orders.push(['overflow', '更新期間回報過多，已保留即時資料；請稍後手動確認']);
         for (const key of targets) {
             if (connectionBefore !== connectionEpoch || getStreamStatus() !== 'live') problems[key].push(['disconnect', '串流曾中斷，資料可能不完整；請連線後手動確認']);
@@ -479,11 +502,31 @@ export function refreshTradingState(scope: TradingQueryScope | 'all' = 'all'): P
         }
         state = { ...state, loading: false };
         publish();
-    })().finally(() => { queryEvents = null; for (const key of targets) nextRefreshAt[key] = Date.now() + 1500; inFlight = null; });
+    })().finally(() => {
+        queryEvents = null;
+        for (const key of targets) nextRefreshAt[key] = Date.now() + 1500;
+        inFlight = null;
+        // Joins boot's own mode-change reread when it already started one.
+        if (reread) void refreshTradingStateForModeChange();
+    });
     // Health is cache-only (no broker call): check it once after an explicit
     // orders reconciliation to surface what the server still cannot track.
     inFlightResult = scope === 'orders' ? run.then(() => { if (ordersRead) return checkTradeCacheHealth('manual'); }) : run;
     return inFlightResult;
+}
+
+/** One orders reconciliation that really reads orders (#249: after an unknown
+ *  order outcome). refreshTradingState('orders') alone may return another
+ *  scope's in-flight read or skip during the cooldown; wait both out first.
+ *  Never sends or resends anything. */
+export async function reconcileOrdersOnce(): Promise<void> {
+    if (isMirror) { channel?.postMessage({ kind: 'refresh', scope: 'orders' }); return; }
+    for (let i = 0; i < 20; i += 1) {
+        if (inFlight) { await inFlight.catch(() => {}); continue; }
+        const wait = nextRefreshAt.orders - Date.now();
+        if (wait > 0) { await new Promise(resolve => setTimeout(resolve, wait + 10)); continue; }
+        return refreshTradingState('orders');
+    }
 }
 
 // ---- Shioaji 1.7.6 trade cache health (event-driven only) ----
@@ -867,6 +910,26 @@ function start() {
         releasePendingDeals(trade.order.id);
         schedulePublish();
     });
+    // a background-engine New report parked before the engine's snapshot
+    // named its order id: try it again once the id is known
+    const stopHints = onOrderCodeHintsChanged(() => {
+        let changed = false;
+        for (const [key, pending] of [...pendingOrders]) {
+            if (pending.kind !== 'order') continue;
+            const ref = (reportBody(pending)?.order as { account?: { broker_id?: string; account_id?: string } })?.account;
+            const code = orderCodeHint(pending.id, ref);
+            if (!code) continue;
+            const projected = projectOrderReport(state.trades, pending, getAccountState().accounts, code);
+            if (!projected) continue;
+            state = { ...state, trades: projected };
+            if (pending.ts) orderTimes.set(key, pending.ts);
+            pendingOrders.delete(key);
+            if (pendingReportKeys.delete(key) && pendingReportKeys.size === 0) resolve('orders', ['pending-report'], undefined, MSG.pendingReport);
+            releasePendingDeals(pending.id);
+            changed = true;
+        }
+        if (changed) schedulePublish();
+    });
     const stopOrders = onOrderEvent(report => {
         eventSequence++;
         if (queryEvents && queryEvents.length >= 1000) queryOverflow = true;
@@ -885,9 +948,10 @@ function start() {
         else {
             const ref = (reportBody(report)?.order as { account?: { broker_id?: string; account_id?: string } })?.account;
             const key = `${report.market}:${ref?.broker_id}:${ref?.account_id}:${report.id}`;
+            noteOrderReport(report); // debug trace only (VITE_DEBUG_ORDER_TRACE=1)
             if (report.ts && report.ts < (orderTimes.get(key) ?? 0)) return;
             if (queryEvents && queryEvents.length < 1000) queryEvents.push(report);
-            const trades = projectOrderReport(state.trades, report, getAccountState().accounts);
+            const trades = projectOrderReport(state.trades, report, getAccountState().accounts, orderCodeHint(report.id, ref));
             if (trades) {
                 state = { ...state, trades };
                 if (report.ts) orderTimes.set(key, report.ts);
@@ -962,7 +1026,7 @@ function start() {
     };
     const stopStatus = subscribeStatusStore(statusChanged);
     import.meta.hot?.dispose(() => {
-        stopMutations(); stopResponses(); stopOrders(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); lastTicks.clear(); stopStatus(); channel?.close();
+        stopMutations(); stopResponses(); stopOrders(); stopHints(); stopGaps(); gapTimers.forEach(clearTimeout); stopTicks(); lastTicks.clear(); stopStatus(); channel?.close();
         positionQuotes.forEach(entry => entry.release?.());
         if (publishTimer) clearTimeout(publishTimer);
         clearInterval(stateHeartbeat);

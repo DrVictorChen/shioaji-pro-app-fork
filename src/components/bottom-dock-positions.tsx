@@ -2,6 +2,7 @@ import { canTrade } from '../lib/account-tradable';
 // src/components/bottom-dock-positions.tsx — 持倉 tab：響應式欄位、
 // 分帳戶區段、批次市價平倉（arm-lock 防誤觸）
 
+import { reconcileAfterUnknownOutcome } from '../lib/order-outcome';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTradingLive } from '../hooks/use-stream';
@@ -233,6 +234,7 @@ export function PositionsPane({
                 title: mode2 === 'close' ? (notSent ? '平倉未成立（未送出或被券商拒絕）' : '平倉未完整確認') : (notSent ? '反手未成立（未送出或被券商拒絕）' : '反手未完整確認'),
                 body: notSent ? (e instanceof Error ? e.message : String(e)) : `可能已有部分委託送出或結果未知，請手動核對，勿直接重送。${e instanceof Error ? e.message : String(e)}`,
             });
+            if (!notSent) reconcileAfterUnknownOutcome();
         } finally {
             setBusyCode(null);
         }
@@ -264,6 +266,7 @@ export function PositionsPane({
             title: '批次平倉請核對委託',
             body: `已送出 ${ok} 筆 / 未完整確認 ${fail} 筆；可能部分送出，勿直接重送${firstErr ? `｜${firstErr}` : ''}`,
         });
+        if (fail > 0) reconcileAfterUnknownOutcome();
         onChanged();
     };
 
@@ -374,7 +377,7 @@ export function PositionsPane({
                             )}
                             {sz === 'wide' && (
                                 <td className={styles.td}>
-                                    {fmtPrice(p.price)}
+                                    {maskMoney(fmtPrice(p.price), privMoney)}
                                 </td>
                             )}
                             <td className={styles.td}>
@@ -518,7 +521,7 @@ export function PositionsPane({
                                     <span className={styles.priceStackLabel}>
                                         均
                                     </span>
-                                    {fmtPrice(p.price)}
+                                    {maskMoney(fmtPrice(p.price), privMoney)}
                                 </span>
                             </span>
                             <span className={styles.cardSpacer} />

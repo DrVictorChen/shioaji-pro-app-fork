@@ -620,6 +620,51 @@ export function magnetAnchor(
     return { time: bar.time, price: best };
 }
 
+// 畫圖端點：游標位置 → 實際落下的時間／價格。端點與十字線（#313）
+// 共用這一個函式，十字線顯示的就是按下去會落的點。
+export function resolveDrawingAnchor<
+    T extends { id: string; anchors: DrawingAnchor[]; hidden: boolean; tool?: string },
+>(
+    projector: Projector,
+    pt: Point,
+    opts: {
+        magnet: boolean;
+        // 文字與量測不吸到別的圖形端點
+        snapToDrawings: boolean;
+        drawings: readonly T[];
+        excludeDrawingId?: string;
+        bars: readonly OhlcBar[] | undefined;
+        // 水平線／量測取整到合法跳動價位，其他原樣
+        snapPrice: (price: number) => number;
+    },
+): DrawingAnchor | null {
+    const anchor = unprojectPoint(projector, pt);
+    if (!anchor) return null;
+    if (opts.magnet) {
+        // 既有端點優先，才能在相同位置精確接續另一條線
+        const existing = opts.snapToDrawings
+            ? nearestDrawingAnchor(opts.drawings, projector, pt, ANCHOR_SNAP_PX, opts.excludeDrawingId)
+            : null;
+        if (existing) return { time: existing.time, price: opts.snapPrice(existing.price) };
+        // 再貼齊最近 K 棒的開高低收（本來就是合法價位）
+        if (opts.bars?.length) return magnetAnchor(anchor, opts.bars, (p) => projector.yOfPrice(p), pt.y);
+    }
+    return { time: anchor.time, price: opts.snapPrice(anchor.price) };
+}
+
+// 畫圖中十字線要擺的位置（#313）：橫線與價格標籤＝端點價格；直線貼最近
+// 那根 K 棒（原生十字線的直線本來就貼 K 棒，磁吸時端點時間也就是那根）。
+// 端點在 K 棒範圍外（未來的空白處）時 setCrosshairPosition 會把直線拉回
+// 最後一根，這時回傳 null，交給 Normal 模式的原生十字線停在游標上。
+export function drawingCrosshairTarget(
+    anchor: DrawingAnchor | null,
+    bars: readonly { time: number }[] | undefined,
+): DrawingAnchor | null {
+    if (!anchor || !bars?.length) return null;
+    if (anchor.time < bars[0]!.time || anchor.time > bars[bars.length - 1]!.time) return null;
+    return { time: bars[nearestBarIndex(bars, anchor.time)]!.time, price: anchor.price };
+}
+
 // ── 價差量測 ─────────────────────────────────────────────────────────
 
 export interface MeasureStats {

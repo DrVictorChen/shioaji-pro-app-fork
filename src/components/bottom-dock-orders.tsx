@@ -1,6 +1,7 @@
 import { remainingWorkingOrderQuantity } from '../lib/working-order-quantity';
 import { canUpdateOrderPrice, isOddLot, lotLabel } from '../lib/odd-lot';
 import { cancellationSummary } from '../lib/trade-mutations';
+import { noteOrderTraceEntry } from '../lib/order-trace';
 import { isCancelUnconfirmed } from '../lib/cancel-verification';
 // src/components/bottom-dock-orders.tsx — 委託 tab：成交進度圈、狀態篩選、
 // 分帳戶區段、批次刪單（arm-lock 防誤觸）；inline 改價/減量沿用
@@ -38,6 +39,7 @@ import {
     type MarketFilter,
     type ViewMode,
 } from './bottom-dock-shared';
+import { orderStatusLabel } from '../lib/order-status-label';
 
 type StatusFilter = 'active' | 'filled' | 'dead' | 'all';
 const STATUS_FILTERS = ['active', 'filled', 'dead', 'all'] as const;
@@ -67,7 +69,7 @@ function FillRing({ t }: { t: Trade }) {
     const c = 2 * Math.PI * r;
     const color =
         st === 'Filled'
-            ? vars.color.down // ok 語彙同 statusChip.ok
+            ? vars.color.success // ok 語彙同 statusChip.ok
             : vars.color.amber;
     return (
         <svg width={14} height={14} viewBox='0 0 14 14' aria-hidden>
@@ -165,6 +167,7 @@ export function OrderEditor({
             return;
         }
         if (valid) {
+            noteOrderTraceEntry([trade.order.id], 'orders tab');
             const req =
                 field === 'qty'
                     ? updateOrderQty(trade.order.id, remaining - n)
@@ -237,6 +240,8 @@ export function OrdersPane({
     onChanged,
     onSelectCode,
     onShowAll,
+    showAllRequest,
+    onShowAllRequestHandled,
 }: {
     trades: Trade[];
     initialStatus: 'loading' | 'failed' | 'ready';
@@ -248,6 +253,9 @@ export function OrdersPane({
     onSelectCode: (code: string) => void;
     // 重設市場/帳戶範圍（由 dock 持有那兩個 state）
     onShowAll?: () => void;
+    /** non-zero: show every status once (待確認卡「開啟委託查詢」, #201 ③) */
+    showAllRequest?: number;
+    onShowAllRequestHandled?: () => void;
 }) {
     const { ref: measureRef, width } = useMeasuredWidth();
     const size = sizeClassOf(width);
@@ -257,6 +265,11 @@ export function OrdersPane({
         STATUS_FILTERS,
         'active',
     );
+    useEffect(() => {
+        if (!showAllRequest) return;
+        setStatusFilter('all');
+        onShowAllRequestHandled?.();
+    }, [showAllRequest, setStatusFilter, onShowAllRequestHandled]);
     const [armed, setArmed] = useState(false);
     const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
     const [busy, setBusy] = useState<{ done: number; total: number } | null>(
@@ -339,6 +352,7 @@ export function OrdersPane({
         if (cancelling !== null || busy !== null) return;
         setCancelling(id);
         try {
+            noteOrderTraceEntry([id], 'orders tab');
             const trade = await cancelOrder(id);
             notify({ title: '刪單結果', ...cancellationSummary([{ status: 'fulfilled', value: trade }]) });
             onChanged();
@@ -356,6 +370,7 @@ export function OrdersPane({
     const runBatchCancel = async (ids: string[]) => {
         if (ids.length === 0 || busy || cancelling) return;
         setBusy({ done: 0, total: ids.length });
+        noteOrderTraceEntry(ids, 'orders tab');
         const results: PromiseSettledResult<Trade>[] = await cancelOrders(ids,
             () => setBusy((b) => (b ? { done: b.done + 1, total: b.total } : b)));
         setBusy(null);
@@ -511,12 +526,12 @@ export function OrdersPane({
                             <td className={styles.td}>{fillCell(t)}</td>
                             <td className={styles.td}>
                                 <span
-                                    title={`券商原始狀態 ${st}；原始量 ${t.order.quantity}；成交 ${t.status.deal_quantity}；取消 ${t.status.cancel_quantity}`}
+                                    title={`狀態 ${orderStatusLabel(st)}；原始量 ${t.order.quantity}；成交 ${t.status.deal_quantity}；取消 ${t.status.cancel_quantity}`}
                                     className={
                                         styles.statusChip[statusKind(st)]
                                     }
                                 >
-                                    {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : st}
+                                    {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : orderStatusLabel(st)}
                                 </span>
                             </td>
                             {size === 'wide' && (
@@ -574,10 +589,10 @@ export function OrdersPane({
                             </span>
                             <span className={styles.cardSpacer} />
                             <span
-                                title={`券商原始狀態 ${st}；原始量 ${t.order.quantity}；成交 ${t.status.deal_quantity}；取消 ${t.status.cancel_quantity}`}
+                                title={`狀態 ${orderStatusLabel(st)}；原始量 ${t.order.quantity}；成交 ${t.status.deal_quantity}；取消 ${t.status.cancel_quantity}`}
                                 className={styles.statusChip[statusKind(st)]}
                             >
-                                {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : st}
+                                {ACTIVE_STATUSES.has(st) && remainingWorkingOrderQuantity(t) === 0 ? '無未成交量' : orderStatusLabel(st)}
                             </span>
                         </div>
                         <div className={styles.cardLine}>

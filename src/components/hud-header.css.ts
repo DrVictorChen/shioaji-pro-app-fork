@@ -94,7 +94,7 @@ const ledBase = style({
 });
 
 export const led = styleVariants({
-    live: [ledBase, { background: vars.color.down }],
+    live: [ledBase, { background: vars.color.success }],
     connecting: [
         ledBase,
         {
@@ -105,7 +105,7 @@ export const led = styleVariants({
     down: [
         ledBase,
         {
-            background: vars.color.up,
+            background: vars.color.danger,
             animation: `${blink} 0.6s infinite`,
         },
     ],
@@ -166,9 +166,10 @@ export const prodBadge = style({
     fontSize: '0.64rem',
     fontWeight: 700,
     letterSpacing: '0.06em',
+    // 正式環境固定用 danger 紅：不能用 up（國際配色下 up 會變綠）
     color: '#fff',
-    background: vars.color.up,
-    border: `1px solid ${vars.color.up}`,
+    background: vars.color.danger,
+    border: `1px solid ${vars.color.danger}`,
     borderRadius: vars.radius.sm,
     padding: '0 10px',
     height: '25px',
@@ -666,4 +667,42 @@ export const srvDanger = style({
     gap: vars.space.sm,
     paddingTop: vars.space.sm,
     borderTop: `1px dashed ${vars.color.danger}`,
+});
+
+// #285 — another program's server: refused (amber, with the offer) or adopted
+export const foreignChip = style({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontFamily: vars.font.display,
+    fontSize: '0.66rem',
+    fontWeight: 600,
+    color: vars.color.amber,
+    border: `1px solid rgba(224, 164, 60, 0.45)`,
+    background: 'rgba(224, 164, 60, 0.08)',
+    borderRadius: vars.radius.sm,
+    padding: '0 4px 0 8px',
+    height: '25px',
+    boxSizing: 'border-box',
+    whiteSpace: 'nowrap',
+});
+
+export const foreignChipAction = style({
+    fontFamily: vars.font.display,
+    fontSize: '0.64rem',
+    fontWeight: 600,
+    color: vars.color.foreground,
+    background: vars.color.inset,
+    border: `1px solid ${vars.color.border}`,
+    borderRadius: vars.radius.sm,
+    padding: '0 8px',
+    height: '19px',
+    cursor: 'pointer',
+    ':disabled': { opacity: 0.6, cursor: 'default' },
+});
+
+export const externalTag = style({
+    marginLeft: '6px',
+    fontWeight: 600,
+    opacity: 0.9,
 });

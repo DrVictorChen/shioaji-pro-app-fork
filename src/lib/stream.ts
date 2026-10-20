@@ -3,6 +3,7 @@
 // via useSyncExternalStore without prop drilling.
 
 import { getApiBase, getStreamBase } from './runtime';
+import { serverUrlBlocked } from './server-read-gate';
 import { apiPost } from './api';
 import type { SseBidAsk, SseIndexQuote, SseTick } from './types/market';
 import {
@@ -77,6 +78,7 @@ const oddQuoteListeners = new Map<string, Set<Listener>>();
 const statusListeners = new Set<Listener>();
 const orderEventListeners = new Set<(ev: OrderEventReport) => void>();
 const tickTapeListeners = new Set<(tick: SseTick) => void>();
+const bidAskListeners = new Set<(bidask: SseBidAsk) => void>();
 const oddTickListeners = new Set<(tick: SseTick) => void>();
 const contractEventListeners = new Set<
     (event: ContractChangeEvent) => void
@@ -238,6 +240,7 @@ function handleBidAsk(raw: string) {
 function ingestBidAsk(bidask: SseBidAsk) {
     quotes.set(bidask.code, nextBidAskState(quotes.get(bidask.code), bidask));
     emitQuote(bidask.code);
+    bidAskListeners.forEach((l) => l(bidask));
 }
 
 const INDEX_UPSTREAM_ALIASES: Record<string, string> = {
@@ -682,6 +685,17 @@ function handleOrderEvent(raw: string) {
     orderEventListeners.forEach((l) => l(report));
 }
 
+// #285: a stream that is already open (e.g. a reload that skipped the boot
+// hold) is closed the moment boot refuses the server it points at
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('sj-pro-api-base-changed', () => {
+        if (es && serverUrlBlocked(getStreamBase()) !== null) {
+            setStatus('down');
+            scheduleReconnect(NORMAL_RETRY_MAX_MS);
+        }
+    });
+}
+
 function connect() {
     // Only the Web Locks owner may create an EventSource, including retries
     // queued before ownership was handed to another window.
@@ -695,6 +709,14 @@ function connect() {
     connectStartedAt = Date.now();
     // Keep STALE visible until the reconnect actually opens.
     setStatus(status === 'stale' ? 'stale' : 'connecting');
+    // #285: never stream from another program's server this App did not
+    // adopt — retry later (the App's own server replaces it, or the block
+    // is lifted)
+    if (serverUrlBlocked(getStreamBase()) !== null) {
+        setStatus('down');
+        scheduleReconnect(NORMAL_RETRY_MAX_MS);
+        return;
+    }
     // region filters contract_event only; other families are unfiltered
     es = new EventSource(`${getStreamBase()}/api/v1/stream/data?region=TW`);
     attachedNamed.clear();
@@ -782,6 +804,7 @@ let lastMaintenance: string | null = null;
 async function watchMaintenance() {
     if (shared && !shared.isOwner()) return;
     try {
+        if (serverUrlBlocked(getApiBase()) !== null) return;
         const res = await fetch(`${getApiBase()}/api/v1/health`);
         if (!res.ok) return;
         const h = (await res.json()) as { last_maintenance?: string };
@@ -893,6 +916,14 @@ export function onAnyTick(listener: (tick: SseTick) => void) {
     tickTapeListeners.add(listener);
     return () => {
         tickTapeListeners.delete(listener);
+    };
+}
+
+/** Every regular-lot best bid / ask update (#226 對手價 triggers). */
+export function onAnyBidAsk(listener: (bidask: SseBidAsk) => void) {
+    bidAskListeners.add(listener);
+    return () => {
+        bidAskListeners.delete(listener);
     };
 }
 

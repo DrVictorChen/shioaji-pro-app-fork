@@ -11,9 +11,19 @@ import { serverStop } from './tauri';
 describe('real desktop serverStop orchestration', () => {
     let agentRunning: boolean;
     let serverRunning: boolean;
+    const storage = new Map<string, string>();
     beforeEach(() => {
         vi.clearAllMocks();
         vi.stubGlobal('window', { setTimeout, clearTimeout });
+        // this App started the server on 21322 (pid 4242, still alive)
+        storage.clear();
+        storage.set('sj-pro-server-port', '21322');
+        storage.set('sj-pro-server-pid', '4242');
+        vi.stubGlobal('localStorage', {
+            getItem: (k: string) => storage.get(k) ?? null,
+            setItem: (k: string, v: string) => void storage.set(k, v),
+            removeItem: (k: string) => void storage.delete(k),
+        });
         agentRunning = true;
         serverRunning = true;
         native.fetch.mockImplementation(async (url: string) => new Response(JSON.stringify(
@@ -21,6 +31,8 @@ describe('real desktop serverStop orchestration', () => {
         ), { status: serverRunning && url.includes(':21322/') ? 200 : 503 }));
         native.execute.mockResolvedValue({ code: 0, stdout: '', stderr: '' });
         native.invoke.mockImplementation(async (command: string) => {
+            if (command === 'agent_harness_sidecar_owned') return false;
+            if (command === 'process_alive') return true;
             if (command === 'agent_runtime_list') return [{ runtimeId: 'idle-codex', status: agentRunning ? 'running' : 'stopped' }];
             if (command === 'agent_runtime_stop') { agentRunning = false; return true; }
             if (command === 'kill_shioaji') {
@@ -82,12 +94,57 @@ describe('real desktop serverStop orchestration', () => {
 
     it('preserves external servers when native ownership is refused', async () => {
         agentRunning = false;
-        native.invoke.mockRejectedValue('port 21322 上是外部啟動的 shioaji server（PID 99），不是本 App 啟動的');
+        const implementation = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (command: string, ...args: unknown[]) => {
+            if (command === 'kill_shioaji') throw 'port 21322 上是外部啟動的 shioaji server（PID 99），不是本 App 啟動的';
+            return implementation(command, ...args);
+        });
         native.execute.mockImplementation(async () => { serverRunning = false; return { code: 0, stdout: '', stderr: '' }; });
         const result = await serverStop({});
         expect(result.ok).toBe(false);
         expect(result.output).toContain('外部啟動');
         expect(native.execute).not.toHaveBeenCalled();
+        expect(serverRunning).toBe(true);
+    });
+
+    it('#285: a server this App did not start is never stopped — not even asked of the native shell', async () => {
+        agentRunning = false;
+        storage.clear(); // no spawn record: another program's server
+        const result = await serverStop({});
+        expect(result.ok).toBe(false);
+        expect(result.output).toContain('不是本 App 啟動的');
+        expect(native.invoke.mock.calls.some(call => call[0] === 'kill_shioaji')).toBe(false);
+        expect(serverRunning).toBe(true);
+    });
+
+    it('account changes stop Agents and continue while preserving an external server', async () => {
+        storage.clear();
+        const result = await serverStop({ stopAgents: true, ownedOnly: true });
+        expect(result.ok).toBe(true);
+        expect(agentRunning).toBe(false);
+        expect(serverRunning).toBe(true);
+        expect(native.invoke.mock.calls.some(call => call[0] === 'kill_shioaji')).toBe(false);
+        expect(native.execute).not.toHaveBeenCalled();
+    });
+
+    it('account changes continue when no server or spawn record exists', async () => {
+        storage.clear(); serverRunning = false;
+        const result = await serverStop({ stopAgents: true, ownedOnly: true });
+        expect(result.ok).toBe(true);
+        expect(agentRunning).toBe(false);
+        expect(native.invoke.mock.calls.some(call => call[0] === 'kill_shioaji')).toBe(false);
+    });
+
+    it('#285: a spawn record whose process exited proves nothing about the server there now', async () => {
+        agentRunning = false;
+        const implementation = native.invoke.getMockImplementation()!;
+        native.invoke.mockImplementation(async (command: string, ...args: unknown[]) => {
+            if (command === 'process_alive') return false;
+            return implementation(command, ...args);
+        });
+        const result = await serverStop({});
+        expect(result.ok).toBe(false);
+        expect(native.invoke.mock.calls.some(call => call[0] === 'kill_shioaji')).toBe(false);
         expect(serverRunning).toBe(true);
     });
 

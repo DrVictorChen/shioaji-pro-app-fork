@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
     positions: vi.fn(), trades: vi.fn(), balance: vi.fn(), margin: vi.fn(), subscribe: vi.fn(), health: vi.fn(),
     account: { account_type: 'S', broker_id: 'fixture', account_id: 'a', person_id: 'fixture', signed: true, username: 'fixture' },
 }));
-vi.mock('./account-store', () => ({ useAccounts: () => ({ accounts: [mocks.account, ...mocks.extraAccounts], selectedStock: mocks.account, selectedFutures: null }), getAccountState: () => ({ accounts: [mocks.account, ...mocks.extraAccounts] }), refreshAccounts: vi.fn() }));
+vi.mock('./account-store', () => ({ useAccounts: () => ({ accounts: [mocks.account, ...mocks.extraAccounts], selectedStock: mocks.account, selectedFutures: null }), getAccountState: () => ({ accounts: [mocks.account, ...mocks.extraAccounts] }), refreshAccounts: vi.fn(), subscribeAccounts: () => () => undefined }));
 vi.mock('./runtime', () => ({ getApiBase: () => 'http://fixture.invalid' }));
 vi.mock('./boot', () => ({ subscribeTradeReports: mocks.subscribe }));
 vi.mock('./trade-observations', () => ({ onTradeResponse: (cb: typeof mocks.response) => { mocks.response = cb; return vi.fn(); } }));
@@ -25,7 +25,7 @@ vi.mock('./quote-ownership', () => ({ retainQuote: () => vi.fn() }));
 vi.mock('./shioaji', () => ({ fetchPositions: mocks.positions, fetchTrades: mocks.trades, fetchAccountBalance: mocks.balance, fetchMargin: mocks.margin, fetchTradeCacheHealth: mocks.health }));
 vi.mock('./stream', () => ({ ensureStream: vi.fn(), getStreamStatus: () => mocks.status, isStreamOwner: () => false,
     onOrderEvent: (cb: typeof mocks.order) => { mocks.order = cb; return vi.fn(); },
-    onAnyTick: (cb: typeof mocks.tick) => { mocks.tick = cb; return vi.fn(); }, onOddLotTick: () => vi.fn(), subscribeStatusStore: (cb: typeof mocks.statusChanged) => { mocks.statusChanged = cb; return vi.fn(); },
+    onAnyTick: (cb: typeof mocks.tick) => { mocks.tick = cb; return vi.fn(); }, onOddLotTick: () => vi.fn(), onAnyBidAsk: () => vi.fn(), subscribeStatusStore: (cb: typeof mocks.statusChanged) => { mocks.statusChanged = cb; return vi.fn(); },
 }));
 const epoch = 1789200000;
 const baseline = () => ({ id: 1, code: '2330', direction: 'Buy', quantity: 1000, price: 100, last_price: 100, pnl: 0, yd_quantity: 1000 });
@@ -132,6 +132,116 @@ it('mode discovery during an initial read waits for it and then queries newly tr
     expect(mocks.positions).toHaveBeenCalledWith('F', additional);
     expect(mocks.trades).toHaveBeenCalledWith('F', additional, { refresh: true });
     expect(mocks.margin).toHaveBeenCalledWith(additional);
+});
+
+it('#287 first mode discovery during the boot subscribe rereads instead of failing positions/orders', async () => {
+    // v0.1.52 boot: the early stream starts the first snapshot before boot's
+    // own /info check; the first known mode then lands while subscribe is in
+    // flight, so every account read was dropped in 0 ms and the startup
+    // timing settled as `failed: positions-loaded`.
+    const timing = await import('./startup-timing');
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    vi.advanceTimersByTime(1600);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReturnValueOnce(subscribed.promise);
+    mocks.positions.mockClear(); mocks.trades.mockClear(); mocks.balance.mockClear();
+    const before = store.getTradingState().queries.positions.updatedAt;
+    timing.beginTiming('restart', { replace: true });
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    const info = await import('./server-info-store');
+    // boot's own mode listener is mocked away: trading-state must reread itself
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    vi.advanceTimersByTime(10);
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    for (let i = 0; i < 10; i++) await flush();
+    const state = store.getTradingState();
+    for (const scope of ['positions', 'orders', 'account'] as const) {
+        expect(state.queries[scope].reasons).not.toContain('query-failed');
+        expect(state.queries[scope].error).toBeNull();
+    }
+    expect(state.queries.positions.updatedAt).not.toBe(before);
+    expect(mocks.positions).toHaveBeenCalledOnce();
+    expect(mocks.trades).toHaveBeenCalledOnce();
+    expect(mocks.balance).toHaveBeenCalledOnce();
+    const reads = timing.getActiveTiming()!.marks.filter(m => m.stage === 'account-read').map(m => m.detail ?? '');
+    expect(reads.join(' ')).not.toContain('failed');
+    expect(reads).toEqual(expect.arrayContaining(['S1 positions 0ms superseded', 'S1 positions 0ms']));
+    timing.endTiming('ok');
+});
+
+it.each(['ok', 'reread-fails'] as const)('#287 cold boot: positions-loaded waits for the reread instead of settling failed (%s)', async outcome => {
+    // fresh module graph, no snapshot yet (updatedAt === null)
+    vi.resetModules();
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReset().mockReturnValueOnce(subscribed.promise).mockResolvedValue(undefined);
+    mocks.positions.mockClear();
+    if (outcome === 'reread-fails') mocks.positions.mockReset().mockRejectedValue(new Error('500 broker'));
+    const cold = await import('./trading-state');
+    const timing = await import('./startup-timing');
+    const ready = await import('./frontend-ready');
+    const info = await import('./server-info-store');
+    expect(cold.getTradingState().queries.positions.updatedAt).toBeNull();
+    timing.beginTiming('restart', { replace: true });
+    const runId = timing.peekActiveTiming()!.id;
+    const positionsSignal = ready.appReadySignals().find(s => s.stage === 'positions-loaded')!;
+    ready.watchFrontendReady(runId, [positionsSignal]);
+    let run!: Promise<void>;
+    await act(async () => { run = cold.refreshTradingState(); });
+    // boot's listener and trading-state's own reread must coalesce into one
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    const bootReread = cold.refreshTradingStateForModeChange();
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    await act(async () => { await bootReread; });
+    for (let i = 0; i < 5; i++) await flush();
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(mocks.positions).toHaveBeenCalledOnce();
+    const ended = timing.getTimingHistory()[0]!;
+    expect(ended.id).toBe(runId);
+    if (outcome === 'ok') expect(ended.outcome).toBe('ok');
+    else {
+        expect(ended.outcome).toBe('partial');
+        expect(ended.detail).toContain('failed: positions-loaded');
+    }
+});
+
+it('#287 a boot subscribe dropped by the first mode discovery is resubscribed, not 回報未訂閱', async () => {
+    vi.advanceTimersByTime(1600);
+    let rejectSubscribe!: (e: Error) => void;
+    mocks.subscribe.mockReturnValueOnce(new Promise<undefined>((_, reject) => { rejectSubscribe = reject; }));
+    mocks.positions.mockClear();
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    rejectSubscribe(new Error('訂閱期間伺服器模式已變更，未送出請求；請重新訂閱'));
+    await act(async () => { await run; });
+    for (let i = 0; i < 10; i++) await flush();
+    const state = store.getTradingState();
+    expect(state.queries.positions.reasons).not.toContain('not-subscribed');
+    expect(state.queries.orders.reasons).not.toContain('not-subscribed');
+    expect(mocks.subscribe).toHaveBeenCalledTimes(3); // mount, dropped, reread
+    expect(mocks.positions).toHaveBeenCalledOnce();
+});
+
+it('a known-mode change during a read still records query-failed (only first discovery rereads)', async () => {
+    const info = await import('./server-info-store');
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: true } as import('./shioaji').ServerInfo);
+    vi.advanceTimersByTime(1600);
+    const subscribed = deferred<undefined>();
+    mocks.subscribe.mockReturnValueOnce(subscribed.promise);
+    mocks.positions.mockClear();
+    let run!: Promise<void>;
+    await act(async () => { run = store.refreshTradingState(); });
+    info.observeServerInfo(info.beginServerInfoRequest(), { simulation: false } as import('./shioaji').ServerInfo);
+    subscribed.resolve(undefined);
+    await act(async () => { await run; });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(store.getTradingState().queries.positions.reasons).toContain('query-failed');
+    expect(mocks.positions).not.toHaveBeenCalled();
 });
 
 it.each(['positions', 'orders', 'balance', 'margin'] as const)('discards an unsigned account %s response and stops later reads after a mode change', async stage => {
@@ -770,6 +880,34 @@ describe('Shioaji 1.7.6 report identity and cache health', () => {
         await deliver(byId('v1:FD:FSTREAM:RESET1:9'));
         expect(open()).toHaveLength(0);
         expect(reasons('positions')).not.toContain('unknown-fill');
+    });
+
+    it('a background-engine order (no HTTP response, native New without full_code) applies with the engine\'s code hint (QA 10/12)', async () => {
+        const hints = await import('./order-code-hints');
+        hints.setOrderCodeHint((id, account) => id === 'fx05' && account?.account_id === 'fixture-futures' ? 'TXFJ6' : null);
+        try {
+            await deliver(byId('v1:FO:FSTREAM:RESET1:12'));
+            await deliver(byId('v1:FD:FSTREAM:RESET1:8'));
+            expect(store.getTradingState().positions.filter(p => p.code === 'TXFJ6')[0]).toMatchObject({ quantity: 1, direction: 'Buy' });
+            expect(reasons('positions')).not.toContain('metadata-missing');
+            expect(reasons('orders')).not.toContain('pending-report');
+            expect(mocks.trades).not.toHaveBeenCalled();
+        } finally { hints.setOrderCodeHint(null); }
+    });
+
+    it('a New parked before the engine named its order id is replayed once it does, with its deal', async () => {
+        const hints = await import('./order-code-hints');
+        try {
+            await deliver(byId('v1:FO:FSTREAM:RESET1:12'));
+            await deliver(byId('v1:FD:FSTREAM:RESET1:8'));
+            expect(reasons('orders')).toContain('pending-report');
+            expect(reasons('positions')).toContain('metadata-missing');
+            hints.setOrderCodeHint(id => id === 'fx05' ? 'TXFJ6' : null);
+            await act(async () => { hints.orderCodeHintsChanged(); vi.advanceTimersByTime(50); });
+            expect(store.getTradingState().positions.filter(p => p.code === 'TXFJ6')[0]).toMatchObject({ quantity: 1 });
+            expect(reasons('orders')).not.toContain('pending-report');
+            expect(reasons('positions')).not.toContain('metadata-missing');
+        } finally { hints.setOrderCodeHint(null); }
     });
 
     it('keeps deal-before-order as metadata-missing and clears only that reason on replay', async () => {

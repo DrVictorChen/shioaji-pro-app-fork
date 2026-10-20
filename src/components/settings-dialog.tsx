@@ -63,6 +63,11 @@ import {
     type ToastScale,
 } from '../lib/toast-prefs';
 import {
+    setLimitStyle,
+    useLimitStyle,
+    type LimitStyle,
+} from '../lib/limit-style-prefs';
+import {
     setChartHoverPricePick,
     useChartHoverPricePick,
 } from '../lib/chart-price-prefs';
@@ -72,6 +77,7 @@ import {
 } from '../lib/tauri';
 import { CUSTOM_BASES } from '../lib/custom-theme';
 import { CustomThemeEditor } from './custom-theme-editor';
+import { BackgroundExecutionSetting } from './background-execution-setting';
 import { ExternalLink } from './external-link';
 import { Orb } from './orb';
 import * as hud from './hud-header.css';
@@ -87,6 +93,13 @@ const MODE_OPTIONS: { key: ThemeMode; label: string }[] = [
 const CONVENTION_OPTIONS: { key: Convention; label: string }[] = [
     { key: 'tw', label: '紅漲綠跌' },
     { key: 'intl', label: '綠漲紅跌' },
+];
+
+const LIMIT_STYLE_OPTIONS: { key: LimitStyle; label: string; title: string }[] = [
+    { key: 'block', label: '數字區色塊', title: '價格與漲跌兩行包成實心色塊、白字' },
+    { key: 'tint', label: '淡底＋色條', title: '整列淡淡的漲跌色底，右緣一條實色色條' },
+    { key: 'solid', label: '整列實心', title: '整列實心漲跌色、白字' },
+    { key: 'none', label: '不標示', title: '到漲跌停不加任何標示' },
 ];
 
 type SettingsTab =
@@ -108,6 +121,7 @@ const TABS: { key: SettingsTab; label: string; icon: React.ReactNode }[] = [
 
 function AppearanceSection() {
     const settings = useThemeSettings();
+    const limitStyle = useLimitStyle();
     const toastScale = useToastScale();
     const headerItems = useHeaderItems();
     return (
@@ -148,6 +162,26 @@ function AppearanceSection() {
             <div className={hud.convPreview}>
                 <span className={panel.dirText.up}>▲ +1.25 上漲</span>
                 <span className={panel.dirText.down}>▼ -1.25 下跌</span>
+            </div>
+            <span className={hud.settingLabel} id='limit-style-label'>
+                自選清單漲跌停 Limit Highlight
+            </span>
+            <div
+                className={hud.settingGroup}
+                role='group'
+                aria-labelledby='limit-style-label'
+            >
+                {LIMIT_STYLE_OPTIONS.map((o) => (
+                    <button
+                        key={o.key}
+                        className={hud.opt[limitStyle === o.key ? 'on' : 'off']}
+                        title={o.title}
+                        aria-pressed={limitStyle === o.key}
+                        onClick={() => setLimitStyle(o.key)}
+                    >
+                        {o.label}
+                    </button>
+                ))}
             </div>
             <span className={hud.settingLabel}>字級 Font Size</span>
             <div className={hud.settingGroup}>
@@ -484,6 +518,7 @@ function RiskSection() {
                 圖表點價、平倉與鋪單都會先跳委託確認；停損/停利等
                 自動觸發單與 Agent 下單不經過此確認。
             </span>
+            {isTauri && <BackgroundExecutionSetting />}
             <span className={hud.settingLabel}>圖表帶價 Chart Price</span>
             <div className={hud.switchRow}>
                 <span

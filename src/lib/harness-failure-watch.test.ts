@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { EXPECTED_SERVER_VERSION } from './runtime';
 
 const mocks = vi.hoisted(() => ({
     healthy: false,
@@ -21,18 +22,6 @@ vi.mock('@tauri-apps/plugin-http', () => ({ fetch: async () => { throw new Error
 vi.mock('@tauri-apps/plugin-shell', () => ({
     Command: { sidecar: () => ({ execute: async () => ({ code: 0, stdout: '{"running":false}', stderr: '' }) }) },
 }));
-vi.mock('@tauri-apps/plugin-store', () => ({
-    LazyStore: class {
-        async get(key: string) {
-            const values: Record<string, unknown> = {
-                apiKey: 'TEST-KEY', secretKey: 'TEST-SECRET',
-                agentHarnessSafeDefaultV1: true, agentHarnessEnabled: false,
-            };
-            return values[key];
-        }
-    },
-}));
-
 const data = new Map<string, string>();
 const { setAgentHarnessEnabled } = await import('./tauri');
 
@@ -40,7 +29,7 @@ beforeEach(() => {
     data.clear();
     mocks.healthy = false;
     mocks.reload.mockReset();
-    mocks.invoke.mockReset().mockRejectedValue(new Error('harness command failed'));
+    mocks.invoke.mockReset().mockImplementation(async (cmd: string) => { if (cmd === 'credentials_status') return { configured: true, credentialRevision: 'native-revision', production: false, agentHarnessEnabled: false }; throw new Error('harness command failed'); });
     vi.useFakeTimers();
     vi.setSystemTime(0);
     vi.stubGlobal('window', {
@@ -55,7 +44,7 @@ beforeEach(() => {
     vi.stubGlobal('fetch', async (url: string) => {
         if (!url.startsWith('http://127.0.0.1:21322/')) throw new Error('offline');
         return new Response(JSON.stringify(url.endsWith('/info')
-            ? { version: '1.7.7', simulation: true }
+            ? { version: EXPECTED_SERVER_VERSION, simulation: true }
             : { status: mocks.healthy ? 'healthy' : 'unhealthy' }));
     });
 });
@@ -66,6 +55,14 @@ afterEach(() => {
 });
 
 it('keeps the mutation gate closed after Harness failure, then reloads when the same server becomes healthy', async () => {
+    // the server on 21322 is this App's own spawn, still running (#285)
+    data.set('sj-pro-server-port', '21322');
+    data.set('sj-pro-server-pid', '4242');
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'credentials_status') return { configured: true, credentialRevision: 'native-revision', production: false, agentHarnessEnabled: false };
+        if (cmd === 'process_alive') return true;
+        throw new Error('harness command failed');
+    });
     await expect(setAgentHarnessEnabled(true)).rejects.toThrow('harness command failed');
     expect(data.get('sj-pro-server-identity-verified')).not.toBe('1');
     await vi.advanceTimersByTimeAsync(500);
@@ -75,4 +72,25 @@ it('keeps the mutation gate closed after Harness failure, then reloads when the 
     await vi.advanceTimersByTimeAsync(1000);
     expect(mocks.reload).toHaveBeenCalledTimes(1);
     expect(data.get('sj-pro-server-identity-verified')).not.toBe('1');
+});
+
+it('#285: never reloads onto another program\'s server whose account cannot be confirmed', async () => {
+    await expect(setAgentHarnessEnabled(true)).rejects.toThrow('harness command failed');
+    mocks.healthy = true;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mocks.reload).not.toHaveBeenCalled();
+    // once the server there is this App's own, the watch reloads and ends
+    data.set('sj-pro-server-port', '21322');
+    data.set('sj-pro-server-pid', '4242');
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'credentials_status') return { configured: true, credentialRevision: 'native-revision', production: false, agentHarnessEnabled: false };
+        if (cmd === 'process_alive') return true;
+        throw new Error('harness command failed');
+    });
+    // the watch's checks also await real module loads: keep the clock moving
+    // until it reloads (slow CI runners need more than one poll)
+    await vi.waitFor(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+        expect(mocks.reload).toHaveBeenCalledTimes(1);
+    }, { timeout: 15_000, interval: 20 });
 });

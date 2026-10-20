@@ -19,6 +19,7 @@
 // HTTP rows Submitted after an SSE Cancel. Simulation results here are
 // regression evidence only, not production proof.
 import type { Trade, TradeCacheHealth } from './types/order';
+import { orderStatusLabel } from './order-status-label';
 
 export interface CancelAccountRef {
     account_type: string;
@@ -92,7 +93,7 @@ export class CancelUnconfirmedError extends Error {
         const observed = details.missing
             ? '回讀找不到此委託'
             : details.observedStatus
-              ? `最後狀態 ${details.observedStatus}、取消 ${details.observedCancelQuantity ?? '?'}／需 ${details.requiredCancelQuantity}`
+              ? `最後狀態 ${orderStatusLabel(details.observedStatus)}、取消 ${details.observedCancelQuantity ?? '?'}／需 ${details.requiredCancelQuantity}`
               : '無法回讀委託';
         const health = details.health && details.health.state !== 'Healthy'
             ? `；回報快取 ${details.health.state}`
@@ -141,7 +142,7 @@ export function cancelledByQuantity(row: Trade, quantity = row?.order?.quantity)
 }
 /** Display detail when the broker status still reads as working. */
 export function brokerStatusNote(row: Trade): string | null {
-    return cancelledByQuantity(row) ? `券商狀態仍為 ${row.status.status}，取消量已涵蓋全部` : null;
+    return cancelledByQuantity(row) ? `券商狀態仍為${orderStatusLabel(row.status.status)}，取消量已涵蓋全部` : null;
 }
 
 /** Nothing of the order is left working. Same order id and account (checked

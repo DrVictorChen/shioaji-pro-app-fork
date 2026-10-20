@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
+import { operationNotice } from '../test/operation-notice';
 import type { Account } from './types/portfolio';
 import type { ContractBase } from './types/contract';
 const m = vi.hoisted(() => ({ base: 'fixture', live: 'live', confirm: vi.fn(), stock: vi.fn(), future: vi.fn(), fetch: vi.fn(), cancel: vi.fn(), health: vi.fn(), continuous: false, risk: vi.fn(), accounts: [] as Account[], selected: undefined as Account | undefined }));
@@ -86,8 +87,16 @@ it('passes explicit Cover and retains Auto default', async () => {
     expect(m.future.mock.calls[0]![1].octype).toBe('Cover'); expect(m.future.mock.calls[1]![1].octype).toBe('Auto');
 });
 it('reports failed account queries even when no cancel requests could be made', async () => {
-    m.fetch.mockRejectedValue(new Error('offline')); const notices: {kind:string;body:string}[]=[]; const off=onNotice(n=>notices.push(n));
-    try { await cancelAllOrders(); expect(m.cancel).not.toHaveBeenCalled(); expect(notices.at(-1)).toMatchObject({kind:'err'}); expect(notices.at(-1)!.body).toContain('帳戶委託查詢失敗'); } finally { off(); }
+    m.fetch.mockRejectedValue(new Error('offline'));
+    const notice = vi.fn();
+    const off = onNotice(notice);
+    try {
+        await cancelAllOrders();
+        expect(m.cancel).not.toHaveBeenCalled();
+        expect(operationNotice(notice, '🚨 全部刪單')).toMatchObject({
+            kind: 'err', body: expect.stringContaining('帳戶委託查詢失敗'),
+        });
+    } finally { off(); }
 });
 
 it('full cancel always reads trades authoritatively and never consults the cache health', async () => {

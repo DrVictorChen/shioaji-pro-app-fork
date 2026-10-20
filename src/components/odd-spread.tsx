@@ -10,6 +10,7 @@
 // 主視窗服務 lib/odd-spread-service（面板移除後仍繼續，重新開啟面板可看到）；
 // 行情：hooks/use-odd-spread-feed。
 
+import { reconcileAfterUnknownOutcome } from '../lib/order-outcome';
 import { Link2, Link2Off, Minus, Plus } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAccounts, ensureAccounts } from '../lib/account-store';
@@ -357,7 +358,7 @@ export function OddSpreadView({
             if (notStarted && sent.length === 0) {
                 // 確定一筆都沒送出：解除鎖定
                 if (lockId) clearClickLock(lockId);
-                if (!(e instanceof Error && e.name === 'OrderConfirmCancelled')) notify({ kind: 'err', title: '整零價差點價下單失敗', body: msg });
+                if (!(e instanceof Error && e.name === 'OrderConfirmCancelled')) notify({ kind: 'err', title: (e as { orderNotConnected?: boolean }).orderNotConnected ? '整零價差點價下單未送出' : '整零價差點價下單失敗', body: msg });
                 return;
             }
             setArmed(false);
@@ -369,6 +370,7 @@ export function OddSpreadView({
             const text = `${contract.code} ${side} @ ${fmtPrice(price)}：${sent.length > 0 ? `已送出 ${sent.join('、')}；` : ''}${failedPart}${notStarted ? '未送出' : '結果未確認（可能已送出）'}${rest}`;
             if (lockId) updateClickLock(lockId, text);
             else addClickLock(contract.code, captured, text);
+            if (!notStarted) reconcileAfterUnknownOutcome();
             notify({
                 kind: 'err',
                 title: sent.length > 0 ? '零股拆單只送出部分' : '點價委託結果未確認',

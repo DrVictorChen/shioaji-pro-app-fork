@@ -4,8 +4,8 @@
 // 點下去會送什麼。ChartOrderButton 是 K 線圖的組態（按鈕顯示數量＋單位：
 // 「500 股」＝盤中零股、「1 張」＝整股、「2 口」＝期貨）。
 
-import { Settings2 } from 'lucide-react';
-import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
+import { Ban, Settings2 } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode, type RefObject } from 'react';
 import {
     chartOrderChipLabel,
     chartOrderRows,
@@ -19,8 +19,9 @@ import {
     type ChartOrderMarket,
     type ChartOrderSettings,
 } from '../lib/chart-order-settings';
-import { flashAccountKey } from '../lib/flash-account';
+import { CASH_CREDIT, flashAccountKey, type FlashCond } from '../lib/flash-account';
 import { ODD_LOT_MAX_SHARES } from '../lib/odd-lot';
+import { clipAncestors, fitPopover, visibleClipRect, type PopoverFit } from '../lib/popover-fit';
 import type { Account } from '../lib/types/portfolio';
 import * as styles from './chart-order-popover.css';
 
@@ -54,8 +55,17 @@ export interface OrderSettingsLayout {
     unit: boolean;
     /** ROD/IOC/FOK row */
     orderType: boolean;
-    /** 自動/新倉/平倉 row (futures) */
+    /** 自動/新倉/平倉/當沖 row (futures) */
     octype: boolean;
+    /** 信用條件＋現股當沖先賣 rows (K 線圖股票)；零股時停用並說明 */
+    credit?: {
+        /** why the rows are disabled now (零股), else null */
+        suspended: string | null;
+        /** contract.day_trade === 'Yes' */
+        dayTradeOk: boolean;
+        /** 可否融資券 / 不可當沖 狀態一句話（停用時 bad） */
+        status?: { text: string; bad: boolean };
+    };
     /** read-only 停損停利 behaviour row */
     exitText?: string;
     /** tooltip of 設為預設 */
@@ -115,6 +125,45 @@ export function OrderSettingsButton({
         return value;
     });
     if (openRef) openRef.current = (top) => { if (top !== undefined) setPanelTop(top); setOpen(true); };
+    // 掛在按鈕下方的面板（K 線工具列）：窄面板裡從按鈕往右長會被面板右緣
+    // 裁掉 — 依可見範圍往左收、必要時縮寬／限高捲動。開啟時先以原尺寸
+    // 量一次（fit 為 null）；之後彈出層內容高度（縮寬後換行）、按鈕位置、
+    // 面板大小、視窗縮放或捲動變了都依原寬重算（結果相同就不重繪）
+    const popRef = useRef<HTMLDivElement>(null);
+    const naturalWidth = useRef(0);
+    const [fit, setFit] = useState<PopoverFit | null>(null);
+    useLayoutEffect(() => {
+        if (!open || align !== 'start') {
+            setFit(null);
+            naturalWidth.current = 0;
+            return;
+        }
+        const pop = popRef.current;
+        const anchorEl = buttonRef.current?.parentElement;
+        const win = anchorEl?.ownerDocument?.defaultView;
+        if (!pop || !anchorEl || !win || typeof anchorEl.getBoundingClientRect !== 'function') return;
+        const place = () => {
+            if (!naturalWidth.current) naturalWidth.current = pop.offsetWidth;
+            const a = anchorEl.getBoundingClientRect();
+            const next = fitPopover(
+                { left: a.left, bottom: a.bottom },
+                { width: naturalWidth.current, height: pop.scrollHeight },
+                visibleClipRect(anchorEl),
+            );
+            setFit(prev => (prev && prev.left === next.left && prev.maxWidth === next.maxWidth && prev.maxHeight === next.maxHeight ? prev : next));
+        };
+        place();
+        win.addEventListener('resize', place);
+        win.addEventListener('scroll', place, true);
+        const RO = (win as typeof window).ResizeObserver;
+        const ro = RO ? new RO(place) : null;
+        if (ro) for (const el of [pop, anchorEl, ...clipAncestors(anchorEl)]) ro.observe(el);
+        return () => {
+            win.removeEventListener('resize', place);
+            win.removeEventListener('scroll', place, true);
+            ro?.disconnect();
+        };
+    }, [open, align]);
     // Esc closes the popover and nothing else (a panel's own Esc hotkey must
     // not also fire); nothing is listened to while closed
     useEffect(() => {
@@ -158,6 +207,8 @@ export function OrderSettingsButton({
                         onClose={() => setOpen(false)}
                         align={align}
                         top={panelTop}
+                        popRef={popRef}
+                        fit={fit}
                         layout={layout}
                         contractLabel={contractLabel}
                         summary={summary}
@@ -175,6 +226,8 @@ export function ChartOrderButton({
     onSaveDefault,
     account,
     contractLabel,
+    credit,
+    disabled,
 }: {
     market: ChartOrderMarket;
     settings: ChartOrderSettings;
@@ -182,6 +235,9 @@ export function ChartOrderButton({
     onSaveDefault: () => void;
     account: ChartOrderAccountView;
     contractLabel: string;
+    credit?: OrderSettingsLayout['credit'];
+    /** chip flagged when a condition currently blocks a side */
+    disabled?: boolean;
 }) {
     const rows = chartOrderRows(market, settings.lot);
     const label = chartOrderChipLabel(settings, market);
@@ -193,7 +249,7 @@ export function ChartOrderButton({
             onSaveDefault={onSaveDefault}
             contractLabel={contractLabel}
             summary={chartOrderSummary(settings, market, chartAccountLabel(account))}
-            chip={label}
+            chip={disabled ? <>{label}<Ban size={10} aria-hidden /></> : label}
             ariaLabel={`圖表下單設定：${label}`}
             layout={{
                 title: '圖表下單設定',
@@ -203,11 +259,21 @@ export function ChartOrderButton({
                 orderType: rows.orderType,
                 octype: rows.octype,
                 exitText: chartExitText(settings, market),
+                ...(credit ? { credit } : {}),
                 defaultNote: `新開的${market === 'F' ? '期貨' : '股票'}圖表使用這組設定（不含帳號）`,
                 qtyLabel: '圖表下單數量',
             }}
         />
     );
+}
+
+function fitStyle(fit: PopoverFit | null | undefined): CSSProperties | undefined {
+    if (!fit) return undefined;
+    return {
+        left: fit.left,
+        ...(fit.maxWidth !== undefined ? { width: fit.maxWidth } : {}),
+        ...(fit.maxHeight !== undefined ? { maxHeight: fit.maxHeight, overflowY: 'auto' } : {}),
+    };
 }
 
 export function OrderSettingsPanel({
@@ -221,6 +287,8 @@ export function OrderSettingsPanel({
     summary,
     align = 'start',
     top,
+    popRef,
+    fit,
 }: {
     market: ChartOrderMarket;
     settings: ChartOrderSettings;
@@ -229,6 +297,9 @@ export function OrderSettingsPanel({
     onClose: () => void;
     align?: 'start' | 'panel';
     top?: number;
+    popRef?: RefObject<HTMLDivElement | null>;
+    /** button-anchored popover kept inside the visible area (see fitPopover) */
+    fit?: PopoverFit | null;
     layout: OrderSettingsLayout;
     contractLabel: string;
     summary: string;
@@ -241,8 +312,8 @@ export function OrderSettingsPanel({
     const max = odd ? ODD_LOT_MAX_SHARES : 9999;
     const account = layout.account;
     return (
-        <div className={align === 'panel' ? `${styles.pop} ${styles.popPanel}` : styles.pop}
-            style={align === 'panel' && top !== undefined ? { top } : undefined}
+        <div ref={popRef} className={align === 'panel' ? `${styles.pop} ${styles.popPanel}` : styles.pop}
+            style={align === 'panel' ? (top !== undefined ? { top } : undefined) : fitStyle(fit)}
             role='dialog' aria-label={layout.title}>
             <div className={styles.head}>
                 <span className={styles.headTitle}>{layout.title}</span>
@@ -351,6 +422,13 @@ export function OrderSettingsPanel({
                     </div>
                 </div>
             )}
+            {layout.credit && (
+                <CreditRows
+                    credit={settings.credit ?? CASH_CREDIT}
+                    view={layout.credit}
+                    onChange={credit => set({ credit })}
+                />
+            )}
             {layout.exitText && (
                 <div className={styles.row}>
                     <span className={styles.label}>停損停利</span>
@@ -365,6 +443,59 @@ export function OrderSettingsPanel({
                 <button type='button' className={styles.footBtn.primary} onClick={onClose}>完成</button>
             </div>
         </div>
+    );
+}
+
+// 信用條件（同下單面板與閃電的清單與文案）
+const CREDIT_ITEMS: readonly [FlashCond, string, string][] = [
+    ['Cash', '現股', '預設'],
+    ['MarginTrading', '融資', '買／賣'],
+    ['ShortSelling', '融券', '只能賣'],
+    ['SBLShort', '借券', '只能賣：一般借券賣出（委託類別5）'],
+    ['SBLShortPriceExempt', '借券豁免', '只能賣：價格豁免借券賣出（委託類別6，特殊金融商品適用）'],
+];
+
+function CreditRows({ credit, view, onChange }: {
+    credit: { cond: FlashCond; daytradeShort: boolean };
+    view: NonNullable<OrderSettingsLayout['credit']>;
+    onChange: (c: { cond: FlashCond; daytradeShort: boolean }) => void;
+}) {
+    const off = view.suspended !== null;
+    return (
+        <>
+            <div className={styles.row}>
+                <span className={styles.label}>信用</span>
+                <div className={`${styles.seg} ${styles.segWrap}`} role='group' aria-label='信用條件'>
+                    {CREDIT_ITEMS.map(([cond, text, sub]) => {
+                        const on = !off && credit.cond === cond;
+                        return (
+                            <button key={cond} type='button' className={`${styles.segBtn[on ? 'on' : 'off']} ${styles.segFit}`} aria-pressed={on}
+                                disabled={off} title={off ? view.suspended! : sub}
+                                onClick={() => { if (!off && credit.cond !== cond) onChange({ cond, daytradeShort: false }); }}>
+                                {text}
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+            <div className={styles.row}>
+                <span className={styles.label}>當沖</span>
+                <div className={styles.seg} role='group' aria-label='現股當沖先賣'>
+                    <button type='button' className={styles.segBtn[!off && credit.daytradeShort ? 'on' : 'off']}
+                        aria-pressed={!off && credit.daytradeShort} disabled={off}
+                        title={off ? view.suspended! : view.dayTradeOk ? '現股當沖先賣：點價賣為現沖賣出，當日需回補（只限現股）' : '此股票目前不可現沖先賣；設定保留，換到可當沖的股票時生效'}
+                        // 只限現股：勾選時信用條件一起改回現股
+                        onClick={() => { if (!off) onChange({ cond: 'Cash', daytradeShort: !credit.daytradeShort }); }}>
+                        現股當沖先賣
+                    </button>
+                </div>
+            </div>
+            {(off || view.status) && (
+                <div className={styles.creditNote[view.status?.bad && !off ? 'bad' : 'ok']} data-testid='chart-credit-note'>
+                    {off ? view.suspended : view.status!.text}
+                </div>
+            )}
+        </>
     );
 }
 

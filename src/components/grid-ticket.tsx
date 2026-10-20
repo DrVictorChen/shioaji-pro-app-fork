@@ -4,6 +4,7 @@
 // moves so the ladder keeps its distance. Grid orders are tagged with
 // custom_field so only our own orders are touched.
 
+import { classifyOrderError, reportOrderError } from '../lib/order-outcome';
 import { captureServerMode, SERVER_MODE_CHANGED_MESSAGE, type ServerModeGuard } from '../lib/server-info-store';
 import { canTrade } from '../lib/account-tradable';
 
@@ -342,11 +343,8 @@ export function GridTicket({
                 } });
                 ok += 1;
             } catch (e) {
-                notify({
-                    kind: 'err',
-                    title: `鋪單失敗 @${fmtPrice(price)}`,
-                    body: e instanceof Error ? e.message : String(e),
-                });
+                // 結果不確定就停止後續鋪單：先對帳，不在閘道異常時繼續送
+                if (reportOrderError(`鋪單 @${fmtPrice(price)} `, e, notify) === 'unknown') break;
                 if ((e as { tradingGateRejected?: boolean })?.tradingGateRejected) break;
             }
         }
@@ -520,7 +518,13 @@ export function GridTicket({
                             break;
                         }
                         ops += 1;
-                        await placeAt(Number(k), followAccount, { ...cycle, contract: c, beforeDispatch }).catch(() => undefined);
+                        const failure = await placeAt(Number(k), followAccount, { ...cycle, contract: c, beforeDispatch }).then(() => null, (e: unknown) => e);
+                        // 結果不確定：委託可能已成立。停止跟隨，不然 recentPlace 過期後會把它當成缺單再補一次
+                        if (failure !== null && classifyOrderError(failure) === 'unknown') {
+                            reportOrderError(`鋪單跟隨 @${fmtPrice(Number(k))} `, failure, notify);
+                            stop('委託結果不確定，已停止跟隨；請先核對委託');
+                            break;
+                        }
                     }
                 }
                 if (ops > 0) onChangedRef.current?.();
@@ -715,7 +719,7 @@ export function GridTicket({
             )}
 
             <span className={styles.costRow}>
-                <span className={panel.dirText.up}>
+                <span className={panel.statusText.err}>
                     ⚠ 鋪單會一次送出多筆委託；動態跟隨會自動撤補，請確認風控上限並自行承擔風險
                 </span>
             </span>

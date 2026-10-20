@@ -174,11 +174,122 @@ jobs:
 
       - name: Windows TCP owner E2E
         if: matrix.platform == 'windows-latest'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --bin windows_tcp_owner_e2e
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test windows_tcp_owner_e2e
 
       - name: Windows agent Job Object E2E
         if: matrix.platform == 'windows-latest'
-        run: cargo run --manifest-path src-tauri/Cargo.toml --bin windows_agent_job_e2e
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test windows_agent_job_e2e
+
+      # The installer hook must stop a running bundled server
+      # ($INSTDIR\shioaji.exe) and leave a same-named program elsewhere alone.
+      # Builds the hook into a tiny installer with the runner's NSIS and runs it
+      # against two copies of ping.exe named shioaji.exe.
+      - name: Windows installer hook E2E
+        if: matrix.platform == 'windows-latest' && hashFiles('src-tauri/windows/hooks.nsh') != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # win25-vs2026/20261018.275 (image 20261018.275.1) does not include NSIS.
+          $nsisVersion = '3.11'
+          $chocoVersion = '3.11.0'
+          $nsisPaths = @(
+            "$env:ProgramFiles\NSIS\makensis.exe"
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          )
+          $findMakensis = {
+            $nsisPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          }
+          $makensis = & $findMakensis
+          $installFailures = @()
+          if (-not $makensis) {
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              $log = Join-Path $env:RUNNER_TEMP "nsis-choco-$attempt.log"
+              $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+              try {
+                # Handle native failures ourselves so retries and ZIP fallback can run.
+                $PSNativeCommandUseErrorActionPreference = $false
+                choco install nsis --version=$chocoVersion -y --no-progress 2>&1 | Tee-Object -FilePath $log
+                $chocoExitCode = $LASTEXITCODE
+                if ($chocoExitCode -notin @(0, 1641, 3010)) {
+                  $reason = (Get-Content -LiteralPath $log -Tail 20) -join "`n"
+                  throw "choco exited with code ${chocoExitCode}: $reason"
+                }
+                $makensis = & $findMakensis
+                if (-not $makensis) {
+                  throw "choco exited with code $chocoExitCode but makensis.exe is missing from: $($nsisPaths -join ', ')"
+                }
+                break
+              } catch {
+                $failure = "Chocolatey attempt $attempt/4 failed: $($_.Exception.Message); log: $log"
+                $installFailures += $failure
+                Write-Warning $failure
+                if ($attempt -lt 4) { Start-Sleep -Seconds (5 * [Math]::Pow(2, $attempt - 1)) }
+              } finally {
+                $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+              }
+            }
+          }
+          if (-not $makensis) {
+            $zipUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$nsisVersion/nsis-$nsisVersion.zip"
+            # SHA256 from https://nsis-dev.github.io/release-data/versions.json (3.11 ZIP).
+            $zipSha256 = 'c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1'
+            $zip = Join-Path $env:RUNNER_TEMP "nsis-$nsisVersion.zip"
+            $portable = Join-Path $env:RUNNER_TEMP 'nsis-portable'
+            try {
+              Write-Host "Chocolatey exhausted; downloading official NSIS ZIP: $zipUrl"
+              Invoke-WebRequest -Uri $zipUrl -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 5 -TimeoutSec 120
+              $actualSha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+              if ($actualSha256 -ne $zipSha256) {
+                throw "SHA256 mismatch: expected $zipSha256, got $actualSha256"
+              }
+              Expand-Archive -LiteralPath $zip -DestinationPath $portable -Force
+              $makensis = Join-Path $portable "nsis-$nsisVersion\makensis.exe"
+              if (-not (Test-Path -LiteralPath $makensis -PathType Leaf)) {
+                throw "verified ZIP did not contain $makensis"
+              }
+            } catch {
+              throw "NSIS setup failed. Chocolatey: $($installFailures -join ' | '). Official ZIP fallback ($zipUrl): $($_.Exception.Message)"
+            }
+          }
+          Write-Host "Using makensis: $makensis"
+          $base = Join-Path $env:RUNNER_TEMP "nsis hook's test"
+          $inst = Join-Path $base 'inst'
+          $other = Join-Path $base 'other'
+          New-Item -ItemType Directory -Force $inst, $other | Out-Null
+          Copy-Item "$env:SystemRoot\System32\PING.EXE" (Join-Path $inst 'shioaji.exe')
+          Copy-Item "$env:SystemRoot\System32\PING.EXE" (Join-Path $other 'shioaji.exe')
+          $script = Join-Path $base 'check.nsi'
+          @(
+            'Unicode true'
+            '!include LogicLib.nsh'
+            '!include x64.nsh'
+            '!include "${HOOKS}"'
+            'Name "hook-check"'
+            'OutFile "${OUT}"'
+            'RequestExecutionLevel user'
+            'SilentInstall silent'
+            'Section'
+            '  StrCpy $INSTDIR "${TARGET}"'
+            '  !insertmacro NSIS_HOOK_PREINSTALL'
+            'SectionEnd'
+          ) | Set-Content -Encoding utf8 $script
+          $hooks = (Resolve-Path src-tauri/windows/hooks.nsh).Path
+          $out = Join-Path $base 'check.exe'
+          & $makensis /V2 "/DHOOKS=$hooks" "/DOUT=$out" "/DTARGET=$inst" $script
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
+          $bundled = Start-Process (Join-Path $inst 'shioaji.exe') -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
+          $foreign = Start-Process (Join-Path $other 'shioaji.exe') -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 1
+          try {
+            Start-Process $out -Wait
+            if (-not $bundled.WaitForExit(10000)) { throw 'bundled shioaji.exe is still running' }
+            if ($foreign.HasExited) { throw 'a shioaji.exe outside the install dir was stopped' }
+            # nothing left to stop: the hook is a no-op and still leaves others alone
+            Start-Process $out -Wait
+            if ($foreign.HasExited) { throw 'second run stopped a shioaji.exe outside the install dir' }
+          } finally {
+            foreach ($p in @($bundled, $foreign)) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
+          }
 
       - name: Rust lint
         if: matrix.platform == 'ubuntu-22.04'
