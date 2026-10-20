@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { EXPECTED_SERVER_VERSION } from './runtime';
 
 const mocks = vi.hoisted(() => ({
     healthy: false,
@@ -43,7 +44,7 @@ beforeEach(() => {
     vi.stubGlobal('fetch', async (url: string) => {
         if (!url.startsWith('http://127.0.0.1:21322/')) throw new Error('offline');
         return new Response(JSON.stringify(url.endsWith('/info')
-            ? { version: '1.7.8', simulation: true }
+            ? { version: EXPECTED_SERVER_VERSION, simulation: true }
             : { status: mocks.healthy ? 'healthy' : 'unhealthy' }));
     });
 });
